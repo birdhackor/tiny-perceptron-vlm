@@ -4,6 +4,10 @@
 
 所有指令從 repo 根目錄、啟用 `.venv` 後執行。預設 `--device auto` 依序選 CUDA、MPS、CPU；想指定 GPU 可加 `--device cuda`。音訊 STFT 的裝置支援要先跑 dry-run，CPU 是已驗證的基準。
 
+## 已收集的真實資料
+
+[首批固定資料](../assets/training/README.md)以分來源 Git LFS 包發布。可先用 `python scripts/fetch_training_assets.py --list` 查看，再以 `--asset tinystories` 等 ID 按需取得。快照有來源、固定 revision、授權與逐檔 SHA-256；解包後存入 `data/training/`。它們是小型 pilot，仍須建立獨立 holdout；教材下方的規則資料則可離線生成，不必先下載外部資料。FSDD 保留原始8 kHz音訊，16 kHz入口前要明確轉換。
+
 ## 先檢查一個 batch
 
 ```bash

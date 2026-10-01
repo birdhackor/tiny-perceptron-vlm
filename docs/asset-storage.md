@@ -1,6 +1,6 @@
 # 教材資產存放：Git、LFS 與外部下載
 
-檢查日期：2026-10-01。這是存放方式建議；尚未替本 repo 啟用 LFS 追蹤，也沒有上傳檔案。
+更新日期：2026-10-01。repo 已啟用 `/assets/training/*.tar.gz` 的 LFS 追蹤，首批8個分來源資料快照與普通 Git 的來源／授權／雜湊清單在[訓練資料入口](../assets/training/README.md)。原始 `data/` 快取、權重與執行輸出維持忽略。
 
 ## 已驗證的能力
 
@@ -8,9 +8,9 @@
 - 在 `/tmp` 的獨立測試 repo 執行 local install／track／add：4096 bytes 的 binary 在 Git index 中成為 129 bytes 的 LFS pointer；smudge 還原後逐 byte 相同，SHA-256 一致。
 - 原 repo 的 `git ls-remote origin HEAD` 成功。
 - 使用原 repo 的 GitHub remote 與原生 LFS client，只讀查詢一個刻意不存在的 object；服務回應 `Object does not exist on the server: [404]`。這證明 LFS 物件查詢端點可通，沒有本輪先前其他網站的 CONNECT 403。
-- 尚未以遠端既有物件驗證真正下載，也未驗證上傳權限／帳戶剩餘額度。沒有為測試而上傳物件或 push commit。
+- 前四項是首次調查的結果，當時未上傳物件。目前固定資料採分來源LFS包；不把repo擁有者的方案或剩餘額度當成已知條件。
 
-現有 `.gitattributes` 只有換行設定，`git lfs ls-files` 沒有結果；`.gitignore` 已忽略 `/data/`、`/checkpoints/`、實驗輸出及 `*.pt`／`*.safetensors` 等權重。
+初次調查時 `.gitattributes` 只有換行設定。現在固定資料包使用 LFS pointer；來源、授權、manifest 與生成器用普通 Git。`.gitignore` 仍忽略 `/data/`、`/checkpoints/`、實驗輸出及 `*.pt`／`*.safetensors` 等權重，沒有把整個下載快取目錄改為追蹤。
 
 ## 建議分工
 
@@ -29,7 +29,7 @@ Notebook 保留教學需要的少量結果；大型 base64 圖像、音訊、互
 
 ## 教學訓練資料可能多大？
 
-目前尚未製作完整教材資料，無法報告實際總量。主線是短文字、合成形狀／顏色圖片與短音訊，規模可以控制；資料量不需要隨每個小節各自複製一份。
+目前已收集的小型 pilot 原始資料約35.3 MiB，共1,447筆整理好的 training 紀錄；尚未覆蓋全部教材的自然資料需求。首批快照保留來源與授權，按資料來源分包，精確壓縮 bytes 見 `assets/training/manifest.json`。主線合成資料由生成器重建，不需要為每節各自複製一份。
 
 下列是明確假設下的 payload 計算，非實測檔案大小：
 

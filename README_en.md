@@ -41,7 +41,7 @@ python scripts/train.py --task text --data data/generated/toy-text/train.jsonl
 
 The default runs one forward/backward check with no optimizer update or checkpoint write. Add `--train` explicitly for training. [Training recipes](course/training.md) describe prerequisites, formats, evaluation and limitations for text, style, safety, multimodal, preferences and distillation.
 
-Data, checkpoints and outputs belong in ignored `data/`, `checkpoints/` and `outputs/`. External datasets retain their own licenses; see [asset storage](docs/asset-storage.md).
+[Fixed training snapshots](assets/training/README.md) are published as separate Git LFS archives. Use `python scripts/fetch_training_assets.py --list` to choose and unpack them. Raw caches, checkpoints and outputs stay in ignored `data/`, `checkpoints/` and `outputs/`. External datasets retain their own licenses; see [asset storage](docs/asset-storage.md).
 
 ## Maintenance
 
