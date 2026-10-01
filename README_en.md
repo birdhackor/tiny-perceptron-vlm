@@ -1,113 +1,67 @@
 # Tiny Perceptron 小小感知機
 
-> A tiny multimodal model that can see, hear and read, built from scratch with as little code as possible.
+A from-scratch tutorial that grows from a next-character table into small text, image and audio models. Each lesson explains one idea through an analogy, a diagram and a short numerical experiment.
 
 [繁體中文](README.md) | English
 
-> [!NOTE]
-> 🚧 Early days: only the **environment setup** is done. No model code yet.
+**[Course and reading routes](course/README.md) · [First steps](course/first-steps.md) · [222 lessons](course/lessons.md) · [Training recipes](course/training.md)** — the main course is in Traditional Chinese.
 
-## What is this?
+The course has 18 chapters, three optional branches, 222 independently runnable notebooks and 40 original SVG diagrams with progressive highlights. Begin with small matrices, bigrams, MLPs and manual attention; introduce modern architecture, Dense/MoE, cache/SDPA, quantization and distillation later. Readers can switch models and revisit earlier examples.
 
-Tiny Perceptron is a light-hearted tutorial project. We implement a small multimodal model from scratch with minimal code, and explain every step along the way.
+Core modules implement data handling, Transformers, multimodal inputs, DPO, packed quantization and training utilities directly in PyTorch. CLI tools cover data preparation, training, inference and evaluation. LoRA, QAT, video sequences and small RL exercises demonstrate individual mechanisms; this release does not include a trained general-purpose audiovisual assistant.
 
-- **Stage 1**: text + image + audio → text (multimodal in, text out)
-- **Later**: video + audio → text / image, and other richer multimodal tasks
+University calculus or linear algebra is sufficient background; the first-steps guide introduces Python, tensors and notebook operation. Validation uses CPU numerical and gradient checks. No actual model training was performed; readers will train and measure capabilities on their own hardware. See the [validation report](docs/validation.md).
 
-It follows the spirit of Karpathy's [nanoGPT](https://github.com/karpathy/nanoGPT) / [nanochat](https://github.com/karpathy/nanochat) and [MiniMind](https://github.com/jingyaogong/minimind) / [MiniMind-V](https://github.com/jingyaogong/minimind-v): small, trainable from scratch, built for learning.
+## Setup
 
-**Who is it for**: people with basic Python / PyTorch experience who want to understand how a multimodal model is built from the ground up.
-The primary docs are in Traditional Chinese; this page is the English summary.
-
-## Roadmap
-
-- [x] Environment setup: uv, PyTorch, environment check, CI on three platforms
-- [ ] Stage 1: text + image + audio → text
-- [ ] Later: video + audio → text / image
-
-## Requirements
-
-| Hardware | Good for |
-| --- | --- |
-| Any CPU (a laptop is fine) | Running the whole pipeline, toy-scale experiments |
-| Apple Silicon (M-series, macOS 14+) | Same, accelerated with MPS |
-| NVIDIA GPU | Real training; the goal is a single consumer GPU |
-| Google Colab | When you don't have a GPU |
-
-You only need [uv](https://docs.astral.sh/uv/) and Git. uv downloads Python 3.13 for you and installs everything into the project's `.venv`.
-
-The reasoning behind each choice (PyTorch / CUDA builds, why not torchaudio, candidate datasets, ...) is in [docs/environment.md](docs/environment.md) (Chinese).
-
-## Installation
-
-**1. Install uv**
-
-```bash
-# macOS / Linux
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# Windows (PowerShell)
-powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
-```
-
-**2. Clone and install**
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/) and Git. For CPU exercises:
 
 ```bash
 git clone https://github.com/birdhackor/tiny-perceptron-vlm.git
 cd tiny-perceptron-vlm
-uv sync
+uv sync --frozen --extra cpu --group notebook
+source .venv/bin/activate
+python scripts/check_env.py
+python -m ipykernel install --sys-prefix --name tiny-perceptron --display-name "Tiny Perceptron"
+jupyter lab notebooks
 ```
 
-`uv sync` installs PyTorch from PyPI, which behaves differently on each platform. Pick the command for your machine:
+On Windows PowerShell, activate with `.venv\Scripts\Activate.ps1`. Select **Tiny Perceptron** and open `notebooks/01/1.1.ipynb`. Use `uv sync --frozen --group notebook` on Apple Silicon, or the matching `cu126`/`cu130` extra on compatible NVIDIA hardware. Driver requirements are in [environment notes](docs/environment.md).
 
-| Your machine | Command | Notes |
-| --- | --- | --- |
-| macOS (Apple Silicon) | `uv sync` | The default build supports MPS |
-| Linux + NVIDIA, driver ≥ 580 | `uv sync` | The default build is CUDA 13.0 |
-| Windows + NVIDIA, driver ≥ 580 | `uv sync --extra cu130` | The default PyPI build is CPU-only on Windows |
-| NVIDIA driver < 580, or older GPUs (GTX 9/10 series, V100) | `uv sync --extra cu126` | No RTX 50 series support |
-| Linux without an NVIDIA GPU | `uv sync --extra cpu` | Skips ~2.5 GB of CUDA packages |
-| Windows without an NVIDIA GPU | `uv sync` | The default build is already CPU-only |
+Activate `.venv` and use `python` directly, or pass the same extra to each `uv run`. CUDA/MPS execution was not verified in the current CPU environment.
 
-Check your driver version with `nvidia-smi`.
+Run `python scripts/export_course.py` and open `outputs/site/index.html` for an offline reading website. Search lessons there; edit and execute code in notebooks. SVGs retain static labels and respect reduced-motion preferences.
 
-> [!WARNING]
-> If you installed with `--extra`, pass the same `--extra` to every `uv run` (e.g. `uv run --extra cu130 python ...`). Otherwise uv will helpfully swap PyTorch back to the default build.
-> Alternatively, activate the virtual environment (`source .venv/bin/activate`, or `.venv\Scripts\activate` on Windows) and use `python` directly.
-
-**3. Check the environment**
+## Minimal workflow
 
 ```bash
-uv run python scripts/check_env.py   # versions, device (CUDA / MPS / CPU), and a real computation on it
-uv run pytest                        # offline smoke tests
+python scripts/prepare_data.py --kind toy-text
+python scripts/train.py --task text --data data/generated/toy-text/train.jsonl
 ```
 
-`check_env.py` prints hints for common problems, such as "an NVIDIA driver is present but the CPU-only PyTorch is installed". Please include its output when reporting issues.
+The default runs one forward/backward check with no optimizer update or checkpoint write. Add `--train` explicitly for training. [Training recipes](course/training.md) describe prerequisites, formats, evaluation and limitations for text, style, safety, multimodal, preferences and distillation.
 
-### Google Colab
+Data, checkpoints and outputs belong in ignored `data/`, `checkpoints/` and `outputs/`. External datasets retain their own licenses; see [asset storage](docs/asset-storage.md).
 
-Colab already ships PyTorch, so install the rest with pip:
+## Maintenance
 
-```python
-!git clone https://github.com/birdhackor/tiny-perceptron-vlm.git
-%cd tiny-perceptron-vlm
-!pip install -e .
-!python scripts/check_env.py
-```
-
-## Development
+Edit `course/chapters/`, then regenerate notebooks. Components live in `tiny_perceptron/`; SVG sources are in `scripts/build_visuals.py`.
 
 ```bash
-uv run pytest
-uv run ruff check . && uv run ruff format .
+python scripts/build_visuals.py
+python scripts/build_course.py
+python scripts/build_course.py --check
+python scripts/check_notebooks.py --mode python
+python scripts/check_notebooks.py --mode kernel --lesson 3.6
+pytest -ra
+ruff check .
+ruff format --check .
 ```
 
-GitHub Actions runs the environment check and tests on Linux, macOS and Windows.
+Kernel mode starts a fresh kernel per lesson and saves executed copies under `outputs/`. Existing GitHub Actions run core checks on Linux, macOS and Windows; complete notebook validation is a separate workflow.
 
-## Acknowledgements
+## References and license
 
-[nanoGPT](https://github.com/karpathy/nanoGPT), [nanochat](https://github.com/karpathy/nanochat), [MiniMind](https://github.com/jingyaogong/minimind), [MiniMind-V](https://github.com/jingyaogong/minimind-v), [nanoVLM](https://github.com/huggingface/nanoVLM)
+Inspired by [nanoGPT](https://github.com/karpathy/nanoGPT), [nanochat](https://github.com/karpathy/nanochat), [MiniMind](https://github.com/jingyaogong/minimind), [MiniMind-V](https://github.com/jingyaogong/minimind-v) and [nanoVLM](https://github.com/huggingface/nanoVLM). Research sources and limitations are in [curriculum notes](docs/curriculum.md).
 
-## License
-
-[MIT](LICENSE)
+Code, course text and original diagrams: [MIT](LICENSE). External data has separate licensing.

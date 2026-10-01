@@ -1,141 +1,84 @@
 # 小小感知機 Tiny Perceptron
 
-> 用最少的程式碼，從零打造一個會看、會聽、也會讀的小型多模態模型。
+從一張接字表開始，逐步看懂能接收文字、圖片與聲音的小模型。一次只講一件事，先用譬喻與圖解，再用幾行程式驗算。
 
 繁體中文 | [English](README_en.md)
 
-> [!NOTE]
-> 🚧 專案剛起步：目前只完成**環境初始化**，模型程式碼還沒開始寫。
+**[教材入口與閱讀路線](course/README.md) · [操作與數學暖身](course/first-steps.md) · [222 個小節](course/lessons.md) · [訓練操作](course/training.md)**
 
-## 這是什麼？
+![下一字對齊](course/figures/shift.svg)
 
-小小感知機是一個輕鬆的教學專案。我們用最少的程式碼從零實作一個小型多模態模型，並把每一步拆開講清楚。
+## 教材提供什麼
 
-- **第一階段**：文字 + 影像 + 音訊 → 文字（多模態輸入，文字輸出）
-- **之後擴充**：影片 + 音訊 → 文字 / 影像，以及更複雜的多模態任務
+18章與A／B／C支線、每節一份獨立 Notebook，以及40張自製 SVG 圖解與逐步提示。前段只用小矩陣、接字表、MLP與手寫注意力；後段才加入現代架構、Dense／MoE、cache／SDPA、量化與蒸餾。可以來回跳章，不需要從頭把同一個模型訓練到底。
 
-風格參考 Karpathy 的 [nanoGPT](https://github.com/karpathy/nanoGPT) / [nanochat](https://github.com/karpathy/nanochat)，以及 [MiniMind](https://github.com/jingyaogong/minimind) / [MiniMind-V](https://github.com/jingyaogong/minimind-v)。共同點是模型很小、可以從零訓練、以教學為主。
+文字與圖音模型、對話遮罩、DPO、量化儲存與訓練基本件直接以 PyTorch 實作。資料、訓練、推論與評估有可執行入口。LoRA、QAT、影片序列與小型 RL 等概念提供局部實驗；此版本沒有提供已訓練的通用影音助理。
 
-**適合誰**：有基本 Python / PyTorch 基礎，想搞懂多模態模型是怎麼從零做出來的人。
+適合曾學大學微積分或線性代數、想從直覺瞭解模型的人。Python、tensor與Notebook操作可由暖身補起。開發時驗證了 CPU 執行與梯度，沒有正式訓練模型；權重與能力評估留給讀者之後在自己的 GPU 環境進行。詳見[驗證報告](docs/validation.md)。
 
-## 路線圖
+## 安裝與開啟 Notebook
 
-- [x] 環境初始化：uv、PyTorch、環境檢查、三平台 CI
-- [ ] 第一階段：文字 + 影像 + 音訊 → 文字
-- [ ] 之後：影片 + 音訊 → 文字 / 影像
-
-## 需要什麼環境？
-
-| 硬體 | 適合做什麼 |
-| --- | --- |
-| 一般 CPU（筆電就行） | 跑通整個流程、玩具規模的實驗 |
-| Apple Silicon（M 系列，macOS 14 以上） | 同上，用 MPS 加速 |
-| NVIDIA GPU | 正式訓練；目標是單張消費級顯示卡就能訓練 |
-| Google Colab | 手邊沒有 GPU 時的替代方案 |
-
-軟體方面只需要 [uv](https://docs.astral.sh/uv/) 和 Git。uv 會自動下載 Python 3.13，並把所有套件裝進專案內的 `.venv`，不會弄亂你的系統環境。
-
-各種選擇背後的理由（PyTorch / CUDA 版本、為什麼不用 torchaudio、候選資料集等）都整理在 [docs/environment.md](docs/environment.md)。
-
-## 安裝
-
-**1. 安裝 uv**
-
-```bash
-# macOS / Linux
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# Windows（PowerShell）
-powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
-```
-
-**2. 下載專案並安裝套件**
+先安裝 [uv](https://docs.astral.sh/uv/getting-started/installation/) 與 Git。CPU 閱讀與練習：
 
 ```bash
 git clone https://github.com/birdhackor/tiny-perceptron-vlm.git
 cd tiny-perceptron-vlm
-uv sync
+uv sync --frozen --extra cpu --group notebook
+source .venv/bin/activate
+python scripts/check_env.py
+python -m ipykernel install --sys-prefix --name tiny-perceptron --display-name "Tiny Perceptron"
+jupyter lab notebooks
 ```
 
-`uv sync` 預設安裝 PyPI 上的 PyTorch，但它在不同平台上的行為不一樣，請依你的環境選擇指令：
+Windows PowerShell 啟用指令是 `.venv\Scripts\Activate.ps1`。選擇 **Tiny Perceptron** kernel，先開啟 `notebooks/01/1.1.ipynb`。詳細操作見[暖身指南](course/first-steps.md)。
 
-| 你的環境 | 安裝指令 | 說明 |
-| --- | --- | --- |
-| macOS（Apple Silicon） | `uv sync` | 預設版就支援 MPS |
-| Linux + NVIDIA，驅動 ≥ 580 | `uv sync` | 預設版就是 CUDA 13.0 |
-| Windows + NVIDIA，驅動 ≥ 580 | `uv sync --extra cu130` | PyPI 預設版在 Windows 上只有 CPU |
-| NVIDIA 驅動 < 580，或 GTX 9 / 10 系列、V100 等舊顯卡 | `uv sync --extra cu126` | 不支援 RTX 50 系列 |
-| 沒有 NVIDIA GPU 的 Linux | `uv sync --extra cpu` | 省下約 2.5 GB 的 CUDA 套件 |
-| 沒有 NVIDIA GPU 的 Windows | `uv sync` | 預設版就是 CPU 版 |
+| 環境 | 安裝選擇 |
+| --- | --- |
+| CPU | `uv sync --frozen --extra cpu --group notebook` |
+| Apple Silicon | `uv sync --frozen --group notebook` |
+| NVIDIA CUDA 13.0 相容硬體／驅動 | `uv sync --frozen --extra cu130 --group notebook` |
+| NVIDIA CUDA 12.6 相容硬體／驅動 | `uv sync --frozen --extra cu126 --group notebook` |
 
-驅動版本可以用 `nvidia-smi` 查。各 CUDA 版本支援哪些顯卡，見 [docs/environment.md](docs/environment.md#3-pytorch-與-cuda)。
+各版本的顯卡與驅動限制、Colab和鏡像設定見[環境說明](docs/environment.md)。使用 extra 後，啟用 `.venv` 直接用 `python`，或每次 `uv run` 都帶相同 extra，避免更換 PyTorch。CUDA／MPS未在本次 CPU 環境實測。
 
-> [!WARNING]
-> 用了 `--extra` 之後，每次 `uv run` 都要帶同一個 `--extra`，例如 `uv run --extra cu130 python ...`。不然 uv 會「好心地」把 PyTorch 換回預設版。
-> 嫌麻煩的話，可以先啟用虛擬環境（macOS / Linux：`source .venv/bin/activate`，Windows：`.venv\Scripts\activate`），之後直接用 `python`。
+只想閱讀網頁，可執行 `python scripts/export_course.py`，再打開 `outputs/site/index.html`。網頁可離線搜尋小節；Notebook用來修改程式與執行。SVG保留靜態標註，支援系統減少動態效果。
 
-**3. 檢查環境**
+## 最小流程
 
 ```bash
-uv run python scripts/check_env.py   # 印出版本與裝置（CUDA / MPS / CPU），並在裝置上實際算一次
-uv run pytest                        # 冒煙測試，全部離線執行
+python scripts/prepare_data.py --kind toy-text
+python scripts/train.py --task text --data data/generated/toy-text/train.jsonl
 ```
 
-`check_env.py` 發現常見問題時會直接給提示，例如「有 NVIDIA 驅動，卻裝到 CPU 版 PyTorch」。回報問題時請附上它的輸出。
+預設只做一個 batch 的 forward/backward，不更新權重。正式訓練再明確加 `--train`；字元模型、多模態、風格與安全、偏好和蒸餾配方在[訓練操作](course/training.md)。資料與權重放在被 Git 忽略的 `data/`、`checkpoints/`；Hugging Face／LFS的分工見[資產管理](docs/asset-storage.md)。
 
-### 在 Google Colab 上
-
-Colab 已經預裝 PyTorch，用 pip 安裝其他套件即可：
-
-```python
-!git clone https://github.com/birdhackor/tiny-perceptron-vlm.git
-%cd tiny-perceptron-vlm
-!pip install -e .
-!python scripts/check_env.py
-```
-
-### 在中國大陸
-
-```bash
-# PyPI 鏡像（Windows PowerShell：$env:UV_DEFAULT_INDEX = "https://pypi.tuna.tsinghua.edu.cn/simple"）
-export UV_DEFAULT_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple
-
-# Hugging Face 鏡像，用來下載資料集與模型
-export HF_ENDPOINT=https://hf-mirror.com
-```
-
-設定 PyPI 鏡像後，uv 會改寫本機的 `uv.lock`，這個改動不要提交。
-ModelScope、PyTorch wheel 鏡像、W&B 的替代品等更多選擇，見 [docs/environment.md](docs/environment.md#7-中國大陸網路環境)。
-
-## 專案結構
+## 專案結構與維護
 
 ```text
-tiny-perceptron-vlm/
-├── tiny_perceptron/      # 模型與訓練的核心程式（施工中）
-├── scripts/
-│   └── check_env.py      # 環境檢查
-├── tests/                # 冒煙測試，全部離線
-├── docs/
-│   └── environment.md    # 環境研究筆記：每個選擇的理由
-├── pyproject.toml        # 套件與工具設定（uv）
-└── uv.lock               # 鎖定所有套件的版本
+course/chapters/     教材正文與短程式，單一來源
+course/figures/      自製 SVG
+notebooks/          每小節一份，由正文產生
+tiny_perceptron/    模型、資料、對齊、模態與壓縮零件
+scripts/            資料、訓練、推論、評估與教材建置
+tests/              離線契約測試
+docs/               大綱、研究、環境與驗證紀錄
 ```
-
-## 開發
 
 ```bash
-uv run pytest                                 # 測試
-uv run ruff check . && uv run ruff format .   # lint 與格式化
+python scripts/build_visuals.py
+python scripts/build_course.py
+python scripts/build_course.py --check
+python scripts/check_notebooks.py --mode python
+python scripts/check_notebooks.py --mode kernel --lesson 3.6
+pytest -ra
+ruff check .
+ruff format --check .
 ```
 
-GitHub Actions 會在 Linux、macOS、Windows 三個平台上跑環境檢查與測試。
+修改教材請改 `course/chapters/` 再產生 Notebook；執行輸出與網頁放在 `outputs/`。完整 kernel 檢查用 `--mode kernel`，每節開獨立工作桌。GitHub Actions 保留 Linux、macOS、Windows 的核心測試；Notebook整套驗證另行執行。
 
-## 致謝
+## 參考與授權
 
-- [karpathy/nanoGPT](https://github.com/karpathy/nanoGPT)、[karpathy/nanochat](https://github.com/karpathy/nanochat)
-- [jingyaogong/minimind](https://github.com/jingyaogong/minimind)、[jingyaogong/minimind-v](https://github.com/jingyaogong/minimind-v)
-- [huggingface/nanoVLM](https://github.com/huggingface/nanoVLM)
+參考 [nanoGPT](https://github.com/karpathy/nanoGPT)、[nanochat](https://github.com/karpathy/nanochat)、[MiniMind](https://github.com/jingyaogong/minimind)、[MiniMind-V](https://github.com/jingyaogong/minimind-v) 與 [nanoVLM](https://github.com/huggingface/nanoVLM)。公開課與學習者回饋的來源、取捨與查證限制保留在[大綱](docs/curriculum.md)與研究筆記。
 
-## 授權
-
-[MIT](LICENSE)
+程式、教材與自製圖解使用 [MIT](LICENSE)。外部資料依各自授權。
