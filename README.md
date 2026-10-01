@@ -117,7 +117,8 @@ tiny-perceptron-vlm/
 ├── tests/                # 冒煙測試，全部離線
 ├── docs/
 │   └── environment.md    # 環境研究筆記：每個選擇的理由
-└── pyproject.toml        # 套件與工具設定（uv）
+├── pyproject.toml        # 套件與工具設定（uv）
+└── uv.lock               # 鎖定所有套件的版本
 ```
 
 ## 開發
