@@ -2,6 +2,8 @@
 
 更新日期：2026-10-01。repo 已啟用 `/assets/training/*.tar.gz` 的 LFS 追蹤，首批8個分來源資料快照與普通 Git 的來源／授權／雜湊清單在[訓練資料入口](../assets/training/README.md)。原始 `data/` 快取、權重與執行輸出維持忽略。
 
+目前這些變更僅在本機 commit，尚未推送至遠端 main。普通 Git 推送及 GitHub API 存取已成功，但現有認證在 LFS 上傳端點被拒絕；不能把本機打包成功當成遠端資產已發布。
+
 ## 已驗證的能力
 
 - 本環境已有 `git-lfs/3.6.1`，執行檔為 `/usr/bin/git-lfs`。
@@ -9,6 +11,7 @@
 - 原 repo 的 `git ls-remote origin HEAD` 成功。
 - 使用原 repo 的 GitHub remote 與原生 LFS client，只讀查詢一個刻意不存在的 object；服務回應 `Object does not exist on the server: [404]`。這證明 LFS 物件查詢端點可通，沒有本輪先前其他網站的 CONNECT 403。
 - 前四項是首次調查的結果，當時未上傳物件。目前固定資料採分來源LFS包；不把repo擁有者的方案或剩餘額度當成已知條件。
+- 本輪已確認8個包在 index 中都是 LFS pointer，大小與 SHA-256 符合 manifest；全部本機解包／重建成功。實際上傳失敗：原有 Git 認證無法供 LFS client 使用，改用現有 `GH_TOKEN` 亦被拒絕。尚未驗證遠端下載。
 
 初次調查時 `.gitattributes` 只有換行設定。現在固定資料包使用 LFS pointer；來源、授權、manifest 與生成器用普通 Git。`.gitignore` 仍忽略 `/data/`、`/checkpoints/`、實驗輸出及 `*.pt`／`*.safetensors` 等權重，沒有把整個下載快取目錄改為追蹤。
 
@@ -76,7 +79,9 @@ GitHub Releases 的附件獨立於普通 Git 歷史，官方文件目前表示�
 
 下載入口按單元選取檔案，驗證 checksum 後存入目前已忽略的資料／權重目錄。HF 使用固定 commit revision，避免以 `main` 代表教材版本；Release 附件用 checksum 保證取得的是教材指定內容。
 
-若之後選擇 LFS，須明列追蹤路徑並保存 `.gitattributes`；LFS 追蹤不會覆蓋 `.gitignore`，教材權重的忽略例外也要一起設計。可用 `GIT_LFS_SKIP_SMUDGE=1` 先 clone 程式，再由各單元按需取 LFS 物件；不能把僅有 pointer 的狀態當作資產已下載。
+目前 `.gitattributes` 僅追蹤 `/assets/training/*.tar.gz`；LFS 追蹤不會覆蓋 `.gitignore`，`data/` 仍是本機快取。可用 `GIT_LFS_SKIP_SMUDGE=1` 先 clone 程式，再由各單元按需取 LFS 物件；不能把僅有 pointer 的狀態當作資產已下載。
+
+發布需要能供 Git LFS 使用、對本 repo 有寫入權限的 GitHub HTTPS 認證；普通 Git 或 API 認證成功不保證 LFS 上傳可用。認證設定完成後，先上傳物件，再推送 commit，最後以新的 LFS cache 下載核對 SHA-256。禁止略過 LFS pre-push hook 而發布無法下載的 pointer。認證只能透過安全的環境設定輸入，不放進 repo、指令參數或對話。
 
 ## 官方來源
 
