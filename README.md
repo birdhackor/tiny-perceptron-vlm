@@ -50,7 +50,7 @@ python scripts/prepare_data.py --kind toy-text
 python scripts/train.py --task text --data data/generated/toy-text/train.jsonl
 ```
 
-預設只做一個 batch 的 forward/backward，不更新權重。正式訓練再明確加 `--train`；字元模型、多模態、風格與安全、偏好和蒸餾配方在[訓練操作](course/training.md)。資料與權重放在被 Git 忽略的 `data/`、`checkpoints/`；Hugging Face／LFS的分工見[資產管理](docs/asset-storage.md)。
+預設只做一個 batch 的 forward/backward，不更新權重。正式訓練再明確加 `--train`；字元模型、多模態、風格與安全、偏好和蒸餾配方在[訓練操作](course/training.md)。[首批固定訓練資料](assets/training/README.md)以 Git LFS 發布，執行 `python scripts/fetch_training_assets.py --list` 查看並按需解包。原始快取與權重仍放在被 Git 忽略的 `data/`、`checkpoints/`；分工見[資產管理](docs/asset-storage.md)。
 
 ## 專案結構與維護
 

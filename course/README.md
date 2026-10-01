@@ -61,6 +61,6 @@ Notebook 預設做小數值實驗、推論或一個 batch 的梯度檢查。需�
 
 ## 素材與實作
 
-40 張 SVG 由本專案自行繪製，原始碼在 [build_visuals.py](../scripts/build_visuals.py)，沿用專案 MIT 授權。圖片、聲音、字形資料可離線生成。模型與前處理直接使用 PyTorch；沒有導入外部預訓練編碼器。資料與權重放在被 Git 忽略的目錄，存放原則見[資產管理](../docs/asset-storage.md)。
+40 張 SVG 由本專案自行繪製，原始碼在 [build_visuals.py](../scripts/build_visuals.py)，沿用專案 MIT 授權。圖片、聲音、字形資料可離線生成。模型與前處理直接使用 PyTorch；沒有導入外部預訓練編碼器。[首批固定訓練資料](../assets/training/README.md)使用 Git LFS 發布，解包快取與權重放在被 Git 忽略的目錄；存放原則見[資產管理](../docs/asset-storage.md)。
 
 教學設計參考 nanochat、MiniMind-V、公開課與學習者回饋；可核對的來源與限制保留在[大綱](../docs/curriculum.md)和相關研究筆記。這套實作涵蓋核心機制與玩具任務；影片序列、QAT、LoRA、RL 的部分單元是局部實驗，沒有宣稱提供已訓練的通用影音助理。
