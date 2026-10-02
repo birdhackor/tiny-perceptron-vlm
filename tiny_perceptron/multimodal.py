@@ -165,7 +165,9 @@ def generate_modal(model, prefix, image=None, waveform=None, max_new_tokens=16, 
                 scores.argmax() if temperature <= 0 else torch.multinomial((scores / temperature).softmax(-1), 1)[0]
             )
             ids = torch.cat((ids, next_id.reshape(1)))
-            if next_id.item() == tok.eos_id:
+            # 生成的 image/audio 是非法答案 token，不是新的輸入素材。
+            # 保留它供評估記失敗，但不能在下一步把它重新展開成圖片／聲音。
+            if next_id.item() in (tok.eos_id, tok.image_id, tok.audio_id):
                 break
     finally:
         model.train(was_training)

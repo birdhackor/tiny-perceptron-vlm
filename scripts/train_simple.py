@@ -62,11 +62,14 @@ def main():
         if args.train:
             optimizer.step()
     with torch.no_grad():
+        # 訓練／留出代價都在最後一次更新完成後計算，才能直接對照。
+        train_loss = F.cross_entropy(model(x), y).item()
         validation = F.cross_entropy(model(vx), vy).item()
     report = {
         "mode": "train" if args.train else "dry-run-no-weight-update",
         "model": args.model,
-        "train_loss": loss.detach().item(),
+        "train_loss": train_loss,
+        "last_batch_loss_before_update": loss.detach().item(),
         "validation_loss": validation,
         "split_unit": "whole deduplicated document",
         "parameters": sum(p.numel() for p in model.parameters()),
