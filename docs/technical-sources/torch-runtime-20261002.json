@@ -1,0 +1,1382 @@
+{
+  "schema_version": 1,
+  "library_id": "torch-runtime-20261002",
+  "created_at": "2026-10-02",
+  "scope_zh": "當前 PyTorch runtime 的原始來源準備：SDPA eligibility、AMP/GradScaler、torch.compile/Inductor 冷啟動與 CUDA allocated/reserved 範圍。此檔不宣稱逐節審閱、已通過教學正確性或 GPU 實測。",
+  "verification_policy_zh": "官方 URL 均實際下載並讀取列出原文；Python installed source 逐 byte SHA 與官方固定 commit 比對。cached_text_lines 僅定位忽略目錄中的文字副本；source_lines 是固定 commit 原始程式行號。網頁題名記錄實際文件版本，不能將目前 2.14 內容套成舊 2.11。",
+  "cache_policy_zh": "原文、解析文字、fetch metadata 與 installed source 副本皆放既有 ignored outputs/technical-sources/torch-runtime/；Git 中只放來源索引與有限引文。",
+  "runtime_identity": {
+    "cpu": {
+      "version": "2.14.1+cpu",
+      "git_version": "5c4886908584029761b579af026dcfb627c84070",
+      "cuda_version": null,
+      "official_tag": "v2.14.1",
+      "tag_matches_git_version": true,
+      "installed_files_verified": 5,
+      "all_installed_files_byte_identical_to_official_commit": true
+    },
+    "recorded_gpu": {
+      "version": "2.14.1+cu126",
+      "gpu": "NVIDIA L4",
+      "device": "cuda",
+      "evidence": "docs/course-experiments/results/text_foundation.json",
+      "evidence_sha256": "801ca054d7765334c6c56e684c4aab7900e8b511bca45ed37012446166b20fbd",
+      "training_code_revision": "b52935d99f58b694cd932ac158c10c4d8d92d4c2",
+      "pytorch_git_version": "not recorded in this result; not independently verified on GPU",
+      "cuda_driver_or_build_flags": "not verified by this source preparation"
+    }
+  },
+  "coverage_index": {
+    "sdpa": [
+      "docs214-sdpa",
+      "source-sdp-common",
+      "source-sdp-cuda",
+      "source-cuda-backends",
+      "nvidia-cuda-gpus"
+    ],
+    "amp": [
+      "docs214-amp",
+      "source-autocast",
+      "source-gradscaler"
+    ],
+    "compile": [
+      "docs214-compile",
+      "source-compile",
+      "compile-tutorial",
+      "source-compile-tutorial"
+    ],
+    "cuda_memory_and_timing": [
+      "docs214-cuda",
+      "docs214-allocated",
+      "docs214-reserved",
+      "docs214-memory-usage",
+      "docs214-peak-allocated",
+      "docs214-reset-peak",
+      "source-memory"
+    ],
+    "version_identity": [
+      "official-tag",
+      "official-runtime-commit",
+      "tutorials-main-commit"
+    ]
+  },
+  "failed_accesses": [],
+  "unresolved": [
+    {
+      "id": "gpu-build-identity",
+      "question_zh": "正式 GPU cu126 wheel 的 torch.version.git_version、CUDA runtime/driver/build flags 尚未在本次來源準備中實測。CPU SHA/tag 相同並不自動證明 GPU wheel 的編譯選項相同。",
+      "next_evidence_zh": "由已授權正式 GPU runner 未來記錄 version/git_version/CUDA/device capability/build info；本工作不啟動任何付費工作。"
+    },
+    {
+      "id": "per-input-sdpa-backend",
+      "question_zh": "本倉庫每種 dtype/head dimension/mask/dropout/GQA 形狀實際可用及選中的 backend 尚未由此來源庫驗證。",
+      "next_evidence_zh": "實際 CUDA build 中以 SDPAParams 的 can_use_* debug、強制 sdpa_kernel、profiler/kernel 名稱交叉辨識，保留不適用原因。"
+    },
+    {
+      "id": "performance-and-memory-scope",
+      "question_zh": "來源不能替代實驗：cold/warm 執行時間、FP16 skipped update 數、各段 peak allocator bytes 與外部/context memory 都要明示量測範圍。",
+      "next_evidence_zh": "實驗報告分開 cold compile/warmup/steady-state；記錄 attempted與successful updates，以及 reset/開始/結束 allocator 量測範圍。"
+    }
+  ],
+  "sources": [
+    {
+      "id": "docs214-sdpa",
+      "title": "torch.nn.functional.scaled_dot_product_attention — PyTorch 2.14 documentation",
+      "authors": [
+        "PyTorch project"
+      ],
+      "year": null,
+      "url": "https://docs.pytorch.org/docs/2.14/generated/torch.nn.functional.scaled_dot_product_attention.html",
+      "download_url": "https://docs.pytorch.org/docs/2.14/generated/torch.nn.functional.scaled_dot_product_attention.html",
+      "resolved_url": "https://docs.pytorch.org/docs/2.14/generated/torch.nn.functional.scaled_dot_product_attention.html",
+      "access_date": "2026-10-02",
+      "accessed_at": "2026-10-02T19:39:00.099179+00:00",
+      "http_status": 200,
+      "access_status": "verified_primary_source",
+      "source_type": "official_documentation",
+      "version": "PyTorch 2.14 documentation snapshot",
+      "local_cache": {
+        "original": "outputs/technical-sources/torch-runtime/docs214-sdpa.html",
+        "original_sha256": "f79084c6a533772c7874e5cb38b78b21d2d01a6f209cad49e742e1731180212f",
+        "original_bytes": 214389,
+        "ignored_by_git": true,
+        "text": "outputs/technical-sources/torch-runtime/docs214-sdpa.txt",
+        "text_sha256": "0cb3d192e3fb49f63c92e662136e5472dba5cc11109ced85b72b62f45307b7db"
+      },
+      "claims_supported": [
+        {
+          "summary_zh": "SDPA 會依輸入自動選擇可用實作；fused kernel 有各自輸入限制。指定 backend 的測試應保留不適用原因，不可把呼叫 SDPA 等同 FlashAttention。",
+          "quoted_passage": "The function may call optimized kernels for improved performance when using the CUDA backend.\nFor all other backends, the PyTorch implementation will be used.\nAll implementations are enabled by default. Scaled dot product attention attempts to automatically select the\nmost optimal implementation based on the inputs. In order to provide more fine-grained control over what implementation\nis used, the following functions are provided for enabling and disabling implementations.\nThe context manager is the preferred mechanism:\ntorch.nn.attention.sdpa_kernel(): A context manager used to enable or disable any of the implementations.\ntorch.backends.cuda.enable_flash_sdp(): Globally enables or disables FlashAttention.\ntorch.backends.cuda.enable_mem_efficient_sdp(): Globally enables or disables  Memory-Efficient Attention.\ntorch.backends.cuda.enable_math_sdp(): Globally enables or disables  the PyTorch C++ implementation.\nEach of the fused kernels has specific input limitations. If the user requires the use of a specific fused implementation,\ndisable the PyTorch C++ implementation using torch.nn.attention.sdpa_kernel().\nIn the event that a fused implementation is not available, a warning will be raised with the\nreasons why the fused implementation cannot run.",
+          "locator": {
+            "section": "scaled_dot_product_attention: implementation selection and limitations",
+            "cached_text_lines": [
+              535,
+              548
+            ]
+          },
+          "support_type": "direct"
+        },
+        {
+          "summary_zh": "不同 backend 的浮點結果可能不同；math backend 支援 float64，half/bfloat16 的中間值保留 float。",
+          "quoted_passage": "Due to the nature of fusing floating point operations, the output of this function may be different\ndepending on what backend kernel is chosen.\nThe c++ implementation supports torch.float64 and can be used when higher precision is required.\nFor math backend, all intermediates are kept in torch.float if inputs are in torch.half or torch.bfloat16.",
+          "locator": {
+            "section": "scaled_dot_product_attention: numerical accuracy",
+            "cached_text_lines": [
+              549,
+              552
+            ]
+          },
+          "support_type": "direct"
+        },
+        {
+          "summary_zh": "2.14 文件明列 GQA 支援 Flash、cuDNN、math，memory-efficient 在 NVIDIA CUDA 也支援；head 數仍有整除及 K/V 一致限制。",
+          "quoted_passage": "Grouped Query Attention (GQA) is an experimental feature. It works with FlashAttention,\ncuDNN attention, and the math kernel on CUDA tensors. Memory-efficient attention also supports\nGQA on NVIDIA CUDA. GQA does not support Nested tensors.\nConstraints for GQA:\nnumber_of_heads_query % number_of_heads_key_value == 0 and,\nnumber_of_heads_key == number_of_heads_value",
+          "locator": {
+            "section": "scaled_dot_product_attention: Grouped Query Attention",
+            "cached_text_lines": [
+              554,
+              559
+            ]
+          },
+          "support_type": "direct"
+        }
+      ],
+      "limits": [
+        "僅支持列出的來源論點；未做本倉庫課節正確性審閱，也不是本倉庫速度、精度或記憶體 benchmark。",
+        "文件版本固定到 2.14 major/minor URL，但網頁可更新；以抓取日期與原文 SHA 固定本次所讀內容，不聲稱專屬 2.14.1 point release。"
+      ]
+    },
+    {
+      "id": "docs214-amp",
+      "title": "Automatic Mixed Precision package - torch.amp — PyTorch 2.14 documentation",
+      "authors": [
+        "PyTorch project"
+      ],
+      "year": null,
+      "url": "https://docs.pytorch.org/docs/2.14/amp.html",
+      "download_url": "https://docs.pytorch.org/docs/2.14/amp.html",
+      "resolved_url": "https://docs.pytorch.org/docs/2.14/amp.html",
+      "access_date": "2026-10-02",
+      "accessed_at": "2026-10-02T19:39:00.100311+00:00",
+      "http_status": 200,
+      "access_status": "verified_primary_source",
+      "source_type": "official_documentation",
+      "version": "PyTorch 2.14 documentation snapshot",
+      "local_cache": {
+        "original": "outputs/technical-sources/torch-runtime/docs214-amp.html",
+        "original_sha256": "13ef300cf6920386ea0964ca37b69daa25b79f7404107abca32e85907469729c",
+        "original_bytes": 754438,
+        "ignored_by_git": true,
+        "text": "outputs/technical-sources/torch-runtime/docs214-amp.txt",
+        "text_sha256": "07f1c6d67da4db3574edca13ad85ada993c8b6bd7c3b88a36d9b2d7fe17f510a"
+      },
+      "claims_supported": [
+        {
+          "summary_zh": "autocast 按 operation 選 dtype；模型及輸入不必先全面 half()，forward/loss 包在 autocast，backward 不建議包在其中。",
+          "quoted_passage": "allow regions of your script to run in mixed precision.\nIn these regions, ops run in an op-specific dtype chosen by autocast\nto improve performance while maintaining accuracy.\nSee the Autocast Op Reference for details.\nWhen entering an autocast-enabled region, Tensors may be any type.\nYou should not call half() or bfloat16() on your model(s) or inputs when using autocasting.\nautocast should wrap only the forward pass(es) of your network, including the loss\ncomputation(s).  Backward passes under autocast are not recommended.\nBackward ops run in the same type that autocast used for corresponding forward ops.\nExample for CUDA Devices:",
+          "locator": {
+            "section": "torch.autocast",
+            "cached_text_lines": [
+              3815,
+              3824
+            ]
+          },
+          "support_type": "direct"
+        },
+        {
+          "summary_zh": "FP16 小梯度可能 underflow；loss scaling 後須先 unscale 才更新參數。FP16 也可能 overflow，GradScaler 不保證 scale 大於 1。",
+          "quoted_passage": "If the forward pass for a particular op has float16 inputs, the backward pass for\nthat op will produce float16 gradients.\nGradient values with small magnitudes may not be representable in float16.\nThese values will flush to zero (“underflow”), so the update for the corresponding parameters will be lost.\nTo prevent underflow, “gradient scaling” multiplies the network’s loss(es) by a scale factor and\ninvokes a backward pass on the scaled loss(es). Gradients flowing backward through the network are\nthen scaled by the same factor. In other words, gradient values have a larger magnitude,\nso they don’t flush to zero.\nEach parameter’s gradient (.grad attribute) should be unscaled before the optimizer\nupdates the parameters, so the scale factor does not interfere with the learning rate.\nNote\nAMP/fp16 may not work for every model! For example, most bf16-pretrained models cannot operate in\nthe fp16 numerical range of max 65504 and will cause gradients to overflow instead of underflow. In\nthis case, the scale factor may decrease under 1 as an attempt to bring gradients to a number\nrepresentable in the fp16 dynamic range. While one may expect the scale to always be above 1, our\nGradScaler does NOT make this guarantee to maintain performance. If you encounter NaNs in your loss\nor gradients when running with AMP/fp16, verify your model is compatible.",
+          "locator": {
+            "section": "Gradient Scaling",
+            "cached_text_lines": [
+              3979,
+              3995
+            ]
+          },
+          "support_type": "direct"
+        },
+        {
+          "summary_zh": "float64/非浮點、in-place、out= 與顯式 dtype operation 不會依一般 autocast eligibility 轉型。",
+          "quoted_passage": "Ops that run in float64 or non-floating-point dtypes are not eligible, and will\nrun in these types whether or not autocast is enabled.\nOnly out-of-place ops and Tensor methods are eligible.\nIn-place variants and calls that explicitly supply an out=... Tensor\nare allowed in autocast-enabled regions, but won’t go through autocasting.\nFor example, in an autocast-enabled region a.addmm(b, c) can autocast,\nbut a.addmm_(b, c) and a.addmm(b, c, out=d) cannot.\nFor best performance and stability, prefer out-of-place ops in autocast-enabled\nregions.\nOps called with an explicit dtype=... argument are not eligible,\nand will produce output that respects the dtype argument.",
+          "locator": {
+            "section": "Autocast Op Reference / Op Eligibility",
+            "cached_text_lines": [
+              4004,
+              4014
+            ]
+          },
+          "support_type": "direct"
+        }
+      ],
+      "limits": [
+        "僅支持列出的來源論點；未做本倉庫課節正確性審閱，也不是本倉庫速度、精度或記憶體 benchmark。",
+        "文件版本固定到 2.14 major/minor URL，但網頁可更新；以抓取日期與原文 SHA 固定本次所讀內容，不聲稱專屬 2.14.1 point release。"
+      ]
+    },
+    {
+      "id": "docs214-compile",
+      "title": "torch.compile — PyTorch 2.14 documentation",
+      "authors": [
+        "PyTorch project"
+      ],
+      "year": null,
+      "url": "https://docs.pytorch.org/docs/2.14/generated/torch.compile.html",
+      "download_url": "https://docs.pytorch.org/docs/2.14/generated/torch.compile.html",
+      "resolved_url": "https://docs.pytorch.org/docs/2.14/generated/torch.compile.html",
+      "access_date": "2026-10-02",
+      "accessed_at": "2026-10-02T19:39:00.105052+00:00",
+      "http_status": 200,
+      "access_status": "verified_primary_source",
+      "source_type": "official_documentation",
+      "version": "PyTorch 2.14 documentation snapshot",
+      "local_cache": {
+        "original": "outputs/technical-sources/torch-runtime/docs214-compile.html",
+        "original_sha256": "473184fe5b0cb98ecd71f52b901b4d9c9735f35270ebf33ae804a321246cce67",
+        "original_bytes": 264873,
+        "ignored_by_git": true,
+        "text": "outputs/technical-sources/torch-runtime/docs214-compile.txt",
+        "text_sha256": "c67f288095b8309eaed120a8bf3046823d6f16aa445ba0d3064cf8ddc31108b3"
+      },
+      "claims_supported": [
+        {
+          "summary_zh": "torch.compile 會嘗試編譯並快取；guard failure 會再編譯，達限制後可退回 eager。不能假設固定一次編譯後所有輸入永久命中。",
+          "quoted_passage": "Optimizes given model/function using TorchDynamo and specified backend.\nIf you are compiling an torch.nn.Module, you can also use torch.nn.Module.compile()\nto compile the module inplace without changing its structure.\nConcretely, for every frame executed within the compiled region, we will attempt\nto compile it and cache the compiled result on the code object for future\nuse.  A single frame may be compiled multiple times if previous compiled\nresults are not applicable for subsequent calls (this is called a “guard\nfailure”), you can use TORCH_LOGS=guards to debug these situations.\nMultiple compiled results can be associated with a frame up to\ntorch._dynamo.config.recompile_limit, which defaults to 8; at which\npoint we will fall back to eager.  Note that compile caches are per\ncode object, not frame; if you dynamically create multiple copies of a\nfunction, they will all share the same code cache.",
+          "locator": {
+            "section": "torch.compile: description",
+            "cached_text_lines": [
+              1110,
+              1122
+            ]
+          },
+          "support_type": "direct"
+        },
+        {
+          "summary_zh": "fullgraph=True 遇 graph break 會報錯；dynamic=False 固定 shape specialization；預設 backend 是 Inductor。",
+          "quoted_passage": "in the function that it will optimize. If True, then we require that the entire function be\ncapturable into a single graph. If this is not possible (that is, if there are graph breaks),\nthen this will raise an error. This also opts into unbacked semantics, notably it will turn on\ncapture_scalar_outputs and capture_dynamic_output_shape_ops on by default.\ndynamic (bool or None) – Use dynamic shape tracing.  When this is True, we will up-front attempt\nto generate a kernel that is as dynamic as possible to avoid recompilations when\nsizes change.  This may not always work as some operations/optimizations will\nforce specialization; use TORCH_LOGS=dynamic to debug overspecialization.\nWhen this is False, we will NEVER generate dynamic kernels, we will always specialize.\nBy default (None), we automatically detect if dynamism has occurred and compile a more\ndynamic kernel upon recompile.\nbackend (str or Callable) –\nbackend to be used\n”inductor” is the default backend, which is a good balance between performance and overhead\nNon experimental in-tree backends can be seen with torch._dynamo.list_backends()",
+          "locator": {
+            "section": "torch.compile: fullgraph / dynamic / backend",
+            "cached_text_lines": [
+              1126,
+              1140
+            ]
+          },
+          "support_type": "direct"
+        },
+        {
+          "summary_zh": "reduce-overhead/CUDA graphs 可降低 Python overhead，但可能多用 workspace 記憶體且不保證適用；文件另外說明 max-autotune 啟用 GPU CUDA graphs 的預設行為。",
+          "quoted_passage": "Can be either “default”, “reduce-overhead”, “max-autotune” or “max-autotune-no-cudagraphs”\n”default” is the default mode, which is a good balance between performance and overhead\n”reduce-overhead” is a mode that reduces the overhead of python with CUDA graphs,\nuseful for small batches.  Reduction of overhead can come at the cost of more memory\nusage, as we will cache the workspace memory required for the invocation so that we\ndo not have to reallocate it on subsequent runs.  Reduction of overhead is not guaranteed\nto work; today, we only reduce overhead for CUDA only graphs which do not mutate inputs.\nThere are other circumstances where CUDA graphs are not applicable; use TORCH_LOGS=perf_hints\nto debug.\n”max-autotune” is a mode that leverages Triton or template based matrix multiplications\non supported devices and Triton based convolutions on GPU.\nIt enables CUDA graphs by default on GPU.\n”max-autotune-no-cudagraphs” is a mode similar to “max-autotune” but without CUDA graphs\nTo see the exact configs that each mode sets you can call torch._inductor.list_mode_options()",
+          "locator": {
+            "section": "torch.compile: mode",
+            "cached_text_lines": [
+              1145,
+              1158
+            ]
+          },
+          "support_type": "direct"
+        }
+      ],
+      "limits": [
+        "僅支持列出的來源論點；未做本倉庫課節正確性審閱，也不是本倉庫速度、精度或記憶體 benchmark。",
+        "文件版本固定到 2.14 major/minor URL，但網頁可更新；以抓取日期與原文 SHA 固定本次所讀內容，不聲稱專屬 2.14.1 point release。"
+      ]
+    },
+    {
+      "id": "docs214-cuda",
+      "title": "CUDA semantics — PyTorch 2.14 documentation",
+      "authors": [
+        "PyTorch project"
+      ],
+      "year": null,
+      "url": "https://docs.pytorch.org/docs/2.14/notes/cuda.html",
+      "download_url": "https://docs.pytorch.org/docs/2.14/notes/cuda.html",
+      "resolved_url": "https://docs.pytorch.org/docs/2.14/notes/cuda.html",
+      "access_date": "2026-10-02",
+      "accessed_at": "2026-10-02T19:39:00.105640+00:00",
+      "http_status": 200,
+      "access_status": "verified_primary_source",
+      "source_type": "official_documentation",
+      "version": "PyTorch 2.14 documentation snapshot",
+      "local_cache": {
+        "original": "outputs/technical-sources/torch-runtime/docs214-cuda.html",
+        "original_sha256": "bff26e0d0e235b0dd16e81d9f688ac9c7418025fff9cfe13f4e74c6c983047dd",
+        "original_bytes": 465033,
+        "ignored_by_git": true,
+        "text": "outputs/technical-sources/torch-runtime/docs214-cuda.txt",
+        "text_sha256": "f9f0dc8504b2263c5e7dacaacfdec8c59f54c98e44dff63dc70bf9ee49e325c9"
+      },
+      "claims_supported": [
+        {
+          "summary_zh": "GPU operation 預設非同步，CPU 呼叫返回不等於 GPU 工作完成。",
+          "quoted_passage": "By default, GPU operations are asynchronous.  When you call a function that\nuses the GPU, the operations are enqueued to the particular device, but not\nnecessarily executed until later.  This allows us to execute more computations\nin parallel, including operations on CPU or other GPUs.",
+          "locator": {
+            "section": "Asynchronous execution",
+            "cached_text_lines": [
+              618,
+              621
+            ]
+          },
+          "support_type": "direct"
+        },
+        {
+          "summary_zh": "GPU 計時需適當 synchronization 或 CUDA Events；未同步的 wall clock 不能當 kernel 完成時間。",
+          "quoted_passage": "A consequence of the asynchronous computation is that time measurements without\nsynchronizations are not accurate. To get precise measurements, one should either\ncall torch.cuda.synchronize() before measuring, or use torch.cuda.Event\nto record times as following:\nstart_event = torch.cuda.Event(enable_timing=True)\nend_event = torch.cuda.Event(enable_timing=True)\nstart_event.record()\n# Run some things here\nend_event.record()\ntorch.cuda.synchronize()  # Wait for the events to be recorded!",
+          "locator": {
+            "section": "Asynchronous execution: timing",
+            "cached_text_lines": [
+              632,
+              641
+            ]
+          },
+          "support_type": "direct"
+        },
+        {
+          "summary_zh": "allocated 是 tensors 使用量；reserved 是 caching allocator 管理總量。empty_cache 釋出未使用 cache，不會釋放仍被 tensor 佔用的記憶體。",
+          "quoted_passage": "PyTorch uses a caching memory allocator to speed up memory allocations. This\nallows fast memory deallocation without device synchronizations. However, the\nunused memory managed by the allocator will still show as if used in\nnvidia-smi. You can use memory_allocated() and\nmax_memory_allocated() to monitor memory occupied by\ntensors, and use memory_reserved() and\nmax_memory_reserved() to monitor the total amount of memory\nmanaged by the caching allocator. Calling empty_cache()\nreleases all unused cached memory from PyTorch so that those can be used\nby other GPU applications. However, the occupied GPU memory by tensors will not\nbe freed so it can not increase the amount of GPU memory available for PyTorch.",
+          "locator": {
+            "section": "Memory management",
+            "cached_text_lines": [
+              759,
+              769
+            ]
+          },
+          "support_type": "direct"
+        }
+      ],
+      "limits": [
+        "僅支持列出的來源論點；未做本倉庫課節正確性審閱，也不是本倉庫速度、精度或記憶體 benchmark。",
+        "文件版本固定到 2.14 major/minor URL，但網頁可更新；以抓取日期與原文 SHA 固定本次所讀內容，不聲稱專屬 2.14.1 point release。"
+      ]
+    },
+    {
+      "id": "docs214-allocated",
+      "title": "torch.cuda.memory.memory_allocated — PyTorch 2.14 documentation",
+      "authors": [
+        "PyTorch project"
+      ],
+      "year": null,
+      "url": "https://docs.pytorch.org/docs/2.14/generated/torch.cuda.memory.memory_allocated.html",
+      "download_url": "https://docs.pytorch.org/docs/2.14/generated/torch.cuda.memory.memory_allocated.html",
+      "resolved_url": "https://docs.pytorch.org/docs/2.14/generated/torch.cuda.memory.memory_allocated.html",
+      "access_date": "2026-10-02",
+      "accessed_at": "2026-10-02T19:39:00.401202+00:00",
+      "http_status": 200,
+      "access_status": "verified_primary_source",
+      "source_type": "official_documentation",
+      "version": "PyTorch 2.14 documentation snapshot",
+      "local_cache": {
+        "original": "outputs/technical-sources/torch-runtime/docs214-allocated.html",
+        "original_sha256": "992f108b5cad89a47f7b11913e100b757bca348ec1ae4b93226d9825149ad1f3",
+        "original_bytes": 165148,
+        "ignored_by_git": true,
+        "text": "outputs/technical-sources/torch-runtime/docs214-allocated.txt",
+        "text_sha256": "0e5b02e93f990913b86469321a4af66035f43ad32cf547892a70e91fcb4129b4"
+      },
+      "claims_supported": [
+        {
+          "summary_zh": "memory_allocated 回報選定 device 的 tensor bytes；通常不等於 nvidia-smi，cache/context 是差異來源。",
+          "quoted_passage": "torch.cuda.memory.memory_allocated(device=None)[source]#\nReturn the current GPU memory occupied by tensors in bytes for a given device.\nParameters:\ndevice (torch.device or int, optional) – selected device. Returns\nstatistic for the current device, given by current_device(),\nif device is None (default).\nReturn type:\nint\nNote\nThis is likely less than the amount shown in nvidia-smi since some\nunused memory can be held by the caching allocator and some context\nneeds to be created on GPU. See Memory management for more\ndetails about GPU memory management.",
+          "locator": {
+            "section": "torch.cuda.memory.memory_allocated",
+            "cached_text_lines": [
+              480,
+              492
+            ]
+          },
+          "support_type": "direct"
+        }
+      ],
+      "limits": [
+        "僅支持列出的來源論點；未做本倉庫課節正確性審閱，也不是本倉庫速度、精度或記憶體 benchmark。",
+        "文件版本固定到 2.14 major/minor URL，但網頁可更新；以抓取日期與原文 SHA 固定本次所讀內容，不聲稱專屬 2.14.1 point release。"
+      ]
+    },
+    {
+      "id": "docs214-reserved",
+      "title": "torch.cuda.memory.memory_reserved — PyTorch 2.14 documentation",
+      "authors": [
+        "PyTorch project"
+      ],
+      "year": null,
+      "url": "https://docs.pytorch.org/docs/2.14/generated/torch.cuda.memory.memory_reserved.html",
+      "download_url": "https://docs.pytorch.org/docs/2.14/generated/torch.cuda.memory.memory_reserved.html",
+      "resolved_url": "https://docs.pytorch.org/docs/2.14/generated/torch.cuda.memory.memory_reserved.html",
+      "access_date": "2026-10-02",
+      "accessed_at": "2026-10-02T19:39:00.466680+00:00",
+      "http_status": 200,
+      "access_status": "verified_primary_source",
+      "source_type": "official_documentation",
+      "version": "PyTorch 2.14 documentation snapshot",
+      "local_cache": {
+        "original": "outputs/technical-sources/torch-runtime/docs214-reserved.html",
+        "original_sha256": "0a5e86becb8bc80c95f0d89bee182e9b8a389836b886fcdeaa12f75935d8369d",
+        "original_bytes": 164876,
+        "ignored_by_git": true,
+        "text": "outputs/technical-sources/torch-runtime/docs214-reserved.txt",
+        "text_sha256": "e20e7015e6fad60c8d79817b199f7b26978863be326e388a0b895364f327de80"
+      },
+      "claims_supported": [
+        {
+          "summary_zh": "memory_reserved 回報選定 device 的 caching allocator bytes，而非模型參數 bytes 或整張卡所有使用量。",
+          "quoted_passage": "torch.cuda.memory.memory_reserved(device=None)[source]#\nReturn the current GPU memory managed by the caching allocator in bytes for a given device.\nParameters:\ndevice (torch.device or int, optional) – selected device. Returns\nstatistic for the current device, given by current_device(),\nif device is None (default).",
+          "locator": {
+            "section": "torch.cuda.memory.memory_reserved",
+            "cached_text_lines": [
+              480,
+              485
+            ]
+          },
+          "support_type": "direct"
+        }
+      ],
+      "limits": [
+        "僅支持列出的來源論點；未做本倉庫課節正確性審閱，也不是本倉庫速度、精度或記憶體 benchmark。",
+        "文件版本固定到 2.14 major/minor URL，但網頁可更新；以抓取日期與原文 SHA 固定本次所讀內容，不聲稱專屬 2.14.1 point release。"
+      ]
+    },
+    {
+      "id": "official-tag",
+      "title": "PyTorch official v2.14.1 tag identity",
+      "authors": [
+        "PyTorch project"
+      ],
+      "year": null,
+      "url": "https://api.github.com/repos/pytorch/pytorch/git/ref/tags/v2.14.1",
+      "download_url": "https://api.github.com/repos/pytorch/pytorch/git/ref/tags/v2.14.1",
+      "resolved_url": "https://api.github.com/repos/pytorch/pytorch/git/ref/tags/v2.14.1",
+      "access_date": "2026-10-02",
+      "accessed_at": "2026-10-02T19:39:00.566655+00:00",
+      "http_status": 200,
+      "access_status": "verified_primary_source",
+      "source_type": "official_metadata",
+      "version": "PyTorch v2.14.1 identity",
+      "local_cache": {
+        "original": "outputs/technical-sources/torch-runtime/official-tag.json",
+        "original_sha256": "46cd7504d9ac97ab4e627cafe9eb7d210d70fbd8c8dc700b4f231b8db7c5435f",
+        "original_bytes": 341,
+        "ignored_by_git": true
+      },
+      "claims_supported": [
+        {
+          "summary_zh": "官方 v2.14.1 tag 直接指向 commit 5c4886908584029761b579af026dcfb627c84070，與已安裝 CPU torch.version.git_version 相同。",
+          "quoted_passage": "{\"sha\": \"5c4886908584029761b579af026dcfb627c84070\", \"type\": \"commit\", \"url\": \"https://api.github.com/repos/pytorch/pytorch/git/commits/5c4886908584029761b579af026dcfb627c84070\"}",
+          "locator": {
+            "json_pointer": "/object/sha"
+          },
+          "support_type": "direct"
+        }
+      ],
+      "limits": [
+        "僅支持列出的來源論點；未做本倉庫課節正確性審閱，也不是本倉庫速度、精度或記憶體 benchmark。"
+      ]
+    },
+    {
+      "id": "official-runtime-commit",
+      "title": "PyTorch installed CPU runtime commit identity",
+      "authors": [
+        "PyTorch project"
+      ],
+      "year": null,
+      "url": "https://api.github.com/repos/pytorch/pytorch/commits/5c4886908584029761b579af026dcfb627c84070",
+      "download_url": "https://api.github.com/repos/pytorch/pytorch/commits/5c4886908584029761b579af026dcfb627c84070",
+      "resolved_url": "https://api.github.com/repos/pytorch/pytorch/commits/5c4886908584029761b579af026dcfb627c84070",
+      "access_date": "2026-10-02",
+      "accessed_at": "2026-10-02T19:39:00.655517+00:00",
+      "http_status": 200,
+      "access_status": "verified_primary_source",
+      "source_type": "official_metadata",
+      "version": "PyTorch v2.14.1 identity",
+      "local_cache": {
+        "original": "outputs/technical-sources/torch-runtime/official-runtime-commit.json",
+        "original_sha256": "0dd7867f1a58b3b2f385c157aa39e5fa45dc218877c36faf9f37ccd626bd1397",
+        "original_bytes": 10303,
+        "ignored_by_git": true
+      },
+      "claims_supported": [
+        {
+          "summary_zh": "固定 commit 的 GitHub API 回應確認 SHA 與 committer date；只作版本身分證據，不將提交訊息作功能論點。",
+          "quoted_passage": "{\"sha\": \"5c4886908584029761b579af026dcfb627c84070\", \"committer_date\": \"2026-09-30T01:47:31Z\"}",
+          "locator": {
+            "json_pointers": [
+              "/sha",
+              "/commit/committer/date"
+            ]
+          },
+          "support_type": "direct"
+        }
+      ],
+      "limits": [
+        "僅支持列出的來源論點；未做本倉庫課節正確性審閱，也不是本倉庫速度、精度或記憶體 benchmark。"
+      ]
+    },
+    {
+      "id": "compile-tutorial",
+      "title": "Introduction to torch.compile — PyTorch Tutorials 2.14.0+cu130 documentation",
+      "authors": [
+        "PyTorch project"
+      ],
+      "year": null,
+      "url": "https://docs.pytorch.org/tutorials/intermediate/torch_compile_tutorial.html",
+      "download_url": "https://docs.pytorch.org/tutorials/intermediate/torch_compile_tutorial.html",
+      "resolved_url": "https://docs.pytorch.org/tutorials/intermediate/torch_compile_tutorial.html",
+      "access_date": "2026-10-02",
+      "accessed_at": "2026-10-02T19:39:00.686538+00:00",
+      "http_status": 200,
+      "access_status": "verified_primary_source",
+      "source_type": "official_documentation",
+      "version": "PyTorch Tutorials 2.14.0+cu130 documentation snapshot (not a cu126 benchmark)",
+      "local_cache": {
+        "original": "outputs/technical-sources/torch-runtime/compile-tutorial.html",
+        "original_sha256": "74168c05d31a7ed8028818a203edcca68ee2dc9ca00c96832552a9b84ef61bc1",
+        "original_bytes": 239674,
+        "ignored_by_git": true,
+        "text": "outputs/technical-sources/torch-runtime/compile-tutorial.txt",
+        "text_sha256": "674dac1f1e6424f588bba502679fa5915d1d0f9bf2e0bc82bb7820ebfe63f50b"
+      },
+      "claims_supported": [
+        {
+          "summary_zh": "官方教學明述第一次／前幾次執行包含編譯額外時間；需要分別呈現 cold compile 與後續重用 compiled code 的時間。",
+          "quoted_passage": "Notice that torch.compile appears to take a lot longer to complete\ncompared to eager. This is because torch.compile takes extra time to compile\nthe model on the first few executions.\ntorch.compile re-uses compiled code whever possible,\nso if we run our optimized model several more times, we should\nsee a significant improvement compared to eager.",
+          "locator": {
+            "section": "Demonstrating Speedups",
+            "paragraph_start": "Notice that torch.compile appears to take a lot longer to complete",
+            "cached_text_lines": [
+              484,
+              489
+            ]
+          },
+          "support_type": "direct"
+        }
+      ],
+      "limits": [
+        "僅支持列出的來源論點；未做本倉庫課節正確性審閱，也不是本倉庫速度、精度或記憶體 benchmark。",
+        "文件版本固定到 2.14 major/minor URL，但網頁可更新；以抓取日期與原文 SHA 固定本次所讀內容，不聲稱專屬 2.14.1 point release。",
+        "來源中的示範 speedup 數字不外推到小模型、L4 或本專案；只引用 cold/warm 差異與量測方法。"
+      ]
+    },
+    {
+      "id": "docs214-memory-usage",
+      "title": "Understanding CUDA Memory Usage — PyTorch 2.14 documentation",
+      "authors": [
+        "PyTorch project"
+      ],
+      "year": null,
+      "url": "https://docs.pytorch.org/docs/2.14/torch_cuda_memory.html",
+      "download_url": "https://docs.pytorch.org/docs/2.14/torch_cuda_memory.html",
+      "resolved_url": "https://docs.pytorch.org/docs/2.14/torch_cuda_memory.html",
+      "access_date": "2026-10-02",
+      "accessed_at": "2026-10-02T19:41:23.154189+00:00",
+      "http_status": 200,
+      "access_status": "verified_primary_source",
+      "source_type": "official_documentation",
+      "version": "PyTorch 2.14 documentation snapshot",
+      "local_cache": {
+        "original": "outputs/technical-sources/torch-runtime/docs214-memory-usage.html",
+        "original_sha256": "a5896c1dad3a502974b7c7b0a983ed0109d379bfb554e28515ea3497defdbe78",
+        "original_bytes": 681768,
+        "ignored_by_git": true,
+        "text": "outputs/technical-sources/torch-runtime/docs214-memory-usage.txt",
+        "text_sha256": "cabac1e1dd0c4724276d3eb71eb057ef58b301aa7d6ab6b659f94a9801507866"
+      },
+      "claims_supported": [
+        {
+          "summary_zh": "PyTorch memory profiler 主要可見自己 allocator 管理的 CUDA device allocation；CUDA API／第三方直接配置及 NCCL allocation 可在視野之外。",
+          "quoted_passage": "By default, the memory profiler only has visibility into CUDA device memory allocated and managed through the\nPyTorch allocator (e.g., torch.empty(..., device='cuda'), :func:torch.cuda.memory.CUDAPluggableAllocator).\nCPU pinned memory (host memory) can optionally be included by passing record_pinned_host_memory=True\nto :func:~torch.cuda.memory._record_memory_history; see Including Pinned (Host) Memory below.\nAny memory allocated directly from CUDA APIs in C++ (e.g., cudaMalloc, cuMemCreate) or via third-party\nPython bindings such as cuda-python <https://github.com/NVIDIA/cuda-python>_ will not be visible in the\nPyTorch memory profiler. NCCL (used for distributed communication on CUDA devices) is a common example of a\nlibrary that allocates GPU memory outside of PyTorch’s allocator.  See Identifying Non-PyTorch allocations for more info.",
+          "locator": {
+            "section": "Understanding CUDA Memory Usage: Note",
+            "cached_text_lines": [
+              3769,
+              3776
+            ]
+          },
+          "support_type": "direct"
+        }
+      ],
+      "limits": [
+        "僅支持列出的來源論點；未做本倉庫課節正確性審閱，也不是本倉庫速度、精度或記憶體 benchmark。",
+        "文件版本固定到 2.14 major/minor URL，但網頁可更新；以抓取日期與原文 SHA 固定本次所讀內容，不聲稱專屬 2.14.1 point release。",
+        "此處對外部 allocation 的明述是 profiler visibility；allocated/reserved API 範圍另由 allocator 指標來源交叉支持。"
+      ]
+    },
+    {
+      "id": "docs214-peak-allocated",
+      "title": "torch.cuda.memory.max_memory_allocated — PyTorch 2.14 documentation",
+      "authors": [
+        "PyTorch project"
+      ],
+      "year": null,
+      "url": "https://docs.pytorch.org/docs/2.14/generated/torch.cuda.memory.max_memory_allocated.html",
+      "download_url": "https://docs.pytorch.org/docs/2.14/generated/torch.cuda.memory.max_memory_allocated.html",
+      "resolved_url": "https://docs.pytorch.org/docs/2.14/generated/torch.cuda.memory.max_memory_allocated.html",
+      "access_date": "2026-10-02",
+      "accessed_at": "2026-10-02T19:41:23.155276+00:00",
+      "http_status": 200,
+      "access_status": "verified_primary_source",
+      "source_type": "official_documentation",
+      "version": "PyTorch 2.14 documentation snapshot",
+      "local_cache": {
+        "original": "outputs/technical-sources/torch-runtime/docs214-peak-allocated.html",
+        "original_sha256": "e889c5f3a9eadf98bc918dc92332f0cbc996cf82c874463a0528a056a38acfe3",
+        "original_bytes": 165613,
+        "ignored_by_git": true,
+        "text": "outputs/technical-sources/torch-runtime/docs214-peak-allocated.txt",
+        "text_sha256": "5fa1757bc306847cd9a5e823226ebe5eabc5aaf30dd40d9b713cec6769e2a8e8"
+      },
+      "claims_supported": [
+        {
+          "summary_zh": "max_memory_allocated 預設追蹤整個程式開始以來 peak；reset_peak_memory_stats 可重設計量起點。",
+          "quoted_passage": "Return the maximum GPU memory occupied by tensors in bytes for a given device.\nBy default, this returns the peak allocated memory since the beginning of\nthis program. reset_peak_memory_stats() can be used to\nreset the starting point in tracking this metric. For example, these two\nfunctions can measure the peak allocated memory usage of each iteration in a\ntraining loop.",
+          "locator": {
+            "section": "torch.cuda.memory.max_memory_allocated",
+            "cached_text_lines": [
+              481,
+              486
+            ]
+          },
+          "support_type": "direct"
+        }
+      ],
+      "limits": [
+        "僅支持列出的來源論點；未做本倉庫課節正確性審閱，也不是本倉庫速度、精度或記憶體 benchmark。",
+        "文件版本固定到 2.14 major/minor URL，但網頁可更新；以抓取日期與原文 SHA 固定本次所讀內容，不聲稱專屬 2.14.1 point release。"
+      ]
+    },
+    {
+      "id": "docs214-reset-peak",
+      "title": "torch.cuda.memory.reset_peak_memory_stats — PyTorch 2.14 documentation",
+      "authors": [
+        "PyTorch project"
+      ],
+      "year": null,
+      "url": "https://docs.pytorch.org/docs/2.14/generated/torch.cuda.memory.reset_peak_memory_stats.html",
+      "download_url": "https://docs.pytorch.org/docs/2.14/generated/torch.cuda.memory.reset_peak_memory_stats.html",
+      "resolved_url": "https://docs.pytorch.org/docs/2.14/generated/torch.cuda.memory.reset_peak_memory_stats.html",
+      "access_date": "2026-10-02",
+      "accessed_at": "2026-10-02T19:41:23.156378+00:00",
+      "http_status": 200,
+      "access_status": "verified_primary_source",
+      "source_type": "official_documentation",
+      "version": "PyTorch 2.14 documentation snapshot",
+      "local_cache": {
+        "original": "outputs/technical-sources/torch-runtime/docs214-reset-peak.html",
+        "original_sha256": "69259770a30fbc16a540201eb21c6d93da5d8519f37f03843e60f150dff2040e",
+        "original_bytes": 165100,
+        "ignored_by_git": true,
+        "text": "outputs/technical-sources/torch-runtime/docs214-reset-peak.txt",
+        "text_sha256": "d01ed8787705fe9ee2789e149ce1ecbaddefc57323269113b3204fa91ff17645"
+      },
+      "claims_supported": [
+        {
+          "summary_zh": "reset_peak_memory_stats 重設 allocator 所追蹤 peak 統計；其本身不是釋放 tensor/cache 的操作。",
+          "quoted_passage": "torch.cuda.memory.reset_peak_memory_stats(device=None)[source]#\nReset the “peak” stats tracked by the CUDA memory allocator.\nSee memory_stats() for details. Peak stats correspond to the\n“peak” key in each individual stat dict.\nParameters:\ndevice (torch.device or int, optional) – selected device. Returns",
+          "locator": {
+            "section": "torch.cuda.memory.reset_peak_memory_stats",
+            "cached_text_lines": [
+              480,
+              485
+            ]
+          },
+          "support_type": "direct"
+        }
+      ],
+      "limits": [
+        "僅支持列出的來源論點；未做本倉庫課節正確性審閱，也不是本倉庫速度、精度或記憶體 benchmark。",
+        "文件版本固定到 2.14 major/minor URL，但網頁可更新；以抓取日期與原文 SHA 固定本次所讀內容，不聲稱專屬 2.14.1 point release。"
+      ]
+    },
+    {
+      "id": "source-sdp-cuda",
+      "title": "PyTorch CUDA SDPA eligibility and dispatcher (v2.14.1 exact commit)",
+      "authors": [
+        "PyTorch project"
+      ],
+      "year": null,
+      "url": "https://raw.githubusercontent.com/pytorch/pytorch/5c4886908584029761b579af026dcfb627c84070/aten/src/ATen/native/transformers/cuda/sdp_utils.cpp",
+      "download_url": "https://raw.githubusercontent.com/pytorch/pytorch/5c4886908584029761b579af026dcfb627c84070/aten/src/ATen/native/transformers/cuda/sdp_utils.cpp",
+      "resolved_url": "https://raw.githubusercontent.com/pytorch/pytorch/5c4886908584029761b579af026dcfb627c84070/aten/src/ATen/native/transformers/cuda/sdp_utils.cpp",
+      "access_date": "2026-10-02",
+      "accessed_at": "2026-10-02T19:41:23.156905+00:00",
+      "http_status": 200,
+      "access_status": "verified_primary_source",
+      "source_type": "official_source_code",
+      "version": "PyTorch v2.14.1 / commit 5c4886908584029761b579af026dcfb627c84070",
+      "local_cache": {
+        "original": "outputs/technical-sources/torch-runtime/source-sdp-cuda.cpp",
+        "original_sha256": "5aebb6de086f21291b7966566d00d9581d8d547316bb4f9f6963c03aa12a30d9",
+        "original_bytes": 46615,
+        "ignored_by_git": true
+      },
+      "claims_supported": [
+        {
+          "summary_zh": "此 commit NVIDIA CUDA Flash hardware gate 的執行條件是 SM8.0 至 SM12.1；仍須通過 build、輸入形狀、dtype 等其它 gate。",
+          "quoted_passage": "      TORCH_WARN(\"flash attention requires a CUDA device, which is not available.\");\n    }\n    return false;\n  }\n  auto dprops = at::cuda::getCurrentDeviceProperties();\n  if (!check_sm_version<sm80, sm121>(dprops)) {\n    if (debug) {\n      TORCH_WARN(\n          \"Flash attention only supports gpu architectures in the range [sm80, sm121]. Attempting to run on a sm \",\n          dprops->major,\n          \".\",\n          dprops->minor,\n          \" gpu.\");\n    }\n    return false;\n  }",
+          "locator": {
+            "path": "aten/src/ATen/native/transformers/cuda/sdp_utils.cpp",
+            "function": "check_flash_attention_hardware_support",
+            "source_lines": [
+              450,
+              465
+            ],
+            "cached_text_lines": [
+              450,
+              465
+            ]
+          },
+          "support_type": "direct"
+        },
+        {
+          "summary_zh": "此 commit NVIDIA memory-efficient hardware gate 的執行條件是 SM5.0 至 SM12.1。上方舊註解寫 sm90；此處以執行條件為依據。",
+          "quoted_passage": "  if (!check_sm_version<sm50, sm121>(dprops)) {\n    if (debug) {\n      TORCH_WARN(\n          \"Mem Efficient Attention only supports gpu architectures in the range [sm50, sm121]. Attempting to run on a sm \",\n          dprops->major,\n          \".\",\n          dprops->minor,\n          \" gpu.\");\n    }",
+          "locator": {
+            "path": "aten/src/ATen/native/transformers/cuda/sdp_utils.cpp",
+            "function": "check_mem_efficient_hardware_support",
+            "source_lines": [
+              515,
+              523
+            ],
+            "cached_text_lines": [
+              515,
+              523
+            ]
+          },
+          "support_type": "direct"
+        },
+        {
+          "summary_zh": "NVIDIA SM8.x 的 Flash dtype gate 僅允許 half/bfloat16，FP32 Q/K/V 無法通過；SM9+且啟用 FA3 時另有 float8_e4m3fn 分支，不概括所有新版 Flash 都只有兩種 dtype。",
+          "quoted_passage": "  auto dprop = at::cuda::getCurrentDeviceProperties();\n  if (dprop->major >= 8) {\n    constexpr auto sm80_dtypes =\n        std::to_array<at::ScalarType>({at::kHalf, at::kBFloat16});\n    return check_tensor_dtype(params, sm80_dtypes, debug);\n  } else {\n    constexpr auto default_dtypes = std::to_array<at::ScalarType>({at::kHalf});\n    return check_tensor_dtype(params, default_dtypes, debug);\n  }\n}\n\nbool check_dtypes_flash_attention(sdp_params const& params, bool debug) {\n  auto dprop = at::cuda::getCurrentDeviceProperties();\n  if (dprop->major >= 9 and at::globalContext().userEnabledFA3SDP()) {\n    constexpr auto fa3_dtypes =\n        std::to_array<at::ScalarType>({at::kFloat8_e4m3fn, at::kHalf, at::kBFloat16});\n    return check_tensor_dtype(params, fa3_dtypes, debug);\n  } else {\n    return check_dtypes_low_precision(params, debug);\n  }\n}",
+          "locator": {
+            "path": "aten/src/ATen/native/transformers/cuda/sdp_utils.cpp",
+            "function": "check_dtypes_low_precision / check_dtypes_flash_attention",
+            "source_lines": [
+              895,
+              915
+            ],
+            "cached_text_lines": [
+              895,
+              915
+            ]
+          },
+          "support_type": "direct"
+        },
+        {
+          "summary_zh": "NVIDIA Flash gate 要求 Q/K/V 最後一維相同且 head dimension <=256；程式使用 <=，不沿用附近註解的 less than。",
+          "quoted_passage": "  // All head_dim sizes must be equal and less than 256\n  const auto max_size = c10::SymInt(256);\n#endif\n  const auto query_size_last = params.query.sym_size(-1);\n  const auto key_size_last = params.key.sym_size(-1);\n  const auto value_size_last = params.value.sym_size(-1);\n  bool same_head_dim_size =\n      query_size_last == key_size_last && query_size_last == value_size_last;\n  if (!(same_head_dim_size && (query_size_last <= max_size))) {\n    if (debug) {",
+          "locator": {
+            "path": "aten/src/ATen/native/transformers/cuda/sdp_utils.cpp",
+            "function": "check_head_dim_size_flash",
+            "source_lines": [
+              203,
+              212
+            ],
+            "cached_text_lines": [
+              203,
+              212
+            ]
+          },
+          "support_type": "direct"
+        },
+        {
+          "summary_zh": "部分 SM8.6–8.9／SM12.0–12.1 training 在 head dim >192 時另受 dropout/head dim gate；可用硬體與 dtype 仍不足以保證可用。",
+          "quoted_passage": "  bool is_head_dim_gt192 = params.query.sym_size(-1) > 192;\n  bool is_head_dim_lte224 = params.query.sym_size(-1) <= 224;\n  bool is_dropout = params.dropout > 0.0;\n  //  head_dim size  in (192, 224] is not supported on sm86 and sm89\n  bool cond1 = is_head_dim_gt192 && is_head_dim_lte224;\n  // head_dim size > 224 and is_dropout is not supported on sm86 and sm89\n  bool cond2 = params.query.sym_size(-1) > 224 && is_dropout;\n  if (input_requires_grad(params) && (is_sm86_or_sm89 || is_sm120_or_sm121) && (cond1 || cond2)) {",
+          "locator": {
+            "path": "aten/src/ATen/native/transformers/cuda/sdp_utils.cpp",
+            "function": "check_requires_grad_and_head_dim_gt192_constraints_on_sm86_89_or_120",
+            "source_lines": [
+              542,
+              549
+            ],
+            "cached_text_lines": [
+              542,
+              549
+            ]
+          },
+          "support_type": "direct"
+        },
+        {
+          "summary_zh": "Flash eligibility 包含 USE_FLASH_ATTENTION build flag 及多個 gate；GPU 名稱並不直接證明本次輸入有使用此 backend。",
+          "quoted_passage": "bool can_use_flash_attention(sdp_params const& params, bool debug) {\n#ifndef USE_FLASH_ATTENTION\n  if (debug) {\n    TORCH_WARN(\"Torch was not compiled with flash attention.\");\n  }\n  return false;\n#else // defined(USE_FLASH_ATTENTION)\n  // Define gate functions that determine if a flash kernel can be ran\n  constexpr auto general_constraints = std::to_array<bool (*)(sdp_params const&, bool)>({\n      check_runtime_disabled_flash,\n      check_all_tensors_on_device,\n      check_tensor_shapes,\n      check_for_attn_mask,\n      check_head_dim_size_flash<false /*caller_is_meff*/>,\n      check_flash_attention_hardware_support,\n      check_requires_grad_and_head_dim_gt192_constraints_on_sm86_89_or_120,\n      check_flash_causal_non_square_seqlens,\n      check_dtypes_flash_attention});\n  for (auto& constraint : general_constraints) {",
+          "locator": {
+            "path": "aten/src/ATen/native/transformers/cuda/sdp_utils.cpp",
+            "function": "can_use_flash_attention",
+            "source_lines": [
+              1047,
+              1065
+            ],
+            "cached_text_lines": [
+              1047,
+              1065
+            ]
+          },
+          "support_type": "direct"
+        },
+        {
+          "summary_zh": "NVIDIA memory-efficient 在 SM8+ 的 allowed dtype 是 FP16、FP32、BF16；SM8 之前是 FP16、FP32。",
+          "quoted_passage": "  constexpr auto less_than_sm80_mem_efficient_dtypes =\n      std::to_array<at::ScalarType>({at::kHalf, at::kFloat});\n#ifdef USE_ROCM\n  constexpr auto aotriton_mem_efficient_dtypes =\n      std::to_array<at::ScalarType>({at::kHalf, at::kFloat, at::kBFloat16});\n  constexpr auto ck_mem_efficient_dtypes =\n      std::to_array<at::ScalarType>({at::kHalf, at::kBFloat16});\n#else\n  constexpr auto greater_than_or_equal_sm80_mem_efficient_dtypes =\n      std::to_array<at::ScalarType>({at::kHalf, at::kFloat, at::kBFloat16});\n#endif",
+          "locator": {
+            "path": "aten/src/ATen/native/transformers/cuda/sdp_utils.cpp",
+            "function": "can_use_mem_efficient_attention",
+            "source_lines": [
+              1104,
+              1114
+            ],
+            "cached_text_lines": [
+              1104,
+              1114
+            ]
+          },
+          "support_type": "direct"
+        },
+        {
+          "summary_zh": "固定 commit 的 memory-efficient dense-input CUDA 分支 supports_gqa=true，與目前官方 GQA 文件一致；ROCm 分支不同。",
+          "quoted_passage": "      if (!constraint(params, debug)) {\n        return false;\n      }\n    }\n  }\n  if (has_only_dense_inputs(params)) {\n#ifdef USE_ROCM\n    constexpr bool supports_gqa = false;\n    constexpr bool supports_mqa = false;\n#else\n    constexpr bool supports_gqa = true;\n    constexpr bool supports_mqa = true;\n#endif\n    constexpr auto dense_constraints = std::to_array<bool (*)(sdp_params const&, bool)>({\n        check_nonzero_sequence_lengths_dense,",
+          "locator": {
+            "path": "aten/src/ATen/native/transformers/cuda/sdp_utils.cpp",
+            "function": "can_use_mem_efficient_attention",
+            "source_lines": [
+              1139,
+              1153
+            ],
+            "cached_text_lines": [
+              1139,
+              1153
+            ]
+          },
+          "support_type": "direct"
+        },
+        {
+          "summary_zh": "CUDA dispatcher 逐一檢查 cuDNN、Flash、efficient、math；可用 backend 與實際優先選中 backend 需分別辨識。",
+          "quoted_passage": "  // Because TORCHCHECK checks if condition is true we negate debug so that\n  // The statements will be printed when debug is true\n  bool print_debug = false;\n  for (auto& backend : ordering) {\n    switch (backend) {\n      case SDPBackend::cudnn_attention:\n        if (sdp::can_use_cudnn_attention(kernel_params, print_debug)) {\n              return SDPBackend::cudnn_attention;\n        }\n        break;\n      case SDPBackend::flash_attention:\n        if (sdp::can_use_flash_attention(kernel_params, print_debug)) {\n          return SDPBackend::flash_attention;\n        }\n        break;\n      case SDPBackend::efficient_attention:\n        if (sdp::can_use_mem_efficient_attention(kernel_params, print_debug)) {\n          return SDPBackend::efficient_attention;\n        }\n        break;\n      case SDPBackend::math:\n        if (ctx.userEnabledMathSDP()) {\n          return SDPBackend::math;\n        }\n        break;\n      case SDPBackend::overrideable:\n        if (ctx.userEnabledOverrideableSDP()) {\n          TORCH_CHECK(false, \"Invalid backend\");\n        }",
+          "locator": {
+            "path": "aten/src/ATen/native/transformers/cuda/sdp_utils.cpp",
+            "function": "select_sdp_backend",
+            "source_lines": [
+              1198,
+              1226
+            ],
+            "cached_text_lines": [
+              1198,
+              1226
+            ]
+          },
+          "support_type": "direct"
+        }
+      ],
+      "limits": [
+        "僅支持列出的來源論點；未做本倉庫課節正確性審閱，也不是本倉庫速度、精度或記憶體 benchmark。",
+        "NVIDIA CUDA 分支與 ROCm 分支需分開。gate/source 支持必要條件，不能取代 cu126 wheel build、實際 SDPAParams 與 profiler/backend probe。",
+        "附近註解可能落後執行程式；硬體上限與 head dimension 邊界引用實際 condition。",
+        "FlashAttention gate 包含 FA3 分支，不能把 SM8.x 的 FP16/BF16 限制擴張成所有硬體/全部版本通則。"
+      ],
+      "fixed_commit": "5c4886908584029761b579af026dcfb627c84070"
+    },
+    {
+      "id": "source-sdp-common",
+      "title": "PyTorch shared SDPA dtype checks (v2.14.1 exact commit)",
+      "authors": [
+        "PyTorch project"
+      ],
+      "year": null,
+      "url": "https://raw.githubusercontent.com/pytorch/pytorch/5c4886908584029761b579af026dcfb627c84070/aten/src/ATen/native/transformers/sdp_utils_cpp.h",
+      "download_url": "https://raw.githubusercontent.com/pytorch/pytorch/5c4886908584029761b579af026dcfb627c84070/aten/src/ATen/native/transformers/sdp_utils_cpp.h",
+      "resolved_url": "https://raw.githubusercontent.com/pytorch/pytorch/5c4886908584029761b579af026dcfb627c84070/aten/src/ATen/native/transformers/sdp_utils_cpp.h",
+      "access_date": "2026-10-02",
+      "accessed_at": "2026-10-02T19:41:23.157305+00:00",
+      "http_status": 200,
+      "access_status": "verified_primary_source",
+      "source_type": "official_source_code",
+      "version": "PyTorch v2.14.1 / commit 5c4886908584029761b579af026dcfb627c84070",
+      "local_cache": {
+        "original": "outputs/technical-sources/torch-runtime/source-sdp-common.h",
+        "original_sha256": "c31711aa9f1d8e5adf33e52851fba1abcd668d52c7c19a8337a50db26c04b48c",
+        "original_bytes": 19635,
+        "ignored_by_git": true
+      },
+      "claims_supported": [
+        {
+          "summary_zh": "fused dtype 檢查要求 Q/K/V dtype 相同且屬該 backend allowed_dtypes。",
+          "quoted_passage": "inline bool check_tensor_dtype(\n    sdp_params const& params,\n    dtype_vector allowed_dtypes,\n    bool debug) {\n  auto query_dtype = params.query.dtype();\n  if (!(query_dtype == params.key.dtype() &&\n        query_dtype == params.value.dtype() &&\n        (std::find(allowed_dtypes.begin(), allowed_dtypes.end(), query_dtype) !=\n         allowed_dtypes.end()))) {\n    if (debug) {\n      TORCH_WARN(\n          \"Expected query, key and value to all be of dtype: {\",\n          c10::Join(\", \", allowed_dtypes),\n          \"}. Got \",\n          \"Query dtype: \",",
+          "locator": {
+            "path": "aten/src/ATen/native/transformers/sdp_utils_cpp.h",
+            "function": "check_tensor_dtype",
+            "source_lines": [
+              100,
+              114
+            ],
+            "cached_text_lines": [
+              100,
+              114
+            ]
+          },
+          "support_type": "direct"
+        }
+      ],
+      "limits": [
+        "僅支持列出的來源論點；未做本倉庫課節正確性審閱，也不是本倉庫速度、精度或記憶體 benchmark。"
+      ],
+      "fixed_commit": "5c4886908584029761b579af026dcfb627c84070"
+    },
+    {
+      "id": "source-cuda-backends",
+      "title": "PyTorch CUDA SDPA Python predicates (installed source and exact commit)",
+      "authors": [
+        "PyTorch project"
+      ],
+      "year": null,
+      "url": "https://raw.githubusercontent.com/pytorch/pytorch/5c4886908584029761b579af026dcfb627c84070/torch/backends/cuda/__init__.py",
+      "download_url": "https://raw.githubusercontent.com/pytorch/pytorch/5c4886908584029761b579af026dcfb627c84070/torch/backends/cuda/__init__.py",
+      "resolved_url": "https://raw.githubusercontent.com/pytorch/pytorch/5c4886908584029761b579af026dcfb627c84070/torch/backends/cuda/__init__.py",
+      "access_date": "2026-10-02",
+      "accessed_at": "2026-10-02T19:41:23.157831+00:00",
+      "http_status": 200,
+      "access_status": "verified_primary_source",
+      "source_type": "official_source_code",
+      "version": "PyTorch v2.14.1 / commit 5c4886908584029761b579af026dcfb627c84070",
+      "local_cache": {
+        "original": "outputs/technical-sources/torch-runtime/source-cuda-backends.py",
+        "original_sha256": "aa36a537f1fbea9292069b7b8cce52a5ef4c5f354b73165448a1ca9ab116d81e",
+        "original_bytes": 26347,
+        "ignored_by_git": true
+      },
+      "claims_supported": [
+        {
+          "summary_zh": "is_flash_attention_available 檢查 build；can_use_flash_attention 要輸入 SDPAParams。debug=True 可提供不適用原因；這些 CUDA API 在 CPU build 回傳 False。",
+          "quoted_passage": "def is_flash_attention_available() -> bool:\n    r\"\"\"Check if PyTorch was built with FlashAttention for scaled_dot_product_attention.\n\n    Returns:\n        True if FlashAttention is built and available; otherwise, False.\n\n    Note:\n        This function is dependent on a CUDA-enabled build of PyTorch. It will return False\n        in non-CUDA environments.\n    \"\"\"\n    return torch._C._is_flash_attention_available()\n\n\ndef can_use_flash_attention(params: SDPAParams, debug: bool = False) -> bool:\n    r\"\"\"Check if FlashAttention can be utilized in scaled_dot_product_attention.\n\n    Args:\n        params: An instance of SDPAParams containing the tensors for query,\n                key, value, an optional attention mask, dropout rate, and\n                a flag indicating if the attention is causal.\n        debug: Whether to logging.warn debug information as to why FlashAttention could not be run.\n            Defaults to False.\n\n    Returns:\n        True if FlashAttention can be used with the given parameters; otherwise, False.\n\n    Note:\n        This function is dependent on a CUDA-enabled build of PyTorch. It will return False\n        in non-CUDA environments.\n    \"\"\"\n    return torch._C._can_use_flash_attention(params, debug)",
+          "locator": {
+            "path": "torch/backends/cuda/__init__.py",
+            "function": "is_flash_attention_available / can_use_flash_attention",
+            "source_lines": [
+              582,
+              612
+            ],
+            "cached_text_lines": [
+              582,
+              612
+            ]
+          },
+          "support_type": "direct"
+        }
+      ],
+      "limits": [
+        "僅支持列出的來源論點；未做本倉庫課節正確性審閱，也不是本倉庫速度、精度或記憶體 benchmark。"
+      ],
+      "installed_source": {
+        "installed_path": "/workspace/tiny-perceptron-vlm/.venv/lib/python3.13/site-packages/torch/backends/cuda/__init__.py",
+        "cache": "outputs/technical-sources/torch-runtime/installed/backends/cuda/__init__.py",
+        "sha256": "aa36a537f1fbea9292069b7b8cce52a5ef4c5f354b73165448a1ca9ab116d81e",
+        "bytes": 26347,
+        "matches_official_fixed_commit": true
+      },
+      "fixed_commit": "5c4886908584029761b579af026dcfb627c84070"
+    },
+    {
+      "id": "source-autocast",
+      "title": "PyTorch autocast implementation/docstring (installed source and exact commit)",
+      "authors": [
+        "PyTorch project"
+      ],
+      "year": null,
+      "url": "https://raw.githubusercontent.com/pytorch/pytorch/5c4886908584029761b579af026dcfb627c84070/torch/amp/autocast_mode.py",
+      "download_url": "https://raw.githubusercontent.com/pytorch/pytorch/5c4886908584029761b579af026dcfb627c84070/torch/amp/autocast_mode.py",
+      "resolved_url": "https://raw.githubusercontent.com/pytorch/pytorch/5c4886908584029761b579af026dcfb627c84070/torch/amp/autocast_mode.py",
+      "access_date": "2026-10-02",
+      "accessed_at": "2026-10-02T19:41:23.158384+00:00",
+      "http_status": 200,
+      "access_status": "verified_primary_source",
+      "source_type": "official_source_code",
+      "version": "PyTorch v2.14.1 / commit 5c4886908584029761b579af026dcfb627c84070",
+      "local_cache": {
+        "original": "outputs/technical-sources/torch-runtime/source-autocast.py",
+        "original_sha256": "a927f545435b1ce7cfbe2754c2f44da316a234cf7eaac555a93266708ad8db03",
+        "original_bytes": 22041,
+        "ignored_by_git": true
+      },
+      "claims_supported": [
+        {
+          "summary_zh": "已安裝 2.14.1 CPU wheel 的 autocast docstring 與固定官方 commit 檔案逐 byte SHA 相同，支持 operation-specific dtype 與 forward/loss 範圍。",
+          "quoted_passage": "class autocast:\n    r\"\"\"\n    Instances of :class:`autocast` serve as context managers or decorators that\n    allow regions of your script to run in mixed precision.\n\n    In these regions, ops run in an op-specific dtype chosen by autocast\n    to improve performance while maintaining accuracy.\n    See the :ref:`Autocast Op Reference<autocast-op-reference>` for details.\n\n    When entering an autocast-enabled region, Tensors may be any type.\n    You should not call ``half()`` or ``bfloat16()`` on your model(s) or inputs when using autocasting.\n\n    :class:`autocast` should wrap only the forward pass(es) of your network, including the loss\n    computation(s).  Backward passes under autocast are not recommended.\n    Backward ops run in the same type that autocast used for corresponding forward ops.\n\n    Example for CUDA Devices::",
+          "locator": {
+            "path": "torch/amp/autocast_mode.py",
+            "function": "autocast",
+            "source_lines": [
+              52,
+              68
+            ],
+            "cached_text_lines": [
+              52,
+              68
+            ]
+          },
+          "support_type": "direct"
+        }
+      ],
+      "limits": [
+        "僅支持列出的來源論點；未做本倉庫課節正確性審閱，也不是本倉庫速度、精度或記憶體 benchmark。"
+      ],
+      "installed_source": {
+        "installed_path": "/workspace/tiny-perceptron-vlm/.venv/lib/python3.13/site-packages/torch/amp/autocast_mode.py",
+        "cache": "outputs/technical-sources/torch-runtime/installed/amp/autocast_mode.py",
+        "sha256": "a927f545435b1ce7cfbe2754c2f44da316a234cf7eaac555a93266708ad8db03",
+        "bytes": 22041,
+        "matches_official_fixed_commit": true
+      },
+      "fixed_commit": "5c4886908584029761b579af026dcfb627c84070"
+    },
+    {
+      "id": "source-gradscaler",
+      "title": "PyTorch GradScaler skip/update implementation (installed source and exact commit)",
+      "authors": [
+        "PyTorch project"
+      ],
+      "year": null,
+      "url": "https://raw.githubusercontent.com/pytorch/pytorch/5c4886908584029761b579af026dcfb627c84070/torch/amp/grad_scaler.py",
+      "download_url": "https://raw.githubusercontent.com/pytorch/pytorch/5c4886908584029761b579af026dcfb627c84070/torch/amp/grad_scaler.py",
+      "resolved_url": "https://raw.githubusercontent.com/pytorch/pytorch/5c4886908584029761b579af026dcfb627c84070/torch/amp/grad_scaler.py",
+      "access_date": "2026-10-02",
+      "accessed_at": "2026-10-02T19:41:23.167518+00:00",
+      "http_status": 200,
+      "access_status": "verified_primary_source",
+      "source_type": "official_source_code",
+      "version": "PyTorch v2.14.1 / commit 5c4886908584029761b579af026dcfb627c84070",
+      "local_cache": {
+        "original": "outputs/technical-sources/torch-runtime/source-gradscaler.py",
+        "original_sha256": "97c411da028daaf6a6ed15d06b9b20c017404846db68203be1a586e276e44039",
+        "original_bytes": 31615,
+        "ignored_by_git": true
+      },
+      "claims_supported": [
+        {
+          "summary_zh": "GradScaler 遇 inf/NaN gradient 會跳過 underlying optimizer update，update 退 scale；初期校準可能有 skipped steps。訓練 iteration 數因此不能一律視為 parameter-update 數。",
+          "quoted_passage": "    ``scaler`` approximates the optimal scale factor over time by checking the gradients for infs and NaNs during every\n    ``scaler.step(optimizer)`` (or optional separate ``scaler.unscale_(optimizer)``, see :meth:`unscale_`).\n\n    * If infs/NaNs are found, ``scaler.step(optimizer)`` skips the underlying ``optimizer.step()`` (so the params\n      themselves remain uncorrupted) and ``update()`` multiplies the scale by ``backoff_factor``.\n\n    * If no infs/NaNs are found, ``scaler.step(optimizer)`` runs the underlying ``optimizer.step()`` as usual.\n      If ``growth_interval`` unskipped iterations occur consecutively, ``update()`` multiplies the scale by\n      ``growth_factor``.\n\n    The scale factor often causes infs/NaNs to appear in gradients for the first few iterations as its\n    value calibrates.  ``scaler.step`` will skip the underlying ``optimizer.step()`` for these\n    iterations.  After that, step skipping should occur rarely (once every few hundred or thousand iterations).",
+          "locator": {
+            "path": "torch/amp/grad_scaler.py",
+            "function": "GradScaler",
+            "source_lines": [
+              93,
+              105
+            ],
+            "cached_text_lines": [
+              93,
+              105
+            ]
+          },
+          "support_type": "direct"
+        },
+        {
+          "summary_zh": "一般 optimizer 路徑實際以 found_inf_per_device 判斷是否呼叫 optimizer.step；不是單看 loss 有限或 GradScaler.step 返回 None 來判斷成功。",
+          "quoted_passage": "    def _maybe_opt_step(\n        self,\n        optimizer: torch.optim.Optimizer,\n        optimizer_state: dict[str, Any],\n        *args: Any,\n        **kwargs: Any,\n    ) -> float | None:\n        retval: float | None = None\n        if not sum(v.item() for v in optimizer_state[\"found_inf_per_device\"].values()):\n            retval = optimizer.step(*args, **kwargs)\n        return retval\n\n    def step(\n        self, optimizer: torch.optim.Optimizer, *args: Any, **kwargs: Any\n    ) -> float | None:\n        \"\"\"Invoke ``unscale_(optimizer)`` followed by parameter update, if gradients are not infs/NaN.\n\n        :meth:`step` carries out the following two operations:\n\n        1.  Internally invokes ``unscale_(optimizer)`` (unless :meth:`unscale_` was explicitly called for ``optimizer``\n            earlier in the iteration).  As part of the :meth:`unscale_`, gradients are checked for infs/NaNs.\n        2.  If no inf/NaN gradients are found, invokes ``optimizer.step()`` using the unscaled\n            gradients.  Otherwise, ``optimizer.step()`` is skipped to avoid corrupting the params.\n",
+          "locator": {
+            "path": "torch/amp/grad_scaler.py",
+            "function": "GradScaler._maybe_opt_step / GradScaler.step",
+            "source_lines": [
+              363,
+              386
+            ],
+            "cached_text_lines": [
+              363,
+              386
+            ]
+          },
+          "support_type": "direct"
+        },
+        {
+          "summary_zh": "update 使用 backoff/growth 調 scale，需在所有 optimizer 的 step 之後呼叫，scale 不保證大於 1。",
+          "quoted_passage": "    def update(self, new_scale: float | torch.Tensor | None = None) -> None:\n        \"\"\"Update the scale factor.\n\n        If any optimizer steps were skipped the scale is multiplied by ``backoff_factor``\n        to reduce it. If ``growth_interval`` unskipped iterations occurred consecutively,\n        the scale is multiplied by ``growth_factor`` to increase it.\n\n        Passing ``new_scale`` sets the new scale value manually. (``new_scale`` is not\n        used directly, it's used to fill GradScaler's internal scale tensor. So if\n        ``new_scale`` was a tensor, later in-place changes to that tensor will not further\n        affect the scale GradScaler uses internally.)\n\n        Args:\n            new_scale (float or :class:`torch.Tensor`, optional, default=None):  New scale factor.\n\n        .. warning::\n            :meth:`update` should only be called at the end of the iteration, after ``scaler.step(optimizer)`` has\n            been invoked for all optimizers used this iteration.\n\n        .. warning::\n            For performance reasons, we do not check the scale factor value to avoid synchronizations,\n            so the scale factor is not guaranteed to be above 1. If the scale falls below 1 and/or\n            you are seeing NaNs in your gradients or loss, something is likely wrong. For example,\n            bf16-pretrained models are often incompatible with AMP/fp16 due to differing dynamic ranges.\n        \"\"\"\n        if not self._enabled:\n            return\n",
+          "locator": {
+            "path": "torch/amp/grad_scaler.py",
+            "function": "GradScaler.update",
+            "source_lines": [
+              484,
+              511
+            ],
+            "cached_text_lines": [
+              484,
+              511
+            ]
+          },
+          "support_type": "direct"
+        }
+      ],
+      "limits": [
+        "僅支持列出的來源論點；未做本倉庫課節正確性審閱，也不是本倉庫速度、精度或記憶體 benchmark。",
+        "特殊 optimizer 的 _step_supports_amp_scaling 路徑可自行處理 found_inf；一般 _maybe_opt_step 的 return None 不是可靠成功/skip旗標。"
+      ],
+      "installed_source": {
+        "installed_path": "/workspace/tiny-perceptron-vlm/.venv/lib/python3.13/site-packages/torch/amp/grad_scaler.py",
+        "cache": "outputs/technical-sources/torch-runtime/installed/amp/grad_scaler.py",
+        "sha256": "97c411da028daaf6a6ed15d06b9b20c017404846db68203be1a586e276e44039",
+        "bytes": 31615,
+        "matches_official_fixed_commit": true
+      },
+      "fixed_commit": "5c4886908584029761b579af026dcfb627c84070"
+    },
+    {
+      "id": "source-memory",
+      "title": "PyTorch CUDA allocator metric implementations (installed source and exact commit)",
+      "authors": [
+        "PyTorch project"
+      ],
+      "year": null,
+      "url": "https://raw.githubusercontent.com/pytorch/pytorch/5c4886908584029761b579af026dcfb627c84070/torch/cuda/memory.py",
+      "download_url": "https://raw.githubusercontent.com/pytorch/pytorch/5c4886908584029761b579af026dcfb627c84070/torch/cuda/memory.py",
+      "resolved_url": "https://raw.githubusercontent.com/pytorch/pytorch/5c4886908584029761b579af026dcfb627c84070/torch/cuda/memory.py",
+      "access_date": "2026-10-02",
+      "accessed_at": "2026-10-02T19:41:23.171631+00:00",
+      "http_status": 200,
+      "access_status": "verified_primary_source",
+      "source_type": "official_source_code",
+      "version": "PyTorch v2.14.1 / commit 5c4886908584029761b579af026dcfb627c84070",
+      "local_cache": {
+        "original": "outputs/technical-sources/torch-runtime/source-memory.py",
+        "original_sha256": "ed3e6068d73ef9d2165f7276476041ee5bfe8f19db863e3e11172d840812173b",
+        "original_bytes": 65572,
+        "ignored_by_git": true
+      },
+      "claims_supported": [
+        {
+          "summary_zh": "已安裝 memory_allocated/max_memory_allocated 實際讀 allocator allocated_bytes.all.current/peak；reset 起點與 device 必須在結果中交代。",
+          "quoted_passage": "def memory_allocated(device: \"Device\" = None) -> int:\n    r\"\"\"Return the current GPU memory occupied by tensors in bytes for a given device.\n\n    Args:\n        device (torch.device or int, optional): selected device. Returns\n            statistic for the current device, given by :func:`~torch.cuda.current_device`,\n            if :attr:`device` is ``None`` (default).\n\n    .. note::\n        This is likely less than the amount shown in `nvidia-smi` since some\n        unused memory can be held by the caching allocator and some context\n        needs to be created on GPU. See :ref:`cuda-memory-management` for more\n        details about GPU memory management.\n    \"\"\"\n    return memory_stats(device=device).get(\"allocated_bytes.all.current\", 0)\n\n\ndef max_memory_allocated(device: \"Device\" = None) -> int:\n    r\"\"\"Return the maximum GPU memory occupied by tensors in bytes for a given device.\n\n    By default, this returns the peak allocated memory since the beginning of\n    this program. :func:`~torch.cuda.reset_peak_memory_stats` can be used to\n    reset the starting point in tracking this metric. For example, these two\n    functions can measure the peak allocated memory usage of each iteration in a\n    training loop.\n\n    Args:\n        device (torch.device or int, optional): selected device. Returns\n            statistic for the current device, given by :func:`~torch.cuda.current_device`,\n            if :attr:`device` is ``None`` (default).\n\n    .. note::\n        See :ref:`cuda-memory-management` for more details about GPU memory\n        management.\n    \"\"\"\n    return memory_stats(device=device).get(\"allocated_bytes.all.peak\", 0)\n\n\ndef memory_reserved(device: \"Device\" = None) -> int:",
+          "locator": {
+            "path": "torch/cuda/memory.py",
+            "function": "memory_allocated / max_memory_allocated",
+            "source_lines": [
+              525,
+              563
+            ],
+            "cached_text_lines": [
+              525,
+              563
+            ]
+          },
+          "support_type": "direct"
+        },
+        {
+          "summary_zh": "已安裝 memory_reserved 實際讀 reserved_bytes.all.current，與 allocated 使用不同統計。",
+          "quoted_passage": "def memory_reserved(device: \"Device\" = None) -> int:\n    r\"\"\"Return the current GPU memory managed by the caching allocator in bytes for a given device.\n\n    Args:\n        device (torch.device or int, optional): selected device. Returns\n            statistic for the current device, given by :func:`~torch.cuda.current_device`,\n            if :attr:`device` is ``None`` (default).\n\n    .. note::\n        See :ref:`cuda-memory-management` for more details about GPU memory\n        management.\n    \"\"\"\n    return memory_stats(device=device).get(\"reserved_bytes.all.current\", 0)\n\n\ndef max_memory_reserved(device: \"Device\" = None) -> int:\n    r\"\"\"Return the maximum GPU memory managed by the caching allocator in bytes for a given device.\n",
+          "locator": {
+            "path": "torch/cuda/memory.py",
+            "function": "memory_reserved",
+            "source_lines": [
+              563,
+              580
+            ],
+            "cached_text_lines": [
+              563,
+              580
+            ]
+          },
+          "support_type": "direct"
+        }
+      ],
+      "limits": [
+        "僅支持列出的來源論點；未做本倉庫課節正確性審閱，也不是本倉庫速度、精度或記憶體 benchmark。"
+      ],
+      "installed_source": {
+        "installed_path": "/workspace/tiny-perceptron-vlm/.venv/lib/python3.13/site-packages/torch/cuda/memory.py",
+        "cache": "outputs/technical-sources/torch-runtime/installed/cuda/memory.py",
+        "sha256": "ed3e6068d73ef9d2165f7276476041ee5bfe8f19db863e3e11172d840812173b",
+        "bytes": 65572,
+        "matches_official_fixed_commit": true
+      },
+      "fixed_commit": "5c4886908584029761b579af026dcfb627c84070"
+    },
+    {
+      "id": "source-compile",
+      "title": "PyTorch torch.compile entry point (installed source and exact commit)",
+      "authors": [
+        "PyTorch project"
+      ],
+      "year": null,
+      "url": "https://raw.githubusercontent.com/pytorch/pytorch/5c4886908584029761b579af026dcfb627c84070/torch/__init__.py",
+      "download_url": "https://raw.githubusercontent.com/pytorch/pytorch/5c4886908584029761b579af026dcfb627c84070/torch/__init__.py",
+      "resolved_url": "https://raw.githubusercontent.com/pytorch/pytorch/5c4886908584029761b579af026dcfb627c84070/torch/__init__.py",
+      "access_date": "2026-10-02",
+      "accessed_at": "2026-10-02T19:41:23.173910+00:00",
+      "http_status": 200,
+      "access_status": "verified_primary_source",
+      "source_type": "official_source_code",
+      "version": "PyTorch v2.14.1 / commit 5c4886908584029761b579af026dcfb627c84070",
+      "local_cache": {
+        "original": "outputs/technical-sources/torch-runtime/source-compile.py",
+        "original_sha256": "bd4a10ff16357ed78f45aaf4b46ce5b771fdc0e8549402206e324d0eb792c672",
+        "original_bytes": 130530,
+        "ignored_by_git": true
+      },
+      "claims_supported": [
+        {
+          "summary_zh": "已安裝 torch.compile 的快取/guard/recompile 文件與固定官方 commit 相同。",
+          "quoted_passage": "    to compile the module inplace without changing its structure.\n\n    Concretely, for every frame executed within the compiled region, we will attempt\n    to compile it and cache the compiled result on the code object for future\n    use.  A single frame may be compiled multiple times if previous compiled\n    results are not applicable for subsequent calls (this is called a \"guard\n    failure\"), you can use TORCH_LOGS=guards to debug these situations.\n    Multiple compiled results can be associated with a frame up to\n    ``torch._dynamo.config.recompile_limit``, which defaults to 8; at which\n    point we will fall back to eager.  Note that compile caches are per\n    *code object*, not frame; if you dynamically create multiple copies of a\n    function, they will all share the same code cache.\n",
+          "locator": {
+            "path": "torch/__init__.py",
+            "function": "compile",
+            "source_lines": [
+              3066,
+              3078
+            ],
+            "cached_text_lines": [
+              3066,
+              3078
+            ]
+          },
+          "support_type": "direct"
+        },
+        {
+          "summary_zh": "已安裝 torch.compile 的 Inductor default 與 reduce-overhead workspace memory 說明。",
+          "quoted_passage": "\n        - \"inductor\" is the default backend, which is a good balance between performance and overhead\n\n        - Non experimental in-tree backends can be seen with `torch._dynamo.list_backends()`\n\n        - Experimental or debug in-tree backends can be seen with `torch._dynamo.list_backends(None)`\n\n        - To register an out-of-tree custom backend:\n          https://docs.pytorch.org/docs/main/user_guide/torch_compiler/torch.compiler_custom_backends.html#registering-custom-backends\n       mode (str): Can be either \"default\", \"reduce-overhead\", \"max-autotune\" or \"max-autotune-no-cudagraphs\"\n\n        - \"default\" is the default mode, which is a good balance between performance and overhead\n\n        - \"reduce-overhead\" is a mode that reduces the overhead of python with CUDA graphs,\n          useful for small batches.  Reduction of overhead can come at the cost of more memory\n          usage, as we will cache the workspace memory required for the invocation so that we\n          do not have to reallocate it on subsequent runs.  Reduction of overhead is not guaranteed\n          to work; today, we only reduce overhead for CUDA only graphs which do not mutate inputs.\n          There are other circumstances where CUDA graphs are not applicable; use TORCH_LOGS=perf_hints\n          to debug.\n\n        - \"max-autotune\" is a mode that leverages Triton or template based matrix multiplications\n          on supported devices and Triton based convolutions on GPU.\n          It enables CUDA graphs by default on GPU.",
+          "locator": {
+            "path": "torch/__init__.py",
+            "function": "compile",
+            "source_lines": [
+              3094,
+              3117
+            ],
+            "cached_text_lines": [
+              3094,
+              3117
+            ]
+          },
+          "support_type": "direct"
+        }
+      ],
+      "limits": [
+        "僅支持列出的來源論點；未做本倉庫課節正確性審閱，也不是本倉庫速度、精度或記憶體 benchmark。"
+      ],
+      "installed_source": {
+        "installed_path": "/workspace/tiny-perceptron-vlm/.venv/lib/python3.13/site-packages/torch/__init__.py",
+        "cache": "outputs/technical-sources/torch-runtime/installed/__init__.py",
+        "sha256": "bd4a10ff16357ed78f45aaf4b46ce5b771fdc0e8549402206e324d0eb792c672",
+        "bytes": 130530,
+        "matches_official_fixed_commit": true
+      },
+      "fixed_commit": "5c4886908584029761b579af026dcfb627c84070"
+    },
+    {
+      "id": "nvidia-cuda-gpus",
+      "title": "NVIDIA CUDA GPU Compute Capability table",
+      "authors": [
+        "NVIDIA"
+      ],
+      "year": null,
+      "url": "https://developer.nvidia.com/cuda-gpus",
+      "download_url": "https://developer.nvidia.com/cuda-gpus",
+      "resolved_url": "https://developer.nvidia.com/cuda/gpus",
+      "access_date": "2026-10-02",
+      "accessed_at": "2026-10-02T19:42:23.472062+00:00",
+      "http_status": 200,
+      "access_status": "verified_primary_source",
+      "source_type": "official_documentation",
+      "version": "Unversioned official hardware table snapshot, accessed 2026-10-02",
+      "local_cache": {
+        "original": "outputs/technical-sources/torch-runtime/nvidia-cuda-gpus.html",
+        "original_sha256": "bf1b28c46e0f1cb74f3499394d4e6f25490e0917f189e358f82e58ccdfa33697",
+        "original_bytes": 25515,
+        "ignored_by_git": true,
+        "text": "outputs/technical-sources/torch-runtime/nvidia-cuda-gpus.txt",
+        "text_sha256": "3cd114b811d6327577528f5a4e71643f12033b4ce6d4c32bb36cb755be395159"
+      },
+      "claims_supported": [
+        {
+          "summary_zh": "NVIDIA 官方 compute-capability 表的 8.9 row 列出 L4／L40／L40S；L4 位於 Flash NVIDIA hardware gate 範圍，並不能代替實際 wheel build/input/backend probe。",
+          "quoted_passage": "9.0\nNVIDIA GH200NVIDIA H200NVIDIA H100\n8.9\nNVIDIA L4NVIDIA L40NVIDIA L40S\nNVIDIA RTX 6000 AdaNVIDIA RTX 5000 AdaNVIDIA RTX 4500 AdaNVIDIA RTX 4000 AdaNVIDIA RTX 4000 SFF AdaNVIDIA RTX 2000 AdaGeForce RTX 4090GeForce RTX 4080GeForce RTX 4070 TiGeForce RTX 4070GeForce RTX 4060 TiGeForce RTX 4060GeForce RTX 4050",
+          "locator": {
+            "section": "CUDA GPU Compute Capability: 8.9 / Data Center GPUs",
+            "table_row": "8.9; NVIDIA L4, NVIDIA L40, NVIDIA L40S",
+            "cached_text_lines": [
+              20,
+              24
+            ]
+          },
+          "support_type": "direct"
+        }
+      ],
+      "limits": [
+        "僅支持列出的來源論點；未做本倉庫課節正確性審閱，也不是本倉庫速度、精度或記憶體 benchmark。",
+        "文件版本固定到 2.14 major/minor URL，但網頁可更新；以抓取日期與原文 SHA 固定本次所讀內容，不聲稱專屬 2.14.1 point release。"
+      ]
+    },
+    {
+      "id": "tutorials-main-commit",
+      "title": "PyTorch tutorials snapshot commit identity",
+      "authors": [
+        "PyTorch project"
+      ],
+      "year": null,
+      "url": "https://api.github.com/repos/pytorch/tutorials/commits/main",
+      "download_url": "https://api.github.com/repos/pytorch/tutorials/commits/main",
+      "resolved_url": "https://api.github.com/repos/pytorch/tutorials/commits/main",
+      "access_date": "2026-10-02",
+      "accessed_at": "2026-10-02T19:42:23.472829+00:00",
+      "http_status": 200,
+      "access_status": "verified_primary_source",
+      "source_type": "official_metadata",
+      "version": "pytorch/tutorials commit 11512db7cbbcc4b530ecfc63205d3fed13fa190d",
+      "local_cache": {
+        "original": "outputs/technical-sources/torch-runtime/tutorials-main-commit.json",
+        "original_sha256": "58067b87c3ab291a6c98d845f77ec2cb743bf21219633e0d52f06bc5c63bb1a5",
+        "original_bytes": 38689,
+        "ignored_by_git": true
+      },
+      "claims_supported": [
+        {
+          "summary_zh": "2026-10-02 抓取官方 tutorials main 所解析的固定 commit，後續原文 URL 已改用其 SHA。這不是 PyTorch v2.14.1 的套件 tag。",
+          "quoted_passage": "{\"sha\": \"11512db7cbbcc4b530ecfc63205d3fed13fa190d\", \"committer_date\": \"2026-09-30T22:09:34Z\"}",
+          "locator": {
+            "json_pointers": [
+              "/sha",
+              "/commit/committer/date"
+            ]
+          },
+          "support_type": "direct"
+        }
+      ],
+      "limits": [
+        "僅支持列出的來源論點；未做本倉庫課節正確性審閱，也不是本倉庫速度、精度或記憶體 benchmark。"
+      ]
+    },
+    {
+      "id": "source-compile-tutorial",
+      "title": "PyTorch official torch.compile tutorial source (fixed tutorials commit)",
+      "authors": [
+        "PyTorch project"
+      ],
+      "year": null,
+      "url": "https://raw.githubusercontent.com/pytorch/tutorials/11512db7cbbcc4b530ecfc63205d3fed13fa190d/intermediate_source/torch_compile_tutorial.py",
+      "download_url": "https://raw.githubusercontent.com/pytorch/tutorials/11512db7cbbcc4b530ecfc63205d3fed13fa190d/intermediate_source/torch_compile_tutorial.py",
+      "resolved_url": "https://raw.githubusercontent.com/pytorch/tutorials/11512db7cbbcc4b530ecfc63205d3fed13fa190d/intermediate_source/torch_compile_tutorial.py",
+      "access_date": "2026-10-02",
+      "accessed_at": "2026-10-02T19:42:24.550934+00:00",
+      "http_status": 200,
+      "access_status": "verified_primary_source",
+      "source_type": "official_source_code",
+      "version": "pytorch/tutorials commit 11512db7cbbcc4b530ecfc63205d3fed13fa190d",
+      "local_cache": {
+        "original": "outputs/technical-sources/torch-runtime/source-compile-tutorial.py",
+        "original_sha256": "6cbbf9de72b1acca550416f3f5d86d689cac97c6e67b0a09b04f2393ac9a7f54",
+        "original_bytes": 14553,
+        "ignored_by_git": true
+      },
+      "claims_supported": [
+        {
+          "summary_zh": "固定官方 tutorial commit 的計時範例用 CUDA Events 並 synchronize；相同段落明述第一次／前幾次編譯額外成本。",
+          "quoted_passage": "def timed(fn):\n    start = torch.cuda.Event(enable_timing=True)\n    end = torch.cuda.Event(enable_timing=True)\n    start.record()\n    result = fn()\n    end.record()\n    torch.cuda.synchronize()\n    return result, start.elapsed_time(end) / 1000\n\n\ninp = torch.randn(4096, 4096).cuda()\nprint(\"compile:\", timed(lambda: opt_foo3(inp))[1])\nprint(\"eager:\", timed(lambda: foo3(inp))[1])\n\n######################################################################\n# Notice that ``torch.compile`` appears to take a lot longer to complete\n# compared to eager. This is because ``torch.compile`` takes extra time to compile\n# the model on the first few executions.\n# ``torch.compile`` re-uses compiled code whever possible,\n# so if we run our optimized model several more times, we should\n# see a significant improvement compared to eager.\n",
+          "locator": {
+            "path": "intermediate_source/torch_compile_tutorial.py",
+            "function": "timed / Demonstrating Speedups",
+            "source_lines": [
+              159,
+              180
+            ],
+            "cached_text_lines": [
+              159,
+              180
+            ]
+          },
+          "support_type": "direct"
+        }
+      ],
+      "limits": [
+        "僅支持列出的來源論點；未做本倉庫課節正確性審閱，也不是本倉庫速度、精度或記憶體 benchmark。",
+        "來源中的示範 speedup 數字不外推到小模型、L4 或本專案；只引用 cold/warm 差異與量測方法。"
+      ],
+      "fixed_commit": "11512db7cbbcc4b530ecfc63205d3fed13fa190d"
+    }
+  ]
+}

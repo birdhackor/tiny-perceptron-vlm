@@ -37,3 +37,13 @@ def test_smoke_cannot_replace_completed_evidence(tmp_path, monkeypatch):
     with pytest.raises(ValueError, match="complete formal run"):
         ingest_course_result.ingest(smoke)
     assert json.loads(existing.read_text()) == {"evidence_status": "complete_run"}
+
+
+def test_older_backup_flag_keeps_observation_and_qualifies_resume_scope():
+    result = {"experiment_id": "simple_models", "hf": {"private_full_training_state": True}}
+    corrected = ingest_course_result.clarify_backup_scope(result)
+    assert corrected["hf"]["private_full_training_state"] is True
+    assert "weights/vocabulary only" in corrected["hf"]["legacy_backup_flag_scope"]
+    assert "not as a per-format resume check" in corrected["hf"]["legacy_backup_flag_scope"]
+    current = {"hf": {"private_full_experiment_output": True}}
+    assert ingest_course_result.clarify_backup_scope(current) == current
