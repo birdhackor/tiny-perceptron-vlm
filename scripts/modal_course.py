@@ -707,6 +707,30 @@ def release(checkpoint_repo, release_repo, experiment_id, batch_id, run_id, appr
             "anonymous_download_verified": True,
             "gpu_used": False,
         }
+        if "repository_index" in approval:
+            # 全文已由同一份 Git 核准清單綁定；權重及其匿名 roundtrip 成功後才更新根索引。
+            index = approval["repository_index"]
+            index_commit = api.upload_file(
+                repo_id=release_repo,
+                path_or_fileobj=index["content"].encode("utf-8"),
+                path_in_repo="README.md",
+                commit_message=f"Publish reviewed model index: {run_id}",
+            )
+            with tempfile.TemporaryDirectory(prefix="public-index-download-") as download:
+                index_file = hf_hub_download(
+                    repo_id=release_repo,
+                    token=False,
+                    filename="README.md",
+                    revision=index_commit.oid,
+                    local_dir=download,
+                )
+                if sha256(index_file) != index["sha256"]:
+                    raise RuntimeError("學生匿名下載的根 README SHA 與核准索引不一致")
+            response.update(
+                root_index_revision=index_commit.oid,
+                root_index_sha256=index["sha256"],
+                root_index_anonymous_download_verified=True,
+            )
         write_json(VOLUME_ROOT / batch_id / experiment_id / "public-release.json", response)
         volume.commit()
     return json.dumps(response, ensure_ascii=False, allow_nan=False)
