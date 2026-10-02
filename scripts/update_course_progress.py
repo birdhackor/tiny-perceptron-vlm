@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+from decimal import Decimal
 from pathlib import Path
 
 from check_course_reviews import sections
@@ -59,6 +60,25 @@ def main():
                     "technical_review": review_state("docs/technical-reviews", lesson_id, body),
                 }
             )
+    attempts = []
+    for evidence in sorted((ROOT / "outputs/course-control").glob("*/result.json")):
+        raw = read_json(evidence)
+        billing = raw.get("billing", {})
+        entry = billing.get("entry", {})
+        if not entry:
+            continue
+        attempts.append(
+            {key: entry.get(key) for key in ("run_id", "batch_id", "experiment_id", "mode", "reserved_usd", "status")}
+            | {"observed_cumulative_reserved_usd": billing.get("reserved_total_usd")}
+        )
+    budget = {
+        "ceiling_usd": str(plan["budget"]["maximum_compute_cost"]),
+        "observed_reserved_total_usd": str(
+            max((Decimal(a["observed_cumulative_reserved_usd"]) for a in attempts), default=Decimal(0))
+        ),
+        "scope": "Conservative project reservations from completed attempt reports; failures and reruns retain reservations. Active jobs can reserve additional funds before their report arrives. These values are not measured invoice charges or account-wide billing deltas.",
+        "attempts": attempts,
+    }
     report = {
         "schema_version": 1,
         "budget_ceiling_usd": plan["budget"]["maximum_compute_cost"],
@@ -73,6 +93,9 @@ def main():
     }
     path = ROOT / "docs/course-experiments/progress.json"
     path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    (path.parent / "budget-reservations.json").write_text(
+        json.dumps(budget, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
     print(json.dumps(report["counts"]))
 
 
