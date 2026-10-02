@@ -25,7 +25,8 @@ from .common import extract_asset, write_json
 
 
 def _steps(ctx, normal=300, smoke=12):
-    return smoke if str(ctx.device).startswith("cpu") else normal
+    scale = float(getattr(ctx, "step_scale", 1.0))
+    return max(1, round((smoke if str(ctx.device).startswith("cpu") else normal) * scale))
 
 
 def _sync(ctx):

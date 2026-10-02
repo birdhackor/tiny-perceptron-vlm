@@ -110,7 +110,11 @@ def execute(experiment_id, device, output, dependencies, assets, revision=None, 
         "elapsed_seconds": elapsed,
         "timing_scope": "experiment training, evaluation and local checkpoint saves; excludes image build, startup and HF uploads",
         "step_scale": step_scale,
-        "evidence_status": "complete_run" if step_scale == 1 else "interface_smoke_only",
+        "evidence_status": (
+            "complete_run"
+            if step_scale == 1 and not (spec["module"] == "modalities" and device == "cpu")
+            else "interface_smoke_only"
+        ),
         "peak_allocated_bytes": torch.cuda.max_memory_allocated() if device == "cuda" else None,
         "results": results,
         "artifacts": artifacts,
