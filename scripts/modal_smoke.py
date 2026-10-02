@@ -106,7 +106,8 @@ def train(checkpoint_repo, run_id, revision):
     result["hf"]["final_revision"] = final_commit.oid
     write_json(directory / "result.json", result)
     volume.commit()
-    return result
+    # 以 JSON 跨機器傳回結果，Actions 端不必安裝 PyTorch 或載入 tensor。
+    return json.dumps(result, ensure_ascii=False)
 
 
 @app.function(image=cpu_image, volumes={"/checkpoints": volume}, timeout=60, retries=0, max_containers=1)
@@ -128,7 +129,7 @@ def main(checkpoint_repo: str, release_repo: str, run_id: str, revision: str):
         if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo):
             raise ValueError("HF repo 必須是 owner/name")
     access = preflight.remote(checkpoint_repo, release_repo, run_id, revision)
-    result = train.remote(checkpoint_repo, run_id, revision)
+    result = json.loads(train.remote(checkpoint_repo, run_id, revision))
     result["preflight"] = access
     result["volume_persisted"] = verify_volume.remote(run_id, result["checkpoint_sha256"])
     output = ROOT / "outputs/modal-smoke"
