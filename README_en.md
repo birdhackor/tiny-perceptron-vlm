@@ -12,7 +12,7 @@ The course has 18 chapters, three optional branches, 222 independently runnable 
 
 Core modules implement data handling, Transformers, multimodal inputs, DPO, packed quantization and training utilities directly in PyTorch. CLI tools cover data preparation, training, inference and evaluation. LoRA, QAT and small RL exercises demonstrate individual mechanisms. Video currently has frame-slicing helpers; a complete video course is planned for a later extension. This release does not include a trained general-purpose audiovisual assistant.
 
-You can begin without prior knowledge of this project. Linked warmups introduce Python, tensors, probability, matrices, gradients and notebook operation as they become necessary. Lessons explain the problem and a worked example before introducing terminology. Validation covers CPU numerical and gradient checks, plus a small text training run on Modal L4 with HF checkpoint upload, download and resume verification. Training and capability evaluation on natural data remain pending. See the [validation report](docs/validation.md).
+You can begin without prior knowledge of this project. Linked warmups introduce Python, tensors, probability, matrices, gradients and notebook operation as they become necessary. Lessons explain the problem and a worked example before introducing terminology. Small CPU programs verify individual mechanisms. Separate formal experiments update weights, evaluate fixed held-out records and preserve code versions, data provenance and per-record results. Controlled synthetic tasks and short natural-data pilots do not establish general assistant capability. See the [experiment plan and progress](docs/course-experiments/README.md) and [validation report](docs/validation.md).
 
 ## Setup
 
@@ -47,9 +47,18 @@ The default runs one forward/backward check with no optimizer update or checkpoi
 
 With Modal and Hugging Face configured, manually run the **GPU training smoke test** GitHub Actions workflow to verify GPU parameter updates, checkpoint uploads and resuming from an HF download. See the [GPU operations guide](docs/gpu-training.md) for account settings, time limits and result checks.
 
+To inspect trained models without retraining, use the [public student weights](https://huggingface.co/birdhackor/tiny-perceptron-course-models). The [download manifest](docs/course-experiments/public-models.json) contains only published, pinned revisions; downloads verify each file hash. Model cards document scope, data licenses and measured results. From the installed CPU environment above:
+
+```bash
+python scripts/fetch_course_models.py --list
+python scripts/check_course_models.py --model text_foundation
+```
+
+The second command anonymously downloads the foundation models, verifies files and runs CPU inference. It checks loading and execution; task accuracy comes from the separate held-out evaluation. Public inference exports omit optimizer and RNG state and cannot reproduce an exact resumed training trajectory. Full training backups are stored separately.
+
 ## Maintenance
 
-Edit `course/chapters/`, format that file’s Python examples, then regenerate notebooks. Each section needs an independent reader review of its current text and SVGs; the [editorial protocol](docs/editorial-guide.md) documents the reports. Publication rejects outdated reviews. Components live in `tiny_perceptron/`; SVG sources are in `scripts/build_visuals.py`.
+Edit `course/chapters/`, format that file’s Python examples, then regenerate notebooks. Each section needs an independent reader review of its current text and SVGs, followed by a separate reviewer checking facts, original sources and measured evidence. See the [editorial protocol](docs/editorial-guide.md) and [technical review protocol](docs/technical-review-guide.md). Publication rejects outdated reviews. Components live in `tiny_perceptron/`; SVGs live in `course/figures/`, with generated examples in `scripts/build_visuals.py`.
 
 ```bash
 python scripts/build_visuals.py
@@ -57,6 +66,7 @@ python scripts/format_course_code.py course/chapters/01.md
 python scripts/build_course.py
 python scripts/build_course.py --check
 python scripts/check_course_reviews.py
+python scripts/check_technical_reviews.py
 python scripts/check_notebooks.py --mode python
 python scripts/check_notebooks.py --mode kernel --lesson 3.6
 pytest -ra
