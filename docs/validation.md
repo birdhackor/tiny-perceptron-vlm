@@ -12,6 +12,8 @@
 
 本階段累計Modal運算預留額US$8.22，上限US$10；[費用保留紀錄](course-experiments/budget-reservations.json)包含原執行、發布與修復，不是實際帳單。本輪248節的新讀者審閱、另一批技術審閱，以及最終222份Notebook／網站發布，是後續獨立關卡；本段不宣稱它們已完成。
 
+後續跨平台CI在Windows找到發布控制工具的兩處問題：以字串斜線比對私有目錄，沒有正確處理Windows路徑；隔離Python的中文help重導至非UTF-8 pipe也會失敗。修正採路徑元件比對並明示CLI輸出UTF-8，未更動上面操作驗收記錄的24份訓練／推論程式或公開權重。固定版本`1ac7fcbfafca30a7ec1d46d82947a16f82fb7bbe`的[實際CI證據](validation-artifacts/release-compatibility-ci.json)確認Linux與Windows各329 passed、1 skipped，macOS為330 passed；格式檢查亦通過。這仍不等於Apple MPS或Colab雲端實機驗證。
+
 ## 早期 GPU 連線與 HF checkpoint 流程測試
 
 2026-10-02：透過 GitHub Actions 啟動 Modal NVIDIA L4，使用 PyTorch 2.14.1+cu126，

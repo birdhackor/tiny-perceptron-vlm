@@ -1,6 +1,6 @@
 # 教材發布
 
-網站使用 [Zensical](https://zensical.org/) 建置，部署在 GitHub Pages。讀者可用全文搜尋、章節導覽與頁內目錄找內容，切換深淺色模式，並直接複製程式碼。每節附實際 CPU 輸出、SVG 圖解、Colab 入口與 `.ipynb` 下載。正文仍是 `course/chapters/` 的單一來源，Notebook 由 `scripts/build_course.py` 產生。模型能力與 GPU 訓練配方尚待實測；Colab 自動設定已加入，尚未在 Google 執行環境實機驗證。
+網站使用 [Zensical](https://zensical.org/) 建置，部署在 GitHub Pages。讀者可用全文搜尋、章節導覽與頁內目錄找內容，切換深淺色模式，並直接複製程式碼。小節頁附實際 CPU 輸出、Colab 入口與 `.ipynb` 下載，需要圖解的地方加入SVG。正文仍是 `course/chapters/` 的單一來源，Notebook 由 `scripts/build_course.py` 產生。30組正式訓練與Flash Attention補充探針已實跑，120份公開權重完成CPU操作驗收；各組結果與限制見[實驗紀錄](course-experiments/README.md)。Colab 自動設定已加入，尚未在 Google 執行環境實機驗證。
 
 ## 讀者怎麼使用
 
@@ -20,6 +20,8 @@ uv sync --frozen --extra cpu --group notebook --group site
 source .venv/bin/activate
 python scripts/build_course.py --check
 python scripts/check_course_reviews.py
+python scripts/check_technical_reviews.py
+python docs/review-tools/check_review_round.py
 python -m ipykernel install --sys-prefix --name tiny-perceptron --display-name "Tiny Perceptron"
 python scripts/check_notebooks.py --mode kernel --workers 1
 python scripts/export_course.py --executed outputs/notebooks --revision main
@@ -34,7 +36,7 @@ Windows PowerShell 使用 `.venv\Scripts\Activate.ps1` 啟用環境。`site` 群
 
 `use_directory_urls = false` 保留既有的 `1.1.html` 等網址；暖身的 `#W.2` 等錨點也保留。前置連結、舊書籤與 Notebook 中的閱讀連結不必更換。教材的額外 CSS／JavaScript 位於 `course/web/`，只處理圖解放大、公式與閱讀間距；導覽與搜尋使用 Zensical 原生功能。
 
-`--executed` 會核對每個 cell 的原始碼、執行次數與錯誤，拒絕舊教材的結果或未執行副本。讀者審閱也逐節核對來源雜湊；缺少審閱、要求修改或正文已變更而未重審時，發布會停止。只要有一節程式失敗，發布流程也會停止。讀取模式可省略 `--executed`，但不會填入假輸出。
+`--executed` 會核對每個 cell 的原始碼、執行次數與錯誤，拒絕舊教材的結果或未執行副本。發布CI也逐節核對讀者與另一批技術審閱的來源、圖解及證據雜湊，並核對本輪新審閱身分與25份導言；缺少審閱、要求修改或版本已變更而未重審時，發布會停止。只要有一節程式失敗，發布流程也會停止。讀取模式可省略 `--executed`，但不會填入假輸出。
 
 網站產物與已執行 Notebook 留在被 Git 忽略的 `outputs/`；發布時透過 Pages artifact 傳送，不把生成網頁或執行輸出提交到普通 Git。
 
