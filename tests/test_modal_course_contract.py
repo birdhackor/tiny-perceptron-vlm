@@ -165,6 +165,72 @@ def test_inference_export_removes_optimizer_rng_teacher_and_unknown_content():
     assert clean["metadata"] == {"revision": "commit"}
 
 
+def test_main_backs_up_full_report_before_sanitizing_actions_outputs(tmp_path, capsys):
+    """執行真正的 client main，僅以離線 stub 取代遠端呼叫。"""
+    from copy import deepcopy
+    from types import SimpleNamespace
+
+    original = {
+        "experiment_id": "safety",
+        "status": "completed",
+        "evidence_status": "complete_run",
+        "results": {
+            "synthetic": {"test": {"correct": 16, "count": 17}},
+            "pku_pilot": {
+                "private_only": True,
+                "training": {"steps": 80, "loss": 1.25},
+                "evaluation": {
+                    "test": {
+                        "correct": 0,
+                        "count": 6,
+                        "samples": [{"messages": [{"content": "SOURCE_MARKER"}], "generated": "OUTPUT_MARKER"}],
+                    }
+                },
+                "data": {"records": 60, "sha256": "a" * 64},
+            },
+        },
+    }
+    events = []
+
+    def backup(*args):
+        events.append("full_private_backup")
+        return json.dumps(original)
+
+    namespace = helpers() | {
+        "ROOT": tmp_path,
+        "billing_snapshot": lambda: snapshot(),
+        "preflight": SimpleNamespace(remote=lambda *args: {"ready": True}),
+        "train": SimpleNamespace(remote=lambda *args: events.append("train")),
+        "backup": SimpleNamespace(remote=backup),
+        "finish_budget": SimpleNamespace(remote=lambda *args: {"reserved_total_usd": "2.06"}),
+    }
+    real_write = namespace["write_json"]
+
+    def write(path, value):
+        if path.name == "result.json":
+            events.append("public_write")
+        real_write(path, value)
+
+    namespace["write_json"] = write
+    main = deepcopy(next(node for node in TREE.body if isinstance(node, ast.FunctionDef) and node.name == "main"))
+    main.decorator_list = []
+    exec(compile(ast.Module(body=[main], type_ignores=[]), str(SOURCE), "exec"), namespace)
+    namespace["main"]("safety", "owner/private", "owner/public", "run-1", "b" * 40)
+    artifact = json.loads((tmp_path / "outputs/modal-course/result.json").read_text())
+    printed = json.loads(capsys.readouterr().out)
+    assert events == ["train", "full_private_backup", "public_write"]
+    assert printed == artifact
+    assert artifact["results"]["synthetic"] == original["results"]["synthetic"]
+    pilot = artifact["results"]["pku_pilot"]
+    assert pilot["training"] == original["results"]["pku_pilot"]["training"]
+    assert pilot["data"] == original["results"]["pku_pilot"]["data"]
+    assert pilot["evaluation"]["test"] == {"correct": 0, "count": 6}
+    assert artifact["billing"]["reserved_total_usd"] == "2.06"
+    assert "SOURCE_MARKER" not in json.dumps(artifact)
+    assert "OUTPUT_MARKER" not in json.dumps(printed)
+    assert original["results"]["pku_pilot"]["evaluation"]["test"]["samples"]  # 私有原報告未被改寫。
+
+
 def test_only_one_bounded_gpu_function_and_manual_serial_workflow():
     functions = {node.name: node for node in TREE.body if isinstance(node, ast.FunctionDef)}
     gpu_functions = []

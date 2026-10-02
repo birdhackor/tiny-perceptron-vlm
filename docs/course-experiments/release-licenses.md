@@ -2,7 +2,7 @@
 
 核驗日期：2026-10-02。依據 `assets/training/sources/*.json` 的固定 revision，重新讀取官方資料卡、上游 LICENSE、CDLA 與 Creative Commons 法律文本；下載原文及雜湊保存在 ignored `outputs/technical-sources/release-licenses/`。
 
-課程程式碼的 [MIT LICENSE](../../LICENSE) 不會把訓練資料一併改成 MIT。公開模型卡應分別標明 **程式碼許可、該權重的許可、各訓練資料來源及許可**。以下是具體發布配置；本輪 PKU 訓練分支的額外選樣、截短、切分樣本及衍生權重依既定政策保持私有。
+課程程式碼的 [MIT LICENSE](../../LICENSE) 不會把訓練資料一併改成 MIT。公開模型卡應分別標明 **程式碼許可、該權重的許可、各訓練資料來源及許可**。以下是具體發布配置；本輪 PKU 衍生權重與完整訓練檔案不進公開學生模型包，完整報告備份在私有 HF。較早 Actions 診斷包含選取的公開來源片段與模型生成，詳見下方紀錄。
 
 ## 公開模型卡與 notice 配置
 
@@ -15,7 +15,7 @@
 | FSDD | [固定 README 的 License][fsdd-card]：CC-BY-SA-4.0 | `Free Spoken Digit Dataset (FSDD)`；發布者 `Jakobovski/free-spoken-digit-dataset` 與貢獻者；revision `26eb9aaf76e81b692f806f9140c2d2777410d7a1`；CC BY-SA 4.0 連結。說明實際錄音／說話者索引及自訂 speaker holdout；原 WAV 未修改。 | 本次可直接採 **權重 CC-BY-SA-4.0、程式碼 MIT** 的配置。這是課程主動選擇的相容發布方式，不是認定所有 FSDD 訓練權重依法必然受 SA 約束。 |
 | Fashion-MNIST | [Zalando 原 LICENSE][fashion-license] 與 [固定資料卡][fashion-card]：MIT | `zalandoresearch/fashion-mnist`；原 notice `Copyright © 2017 Zalando SE, https://tech.zalando.com`；repo revision `b2617bb6d3ffa2e429640350f613e3291e10b141`、HF revision `531be5e2ccc9dba0c201ad3ae567a4f3d16ecdd2`。說明 first-five-per-label 50 張與自訂 3/1/1 holdout、16×16 RGB 預處理。 | 本課程 Fashion 分支權重採 `MIT`，附完整 Zalando notice；不把程式碼 MIT 當成資料許可證據。 |
 | GSM8K | [OpenAI 原 LICENSE][gsm-license] 與 [固定資料卡][gsm-card]：MIT | `openai/grade-school-math`；`Copyright (c) 2021 OpenAI`；repo revision `3101c7d5072418e28b9008a6636bde82a006892c`、HF revision `740312add88f781978c0658806c59bc2815b9866`。按實際分支標明前 200 題、人類原答案、截取／分窗／family split；僅評估使用不得寫成訓練來源。 | 本課程 GSM8K 訓練分支權重採 `MIT`，附完整 OpenAI notice；保留人類答案來源，不稱教師生成。 |
-| PKU-SafeRLHF | [固定資料卡][pku-card]：CC-BY-NC-4.0 | 私有模型卡保留 `PKU-Alignment/PKU-SafeRLHF`、revision `9421ffafec3fa40a1f1a7d567b4d525079477ecb`、`alpaca3-8b/train` 與資料卡 citation。 | **本輪訓練分支私有**：額外選樣、截短、切分樣本及 checkpoint、adapter、merged、distilled 不進公開權重包；既有固定來源 archive 仍按 CC-BY-NC-4.0 提供。這是本項目發布政策；CC BY-NC 本身允許符合條件的非商業公開分享，不能把「私有」寫成該許可的原文規定。 |
+| PKU-SafeRLHF | [固定資料卡][pku-card]：CC-BY-NC-4.0 | 私有模型卡保留 `PKU-Alignment/PKU-SafeRLHF`、revision `9421ffafec3fa40a1f1a7d567b4d525079477ecb`、`alpaca3-8b/train` 與資料卡 citation。 | **本輪衍生權重不公開**：額外選樣、截短、切分樣本及 checkpoint、adapter、merged、distilled 不進公開權重包；既有固定來源 archive 仍按 CC-BY-NC-4.0 提供。這是本項目發布政策；CC BY-NC 本身允許符合條件的非商業公開分享，不能把「私有」寫成該許可的原文規定。 |
 
 權重包根目錄的 `LICENSE` 寫該權重的許可；`THIRD_PARTY_NOTICES.md` 寫上表的來源、revision、原 copyright、許可連結及修改說明。需附原文的 MIT notice 可分別保存為 `licenses/chinese-poetry-MIT.txt`、`licenses/UltraChat-MIT.txt`、`licenses/UltraFeedback-MIT.txt`。實際附帶的 TinyStories 語料與 FSDD WAV／改編資料各自保持原許可，不能由權重包的 MIT 聲明覆蓋。
 
@@ -128,6 +128,8 @@ PKU 資料卡宣告 CC-BY-NC-4.0。[官方法律文本](https://creativecommons.
 本次權重發布 manifest 將本輪 PKU 訓練分支的選取／截短／切分樣本及 checkpoint、adapter、merged、distilled 標記 `pku_derived: true`、`visibility: private`，排除公開權重下載清單。這落實既定政策，不把資料 NC 條款擴寫成無來源支持的「所有訓練模型必須私有」一般規則。
 
 既有的 [PKU 固定來源 archive](../../assets/training/pku-safe-rlhf-v1.tar.gz)（上游訓練 split 前 100 筆）已由 Git LFS 提供，隨包保留 `pku-safe-rlhf-LICENSE-AND-SOURCE.md` 的 CC-BY-NC-4.0 聲明、固定來源版本與 `source-README.md` 的上游署名／引用；它繼續遵循原非商用條件，不屬於 MIT 公開模型權重包，也不因上述本輪分支政策而變成私有。
+
+較早 safety Actions run `37046840520` 的診斷 log／artifact 包含 validation、test 各 6 筆來源截短與模型生成。這 12 組來源問答與上述公開 archive 的 120-byte 前綴一致；它們沿用原資料的 CC-BY-NC-4.0 條件。這些診斷副本仍公開，因此不能宣稱歷史上所有逐筆內容一直私有。後續 runner 在完整私有備份完成後，先移除 `private_only` 支線的逐筆樣本，再寫入公開 Actions 報告、log 與 summary；聚合指標與來源資訊保留。PKU 衍生權重始終不在公開學生模型清單。
 
 [tinystories-card]: https://huggingface.co/datasets/roneneldan/TinyStories/blob/f54c09fd23315a6f9c86f9dc80f725de7d8f9c64/README.md
 [poetry-license]: https://github.com/chinese-poetry/chinese-poetry/blob/b8594f81a89752241442f2ce267d6f66f96704ee/LICENSE
