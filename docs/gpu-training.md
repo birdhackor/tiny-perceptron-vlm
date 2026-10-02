@@ -7,11 +7,11 @@
 ## 帳號設定
 
 Modal 使用 Starter 方案即可。在 `Usage & Billing` 設定 Workspace 用量上限與需要的自付上限。
-Environment 先使用 `main`；建立 API token 後，將下列兩個值存到 GitHub 的
-`Settings → Secrets and variables → Actions → Secrets`，不要放進對話、程式或 commit：
+Environment 先使用 `main`；建立 API token 後，在 GitHub 的
+`Settings → Secrets and variables → Actions` 設定：
 
-- `MODAL_TOKEN_ID`
-- `MODAL_TOKEN_SECRET`
+- `MODAL_TOKEN_ID`：存到 Repository variables；也支援 Repository secrets，優先讀取 Variable。
+- `MODAL_TOKEN_SECRET`：存到 Repository secrets，不要放進對話、程式或 commit。
 
 HF 建立私有 Model repo 保存 checkpoint，以及公開 Model repo 保存日後驗證完成的教學權重。
 建立只允許這兩個 repo 讀寫的 fine-grained token，存到 Modal 的 `main` Environment：
