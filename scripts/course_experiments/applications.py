@@ -277,6 +277,23 @@ def _grounding(sample, documents, expected):
     }
 
 
+def _rag_counterfactual_contexts(fact):
+    """只修改這次公告的地址或來源；原始 split 與事實物件保持不動。"""
+    changed_address = fact["address"][0] + str((int(fact["address"][1]) + 1) % 10)
+    changed_source = "D" + str((int(fact["source"][1:]) + 1) % 10)
+    changed = {
+        "changed_address_context": {**fact, "address": changed_address},
+        "changed_source_context": {**fact, "source": changed_source},
+    }
+    return {
+        mode: {
+            "fact": current,
+            "documents": [{"id": current["source"], "text": f"{current['key']} address={current['address']}"}],
+        }
+        for mode, current in changed.items()
+    }
+
+
 def run_rag(ctx):
     """同一權重閉卷／正確文件／實際檢索／干擾文件比較。"""
     started = time.perf_counter()
@@ -322,11 +339,15 @@ def run_rag(ctx):
             "distractor_only": [distractor],
             "correct_with_distractor": [distractor, correct],
         }
+        interventions = _rag_counterfactual_contexts(fact)
+        modes.update({mode: case["documents"] for mode, case in interventions.items()})
         for mode, documents in modes.items():
+            context_fact = interventions[mode]["fact"] if mode in interventions else fact
+            fact_answer = f"{context_fact['address']}[{context_fact['source']}]"
             expected = (
                 "UNKNOWN"
                 if mode in ("without_context", "distractor_only") or not hits and mode == "retrieved_context"
-                else f"{address}[{source}]"
+                else fact_answer
             )
             generation = _sample(model, [{"role": "user", "content": _rag_question(key, documents)}], ctx, tokens=16)
             sample = generation["samples"][0]
@@ -335,6 +356,8 @@ def run_rag(ctx):
                     "family": key,
                     "mode": mode,
                     "fact": fact,
+                    "context_fact": context_fact,
+                    "paired_baseline_mode": "correct_context" if mode in interventions else None,
                     "query": query,
                     "retrieved_ids": [hit["id"] for hit in hits],
                     "retrieval_hit": any(hit["id"] == f"doc-{key}" for hit in hits),
@@ -342,8 +365,7 @@ def run_rag(ctx):
                     "documents": documents,
                     "generation": generation,
                     **_grounding(sample, documents, expected),
-                    "fact_answer_correct": sample["generated"] == f"{address}[{source}]"
-                    and not sample["invalid_special_tokens"],
+                    "fact_answer_correct": sample["generated"] == fact_answer and not sample["invalid_special_tokens"],
                 }
             )
     metrics = {}
@@ -361,6 +383,24 @@ def run_rag(ctx):
         }
         metrics[mode]["generated_tokens"] = sum(row["generation"]["generated_tokens"] for row in selected)
         metrics[mode]["seconds"] = sum(row["generation"]["seconds"] for row in selected)
+        metrics[mode]["eos_rate"] = _rate(
+            sum(row["generation"]["samples"][0]["eos"] for row in selected), len(selected)
+        )
+        metrics[mode]["invalid_control_rate"] = _rate(
+            sum(bool(row["generation"]["samples"][0]["invalid_special_tokens"]) for row in selected), len(selected)
+        )
+    baseline = {row["family"]: row for row in rows if row["mode"] == "correct_context"}
+    paired = {}
+    for mode in ("changed_address_context", "changed_source_context"):
+        changed = [row for row in rows if row["mode"] == mode]
+        paired[mode] = {
+            "both_answers_correct": _rate(
+                sum(row["fact_answer_correct"] and baseline[row["family"]]["fact_answer_correct"] for row in changed),
+                len(changed),
+            ),
+            "changed_answer_correct": _rate(sum(row["fact_answer_correct"] for row in changed), len(changed)),
+            "baseline_mode": "correct_context",
+        }
     retrieval_rows = [row for row in rows if row["mode"] == "retrieved_context"]
     icl_samples = []
     for value in sorted({row["value"] for row in icl_splits["test"]}):
@@ -396,6 +436,7 @@ def run_rag(ctx):
         "validation": _sft_nll(model, splits["validation"], ctx),
         "test": _sft_nll(model, splits["test"], ctx),
         "metrics": metrics,
+        "paired_counterfactuals": paired,
         "retrieval_recall_at_1": _rate(sum(row["retrieval_hit"] for row in retrieval_rows), len(retrieval_rows)),
         "samples": rows,
         "seconds": time.perf_counter() - started,
@@ -404,6 +445,7 @@ def run_rag(ctx):
             "Citation support checks one affirmative address field, not general entailment or source trust.",
             "UNKNOWN is the supervised answer when the requested fact is absent; fact accuracy is reported separately.",
             "The lexical query alias changes are deliberate misses, not model failures.",
+            "Paired context interventions change only the held-out announcement address or citation ID; weights and saved splits remain fixed.",
         ],
     }
     write_json(ctx.output / "generations.json", rows)
@@ -455,7 +497,21 @@ def _parse_json_action(text):
     def reject_constant(value):
         raise ValueError(f"非有限 JSON 數字：{value}")
 
-    action = json.loads(text, parse_constant=reject_constant)
+    def finite_float(value):
+        number = float(value)
+        if not math.isfinite(number):
+            raise ValueError(f"JSON 數字超出有限 float 範圍：{value}")
+        return number
+
+    def unique_object(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError(f"JSON object 含重複欄位：{key}")
+            value[key] = item
+        return value
+
+    action = json.loads(text, parse_constant=reject_constant, parse_float=finite_float, object_pairs_hook=unique_object)
     if not isinstance(action, dict):
         raise ValueError("動作最外層必須是 JSON object")
     if "done" in action:
@@ -495,11 +551,22 @@ def _tool_episode(model, record, ctx, max_steps=3):
                 break
             # 唯一真正執行工具的位置；參數不從標準答案替換或修正。
             result = call_tool(action)
-            event.update({"executed": True, "tool_result": result})
+            finite_result = type(result) is not float or math.isfinite(result)
+            event.update(
+                {
+                    "executed": True,
+                    "finite_result": finite_result,
+                    "tool_result": result if finite_result else repr(result),
+                }
+            )
             event["request_matches_question"] = record["operation"] != "copy" and action == {
                 "name": record["operation"],
                 "arguments": {"a": record["a"], "b": record["b"]},
             }
+            if not finite_result:
+                event["error"] = "工具確實已執行，但運算 overflow 產生非有限結果；保留文字證據並停止。"
+                status = "invalid_tool_result"
+                break
             messages += [
                 {"role": "assistant", "content": raw["generated"]},
                 {"role": "user", "content": f"TOOL_RESULT:{result}"},
@@ -515,6 +582,7 @@ def _tool_episode(model, record, ctx, max_steps=3):
         if record["operation"] == "copy"
         else bool(
             executions
+            and executions[-1]["finite_result"]
             and any(event["request_matches_question"] for event in executions)
             and answer == executions[-1]["tool_result"]
         )
@@ -556,6 +624,8 @@ def run_tools(ctx):
         '{"name":"delete_all","arguments":{"a":2,"b":3}}',
         '{"name":"add","arguments":{"a":true,"b":3}}',
         '{"name":"add","arguments":{"a":NaN,"b":3}}',
+        '{"name":"add","arguments":{"a":1e999,"b":3}}',
+        '{"name":"add","name":"multiply","arguments":{"a":2,"b":3}}',
     ):
         try:
             action = _parse_json_action(raw)

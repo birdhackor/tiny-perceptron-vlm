@@ -89,9 +89,15 @@ def validate_approval(approval, experiment_id, batch_id, checkpoint_repo):
             encoded = content.encode("utf-8")
         except UnicodeError as error:
             raise ValueError("repository_index content 必須是有效 UTF-8") from error
-        if not 16 <= len(encoded) <= 262144 or any(ord(character) < 32 and character not in "\n\r\t" for character in content):
+        if not 16 <= len(encoded) <= 262144 or any(
+            ord(character) < 32 and character not in "\n\r\t" for character in content
+        ):
             raise ValueError("repository_index Markdown 長度需在 16 bytes 至 256 KiB，且不能含控制字元")
-        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest) or hashlib.sha256(encoded).hexdigest() != digest:
+        if (
+            not isinstance(digest, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", digest)
+            or hashlib.sha256(encoded).hexdigest() != digest
+        ):
             raise ValueError("repository_index sha256 必須精確匹配 content 的 UTF-8 bytes")
     if approval.get("pku_derived") or approval.get("visibility") == "private":
         raise ValueError("PKU 衍生分支依本項目政策保持私有")
@@ -329,16 +335,23 @@ def write_model_card(path, approval, repo, prefix, weights_revision=None):
             lines.append(
                 f"- [{filename}](https://huggingface.co/{repo}/resolve/{weights_revision}/{prefix}/{filename}?download=true)"
             )
-    if approval.get("inference"):
+    inference = card.get("inference") or approval.get("inference")
+    if inference:
         lines += [
             "",
             "使用設定：",
             "",
             "```json",
-            json.dumps(approval["inference"], ensure_ascii=False, indent=2),
+            json.dumps(inference, ensure_ascii=False, indent=2),
             "```",
             "",
         ]
+        if isinstance(inference, dict) and inference.get("commands"):
+            lines += ["在專案根目錄執行：", "", "```bash", *inference["commands"], "```", ""]
+    if card.get("inference_variants"):
+        lines += ["各權重的使用設定：", ""]
+        for filename, settings in card["inference_variants"].items():
+            lines += [f"### {filename}", "", "```json", json.dumps(settings, ensure_ascii=False, indent=2), "```", ""]
     Path(path).write_text("\n".join(lines), encoding="utf-8")
 
 

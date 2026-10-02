@@ -9,7 +9,6 @@ import hashlib
 import json
 import math
 import random
-import re
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -23,6 +22,7 @@ from tiny_perceptron.data import IGNORE, ByteTokenizer, pad_batch, render_chat
 from tiny_perceptron.model import ModelConfig, TinyLM, generate, loss_sum, masked_loss
 from tiny_perceptron.multimodal import MultiModalLM, VisionEncoder
 from tiny_perceptron.quantization import QuantizedLinear, quantize_symmetric, replace_linear_layers
+from tiny_perceptron.tokenization import generation_report
 from tiny_perceptron.training import load_checkpoint, save_checkpoint, seed_everything
 
 from .common import extract_asset, text_examples
@@ -79,7 +79,13 @@ def _chat(record):
 def _example(record, maximum):
     if "_hard_ids" in record:
         prefix = _prompt(record, maximum)
-        tail = torch.tensor(record["_hard_ids"] + [ByteTokenizer().eos_id], dtype=torch.long)
+        hard_ids = record["_hard_ids"]
+        if not hard_ids:
+            raise ValueError("教師沒有生成任何有效 hard target；不可捏造 EOS 標籤")
+        eos = ByteTokenizer().eos_id in hard_ids
+        if record.get("_hard_eos") is not eos:
+            raise ValueError("教師 hard target 的實際 IDs 與 EOS 標記不一致")
+        tail = torch.tensor(hard_ids, dtype=torch.long)
         full = torch.cat((prefix, tail))
         labels = torch.cat((torch.full_like(prefix, IGNORE), tail))
         if len(full) - 1 > maximum:
@@ -122,7 +128,7 @@ def _dataset(ctx, identifier):
     }
 
 
-def _prompt(record, maximum):
+def _prompt(record, maximum=None):
     tok = ByteTokenizer()
     messages = _chat(record)
     ids = [tok.bos_id]
@@ -131,7 +137,7 @@ def _prompt(record, maximum):
     for message in messages[:-1]:
         ids += [roles[message["role"]]] + tok.encode(message["content"]) + [tok.eos_id]
     ids.append(tok.assistant_id)
-    if len(ids) >= maximum:
+    if maximum is not None and len(ids) >= maximum:
         raise ValueError("prompt 沒有留下答案空間")
     return torch.tensor(ids, dtype=torch.long)
 
@@ -210,7 +216,7 @@ def _packed(ctx, source, name, bits, provenance=None):
 def _evaluate(model, records, device, tokens=24):
     model.eval()
     tok = ByteTokenizer()
-    total, count, correct, eos_count, byte_count = 0.0, 0, 0, 0, 0
+    total, count, correct, completed, eos_count, byte_count = 0.0, 0, 0, 0, 0, 0
     answers = []
     start = time.perf_counter()
     examples = _examples(records, model.config.max_length)
@@ -239,6 +245,7 @@ def _evaluate(model, records, device, tokens=24):
         response = tok.decode(raw)
         hit = raw == expected_ids
         correct += hit
+        completed += hit and tok.eos_id in new
         eos_count += tok.eos_id in new
         answers.append(
             {
@@ -263,7 +270,10 @@ def _evaluate(model, records, device, tokens=24):
         "correct": correct,
         "examples": len(records),
         "exact_match": correct / len(records),
+        "completed_correct": completed,
+        "completed_exact_match": completed / len(records),
         "eos_count": eos_count,
+        "eos_rate": eos_count / len(records),
         "generation": "greedy, full recompute, no KV cache",
         "max_new_tokens": tokens,
         "exact_match_definition": "fixed reference continuation"
@@ -572,11 +582,13 @@ def _hard_targets(ctx, teacher, records, name, tokens):
         prefix = _prompt(record, teacher.config.max_length).to(ctx.device)
         ids = generate(teacher, prefix[None], max_new_tokens=tokens)[0, len(prefix) :].tolist()
         raw = ids[: ids.index(tok.eos_id)] if tok.eos_id in ids else ids
-        answer = tok.decode(raw)
+        teacher_output = generation_report(tok, ids)
+        answer = teacher_output["answer"]
         row = copy.deepcopy(record)
         row["messages"] = copy.deepcopy(_chat(record))
         row["messages"][-1]["content"] = answer
-        row["_hard_ids"] = raw
+        row["_hard_ids"] = ids
+        row["_hard_eos"] = tok.eos_id in ids
         row.pop("answer", None)
         prepared.append(row)
         audit.append(
@@ -588,6 +600,10 @@ def _hard_targets(ctx, teacher, records, name, tokens):
                 "teacher_ids": ids,
                 "teacher_correct": raw == tok.encode(_answer(record)),
                 "eos": tok.eos_id in ids,
+                "valid_target_tokens": len(ids),
+                "invalid_special_tokens": teacher_output["invalid_special_tokens"],
+                "valid_answer_tokens": teacher_output["valid_answer_tokens"],
+                "generation_status": teacher_output["generation_status"],
             }
         )
     _sync(ctx.device)
@@ -597,6 +613,11 @@ def _hard_targets(ctx, teacher, records, name, tokens):
     return prepared, {
         "seconds": elapsed,
         "records": len(records),
+        "usable_target_records": sum(bool(row["teacher_ids"]) for row in audit),
+        "zero_target_records": sum(not row["teacher_ids"] for row in audit),
+        "zero_target_families": [row["family"] for row in audit if not row["teacher_ids"]],
+        "invalid_control_records": sum(bool(row["invalid_special_tokens"]) for row in audit),
+        "invalid_control_tokens": sum(len(row["invalid_special_tokens"]) for row in audit),
         "correct": sum(row["teacher_correct"] for row in audit),
         "wrong": sum(not row["teacher_correct"] for row in audit),
         "file": str(path),
@@ -606,51 +627,94 @@ def _hard_targets(ctx, teacher, records, name, tokens):
     }
 
 
-def _style_scores(evaluation):
-    correct, json_valid, json_total = 0, 0, 0
-    for sample in evaluation["generated_samples"]:
-        expected_numbers = re.findall(r"\d+", sample["expected"])
-        generated_numbers = re.findall(r"\d+", sample["generated"])
-        correct += bool(expected_numbers and generated_numbers and expected_numbers[0] == generated_numbers[0])
-        if "style=json" in sample["question"]:
-            json_total += 1
-            try:
-                value = json.loads(sample["generated"])
-                json_valid += isinstance(value, dict) and set(value) == {"answer"}
-            except (ValueError, TypeError):
-                pass
+def _style_scores(evaluation, records):
+    from .behavior import _style_metrics
+
+    if not records:
+        raise ValueError("風格評估需要非空的 records，不能用 0/0 正確率")
+    if evaluation["examples"] != len(records):
+        raise ValueError("風格評估分母與原始 records 數不一致")
+    tok, samples = ByteTokenizer(), []
+    for sample, record in zip(evaluation["generated_samples"], records, strict=True):
+        if sample["family"] != record["family"] or sample["question"] != _chat(record)[-2]["content"]:
+            raise ValueError("風格評估 samples 與 records 的題目順序不一致")
+        if sample["expected"] != _answer(record):
+            raise ValueError("風格評估必須使用原始獨立真值")
+        ids = sample["generated_ids"]
+        raw = ids[: ids.index(tok.eos_id)] if tok.eos_id in ids else ids
+        exact = raw == tok.encode(_answer(record))
+        if sample["exact"] is not exact:
+            raise ValueError("風格評估的 exact 與實際生成 IDs 不一致")
+        visible = generation_report(tok, ids)
+        samples.append({**sample, **visible, "generated": visible["answer"], "exact": exact})
+    report = _style_metrics({"samples": samples}, records)
+    rubric = report["rubric"]
+    correct = sum(group["content_correct"] for group in rubric.values())
+    json_group = rubric.get("json", {})
     return {
         "content_correct": correct,
         "examples": evaluation["examples"],
         "content_accuracy": correct / evaluation["examples"],
-        "json_parseable": json_valid,
-        "json_examples": json_total,
+        "json_valid": json_group.get("json_valid", 0),
+        "json_examples": json_group.get("records", 0),
+        "rubric": rubric,
+        "samples": report["samples"],
+        "rule": "arithmetic value and requested style separately; JSON answer is int, not bool; clarification uses exact raw answer IDs",
     }
 
 
-def _challenge(ctx, maximum):
+def _challenge(ctx, maximum, reserved_tokens=24):
     root = extract_asset(ctx, "gsm8k")
     matches = list(Path(root).rglob("gsm8k-train-first200.jsonl"))
     if len(matches) != 1:
         raise ValueError("GSM8K 教師錯誤審核需要已校驗的 200 題資料包")
     original = [json.loads(line) for line in matches[0].read_text(encoding="utf-8").splitlines() if line.strip()]
-    rows = []
-    for record in original[:6]:
-        # 本 tiny 模型容納不了整道長題；明示 excerpt，絕不叫完整 GSM8K benchmark。
+    tok, eligible, skipped = ByteTokenizer(), [], []
+    for source_row, record in enumerate(original):
         original_question = record["question"]
-        question = original_question.encode()[: maximum - 32].decode("utf-8", errors="ignore")
         final = record["answer"].split("####")[-1].strip().replace(",", "")
-        rows.append(
-            {
-                "family": hashlib.sha256(original_question.encode()).hexdigest(),
-                "question": question,
-                "answer": final,
-                "original_question": original_question,
-                "question_truncated": question != original_question,
-                "source": "GSM8K unseen prompt excerpt; teacher did not train on these questions",
-            }
-        )
-    return rows
+        row = {
+            "family": hashlib.sha256(original_question.encode()).hexdigest(),
+            "question": original_question,
+            "answer": final,
+            "source_row": source_row,
+            "complete_question": True,
+            "source": "GSM8K complete unseen original question; teacher did not train on these questions",
+        }
+        prefix_tokens = len(_prompt(row))
+        answer_tokens = len(tok.encode(final)) + 1
+        if prefix_tokens + reserved_tokens > maximum or answer_tokens > reserved_tokens:
+            skipped.append(
+                {
+                    "source_row": source_row,
+                    "prefix_tokens": prefix_tokens,
+                    "answer_tokens_with_eos": answer_tokens,
+                    "reason": "complete prompt plus reserved generation exceeds context"
+                    if prefix_tokens + reserved_tokens > maximum
+                    else "gold answer plus EOS exceeds generation budget",
+                }
+            )
+        else:
+            eligible.append(row)
+    selected = eligible[:6]
+    selection = {
+        "status": "selected" if selected else "not_run",
+        "source_rows": len(original),
+        "source_file": str(matches[0]),
+        "source_file_sha256": _sha(matches[0]),
+        "eligible_rows": len(eligible),
+        "selected_rows": len(selected),
+        "skipped_rows": len(skipped),
+        "unselected_eligible_rows": len(eligible) - len(selected),
+        "selected_source_rows": [row["source_row"] for row in selected],
+        "skipped": skipped,
+        "max_length": maximum,
+        "reserved_generation_tokens": reserved_tokens,
+        "scope": "at most six complete prompts fitting the tiny model; out-of-domain diagnostic, not a GSM8K benchmark",
+    }
+    if not selected:
+        selection["reason"] = "No complete original prompt and gold answer/EOS fit the context and generation budgets"
+    return selected, selection
 
 
 def _distill_case(ctx, identifier, widths, steps, hard=True):
@@ -684,10 +748,23 @@ def _distill_case(ctx, identifier, widths, steps, hard=True):
     generated, hard_report = None, None
     if hard:
         generated, hard_report = _hard_targets(ctx, teacher, train_records, identifier, tokens)
-    challenge = _challenge(ctx, teacher.config.max_length) if identifier == "sft" else None
-    challenge_teacher = _evaluate(teacher, challenge, ctx.device, tokens) if challenge else None
-    if challenge:
-        _json(Path(ctx.output) / "unseen-gsm8k-excerpts.json", challenge)
+        if hard_report["zero_target_records"]:
+            raise ValueError(
+                f"{identifier}: {hard_report['zero_target_records']} 個教師回答沒有有效 hard target；"
+                f"沒有捏造 EOS 或略過題目，請查 {hard_report['file']}"
+            )
+    challenge, challenge_selection, challenge_teacher = [], None, None
+    if identifier == "sft":
+        challenge, challenge_selection = _challenge(ctx, teacher.config.max_length, tokens)
+        challenge_teacher = (
+            _evaluate(teacher, challenge, ctx.device, tokens)
+            if challenge
+            else {"status": "not_run", "reason": challenge_selection["reason"]}
+        )
+        _json(
+            Path(ctx.output) / "unseen-gsm8k-complete-prompts.json",
+            {"selection": challenge_selection, "records": challenge},
+        )
     runs = {}
     final_model = None
     for width in widths:
@@ -718,9 +795,13 @@ def _distill_case(ctx, identifier, widths, steps, hard=True):
                 for left, right in zip(result["test"]["generated_samples"], teacher_samples, strict=True)
             ) / len(teacher_samples)
             if identifier == "style":
-                result["style"] = _style_scores(result["test"])
-            if challenge:
-                result["unseen_gsm8k_excerpt_challenge"] = _evaluate(model, challenge, ctx.device, tokens)
+                result["style"] = _style_scores(result["test"], parts["test"])
+            if challenge_selection is not None:
+                result["out_of_domain_gsm8k"] = (
+                    _evaluate(model, challenge, ctx.device, tokens)
+                    if challenge
+                    else {"status": "not_run", "reason": challenge_selection["reason"]}
+                )
             runs[f"w{width}_{method}"] = result
             if method == "ce_kl":
                 packed, packed_path = _packed(
@@ -731,6 +812,16 @@ def _distill_case(ctx, identifier, widths, steps, hard=True):
                     "validation": _evaluate(packed, parts["validation"], ctx.device, tokens),
                     "test": _evaluate(packed, parts["test"], ctx.device, tokens),
                 }
+                if identifier == "style":
+                    runs[f"w{width}_{method}_packed4"]["style"] = _style_scores(
+                        runs[f"w{width}_{method}_packed4"]["test"], parts["test"]
+                    )
+                if challenge_selection is not None:
+                    runs[f"w{width}_{method}_packed4"]["out_of_domain_gsm8k"] = (
+                        _evaluate(packed, challenge, ctx.device, tokens)
+                        if challenge
+                        else {"status": "not_run", "reason": challenge_selection["reason"]}
+                    )
                 if identifier == "sft" and width == 32:
                     final_model = (model, training)
     if _parameter_hash(teacher) != frozen_hash:
@@ -740,12 +831,15 @@ def _distill_case(ctx, identifier, widths, steps, hard=True):
         "teacher_storage": _storage(teacher, teacher_path),
         "teacher_validation": evaluation["validation"],
         "teacher_test": evaluation["test"],
+        "teacher_style": _style_scores(evaluation["test"], parts["test"]) if identifier == "style" else None,
         "teacher_frozen_and_unchanged": True,
         "data": data,
         "student_layers": 1,
         "teacher_cache": {"seconds": cache_seconds, "file_bytes": cache_path.stat().st_size, "file": str(cache_path)},
         "hard_target_generation": hard_report,
-        "unseen_gsm8k_excerpt_teacher": challenge_teacher,
+        "out_of_domain_gsm8k": {"selection": challenge_selection, "teacher": challenge_teacher}
+        if challenge_selection is not None
+        else None,
         "runs": runs,
     }, final_model
 
@@ -781,7 +875,7 @@ def run_distillation(ctx):
         "checkpoint": "model.pt",
         "seconds": time.perf_counter() - began,
         "limitations": [
-            "GSM8K excerpts are a separate out-of-domain error audit, not a GSM8K benchmark",
+            "GSM8K diagnostic uses only complete prompts fitting the tiny context; tiny selected denominator, not a full benchmark",
             "teacher agreement is reported separately from gold answer accuracy",
             "teacher errors and regressions remain in saved reports",
             "packed inference reconstructs FP32 weights",
