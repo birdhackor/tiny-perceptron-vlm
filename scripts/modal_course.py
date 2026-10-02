@@ -46,7 +46,7 @@ gpu_image = (
     .uv_sync(str(ROOT), extras=["cu126"], uv_version="0.12.22", extra_options="--no-dev")
     .apt_install("build-essential")
     .run_commands(
-        "python -c \"import pathlib, sysconfig; "
+        'python -c "import pathlib, sysconfig; '
         "p = pathlib.Path(sysconfig.get_path('include')) / 'Python.h'; "
         "assert p.is_file(), f'Missing matching Python development header: {p}'; print(p)\""
     )
