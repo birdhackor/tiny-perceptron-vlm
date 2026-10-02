@@ -12,7 +12,7 @@ The course has 18 chapters, three optional branches, 222 independently runnable 
 
 Core modules implement data handling, Transformers, multimodal inputs, DPO, packed quantization and training utilities directly in PyTorch. CLI tools cover data preparation, training, inference and evaluation. LoRA, QAT and small RL exercises demonstrate individual mechanisms. Video currently has frame-slicing helpers; a complete video course is planned for a later extension. This release does not include a trained general-purpose audiovisual assistant.
 
-You can begin without prior knowledge of this project. Linked warmups introduce Python, tensors, probability, matrices, gradients and notebook operation as they become necessary. Lessons explain the problem and a worked example before introducing terminology. Validation uses CPU numerical and gradient checks. No actual model training was performed; readers will train and measure capabilities on their own hardware. See the [validation report](docs/validation.md).
+You can begin without prior knowledge of this project. Linked warmups introduce Python, tensors, probability, matrices, gradients and notebook operation as they become necessary. Lessons explain the problem and a worked example before introducing terminology. Validation covers CPU numerical and gradient checks, plus a small text training run on Modal L4 with HF checkpoint upload, download and resume verification. Training and capability evaluation on natural data remain pending. See the [validation report](docs/validation.md).
 
 ## Setup
 
