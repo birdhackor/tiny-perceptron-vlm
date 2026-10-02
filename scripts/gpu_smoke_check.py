@@ -124,7 +124,7 @@ def train_and_measure(directory, device="cuda", revision="local"):
         "revision": revision,
         "device": device,
         "gpu": torch.cuda.get_device_name() if device == "cuda" else None,
-        "torch": torch.__version__,
+        "torch": str(torch.__version__),
         "parameters": report["parameters"],
         "training_seconds": report["seconds"],
         "loss_before": before,
