@@ -308,7 +308,7 @@ def write_model_card(path, approval, repo, prefix, weights_revision=None):
         "",
         f"訓練程式版本：`{approval['revision']}`。授權逐檔列於 export-manifest.json。",
         "",
-        "权重許可及上游來源聲明見 LICENSE 與 THIRD_PARTY_NOTICES.md；程式碼採 MIT。",
+        "權重許可及上游來源聲明見 LICENSE 與 THIRD_PARTY_NOTICES.md；程式碼採 MIT。",
         "",
         "下載的 checkpoint 已移除 optimizer、RNG、reference 與 teacher；自訂模型的 architecture 保留在檔案中。",
         "",
