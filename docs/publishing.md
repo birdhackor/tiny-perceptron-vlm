@@ -1,6 +1,6 @@
 # 教材發布
 
-第一版以 GitHub Pages 提供閱讀網站，每節附實際 CPU 輸出、Colab 入口與 `.ipynb` 下載。正文仍是 `course/chapters/` 的單一來源，Notebook 由 `scripts/build_course.py` 產生。模型能力與 GPU 訓練配方尚待實測；Colab 自動設定已加入，尚未在 Google 執行環境實機驗證。
+網站使用 [Zensical](https://zensical.org/) 建置，部署在 GitHub Pages。讀者可用全文搜尋、章節導覽與頁內目錄找內容，切換深淺色模式，並直接複製程式碼。每節附實際 CPU 輸出、SVG 圖解、Colab 入口與 `.ipynb` 下載。正文仍是 `course/chapters/` 的單一來源，Notebook 由 `scripts/build_course.py` 產生。模型能力與 GPU 訓練配方尚待實測；Colab 自動設定已加入，尚未在 Google 執行環境實機驗證。
 
 ## 讀者怎麼使用
 
@@ -13,16 +13,26 @@ Colab 第一個程式格使用最新 `main` 的共用程式；網站與 Colab no
 
 ## 建置與驗證
 
-在 repo 根目錄啟用已安裝的 `.venv`：
+在 repo 根目錄安裝 Notebook 與網站套件，並啟用 `.venv`：
 
 ```bash
+uv sync --frozen --extra cpu --group notebook --group site
+source .venv/bin/activate
 python scripts/build_course.py --check
 python scripts/check_course_reviews.py
 python -m ipykernel install --sys-prefix --name tiny-perceptron --display-name "Tiny Perceptron"
-python scripts/check_notebooks.py --mode kernel --workers 3
+python scripts/check_notebooks.py --mode kernel --workers 1
 python scripts/export_course.py --executed outputs/notebooks --revision main
 python scripts/check_site.py
 ```
+
+Windows PowerShell 使用 `.venv\Scripts\Activate.ps1` 啟用環境。`site` 群組固定 Zensical 版本；只跑訓練或 Notebook 時不需要它。
+
+`export_course.py` 先把教材整理成 `outputs/zensical/docs/` 的 Markdown，附上核對過的輸出與圖解，再執行真正的 `zensical build --clean --strict`。Markdown 解析、頁面版型、搜尋索引與導覽都由 Zensical 負責。`zensical.toml` 收錄全部小節的導覽；建置會拒絕缺頁或重複項目。新增小節時，需同步更新 `course/lesson-index.json` 與導覽。
+
+匯出後可執行 `python -m zensical serve` 在本機閱讀與測試搜尋。不要以雙擊 HTML 檔案的方式測試全文搜尋：瀏覽器會限制 `file://` 頁面的搜尋 worker。修改教材來源後重新執行匯出指令，便會重建供 Zensical 使用的 Markdown。若沒有網路，正文、SVG 與本機搜尋仍可透過這個伺服器閱讀，公式暫時保留 TeX，連網後由 MathJax 排版。
+
+`use_directory_urls = false` 保留既有的 `1.1.html` 等網址；暖身的 `#W.2` 等錨點也保留。前置連結、舊書籤與 Notebook 中的閱讀連結不必更換。教材的額外 CSS／JavaScript 位於 `course/web/`，只處理圖解放大、公式與閱讀間距；導覽與搜尋使用 Zensical 原生功能。
 
 `--executed` 會核對每個 cell 的原始碼、執行次數與錯誤，拒絕舊教材的結果或未執行副本。讀者審閱也逐節核對來源雜湊；缺少審閱、要求修改或正文已變更而未重審時，發布會停止。只要有一節程式失敗，發布流程也會停止。讀取模式可省略 `--executed`，但不會填入假輸出。
 
@@ -32,6 +42,6 @@ python scripts/check_site.py
 
 repo 的 Settings → Pages → Build and deployment → Source 選 **GitHub Actions**。之後 `.github/workflows/pages.yml` 在 `main` 更新或手動觸發時，會重新執行 222 個小節、核對輸出與網站連結，再部署到 Pages。核心 Linux／macOS／Windows CI 保留原本的流程。
 
-網站CI使用一個worker逐份啟動獨立kernel。GitHub runner曾在並行啟動時發生TCP連接埠被占用、kernel未開始執行就退出的情況；順序啟動避免多個Notebook同時爭用啟動資源。本機仍可用上面的三個worker指令。
+網站 CI 使用一個 worker 逐份啟動獨立 kernel。GitHub runner 曾在並行啟動時發生 TCP 連接埠被占用、kernel 未開始執行就退出的情況；順序啟動避免多個 Notebook 同時爭用啟動資源。
 
-若 Pages 已透過 API 設為 `build_type: workflow`，就不必再手動設定。網站的 `build-info.json` 留下發布 commit、節數與是否包含已核對的 CPU 輸出。
+若 Pages 已透過 API 設為 `build_type: workflow`，就不必再手動設定。網站的 `build-info.json` 留下發布 commit、節數、是否包含已核對的 CPU 輸出，以及 Zensical 版本。

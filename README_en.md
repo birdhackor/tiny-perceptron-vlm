@@ -32,7 +32,7 @@ On Windows PowerShell, activate with `.venv\Scripts\Activate.ps1`. Select **Tiny
 
 Activate `.venv` and use `python` directly, or pass the same extra to each `uv run`. CUDA/MPS execution was not verified in the current CPU environment.
 
-Use the online course, or run `python scripts/export_course.py` and open `outputs/site/index.html` for an offline copy. Search lessons there; edit and execute code in notebooks. SVGs retain static labels and respect reduced-motion preferences. MathJax typesets formulas when online; offline copies retain TeX text. See [publishing instructions](docs/publishing.md) to include verified outputs or deploy GitHub Pages.
+Read the online course built with [Zensical](https://zensical.org/): full-text search, chapter navigation, page contents, light/dark modes and code copying. Every lesson retains its notebook download and Colab entry. SVGs can be enlarged, retain static labels and respect reduced-motion preferences. Website builds require the separate `--group site`. See [publishing instructions](docs/publishing.md) for local reading, verified outputs and GitHub Pages deployment. MathJax typesets formulas when online.
 
 ## Minimal workflow
 
