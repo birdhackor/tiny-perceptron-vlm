@@ -16,7 +16,8 @@ PLAN_PATH = ROOT / "docs/course-experiments/plan.json"
 
 def experiment_spec(experiment_id):
     plan = json.loads(PLAN_PATH.read_text(encoding="utf-8"))
-    matches = [item for item in plan["sequence"] if item["id"] == experiment_id]
+    specs = plan["sequence"] + plan.get("supporting_experiments", [])
+    matches = [item for item in specs if item["id"] == experiment_id]
     if len(matches) != 1:
         raise ValueError(f"Unknown experiment: {experiment_id}")
     return matches[0]
@@ -129,9 +130,11 @@ def execute(experiment_id, device, output, dependencies, assets, revision=None, 
         "step_scale": step_scale,
         "evidence_status": (
             "interface_smoke_only"
-            if step_scale < 1 or (spec["module"] == "modalities" and device == "cpu")
+            if step_scale < 1
+            or (spec["module"] == "modalities" and device == "cpu")
+            or (spec.get("kind") == "mechanism_probe" and device == "cpu")
             else "incomplete_run"
-            if unfinished
+            if unfinished or (spec.get("kind") == "mechanism_probe" and results.get("schedule_completed") is False)
             else "complete_run"
         ),
         "unfinished_schedules": unfinished,
@@ -150,6 +153,12 @@ def execute(experiment_id, device, output, dependencies, assets, revision=None, 
         "code_sha256": code_hashes,
         "public_exports": [],
     }
+    if spec.get("kind") == "mechanism_probe":
+        result["experiment_kind"] = "mechanism_probe"
+        result["timing_scope"] = (
+            "Fixed-QKV component verification, profiler, synchronized measurements and local input fixture save; "
+            "no model training or quality evaluation. Excludes image build, startup and HF uploads."
+        )
     write_json(output / "result.json", result)
     return result
 

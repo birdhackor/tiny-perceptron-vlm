@@ -5,6 +5,7 @@
 """
 
 import copy
+import hashlib
 import json
 import math
 import random
@@ -12,6 +13,7 @@ import statistics
 import subprocess
 import sys
 import time
+import warnings
 from contextlib import nullcontext
 from dataclasses import asdict, replace
 from pathlib import Path
@@ -1056,6 +1058,336 @@ def run_precision(ctx):
         "權重與Adam狀態保留FP32，FP16在CUDA使用GradScaler。",
         "limitations": "FP16溢位時scaler跳過更新，成功更新數另列；單一seed短續訓不代表普遍品質保證。",
     }
+
+
+FLASH_PROBE_SHAPE = (2, 4, 512, 32)
+
+
+def _flash_probe_runtime(ctx):
+    """記錄當次CUDA wheel與硬體；CPU來源核驗不能代替GPU build。"""
+    cuda = torch.device(ctx.device).type == "cuda"
+    runtime = {
+        **_runtime(ctx),
+        "torch_git_version": torch.version.git_version,
+        "cuda_runtime_version": torch.version.cuda,
+        "cudnn_version": torch.backends.cudnn.version() if cuda else None,
+        "build_configuration": torch.__config__.show(),
+        "flash_attention_built": torch.backends.cuda.is_flash_attention_available(),
+        "deterministic_algorithms_enabled": torch.are_deterministic_algorithms_enabled(),
+        "fp16_matmul_reduced_precision_reduction": torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction,
+        "bf16_matmul_reduced_precision_reduction": torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction,
+        "installed_source_sha256": {},
+    }
+    for module in (torch.backends.cuda, torch.nn.attention):
+        file = Path(module.__file__)
+        runtime["installed_source_sha256"][module.__name__] = hashlib.sha256(file.read_bytes()).hexdigest()
+    if cuda:
+        properties = torch.cuda.get_device_properties(ctx.device)
+        runtime.update(
+            {
+                "gpu": properties.name,
+                "compute_capability": list(torch.cuda.get_device_capability(ctx.device)),
+                "total_device_memory_bytes": properties.total_memory,
+                "multiprocessor_count": properties.multi_processor_count,
+                "compiled_cuda_architectures": torch.cuda.get_arch_list(),
+                "native_bf16_supported": torch.cuda.is_bf16_supported(including_emulation=False),
+            }
+        )
+        try:
+            driver = subprocess.run(
+                ["nvidia-smi", "--query-gpu=name,driver_version", "--format=csv,noheader"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+            runtime["driver_query"] = {
+                "returncode": driver.returncode,
+                "stdout": driver.stdout.strip(),
+                "stderr": driver.stderr.strip(),
+            }
+        except (OSError, subprocess.TimeoutExpired) as error:
+            runtime["driver_query"] = {"status": "unavailable", "reason": str(error)}
+    return runtime
+
+
+def _flash_manual_attention(q, k, v):
+    """同dtype QK/PV matmul；scores與softmax用FP32，再將機率轉回輸入dtype。"""
+    if q.ndim != 4 or q.shape != k.shape or q.shape != v.shape:
+        raise ValueError("本機制核驗只接受等長、同形狀的[B,H,T,D] Q/K/V")
+    scores = (q @ k.transpose(-2, -1)).float() * (q.shape[-1] ** -0.5)
+    causal = torch.ones(q.shape[-2], q.shape[-2], dtype=torch.bool, device=q.device).tril()
+    probability = scores.masked_fill(~causal, float("-inf")).softmax(-1).to(q.dtype)
+    return probability @ v
+
+
+def _flash_sdpa_attention(q, k, v):
+    # caller以sdpa_kernel只開FLASH；這裡不在每次計時中重設backend。
+    return F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=0.0, is_causal=True)
+
+
+def _flash_error(actual, reference, atol, rtol):
+    actual_dtype, reference_dtype = str(actual.dtype), str(reference.dtype)
+    actual, reference = actual.detach().float(), reference.detach().float()
+    finite = bool(torch.isfinite(actual).all() and torch.isfinite(reference).all())
+    difference = actual - reference
+    return {
+        "actual_dtype": actual_dtype,
+        "reference_dtype": reference_dtype,
+        "finite": finite,
+        "max_absolute_error": float(difference.abs().max()) if finite else None,
+        "root_mean_square_error": float(difference.square().mean().sqrt()) if finite else None,
+        "relative_l2_error": float(difference.norm() / reference.norm().clamp_min(1e-12)) if finite else None,
+        "atol": atol,
+        "rtol": rtol,
+        "within_declared_tolerance": bool(torch.allclose(actual, reference, atol=atol, rtol=rtol)) if finite else False,
+    }
+
+
+def _flash_profile(function, inputs, upstream, device, backward):
+    activities = [torch.profiler.ProfilerActivity.CPU]
+    if torch.device(device).type == "cuda":
+        activities.append(torch.profiler.ProfilerActivity.CUDA)
+    with torch.profiler.profile(activities=activities) as profile:
+        with torch.set_grad_enabled(backward):
+            output = function(*inputs)
+            if backward:
+                torch.autograd.grad(output, inputs, upstream)
+        _sync(device)
+    operators = sorted({event.key for event in profile.key_averages()})
+    kernels = sorted({event.name for event in profile.events() if str(event.device_type) == "DeviceType.CUDA"})
+    forward_observed = "aten::_scaled_dot_product_flash_attention" in operators
+    backward_observed = "aten::_scaled_dot_product_flash_attention_backward" in operators
+    return {
+        "operator_names": operators,
+        "cuda_kernel_names": kernels,
+        "includes_backward": backward,
+        "flash_forward_operator_observed": forward_observed,
+        "flash_backward_operator_observed": backward_observed,
+        "flash_cuda_verified": (
+            torch.device(device).type == "cuda"
+            and bool(kernels)
+            and forward_observed
+            and (backward_observed or not backward)
+        ),
+    }
+
+
+def _flash_measure(function, inputs, upstream, device, backward, *, warmup=3, repeats=9, deadline=None):
+    """每條路徑暖機後獨立reset；含forward或forward+Q/K/V反傳，不含fixture建立。"""
+    cuda = torch.device(device).type == "cuda"
+
+    def invoke():
+        with torch.set_grad_enabled(backward):
+            output = function(*inputs)
+            if backward:
+                torch.autograd.grad(output, inputs, upstream)
+
+    warm_calls, samples = 0, []
+    for _ in range(warmup):
+        if deadline is not None and time.perf_counter() >= deadline:
+            break
+        invoke()
+        warm_calls += 1
+    _sync(device)
+    memory_before, memory_peak = None, None
+    if warm_calls == warmup:
+        if cuda:
+            memory_before = torch.cuda.memory_allocated(device)
+            torch.cuda.reset_peak_memory_stats(device)
+        for _ in range(repeats):
+            if deadline is not None and time.perf_counter() >= deadline:
+                break
+            _sync(device)
+            began = time.perf_counter()
+            invoke()
+            _sync(device)
+            samples.append(time.perf_counter() - began)
+        if cuda:
+            memory_peak = torch.cuda.max_memory_allocated(device)
+    return {
+        "status": "completed" if warm_calls == warmup and len(samples) == repeats else "budget_exhausted",
+        "budget_exhausted": warm_calls < warmup or len(samples) < repeats,
+        "requested_warmup_calls": warmup,
+        "warmup_calls": warm_calls,
+        "requested_calls": repeats,
+        "measured_calls": len(samples),
+        "samples_seconds": samples,
+        "median_seconds": statistics.median(samples) if samples else None,
+        "synchronized": cuda,
+        "includes_backward": backward,
+        "allocated_before_bytes": memory_before,
+        "peak_allocated_bytes": memory_peak,
+        "additional_peak_allocated_bytes": memory_peak - memory_before if memory_peak is not None else None,
+        "memory_scope": (
+            "This route's main-process PyTorch CUDA allocated-byte peak, reset after its warmup. "
+            "Baseline includes the fixed Q/K/V, upstream gradient and any resident allocations. "
+            "Forward+backward includes the autograd graph, saved tensors, temporaries and Q/K/V gradients; "
+            "forward-only uses no_grad. Excludes fixture creation/transfer, correctness checks, profiler, "
+            "reserved-but-unused allocator memory and CUDA driver allocations. No optimizer or model parameters."
+            if cuda
+            else "No CUDA allocator measurement; CPU checks cannot establish GPU memory savings."
+        ),
+    }
+
+
+def run_flash_probe(ctx):
+    """固定QKV的額外機制核驗，不訓練模型、不產生學生權重或品質指標。"""
+    from torch.nn.attention import SDPBackend, sdpa_kernel
+
+    started = time.perf_counter()
+    generator = torch.Generator().manual_seed(ctx.seed)
+    fixture = {name: torch.randn(FLASH_PROBE_SHAPE, generator=generator) for name in ("q", "k", "v", "upstream")}
+    fixture["upstream"] *= 0.125
+    torch.save(
+        {"format": "course-flash-probe-input-v1", "seed": ctx.seed, "tensors": fixture}, ctx.output / "fixture.pt"
+    )
+    report = {
+        "status": "not_run",
+        "schedule_completed": False,
+        "verification_passed": False,
+        "experiment_kind": "mechanism_probe",
+        "seed": ctx.seed,
+        "step_scale": getattr(ctx, "step_scale", 1.0),
+        "runtime": _flash_probe_runtime(ctx),
+        "configuration": {
+            "shape_B_H_T_D": list(FLASH_PROBE_SHAPE),
+            "dtypes": ["torch.float16", "torch.bfloat16"],
+            "attn_mask": None,
+            "is_causal": True,
+            "dropout_p": 0.0,
+            "scale": FLASH_PROBE_SHAPE[-1] ** -0.5,
+            "gqa": False,
+            "contiguous_inputs": True,
+            "requested_backend": "SDPBackend.FLASH_ATTENTION only",
+            "warmup_calls": _steps(ctx, 3),
+            "measured_calls": _steps(ctx, 9),
+            "upstream_gradient": "Fixed seed42 Gaussian * 0.125, cast to the same dtype; no task loss/scaler/optimizer",
+        },
+        "fixture": {"path": "fixture.pt", "kind": "input_fixture", "contains_model_weights": False},
+        "manual_reference": (
+            "Identical low-precision inputs; QK matmul returns input dtype, then FP32 scaling/masking/softmax; "
+            "probabilities cast back to input dtype before PV matmul. This is an explicit manual reference, "
+            "not an all-FP32 oracle or a demand for bitwise equality. Both routes differentiate identical upstream values."
+        ),
+        "routes": {},
+        "supported_routes": [],
+        "limitations": (
+            "Fixed QKV attention component only, not a full LM, training, model quality or generation test. "
+            "Runtime/build eligibility is separate from actual profiler evidence. Each memory baseline is reported; "
+            "route order and resident/workspace allocations can differ. No speed or memory benefit is assumed."
+        ),
+    }
+    if torch.device(ctx.device).type != "cuda":
+        report["reason"] = "正式Flash CUDA核驗需要CUDA；CPU只核對入口與fixture，不冒充GPU後端。"
+        report["seconds"] = time.perf_counter() - started
+        return report
+    deadline = started + 535
+    for name, dtype in (("fp16", torch.float16), ("bf16", torch.bfloat16)):
+        if time.perf_counter() >= deadline:
+            report["routes"][name] = {"status": "budget_exhausted", "budget_exhausted": True}
+            continue
+        if dtype == torch.bfloat16 and not report["runtime"]["native_bf16_supported"]:
+            report["routes"][name] = {"status": "unsupported", "reason": "此裝置未支援native BF16"}
+            continue
+        inputs = tuple(fixture[key].to(device=ctx.device, dtype=dtype).requires_grad_() for key in ("q", "k", "v"))
+        upstream = fixture["upstream"].to(device=ctx.device, dtype=dtype)
+        params = torch.backends.cuda.SDPAParams(*inputs, None, 0.0, True, False)
+        with warnings.catch_warnings(record=True) as notices:
+            warnings.simplefilter("always")
+            eligible = torch.backends.cuda.can_use_flash_attention(params, debug=True)
+        route = {
+            "dtype": str(dtype),
+            "eligible_for_flash_with_grad": eligible,
+            "eligibility_warnings": [str(notice.message) for notice in notices],
+            "input_strides": [list(tensor.stride()) for tensor in inputs],
+        }
+        report["routes"][name] = route
+        if not eligible:
+            route.update(status="unsupported", reason="當次build/input SDPAParams predicate未通過；未執行Flash。")
+            del inputs, upstream, params
+            continue
+        try:
+            with sdpa_kernel(backends=[SDPBackend.FLASH_ATTENTION]):
+                reference = _flash_manual_attention(*inputs)
+                reference_gradients = torch.autograd.grad(reference, inputs, upstream)
+                actual = _flash_sdpa_attention(*inputs)
+                actual_gradients = torch.autograd.grad(actual, inputs, upstream)
+                # 容差在執行前固定；輸出/梯度另保留完整誤差，不由allclose推定品質。
+                output_tolerance = (0.01, 0.01) if dtype == torch.float16 else (0.06, 0.04)
+                gradient_tolerance = (0.03, 0.03) if dtype == torch.float16 else (0.08, 0.08)
+                route["correctness"] = {
+                    "observed_output_dtype": str(actual.dtype),
+                    "manual_output_dtype": str(reference.dtype),
+                    "output": _flash_error(actual, reference, *output_tolerance),
+                    "gradients": {
+                        key: _flash_error(a, b, *gradient_tolerance)
+                        for key, a, b in zip(("q", "k", "v"), actual_gradients, reference_gradients, strict=True)
+                    },
+                }
+                del reference, actual, reference_gradients, actual_gradients
+                route["profiles"] = {}
+                route["measurements"] = {}
+                for mode, backward in (("forward", False), ("forward_backward", True)):
+                    route["profiles"][mode] = _flash_profile(
+                        _flash_sdpa_attention, inputs, upstream, ctx.device, backward
+                    )
+                    route["measurements"][mode] = {
+                        backend: _flash_measure(
+                            function,
+                            inputs,
+                            upstream,
+                            ctx.device,
+                            backward,
+                            warmup=_steps(ctx, 3),
+                            repeats=_steps(ctx, 9),
+                            deadline=deadline,
+                        )
+                        for backend, function in (
+                            ("manual", _flash_manual_attention),
+                            ("forced_flash", _flash_sdpa_attention),
+                        )
+                    }
+            verified = all(profile["flash_cuda_verified"] for profile in route["profiles"].values())
+            checks = [route["correctness"]["output"], *route["correctness"]["gradients"].values()]
+            route["all_checks_finite"] = all(check["finite"] for check in checks)
+            route["all_comparisons_within_tolerance"] = all(check["within_declared_tolerance"] for check in checks)
+            exhausted = any(
+                measurement["budget_exhausted"]
+                for comparison in route["measurements"].values()
+                for measurement in comparison.values()
+            )
+            if exhausted:
+                route["status"] = "budget_exhausted"
+            elif not verified:
+                route["status"] = "backend_unverified"
+            elif not route["all_comparisons_within_tolerance"]:
+                route["status"] = "numerical_mismatch"
+            else:
+                route["status"] = "completed"
+            if verified:
+                report["supported_routes"].append(name)
+        except RuntimeError as error:
+            route.update(status="runtime_error", error_type=type(error).__name__, reason=str(error))
+        del inputs, upstream, params
+    report["schedule_completed"] = all(
+        route["status"] in ("completed", "unsupported") for route in report["routes"].values()
+    )
+    report["verification_passed"] = bool(report["supported_routes"]) and all(
+        report["routes"][name]["status"] == "completed" for name in report["supported_routes"]
+    )
+    if any(route["status"] == "budget_exhausted" for route in report["routes"].values()):
+        report["status"] = "budget_exhausted"
+    elif all(route["status"] == "completed" for route in report["routes"].values()):
+        report["status"] = "completed"
+    elif report["schedule_completed"] and report["supported_routes"]:
+        report["status"] = "completed_with_unsupported_routes"
+    elif report["schedule_completed"]:
+        report["status"] = "unsupported"
+    else:
+        report["status"] = "failed_verification"
+    report["seconds"] = time.perf_counter() - started
+    return report
 
 
 if __name__ == "__main__":

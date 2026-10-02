@@ -316,7 +316,7 @@ def write_model_card(path, approval, repo, prefix, weights_revision=None):
         "",
         "權重許可及上游來源聲明見 LICENSE 與 THIRD_PARTY_NOTICES.md；程式碼採 MIT。",
         "",
-        "下載的 checkpoint 已移除 optimizer、RNG、reference 與 teacher；自訂模型的 architecture 保留在檔案中。",
+        "下載的 checkpoint 已移除 optimizer、RNG 與內嵌的訓練參照模型；自訂模型的 architecture 保留在檔案中。清單若列有教師基準，它是可單獨載入的推論權重。",
         "",
     ]
     if card.get("evaluation"):
