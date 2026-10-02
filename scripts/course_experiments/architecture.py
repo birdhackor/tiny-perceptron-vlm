@@ -103,6 +103,11 @@ def _runtime(ctx):
     }
 
 
+def _steps(ctx, count):
+    """正式排程保持原步數；caller明示的縮步只用於通路檢查。"""
+    return max(1, round(count * getattr(ctx, "step_scale", 1.0)))
+
+
 def _amp(device, dtype):
     return torch.autocast(torch.device(device).type, dtype=dtype) if dtype is not None else nullcontext()
 
@@ -238,6 +243,10 @@ def _train(
         "effective_tokens": effective_tokens,
         "amp_dtype": str(dtype),
         "successful_optimizer_updates": updates,
+        "requested_steps": steps,
+        "completed_attempts": complete,
+        "skipped_updates": skipped,
+        "step_scale": getattr(ctx, "step_scale", 1.0),
     }
     save_checkpoint(
         ctx.output / f"{name}.pt", model, optimizer, complete, metadata, {"grad_scaler": scaler.state_dict()}
@@ -247,6 +256,9 @@ def _train(
         "final": _nll(model, examples, ctx, dtype),
         "history": history,
         "requested_steps": steps,
+        "status": "budget_exhausted" if complete < steps else "completed",
+        "all_requested_attempts_completed": complete == steps,
+        "step_scale": getattr(ctx, "step_scale", 1.0),
         "schedule": "constant",
         "learning_rate": lr,
         "batch_size": batch_size,
@@ -289,9 +301,10 @@ def run_modern(ctx):
         "tied": {"tied": True},
     }
     results = {}
+    steps = _steps(ctx, 240)
     for name, changes in variants.items():
         model, shared = _clone_config(initial, ctx, **changes)
-        training = _train(model, data["train"], ctx, name=name, steps=240, deadline=started + 520)
+        training = _train(model, data["train"], ctx, name=name, steps=steps, deadline=started + 520)
         results[name] = {
             "model": _description(model),
             "changes": changes,
@@ -303,6 +316,7 @@ def run_modern(ctx):
     (ctx.output / "model.pt").write_bytes((ctx.output / "baseline.pt").read_bytes())
     return {
         "seed": ctx.seed,
+        "step_scale": getattr(ctx, "step_scale", 1.0),
         "runtime": _runtime(ctx),
         "dataset": _data_report(data),
         "variants": results,
@@ -310,7 +324,7 @@ def run_modern(ctx):
         "comparison": "每項只改一個設計；同資料、batch抽樣、更新數與共有表初值。RoPE移除位置表、"
         "SwiGLU新增gate、tied共享表，所以總參數不同；固定的是更新/token預算。",
         "limitations": "單一seed、小型固定語料；不能據此宣稱架構普遍優劣或長度外推能力。",
-        "all_requested_updates_completed": all(result["training"]["steps"] == 240 for result in results.values()),
+        "all_requested_updates_completed": all(result["training"]["steps"] == steps for result in results.values()),
     }
 
 
@@ -443,10 +457,11 @@ def run_moe(ctx):
             plans.append((f"top{k}_aux{weight:g}", {"experts": 4, "top_k": k}, weight, {}))
     examples = text_examples(data["validation"], max_length=initial.config.max_length)
     results = {}
+    steps = _steps(ctx, 180)
     for name, changes, weight, comparison in plans:
         model, shared = _clone_config(initial, ctx, **changes)
         before = _router_gradients(model, examples, ctx)
-        training = _train(model, data["train"], ctx, name=name, steps=180, auxiliary=weight, deadline=started + 515)
+        training = _train(model, data["train"], ctx, name=name, steps=steps, auxiliary=weight, deadline=started + 515)
         results[name] = {
             "model": _description(model),
             "budget": _parameter_budget(model),
@@ -462,6 +477,7 @@ def run_moe(ctx):
             (ctx.output / "model.pt").write_bytes((ctx.output / f"{name}.pt").read_bytes())
     return {
         "seed": ctx.seed,
+        "step_scale": getattr(ctx, "step_scale", 1.0),
         "dataset": _data_report(data),
         "variants": results,
         "seconds": time.perf_counter() - started,
@@ -471,7 +487,7 @@ def run_moe(ctx):
         "相同資料/token/更新預算；active參數不是精確FLOPs，路由與索引成本另看實測時間。",
         "auxiliary_note": "輔助loss每層相加，只含有效輸入token；路由統計分母為token×top_k，PAD排除。",
         "limitations": "單一seed；不同width的Dense改變表徵容量，dropless Python dispatch不保證加速。",
-        "all_requested_updates_completed": all(result["training"]["steps"] == 180 for result in results.values()),
+        "all_requested_updates_completed": all(result["training"]["steps"] == steps for result in results.values()),
     }
 
 
@@ -749,11 +765,20 @@ def _packing_updates(model, data, ctx, steps=40, deadline=None):
                 "max_document_tokens": limit,
                 "effective_tokens": total_tokens,
                 "packing": name == "packed",
+                "requested_steps": steps,
+                "completed_attempts": completed,
+                "step_scale": getattr(ctx, "step_scale", 1.0),
             },
         )
         variants[name] = {
+            "requested_steps": steps,
             "steps": completed,
+            "status": "budget_exhausted" if completed < steps else "completed",
+            "budget_exhausted": completed < steps,
+            "all_requested_attempts_completed": completed == steps,
+            "step_scale": getattr(ctx, "step_scale", 1.0),
             "optimizer_updates": completed,
+            "skipped_updates": 0,
             "seconds": seconds,
             "effective_tokens": total_tokens,
             "history": history,
@@ -766,7 +791,9 @@ def _packing_updates(model, data, ctx, steps=40, deadline=None):
         float((value - models["packed"].state_dict()[key]).abs().max())
         for key, value in models["padded"].state_dict().items()
     )
-    variants["objective"] = "三段真實assistant文字prefix；同token loss與batch，以PAD／隔離packing各更新40次"
+    variants["objective"] = (
+        f"三段真實assistant文字prefix；同token loss與batch，以PAD／隔離packing各計畫{steps}次更新；實際次數另列"
+    )
     return variants
 
 
@@ -895,7 +922,9 @@ def run_efficiency(ctx):
     models, trained = {}, {}
     for name, kv in (("mha", heads), ("gqa", 1)):
         model, shared = _clone_config(initial, ctx, heads=heads, kv_heads=kv, experts=0, backend="manual")
-        training = _train(model, data["train"], ctx, name=name, steps=100, mode="sft", deadline=started + 345)
+        training = _train(
+            model, data["train"], ctx, name=name, steps=_steps(ctx, 100), mode="sft", deadline=started + 345
+        )
         trained[name] = model
         models[name] = {
             "model": _description(model),
@@ -928,7 +957,7 @@ def run_efficiency(ctx):
             data["train"],
             ctx,
             name=name,
-            steps=40,
+            steps=_steps(ctx, 40),
             mode="sft",
             batch_size=8,
             forward=forward,
@@ -943,11 +972,12 @@ def run_efficiency(ctx):
             float((reference[key] - final_models[name].state_dict()[key]).abs().max()) for key in reference
         )
     (ctx.output / "model.pt").write_bytes((ctx.output / "ordinary.pt").read_bytes())
-    packing["actual_updates"] = _packing_updates(base, data, ctx, deadline=started + 345)
+    packing["actual_updates"] = _packing_updates(base, data, ctx, steps=_steps(ctx, 40), deadline=started + 345)
     compilation = _compile_probe(base, ctx, timeout=min(150, max(0, int(started + 535 - time.perf_counter()))))
     return {
         "seed": ctx.seed,
         "source": "sft/model.pt",
+        "step_scale": getattr(ctx, "step_scale", 1.0),
         "runtime": _runtime(ctx),
         "dataset": _data_report(data),
         "models": models,
@@ -983,7 +1013,14 @@ def run_precision(ctx):
         model = copy.deepcopy(initial)
         try:
             training = _train(
-                model, data["train"], ctx, name=name, steps=200, mode="sft", dtype=dtype, deadline=started + 520
+                model,
+                data["train"],
+                ctx,
+                name=name,
+                steps=_steps(ctx, 200),
+                mode="sft",
+                dtype=dtype,
+                deadline=started + 520,
             )
             # 部署權重仍為FP32；另在相同autocast上下文做實際推論品質測試。
             with _amp(ctx.device, dtype):
@@ -994,7 +1031,7 @@ def run_precision(ctx):
                 logits = model(x, valid=valid)["logits"]
                 timings = _benchmark(lambda: model(x, valid=valid), ctx.device)
             results[name] = {
-                "status": "completed",
+                "status": training["status"],
                 "model": _description(model),
                 "training": training,
                 "heldout": heldout,
@@ -1010,6 +1047,7 @@ def run_precision(ctx):
     return {
         "seed": ctx.seed,
         "source": "sft/model.pt",
+        "step_scale": getattr(ctx, "step_scale", 1.0),
         "runtime": _runtime(ctx),
         "dataset": _data_report(data),
         "variants": results,

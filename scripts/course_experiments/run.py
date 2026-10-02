@@ -38,6 +38,22 @@ def _revision():
         return "unknown"
 
 
+def unfinished_schedules(value, path="results"):
+    """執行成功與跑完原定步數是兩件事；提前停下的權重只算部分結果。"""
+    schedules = []
+    if isinstance(value, dict):
+        if value.get("budget_exhausted") is True:
+            schedules.append(
+                {"path": path, "requested_steps": value.get("requested_steps"), "steps": value.get("steps")}
+            )
+        for key, item in value.items():
+            schedules.extend(unfinished_schedules(item, f"{path}.{key}"))
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            schedules.extend(unfinished_schedules(item, f"{path}[{index}]"))
+    return schedules
+
+
 def execute(experiment_id, device, output, dependencies, assets, revision=None, step_scale=1.0):
     import torch
 
@@ -88,6 +104,7 @@ def execute(experiment_id, device, output, dependencies, assets, revision=None, 
     if device == "cuda":
         torch.cuda.synchronize()
     elapsed = time.perf_counter() - started
+    unfinished = unfinished_schedules(results)
     artifacts = [
         {
             "path": str(path.relative_to(output)),
@@ -111,11 +128,22 @@ def execute(experiment_id, device, output, dependencies, assets, revision=None, 
         "timing_scope": "experiment training, evaluation and local checkpoint saves; excludes image build, startup and HF uploads",
         "step_scale": step_scale,
         "evidence_status": (
-            "complete_run"
-            if step_scale == 1 and not (spec["module"] == "modalities" and device == "cpu")
-            else "interface_smoke_only"
+            "interface_smoke_only"
+            if step_scale < 1 or (spec["module"] == "modalities" and device == "cpu")
+            else "incomplete_run"
+            if unfinished
+            else "complete_run"
         ),
+        "unfinished_schedules": unfinished,
         "peak_allocated_bytes": torch.cuda.max_memory_allocated() if device == "cuda" else None,
+        "peak_memory_scope": (
+            "Main-process PyTorch CUDA allocator allocated-byte peak since its most recent reset. "
+            "Branch measurements can reset this counter; this is not necessarily the full-experiment peak. "
+            "It excludes subprocesses, reserved-but-unused allocator memory and CUDA driver memory. "
+            "Use branch-specific memory measurements and their scopes for comparisons."
+            if device == "cuda"
+            else "No CUDA allocator measurement on this device."
+        ),
         "results": results,
         "artifacts": artifacts,
         "assets": source_assets,
