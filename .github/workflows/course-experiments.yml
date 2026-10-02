@@ -1,0 +1,134 @@
+name: Course GPU experiments
+
+# 只有手動提交會執行；每完成一項後審閱，再提交下一項。
+on:
+  workflow_dispatch:
+    inputs:
+      experiment_id:
+        description: Experiment ID, or preflight for CPU-only access and billing checks
+        type: string
+        required: true
+        default: preflight
+      batch_id:
+        description: Persistent course batch ID (budget remains shared across batches)
+        type: string
+        required: true
+        default: course-v1
+      mode:
+        description: Run privately, check access, or publish already-reviewed files without retraining
+        type: choice
+        options: [run, preflight, release]
+        default: run
+      hf_secret_name:
+        description: Modal Secret containing HF_TOKEN (leave blank to discover)
+        type: string
+        required: false
+        default: ''
+      approval_revision:
+        description: Private HF commit containing approved-public-exports.json (release only)
+        type: string
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tiny-perceptron-course-gpu
+  cancel-in-progress: false
+
+jobs:
+  experiment:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      MODAL_TOKEN_ID: ${{ vars.MODAL_TOKEN_ID || secrets.MODAL_TOKEN_ID }}
+      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+      MODAL_ENVIRONMENT: ${{ vars.MODAL_ENVIRONMENT || 'main' }}
+      HF_CHECKPOINT_REPO: ${{ vars.HF_CHECKPOINT_REPO }}
+      HF_RELEASE_REPO: ${{ vars.HF_RELEASE_REPO }}
+      HF_MODAL_SECRET: ${{ inputs.hf_secret_name || vars.HF_MODAL_SECRET }}
+      EXPERIMENT_ID: ${{ inputs.experiment_id }}
+      BATCH_ID: ${{ inputs.batch_id }}
+      EXPERIMENT_MODE: ${{ inputs.mode }}
+      APPROVAL_REVISION: ${{ inputs.approval_revision }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          lfs: false
+      - name: Check settings without revealing credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          missing=0
+          for name in MODAL_TOKEN_ID MODAL_TOKEN_SECRET HF_CHECKPOINT_REPO HF_RELEASE_REPO; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Missing repository secret or variable: $name"
+              missing=1
+            fi
+          done
+          exit "$missing"
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - name: Validate entrypoint syntax without importing training dependencies
+        run: python -m py_compile scripts/modal_course.py
+      - name: Download only the selected experiment's LFS training assets
+        if: inputs.mode == 'run' && inputs.experiment_id != 'preflight'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p outputs/modal-course
+          python scripts/course_experiments/run.py --list-assets "$EXPERIMENT_ID" > outputs/modal-course/assets.txt
+          if [ -s outputs/modal-course/assets.txt ]; then
+            include=$(paste -sd, outputs/modal-course/assets.txt)
+            git lfs install --local
+            git lfs pull --include="$include" --exclude=''
+          fi
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          assets = Path('outputs/modal-course/assets.txt').read_text().splitlines()
+          for name in assets:
+              path = Path(name)
+              if path.is_absolute() or '..' in path.parts or not name.startswith('assets/training/'):
+                  raise ValueError('Invalid training asset path')
+              with path.open('rb') as stream:
+                  if stream.read(128).startswith(b'version https://git-lfs.github.com/spec/v1'):
+                      raise ValueError(f'Training asset is still an LFS pointer: {name}')
+          with open(os.environ['GITHUB_ENV'], 'a') as stream:
+              stream.write('COURSE_ASSET_PATHS<<COURSE_ASSETS_EOF\n' + '\n'.join(assets) + '\nCOURSE_ASSETS_EOF\n')
+          PY
+      - name: Install only Modal client
+        run: python -m pip install modal==1.6.0
+      - name: Select the existing Hugging Face Secret without reading its value
+        run: python scripts/select_modal_hf_secret.py
+      - name: Execute one bounded course experiment
+        run: |
+          modal run scripts/modal_course.py \
+            --experiment-id "$EXPERIMENT_ID" \
+            --batch-id "$BATCH_ID" \
+            --mode "$EXPERIMENT_MODE" \
+            --approval-revision "$APPROVAL_REVISION" \
+            --checkpoint-repo "$HF_CHECKPOINT_REPO" \
+            --release-repo "$HF_RELEASE_REPO" \
+            --run-id "gha-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --revision "$GITHUB_SHA"
+      - name: Save experiment evidence and account-wide billing observations
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: course-${{ inputs.batch_id }}-${{ inputs.experiment_id }}-${{ github.run_attempt }}
+          path: outputs/modal-course/
+          if-no-files-found: ignore
+      - name: Show experiment evidence
+        if: always()
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          path = Path('outputs/modal-course/result.json')
+          if path.exists():
+              with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+                  summary.write('## Course experiment evidence\n\n```json\n' + path.read_text() + '\n```\n')
+          PY
