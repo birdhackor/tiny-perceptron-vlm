@@ -43,7 +43,7 @@ Windows PowerShell 啟用指令是 `.venv\Scripts\Activate.ps1`。選擇 **Tiny 
 
 各版本的顯卡與驅動限制、Colab和鏡像設定見[環境說明](docs/environment.md)。使用 extra 後，啟用 `.venv` 直接用 `python`，或每次 `uv run` 都帶相同 extra，避免更換 PyTorch。CUDA／MPS未在本次 CPU 環境實測。
 
-只想閱讀網頁，可直接開啟線上教材；離線副本用 `python scripts/export_course.py` 匯出，再打開 `outputs/site/index.html`。網頁可搜尋小節；Notebook用來修改程式與執行。SVG保留靜態標註，支援系統減少動態效果。離線時公式保留 TeX 文字，連網後由 MathJax 排版。附帶已執行輸出的建置與 GitHub Pages 操作見[教材發布](docs/publishing.md)。
+只想閱讀，可直接開啟線上教材。全站使用 [Zensical](https://zensical.org/) 建置，提供全文搜尋、章節目錄、頁內目錄、深淺色模式與程式碼複製；每節仍可下載 Notebook 或在 Colab 練習。SVG 可放大並保留靜態標註，支援系統減少動態效果。網站建置另需 `--group site`；本機閱讀與 GitHub Pages 操作見[教材發布](docs/publishing.md)。公式由 MathJax 連網排版。
 
 ## 最小流程
 
