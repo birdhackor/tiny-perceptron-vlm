@@ -1,8 +1,8 @@
 # 教材實作驗證
 
-教材初版與改寫驗證環境為 Linux、Python 3.13.5、PyTorch 2.14.1 CPU。後續新增 Modal L4 的小型文字訓練與 HF checkpoint 續訓實測，記錄如下。自然資料上的正式能力評估仍待進行，沒有將隨機權重的分數當成能力結果。
+教材本機驗證環境為 Linux、Python 3.13.5、PyTorch 2.14.1 CPU；正式訓練另使用 Modal NVIDIA L4、Python 3.13.3、PyTorch 2.14.1+cu126。本頁保留不同階段的紀錄。最新逐組訓練、自然資料短訓、私有備份與學生權重證據見[正式實驗](course-experiments/README.md)及[當前進度](course-experiments/progress.json)；早期流程測試與改寫前的審閱不能代替本輪驗收。
 
-## Modal GPU 與 HF checkpoint 實測
+## 早期 GPU 連線與 HF checkpoint 流程測試
 
 2026-10-02：透過 GitHub Actions 啟動 Modal NVIDIA L4，使用 PyTorch 2.14.1+cu126，
 以既有 `scripts/train.py --train` 訓練 31,584 個參數的文字模型。
@@ -33,10 +33,10 @@ checkpoint 位於 HF 私有 Model repo `birdhackor/tiny-perceptron-checkpoints` 
 `smoke-tests/gha-37028829401-1/training/`。第 40 步上傳 commit 為
 `307c7cef6234fe9e853448175a82fa727c0d5c70`，續訓完成上傳 commit 為
 `3bcd0e9ab3e170a06d728e8a0a4e63e43cab0f00`。
-公開教學 repo 僅驗證可讀，尚未發布模型或驗證寫入。
-圖音訓練、大模型記憶體需求、長時間中斷恢復與正式資料能力尚未驗證。
+這次早期測試對公開教學模型 repo 僅驗證可讀，沒有執行學生權重發布。
+它未涵蓋圖音訓練、大模型記憶體需求、長時間中斷恢復或自然資料能力；後續實驗須各自核對，不能由連線測試推論。
 
-## 完整改寫與圖解驗證
+## 正式訓練前一輪的改寫與圖解驗證
 
 2026-10-02：重寫222節正文，以及7節暖身、4節閱讀指南、4節名詞說明與11節訓練操作，共248個讀者小節。前置材料改成可點擊的具體小節；正文用例子說明問題、數字與練習，圖解保留在對應說明的位置。
 
@@ -52,11 +52,11 @@ checkpoint 位於 HF 私有 Model repo `birdhackor/tiny-perceptron-checkpoints` 
 | 前置跳轉 | 手機實際從1.1點W.2連結，抵達暖身正確標題與段落，再返回原小節 |
 | 格式 | 最終Ruff lint通過，300個Python檔案的format檢查通過，Git空白檢查通過 |
 
-獨立AI讀者只取得分配的小節與正文明確連結的前置，審閱背景、術語、例子、程式解釋及練習；遇到問題會退回作者修正，再由原讀者核對。這是AI審閱紀錄，不是實際學生的使用測試。發布流程會拒絕缺少審閱、要求修訂、正文或圖解已改動的舊報告，也會拒絕未執行、失敗或來源不符的Notebook輸出。
+上表記錄的是正式訓練前一輪，不能算成本輪修改後的新審閱。當時獨立AI讀者只取得分配的小節與正文明確連結的前置，審閱背景、術語、例子、程式解釋及練習；遇到問題會退回作者修正，再由原讀者核對。這是AI審閱紀錄，不是實際學生的使用測試。發布流程會拒絕缺少審閱、要求修訂、正文或圖解已改動的舊報告，也會拒絕未執行、失敗或來源不符的Notebook輸出。
 
 ## 初版程式與資料驗證
 
-以下為2026-10-01的初版驗證；本次改寫沒有修改核心模型或CLI。
+以下為2026-10-01的初版驗證，只描述當時的核心模型與CLI，不代表後續新增實驗程式也已由這32項測試涵蓋。
 
 | 檢查 | 實際結果 |
 | --- | --- |
@@ -71,13 +71,13 @@ checkpoint 位於 HF 私有 Model repo `birdhackor/tiny-perceptron-checkpoints` 
 | 規則資料 | 5 種 JSONL 的原始 SHA-256 與家族切分核對；另有100種字串家族的 OCR 產生器 |
 | 依賴與格式 | frozen CPU／Notebook 安裝、離線 lock 檢查、Ruff lint／format 檢查通過 |
 
-kernel 報告在 `outputs/notebooks/validation-kernel.json`，逐節執行副本也保存在該資料夾。CLI 報告為 `outputs/cli-validation.json`。這些是本次工作區的產物，被 Git 忽略；新 checkout 可用下面指令重新產生。
+重跑會在 `outputs/notebooks/validation-kernel.json` 產生當次kernel報告，逐節執行副本也保存在該資料夾。CLI 報告為 `outputs/cli-validation.json`。這些工作區產物被 Git 忽略；新 checkout 可用下面指令重新產生，當前檔案可能已由新一輪執行更新。
 
 ## 改寫前的網站發布驗證
 
 2026-10-02：加入 Colab 自動設定後，重新以獨立 CPU kernel 執行222份 Notebook，222通過、0失敗；核心測試仍為32 passed、1 skipped。匯出254頁並核對222個 Colab入口、222份下載與60,338個內部連結。發布程式也確認會拒絕過期原始碼、未執行與失敗的結果，並轉義輸出文字中的HTML。
 
-Chromium檢查1440px桌面與390px手機版；搜尋「量化」顯示5節，手機頁面無水平溢出，並可見兩個練習／下載按鈕。離線公式降級保留TeX文字。檢查也發現SVG動畫將邊框筆畫繼承到文字，已改成只動畫矩形邊框並重新產生圖解。Colab實際雲端執行、GPU訓練與收斂仍未驗證。
+當時Chromium檢查1440px桌面與390px手機版；搜尋「量化」顯示5節，手機頁面無水平溢出，並可見兩個練習／下載按鈕。離線公式降級保留TeX文字。檢查也發現SVG動畫將邊框筆畫繼承到文字，已改成只動畫矩形邊框並重新產生圖解。這次網站檢查未執行Colab雲端或GPU訓練；後續Modal實測另有自己的證據，也不能替代Colab實機驗證。
 
 ## 測試核對哪些容易出錯的事情
 
@@ -105,6 +105,8 @@ LFS遠端驗證日期：2026-10-02。GitHub runner從固定公開來源重建8�
 ```bash
 python scripts/build_course.py --check
 python scripts/check_course_reviews.py
+python scripts/check_technical_reviews.py
+python docs/review-tools/check_review_round.py
 python scripts/check_notebooks.py --mode python
 python scripts/check_notebooks.py --mode kernel --workers 3
 pytest -ra
@@ -115,4 +117,4 @@ python scripts/export_course.py --executed outputs/notebooks --revision main
 python scripts/check_site.py
 ```
 
-核心／Notebook 測試離線執行。kernel 模式先依[暖身指南](../course/first-steps.md)註冊 tiny-perceptron kernel。Modal GPU 小模型實測見本頁記錄；自然資料能力、效能提升與一般安全性尚未驗證。具體訓練與評估方式見[訓練操作](../course/training.md)。
+核心／Notebook 測試離線執行。kernel 模式先依[暖身指南](../course/first-steps.md)註冊 tiny-perceptron kernel。Modal實驗的自然資料品質、速度與記憶體結果，須按各份報告的資料、分母與配置閱讀；小型短訓不能保證一般語言、視覺、推理或安全能力。具體訓練與評估方式見[訓練操作](../course/training.md)。Colab雲端與Apple MPS尚未實機驗證。
