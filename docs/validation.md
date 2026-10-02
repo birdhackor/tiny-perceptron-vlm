@@ -17,6 +17,12 @@
 
 kernel 報告在 `outputs/notebooks/validation-kernel.json`，逐節執行副本也保存在該資料夾。CLI 報告為 `outputs/cli-validation.json`。這些是本次工作區的產物，被 Git 忽略；新 checkout 可用下面指令重新產生。
 
+## 網站發布驗證
+
+2026-10-02：加入 Colab 自動設定後，重新以獨立 CPU kernel 執行222份 Notebook，222通過、0失敗；核心測試仍為32 passed、1 skipped。匯出254頁並核對222個 Colab入口、222份下載與60,338個內部連結。發布程式也確認會拒絕過期原始碼、未執行與失敗的結果，並轉義輸出文字中的HTML。
+
+Chromium檢查1440px桌面與390px手機版；搜尋「量化」顯示5節，手機頁面無水平溢出，並可見兩個練習／下載按鈕。離線公式降級保留TeX文字。檢查也發現SVG動畫將邊框筆畫繼承到文字，已改成只動畫矩形邊框並重新產生圖解。Colab實際雲端執行、GPU訓練與收斂仍未驗證。
+
 ## 測試核對哪些容易出錯的事情
 
 - 遮住未來、padding 不直接算 loss、左側 padding 的位置，以及第一個答案的 shift。
