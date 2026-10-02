@@ -32,4 +32,6 @@ python scripts/check_site.py
 
 repo 的 Settings → Pages → Build and deployment → Source 選 **GitHub Actions**。之後 `.github/workflows/pages.yml` 在 `main` 更新或手動觸發時，會重新執行 222 個小節、核對輸出與網站連結，再部署到 Pages。核心 Linux／macOS／Windows CI 保留原本的流程。
 
+網站CI使用一個worker逐份啟動獨立kernel。GitHub runner曾在並行啟動時發生TCP連接埠被占用、kernel未開始執行就退出的情況；順序啟動避免多個Notebook同時爭用啟動資源。本機仍可用上面的三個worker指令。
+
 若 Pages 已透過 API 設為 `build_type: workflow`，就不必再手動設定。網站的 `build-info.json` 留下發布 commit、節數與是否包含已核對的 CPU 輸出。
