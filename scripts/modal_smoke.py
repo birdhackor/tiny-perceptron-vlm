@@ -9,7 +9,9 @@ import modal
 
 ROOT = Path(__file__).resolve().parents[1]
 app = modal.App("tiny-perceptron-gpu-smoke")
-hf_secret = modal.Secret.from_name("tiny-perceptron-hf", required_keys=["HF_TOKEN"])
+hf_secret = modal.Secret.from_name(
+    os.environ.get("HF_MODAL_SECRET") or "tiny-perceptron-hf", required_keys=["HF_TOKEN"]
+)
 volume = modal.Volume.from_name("tiny-perceptron-checkpoints", create_if_missing=True)
 cpu_image = modal.Image.debian_slim(python_version="3.13").pip_install("huggingface-hub==1.33.0")
 # Modal SDK 是執行工具；模型依賴仍使用原有 uv.lock，CUDA 12.6 支援 L4。
