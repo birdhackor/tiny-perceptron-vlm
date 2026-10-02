@@ -841,7 +841,11 @@ def main(
         except Exception as billing_error:
             result["billing_error"] = {"type": type(billing_error).__name__, "message": str(billing_error)}
             error = error or billing_error
-        write_json(output / "result.json", result)
-        print(json.dumps(json_value(result), ensure_ascii=False, indent=2, allow_nan=False))
+        # 完整報告已由 backup 存到私有 HF；Actions artifact、log 與 summary 共用這份公開投影。
+        from scripts.ingest_course_result import redact
+
+        public_result = redact(result)
+        write_json(output / "result.json", public_result)
+        print(json.dumps(json_value(public_result), ensure_ascii=False, indent=2, allow_nan=False))
     if error:
         raise RuntimeError("課程實驗未完成；失敗用量仍保留，詳細資訊見 result.json") from error

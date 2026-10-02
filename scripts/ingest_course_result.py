@@ -32,7 +32,8 @@ def redact(value, private=False):
         }
         if value.get("private_only") is True:
             result["public_evidence_note"] = (
-                "Only aggregate metrics and provenance; all sample text and derived weights remain private."
+                "Only aggregate metrics and provenance in this public report. Full experiment artifacts "
+                "are backed up privately; private-branch samples and derived weights are excluded from student exports."
             )
         return result
     return value
