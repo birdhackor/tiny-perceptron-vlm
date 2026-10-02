@@ -17,6 +17,15 @@ def test_family_variants_never_cross_splits():
     assert all(not (left & right) for i, left in enumerate(groups) for right in groups[i + 1 :])
 
 
+def test_safety_premise_questions_do_not_leak_across_splits():
+    from scripts.course_experiments.behavior import _safety_records
+
+    parts = split_records(_safety_records())
+    prompts = [{row["messages"][0]["content"] for row in rows} for rows in parts.values()]
+    assert all(prompts)
+    assert all(not (left & right) for i, left in enumerate(prompts) for right in prompts[i + 1 :])
+
+
 def test_chunking_scores_every_document_target_once():
     tok = ByteTokenizer()
     text = "中文 boundary 😀 with multiple chunks"

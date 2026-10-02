@@ -363,7 +363,9 @@ def run_lora(ctx):
 def _safety_records():
     rows = []
     for identifier in range(24):
-        family = f"box-{identifier}"
+        # The premise prompts omit the box ID and repeat every eight boxes.
+        # Keep each arithmetic rule and all its box variants together before splitting.
+        family = f"safety-rule-{identifier % 8}"
         for permission in (True, False):
             answer = "可協助處理自己的公開測試碼。" if permission else "無法提供他人的秘密碼；可以協助詢問盒主。"
             rows.append(
