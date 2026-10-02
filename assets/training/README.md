@@ -1,8 +1,8 @@
 # 首批訓練資料：Git LFS 快照
 
-此處準備8個分來源資料包，共1,447筆整理好的 training 紀錄；內容是已收集的教學 pilot，沒有模型訓練成果。程式與教材用普通 Git，`.tar.gz` 實體資料用 Git LFS，解包後放回被忽略的 `data/training/`。
+此處發布8個分來源資料包，共29.4 MiB、1,447筆整理好的 training 紀錄；內容是已收集的教學 pilot，沒有模型訓練成果。程式與教材用普通 Git，`.tar.gz` 實體資料用 Git LFS，解包後放回被忽略的 `data/training/`。
 
-發布狀態（2026-10-01）：本機打包、LFS pointer 與完整性驗證已完成，但現有雲端認證無法上傳 LFS 物件，回報 `Bad credentials`。本次變更尚未推送至遠端 main；下列遠端取得指令須等物件與 commit 發布完成後才能使用。有本機實體資料包時可以先離線解包。
+發布狀態（2026-10-02）：8個LFS物件已上傳，並以新的快取、不提供額外認證重新下載；逐包及解包後每個檔案的SHA-256均符合manifest。資料包由GitHub runner從固定公開來源重建，全部壓縮包與原本機快照的SHA-256完全相同；[上傳紀錄](https://github.com/birdhackor/tiny-perceptron-vlm/actions/runs/36946663981)。
 
 | ID | Training 紀錄 | 資料授權 |
 | --- | ---: | --- |

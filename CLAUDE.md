@@ -25,4 +25,6 @@ uv run ruff check . && uv run ruff format .
 - 依賴越少越好：新增套件前先說明為什麼需要。
 - 要能在 CPU、Apple MPS、單張 NVIDIA GPU 上跑；玩具設定在筆電上要幾分鐘內跑完。
 - 文件與註解用繁體中文，技術名詞保留英文；README_en.md 同步更新英文版。
-- 資料、權重、實驗輸出不進 git；測試不能依賴網路。
+- 原始資料快取、權重、實驗輸出不進普通 Git；使用者授權的固定教學資料包僅放在
+  `assets/training/*.tar.gz`，使用 Git LFS。來源、授權、SHA-256 manifest 與生成器使用普通 Git。
+  `data/` 仍是本機忽略目錄；測試不能依賴網路。
