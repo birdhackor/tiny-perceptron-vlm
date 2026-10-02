@@ -1,8 +1,8 @@
 # 教材資產存放：Git、LFS 與外部下載
 
-更新日期：2026-10-01。repo 已啟用 `/assets/training/*.tar.gz` 的 LFS 追蹤，首批8個分來源資料快照與普通 Git 的來源／授權／雜湊清單在[訓練資料入口](../assets/training/README.md)。原始 `data/` 快取、權重與執行輸出維持忽略。
+更新日期：2026-10-02。repo 已啟用 `/assets/training/*.tar.gz` 的 LFS 追蹤，首批8個分來源資料快照與普通 Git 的來源／授權／雜湊清單在[訓練資料入口](../assets/training/README.md)。原始 `data/` 快取、權重與執行輸出維持忽略。
 
-目前這些變更僅在本機 commit，尚未推送至遠端 main。普通 Git 推送及 GitHub API 存取已成功，但現有認證在 LFS 上傳端點被拒絕；不能把本機打包成功當成遠端資產已發布。
+8個資料物件已上傳，共30,854,837 bytes；新的LFS快取重新下載與逐檔解包驗證均通過。固定快照與來源／授權清單隨main發布；讀者可依單元按需取得，不需要提供額外的上傳認證。
 
 ## 已驗證的能力
 
@@ -10,8 +10,10 @@
 - 在 `/tmp` 的獨立測試 repo 執行 local install／track／add：4096 bytes 的 binary 在 Git index 中成為 129 bytes 的 LFS pointer；smudge 還原後逐 byte 相同，SHA-256 一致。
 - 原 repo 的 `git ls-remote origin HEAD` 成功。
 - 使用原 repo 的 GitHub remote 與原生 LFS client，只讀查詢一個刻意不存在的 object；服務回應 `Object does not exist on the server: [404]`。這證明 LFS 物件查詢端點可通，沒有本輪先前其他網站的 CONNECT 403。
-- 前四項是首次調查的結果，當時未上傳物件。目前固定資料採分來源LFS包；不把repo擁有者的方案或剩餘額度當成已知條件。
-- 本輪已確認8個包在 index 中都是 LFS pointer，大小與 SHA-256 符合 manifest；全部本機解包／重建成功。實際上傳失敗：原有 Git 認證無法供 LFS client 使用，改用現有 `GH_TOKEN` 亦被拒絕。尚未驗證遠端下載。
+- 前四項是首次調查的結果，當時未上傳物件。不把repo擁有者的方案或剩餘額度當成已知條件。
+- 2026-10-02已確認8個包在Git中都是LFS pointer，大小與SHA-256符合manifest。GitHub runner從固定公開來源重建所有包，逐檔與壓縮包雜湊皆符合原快照，LFS上傳8/8成功；[執行紀錄](https://github.com/birdhackor/tiny-perceptron-vlm/actions/runs/36946663981)。
+- 本環境以全新LFS storage、不使用額外secret或credential helper重新下載全部8個物件，再解包核對全部檔案；結果均通過。報告在ignored的`outputs/lfs-remote-validation.json`。
+- 雲端原生上傳仍有傳輸限制：提供有效認證後，LFS batch API回應200，但代理轉送到S3時得到501，指出不支援`Transfer-Encoding`；Release附件上傳同樣回報400 `Bad Content-Length`。本輪由GitHub runner完成物件上傳，普通Git推送與資料下載可用。
 
 初次調查時 `.gitattributes` 只有換行設定。現在固定資料包使用 LFS pointer；來源、授權、manifest 與生成器用普通 Git。`.gitignore` 仍忽略 `/data/`、`/checkpoints/`、實驗輸出及 `*.pt`／`*.safetensors` 等權重，沒有把整個下載快取目錄改為追蹤。
 
@@ -81,7 +83,9 @@ GitHub Releases 的附件獨立於普通 Git 歷史，官方文件目前表示�
 
 目前 `.gitattributes` 僅追蹤 `/assets/training/*.tar.gz`；LFS 追蹤不會覆蓋 `.gitignore`，`data/` 仍是本機快取。可用 `GIT_LFS_SKIP_SMUDGE=1` 先 clone 程式，再由各單元按需取 LFS 物件；不能把僅有 pointer 的狀態當作資產已下載。
 
-發布需要能供 Git LFS 使用、對本 repo 有寫入權限的 GitHub HTTPS 認證；普通 Git 或 API 認證成功不保證 LFS 上傳可用。認證設定完成後，先上傳物件，再推送 commit，最後以新的 LFS cache 下載核對 SHA-256。禁止略過 LFS pre-push hook 而發布無法下載的 pointer。認證只能透過安全的環境設定輸入，不放進 repo、指令參數或對話。
+發布需要能供Git LFS使用、對本repo有寫入權限的GitHub HTTPS認證與可用的實體檔案傳輸路徑；普通Git或API認證成功不保證LFS上傳可用。先上傳物件，再推送commit，最後以新的LFS cache下載核對SHA-256。禁止略過LFS pre-push hook而發布無法下載的pointer。認證只能透過安全的環境設定輸入，不放進repo、指令參數或對話。
+
+此雲端實例的上傳代理有上述傳輸限制；新增資料版本可由正常開發機或GitHub runner上傳。這次runner只保存重建程式與凍結的來源／授權metadata於暫存分支，從公開的固定revision取回原資料，核對原始逐檔與壓縮包SHA-256後才寫入LFS；沒有把實體訓練資料塞入普通Git。runner使用本repo的`GITHUB_TOKEN`與`contents: write`，沒有把雲端Secret複製到GitHub Actions。
 
 ## 官方來源
 

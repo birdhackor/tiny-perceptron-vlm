@@ -32,7 +32,9 @@ checkpoint 測試只使用最小數值更新核對接續一致性；它不是模
 
 首批8個分來源資料包壓縮後共30,854,837 bytes。已逐包解開到新的暫存目錄，核對每個檔案的SHA-256，再由解包內容重建；8個重建壓縮包均與原始包的SHA-256完全一致。新增測試確認重複解包不改寫檔案、既有修改受到保留、包雜湊先驗證，以及拒絕越界路徑。這些檢查不執行模型訓練。
 
-LFS 遠端發布仍未完成：現有平台認證可供普通 Git／GitHub API 使用，但 LFS 上傳回報認證失敗。Git pre-push hook 已阻止本次 commit 推送，因此遠端 main 尚無本次資料 pointer。遠端上傳與重新下載的完整性核對待認證解決後進行。
+LFS遠端驗證日期：2026-10-02。GitHub runner從固定公開來源重建8個包，原始逐檔與壓縮包SHA-256全部符合，再上傳8/8物件。本環境以新的LFS storage、不提供額外認證重新下載全部物件，核對大小／SHA-256並逐包解開，包內檔案雜湊也全數通過。遠端驗證報告在`outputs/lfs-remote-validation.json`；[runner執行紀錄](https://github.com/birdhackor/tiny-perceptron-vlm/actions/runs/36946663981)。
+
+原生雲端上傳受到代理限制：有效認證已讓LFS batch API回應200，但S3 PUT因`Transfer-Encoding`回報501；Release附件也回報400 `Bad Content-Length`。因此物件透過GitHub runner上傳。這是本實例的上傳傳輸限制，沒有略過checksum、TLS或LFS pre-push驗證。
 
 ## 重跑
 
