@@ -34,7 +34,7 @@ Notebook 保留教學需要的少量結果；大型 base64 圖像、音訊、互
 
 ## 教學訓練資料可能多大？
 
-目前已收集的小型 pilot 原始資料約35.3 MiB，共1,447筆整理好的 training 紀錄；尚未覆蓋全部教材的自然資料需求。首批快照保留來源與授權，按資料來源分包，精確壓縮 bytes 見 `assets/training/manifest.json`。主線合成資料由生成器重建，不需要為每節各自複製一份。
+已收集的小型 pilot 原始資料約35.3 MiB，共1,447筆整理好的 training 紀錄。這8包固定快照已供[30組正式實驗](course-experiments/README.md)按需使用，範圍是小型自然資料測試，不是完整自然語言或多模態語料庫。首批快照保留來源與授權，按資料來源分包，精確壓縮 bytes 見 `assets/training/manifest.json`。主線合成資料由生成器重建，不需要為每節各自複製一份。
 
 下列是明確假設下的 payload 計算，非實測檔案大小：
 
@@ -44,21 +44,21 @@ Notebook 保留教學需要的少量結果；大型 base64 圖像、音訊、互
 | 10,000 張 64×64 RGB、uint8 圖片 | 原始像素約 117 MiB；簡單合成圖以 PNG 儲存通常較小，需實測。 |
 | 10,000 段 1 秒、16 kHz、單聲道 PCM16 音訊 | 樣本約 305 MiB，另加容器／標註成本。 |
 
-首版核心資料可先以數十至數百 MiB 作發布規劃目標，確認教學效果後再定案。小型文字與評估樣例仍適合普通 Git；固定較大的多模態資料包適合 LFS。由於學生下載計入擁有者流量，300 MiB 資料包下載 100 次約為 29.3 GiB，已超過 GitHub Free／Pro 的 10 GiB 月流量；人數增加時可另發布 HF dataset 副本，或把資料改為按需生成／下載。
+目前首批壓縮包已定為30,854,837 bytes；以後擴充再按實際大小與讀者數規劃。小型文字與評估樣例仍適合普通 Git；固定較大的多模態資料包適合 LFS。由於學生下載計入擁有者流量，300 MiB 資料包下載 100 次約為 29.3 GiB，已超過本次查閱的 GitHub Free／Pro 10 GiB 月流量；人數增加時可另發布 HF dataset 副本，或把資料改為按需生成／下載。
 
 自然圖片、完整語音與較大文字 corpus 是獨立延伸，可能達 GB 至數十 GB。原有候選的大小見 [環境研究的候選資料集](environment.md#候選資料集)，那些是概略數字；正式選用時再查精確版本、所需 subset 和授權。大型外部資料保留來源與版本，直接從原發布處取得，不把整份 corpus 搬進 GitHub LFS。
 
 ## 權重建議放 Hugging Face
 
-建立專案的 HF **model repo**，發布挑選過的文字 SFT、VLM、音訊整合、MoE、蒸餾與量化里程碑。它可以保存本專案自己寫的 PyTorch 模型，不要求先改成 Transformers 架構；下載後由我們的模型類別與載入程式使用。
+已使用私有HF model repo保存完整實驗備份，並在[公開課程模型庫](https://huggingface.co/birdhackor/tiny-perceptron-course-models)發布30組、120份推論權重，包含文字、對話、模態、MoE、量化與蒸餾。它們是本專案自己寫的 PyTorch 模型，不要求先改成 Transformers 架構；下載後由配對的模型類別與載入程式使用。
 
-每份可用權重附模型配置、匹配的 tokenizer、程式碼 commit、訓練資料版本、評估結果與 model card。純推論權重可用 `safetensors`；需要教「中斷後接續」的小節，另提供包含 optimizer／step／必要隨機狀態的 resume checkpoint。只發布教材所需版本，不把每一步 checkpoint 都當成發布成果。
+每份可用權重附模型配置、匹配的 tokenizer、程式碼 commit、訓練資料版本、評估結果與 model card。目前公開檔採配對載入器的`.pt`格式，下載核對固定版本、大小與SHA-256，再以`weights_only=True`讀取；匯出檔剔除更新器、隨機狀態與訓練參照模型。[公開清單](course-experiments/public-models.json)只發布已審閱的推論檔，不把每一步 checkpoint 都公開。原生續訓需要含更新器／步數／隨機狀態的另一種存檔，讀者可依[5.7](../course/chapters/05.md#5.7)自行產生；完整訓練備份保持私有，是否能精確恢復仍須逐格式檢查。
 
 純 FP32 權重約為參數數量 × 4 bytes：10M 參數約 40 MB，100M 約 400 MB；resume checkpoint 會更大。這些是估算，不代表課程已決定模型大小。
 
 GitHub manifest 固定 HF commit revision、檔名與 SHA-256；讀者按單元下載所需權重。使用現有 `huggingface-hub` 的 API／`hf` CLI 處理大檔，無須把模型掛在本專案的 GitHub LFS 內。
 
-HF 官方目前將免費公開儲存列為 best-effort，並要求大型內容具有社群用途；不是無限免費備份承諾。教材公開里程碑符合其 model／dataset 分享方向，實際容量仍按帳戶方案與最新政策確認。本輪未建立 HF repo 或上傳檔案。
+HF 官方目前將免費公開儲存列為 best-effort，並要求大型內容具有社群用途；不是無限免費備份承諾。教材公開里程碑符合其 model／dataset 分享方向，實際容量仍按帳戶方案與最新政策確認。[實際發布紀錄](course-experiments/public-releases)保留固定HF版本與核准來源；正式模型的CPU載入／執行驗收則另存於[操作證據](course-experiments/student-checks/all-models-validation.json)。
 
 ## Git LFS 的成本與界線
 
