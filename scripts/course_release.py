@@ -78,6 +78,21 @@ def validate_approval(approval, experiment_id, batch_id, checkpoint_repo):
     card = approval.get("model_card", {})
     if not all(card.get(key) for key in ("summary", "scope", "limitations")):
         raise ValueError("需要已審閱的 model_card summary/scope/limitations")
+    if "repository_index" in approval:
+        index = approval["repository_index"]
+        if not isinstance(index, dict) or set(index) != {"content", "sha256"}:
+            raise ValueError("repository_index 必須恰有已審閱的 content 與 sha256")
+        content, digest = index["content"], index["sha256"]
+        if not isinstance(content, str) or not content.strip() or not re.search(r"(?m)^#{1,6}[ \t]+\S", content):
+            raise ValueError("repository_index content 必須是含標題的非空 Markdown 全文")
+        try:
+            encoded = content.encode("utf-8")
+        except UnicodeError as error:
+            raise ValueError("repository_index content 必須是有效 UTF-8") from error
+        if not 16 <= len(encoded) <= 262144 or any(ord(character) < 32 and character not in "\n\r\t" for character in content):
+            raise ValueError("repository_index Markdown 長度需在 16 bytes 至 256 KiB，且不能含控制字元")
+        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest) or hashlib.sha256(encoded).hexdigest() != digest:
+            raise ValueError("repository_index sha256 必須精確匹配 content 的 UTF-8 bytes")
     if approval.get("pku_derived") or approval.get("visibility") == "private":
         raise ValueError("PKU 衍生分支依本項目政策保持私有")
     files = approval.get("files", [])
