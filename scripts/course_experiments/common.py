@@ -285,7 +285,15 @@ def evaluate_lm(model, records, mode="text", tokens=32, tokenizer=None):
     else:
         for record in records[:8]:
             text = record["text"] if isinstance(record, dict) else record
-            prefix = tok.encode(text)[: min(24, max(1, model.config.max_length - tokens - 1))]
+            limit = min(24, max(1, model.config.max_length - tokens - 1))
+            prefix_text = ""
+            for character in text:
+                candidate = prefix_text + character
+                if len(tok.encode(candidate)) > limit:
+                    break
+                prefix_text = candidate
+            # A human-readable prompt must end at a character boundary, even for byte/BPE tokens.
+            prefix = tok.encode(prefix_text)
             ids = torch.tensor([[tok.bos_id] + prefix], device=device)
             generated = generate(model, ids, tokens, eos_id=tok.eos_id)[0, ids.shape[1] :].tolist()
             samples.append(
