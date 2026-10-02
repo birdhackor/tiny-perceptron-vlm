@@ -4,7 +4,9 @@
 
 繁體中文 | [English](README_en.md)
 
-**[教材入口與閱讀路線](course/README.md) · [操作與數學暖身](course/first-steps.md) · [222 個小節](course/lessons.md) · [訓練操作](course/training.md)**
+**[線上教材](https://birdhackor.github.io/tiny-perceptron-vlm/) · [閱讀路線](course/README.md) · [操作與數學暖身](course/first-steps.md) · [222 個小節](course/lessons.md) · [訓練操作](course/training.md)**
+
+教材預覽版：網站提供正文、SVG 圖解與實際 CPU 輸出。每節按「在 Colab 動手做」可開啟同一課的完整 Notebook；第一個程式格會準備專案與套件，小實驗不必先租 GPU。也可下載本節 `.ipynb` 後依下方步驟在本機練習。Colab 雲端執行尚未實機驗證。
 
 ![下一字對齊](course/figures/shift.svg)
 
@@ -41,7 +43,7 @@ Windows PowerShell 啟用指令是 `.venv\Scripts\Activate.ps1`。選擇 **Tiny 
 
 各版本的顯卡與驅動限制、Colab和鏡像設定見[環境說明](docs/environment.md)。使用 extra 後，啟用 `.venv` 直接用 `python`，或每次 `uv run` 都帶相同 extra，避免更換 PyTorch。CUDA／MPS未在本次 CPU 環境實測。
 
-只想閱讀網頁，可執行 `python scripts/export_course.py`，再打開 `outputs/site/index.html`。網頁可離線搜尋小節；Notebook用來修改程式與執行。SVG保留靜態標註，支援系統減少動態效果。
+只想閱讀網頁，可直接開啟線上教材；離線副本用 `python scripts/export_course.py` 匯出，再打開 `outputs/site/index.html`。網頁可搜尋小節；Notebook用來修改程式與執行。SVG保留靜態標註，支援系統減少動態效果。離線時公式保留 TeX 文字，連網後由 MathJax 排版。附帶已執行輸出的建置與 GitHub Pages 操作見[教材發布](docs/publishing.md)。
 
 ## 最小流程
 

@@ -8,7 +8,9 @@
 
 ## 怎麼使用
 
-純閱讀可直接看下方的章節正文。想動手，依[操作指南](first-steps.md)開啟 JupyterLab，再從[全部 222 個小節](lessons.md)選一份 Notebook。每份都能從乾淨環境單獨執行；共享的零件在 `tiny_perceptron/`，不需要一路沿用前章的模型存檔。
+先開啟[線上教材](https://birdhackor.github.io/tiny-perceptron-vlm/)，在同一頁閱讀正文、SVG 與實際 CPU 輸出。想改程式時按本節的「在 Colab 動手做」，登入 Google 後選「執行階段 → 全部執行」；會開啟同一課的完整內容並準備套件。小實驗使用 CPU 即可。Colab 雲端執行尚未實機驗證。
+
+偏好本機練習，可依[操作指南](first-steps.md)開啟 JupyterLab，再從[全部 222 個小節](lessons.md)選一份 Notebook。每份都能從乾淨環境單獨執行；共享的零件在 `tiny_perceptron/`，不需要一路沿用前章的模型存檔。
 
 也提供離線網頁：啟用專案 `.venv` 後執行 `python scripts/export_course.py`，在檔案管理器打開 `outputs/site/index.html`。網頁可搜尋小節並播放 SVG 的逐步提示；修改數字與執行程式仍使用 Notebook。圖的橘色邊框提示閱讀順序，所有標註一直保留；系統的「減少動態效果」設定會停用動畫。
 

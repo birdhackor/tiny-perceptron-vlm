@@ -4,7 +4,9 @@ A from-scratch tutorial that grows from a next-character table into small text, 
 
 [繁體中文](README.md) | English
 
-**[Course and reading routes](course/README.md) · [First steps](course/first-steps.md) · [222 lessons](course/lessons.md) · [Training recipes](course/training.md)** — the main course is in Traditional Chinese.
+**[Online course](https://birdhackor.github.io/tiny-perceptron-vlm/) · [Reading routes](course/README.md) · [First steps](course/first-steps.md) · [222 lessons](course/lessons.md) · [Training recipes](course/training.md)** — the main course is in Traditional Chinese.
+
+This preview provides lesson text, SVG diagrams and actual CPU outputs. Each lesson has an Open in Colab button for the same complete notebook, with repository and package setup in its first cell. Small exercises need no GPU. Notebook downloads are also available for local practice. Execution in a real Colab runtime has not been verified.
 
 The course has 18 chapters, three optional branches, 222 independently runnable notebooks and 40 original SVG diagrams with progressive highlights. Begin with small matrices, bigrams, MLPs and manual attention; introduce modern architecture, Dense/MoE, cache/SDPA, quantization and distillation later. Readers can switch models and revisit earlier examples.
 
@@ -30,7 +32,7 @@ On Windows PowerShell, activate with `.venv\Scripts\Activate.ps1`. Select **Tiny
 
 Activate `.venv` and use `python` directly, or pass the same extra to each `uv run`. CUDA/MPS execution was not verified in the current CPU environment.
 
-Run `python scripts/export_course.py` and open `outputs/site/index.html` for an offline reading website. Search lessons there; edit and execute code in notebooks. SVGs retain static labels and respect reduced-motion preferences.
+Use the online course, or run `python scripts/export_course.py` and open `outputs/site/index.html` for an offline copy. Search lessons there; edit and execute code in notebooks. SVGs retain static labels and respect reduced-motion preferences. MathJax typesets formulas when online; offline copies retain TeX text. See [publishing instructions](docs/publishing.md) to include verified outputs or deploy GitHub Pages.
 
 ## Minimal workflow
 

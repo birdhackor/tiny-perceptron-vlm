@@ -4,6 +4,10 @@
 
 ## 第一次開啟教材
 
+免安裝練習：開啟[線上教材](https://birdhackor.github.io/tiny-perceptron-vlm/)，選一節並按「在 Colab 動手做」。登入 Google、連線到 CPU 執行環境，再選「執行階段 → 全部執行」。第一格會下載專案、安裝套件；請等它完成，再修改後面的數字。Colab 開啟的就是同一課的完整內容。這個雲端入口仍待實機驗證。
+
+本機練習則依下方步驟準備 JupyterLab。單獨下載的 `.ipynb` 也需要專案中的共用零件，請把它放回 repo 內開啟。
+
 「終端機」是一個讓你輸入指令的視窗。打開它後，先確認目前在下載好的專案資料夾。下列指令都從有 `pyproject.toml` 的那一層執行。尚未有專案時，先安裝 [uv](https://docs.astral.sh/uv/getting-started/installation/)，再執行：
 
 ```bash

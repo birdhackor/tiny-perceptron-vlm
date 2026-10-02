@@ -31,9 +31,9 @@ def save(name, title, caption, body, height=330, animated=True):
     animation = (
         """<style>
     text{font-family:"Noto Sans CJK TC","Microsoft JhengHei","PingFang TC",sans-serif}
-    .pulse,.pulse rect{animation:pulse 6s infinite}.step1,.step1 rect{animation-delay:0s}.step2,.step2 rect{animation-delay:1.5s}.step3,.step3 rect{animation-delay:3s}.step4,.step4 rect{animation-delay:4.5s}
+    rect.pulse,.pulse rect{animation:pulse 6s infinite}.step1,.step1 rect{animation-delay:0s}.step2,.step2 rect{animation-delay:1.5s}.step3,.step3 rect{animation-delay:3s}.step4,.step4 rect{animation-delay:4.5s}
     @keyframes pulse{0%,23%{stroke:#e87924;stroke-width:4}24%,100%{stroke:#8da8ca;stroke-width:1}}
-    @media(prefers-reduced-motion:reduce){.pulse,.pulse rect{animation:none}}
+    @media(prefers-reduced-motion:reduce){rect.pulse,.pulse rect{animation:none}}
     </style>"""
         if animated
         else '<style>text{font-family:"Noto Sans CJK TC","Microsoft JhengHei","PingFang TC",sans-serif}</style>'
