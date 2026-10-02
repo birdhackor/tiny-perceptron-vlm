@@ -691,6 +691,16 @@ efficiency正式組先載入[T.4](#T.4)的`sft/model.pt`與同目錄`dataset.jso
 
 同次實驗另核對快取、梯度與實際後端：[16.3](chapters/16.md#16.3)列數值容差與原始生成ID，[16.8](chapters/16.md#16.8)的profiler確定本輪FP32用了memory-efficient。真正Inductor只編譯一個固定形狀FFN，首次7.717秒、穩態比eager慢，沒有回本點，見[16.11](chapters/16.md#16.11)。`compile-input.pt`是內部傳給子程序的載荷，不能交給一般模型推論入口；`compile-result.json`另存編譯量測。完整有效分母、留出生成與每支線時間／記憶體可核對[efficiency實報](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/course-experiments/results/efficiency.json)。
 
+另有一份獨立Flash補驗：固定Q/K/V形狀`[2,4,512,32]`，用FP16與BF16，強制只開CUDA Flash後端。兩種精度都由profiler確認真正的CUDA前向與反傳kernel，並核對輸出與三份梯度的有限值及執行前固定的容差。這份實驗沒有訓練模型；它回答「此形狀是否真的使用Flash、數值是否接近、成本是多少」，不替代上面的整模型品質比較。
+
+```bash
+.venv/bin/python -m scripts.course_experiments.run --experiment flash_probe --device cuda
+```
+
+它不依賴SFT權重或資料包，但需要相容CUDA環境；CPU不會驗證Flash，也不會偷偷改走其他後端。輸出目錄`outputs/course-experiments/course-v1/flash_probe/`內的`fixture.pt`只是固定Q/K/V與反傳輸入，並非訓練權重，不能交給一般模型推論入口。`result.json`保留兩種精度、容差、profiler運算子／kernel、九次同步計時、最高配置與環境。數值對照的計算方式及誤差見[16.8](chapters/16.md#16.8)，記憶體圖與範圍見[16.9](chapters/16.md#16.9)。
+
+本次使用L4、PyTorch 2.14.1+cu126、CUDA 12.6與driver 580.95.05，程式版本為`382604d17d91cfe9e0a58a7de997486e3a0ccafa`。每條路線先暖機三次，再量九次取中位數。FP16向前加反傳為手寫1.689毫秒、Flash0.503毫秒；BF16為1.502、0.458毫秒。相同65MiB已配置基線上，兩種精度的手寫／Flash新增峰值都是32.75／2.032MiB；總峰值則為97.75／67.032MiB，不能把新增配置比值當成整張GPU省下的比例。這是一次程序內的固定注意力核心量測，沒有loss、更新器或整模型訓練速度。全部原始數字與環境在[Flash補驗實報](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/course-experiments/results/flash_probe.json)。
+
 精度比較也從同一份`sft/model.pt`與`dataset.json`重新開始，保留原本單頭設定，沒有接在efficiency的四頭模型之後：
 
 ```bash
