@@ -4,6 +4,8 @@ import hashlib
 import json
 import os
 import re
+import shutil
+import subprocess
 import tempfile
 import threading
 import time
@@ -24,6 +26,9 @@ app = modal.App("tiny-perceptron-course-experiments")
 volume = modal.Volume.from_name("tiny-perceptron-course", create_if_missing=True)
 hf_secret = modal.Secret.from_name(os.environ.get("HF_MODAL_SECRET") or "codex_cloud", required_keys=["HF_TOKEN"])
 cpu_image = modal.Image.debian_slim(python_version="3.13").pip_install("huggingface-hub==1.33.0")
+control_image = cpu_image.env({"PYTHONPATH": "/app"}).add_local_dir(
+    ROOT / "scripts", "/app/scripts", ignore=["**/__pycache__/**"]
+)
 
 
 def asset_ignore(path):
@@ -143,7 +148,11 @@ def reserve_budget(ledger, run_id, batch_id, experiment_id, mode, snapshot):
     if any(entry["run_id"] == run_id for entry in entries):
         raise ValueError("這個 run_id 已保留預算；每次嘗試需使用新的 run_id")
     reservation = GPU_RESERVATION_USD if mode == "run" else CPU_RESERVATION_USD
-    guard = compute_reservation_guard(snapshot["rates"]) if mode == "run" else None
+    guard = (
+        compute_reservation_guard(snapshot["rates"])
+        if mode == "run"
+        else cpu_reservation_guard(snapshot["rates"], mode)
+    )
     previous = sum((Decimal(entry["reserved_usd"]) for entry in entries), Decimal("0"))
     if previous + reservation > BUDGET_USD:
         raise RuntimeError(f"本任務累計保留額 {previous} + {reservation} 超過 US${BUDGET_USD}；未啟動 GPU")
@@ -165,6 +174,28 @@ def reserve_budget(ledger, run_id, batch_id, experiment_id, mode, snapshot):
         "reserved_total_usd": str(previous + reservation),
         "this_job_usd": str(reservation),
     }
+
+
+def cpu_reservation_guard(rates, mode):
+    """CPU 執行、核准傳送與公開匯出仍計入 US$10 的同一本帳本。"""
+    keys = ("cpu_hour_cost", "mem_gib_hour_cost")
+    if not all(key in rates for key in keys):
+        raise ValueError("CPU 用量檢查需要已確認的每小時 API 單價")
+    cpu, memory = (Decimal(rates[key]) for key in keys)
+    if any(not value.is_finite() or value < 0 for value in (cpu, memory)):
+        raise ValueError("CPU/記憶體單價必須為有限非負值")
+    # 全部包含最長 timeout + 2 秒 idle；先驗證／最後帳本各一次。
+    cost = Decimal(182) * (cpu / 4 + memory / 2) + Decimal(62) * (cpu / 4 + memory / 2)
+    if mode == "run-cpu":
+        cost += Decimal(602) * (2 * cpu + 8 * memory) + Decimal(602) * (cpu / 4 + memory)
+    elif mode == "release":
+        cost += Decimal(602) * (cpu / 4 + memory) + Decimal(602) * (cpu + 4 * memory)
+    elif mode != "preflight":
+        raise ValueError("未知 CPU 工作 mode")
+    cost /= Decimal(3600)
+    if cost > CPU_RESERVATION_USD:
+        raise RuntimeError("CPU 工作保守估算超過 US$0.04 保留額；未啟動工作")
+    return {"compute_upper_bound_usd": str(cost), "reserved_usd": str(CPU_RESERVATION_USD), "gpu_used": False}
 
 
 @app.function(
@@ -211,18 +242,7 @@ def preflight(checkpoint_repo, release_repo, run_id, batch_id, experiment_id, mo
     }
 
 
-@app.function(
-    image=gpu_image,
-    gpu="L4",
-    cpu=(2, 2),
-    memory=(8192, 8192),
-    volumes={"/course": volume},
-    timeout=600,
-    retries=0,
-    max_containers=1,
-    scaledown_window=2,
-)
-def train(experiment_id, batch_id, run_id, revision):
+def run_reserved(experiment_id, batch_id, run_id, revision, device, reservation_mode):
     from scripts.course_experiments.run import execute
 
     volume.reload()
@@ -232,7 +252,7 @@ def train(experiment_id, batch_id, run_id, revision):
             entry
             for entry in ledger["reservations"]
             if entry["run_id"] == run_id
-            and entry["mode"] == "run"
+            and entry["mode"] == reservation_mode
             and entry["batch_id"] == batch_id
             and entry["experiment_id"] == experiment_id
             and entry["status"] == "reserved"
@@ -240,12 +260,12 @@ def train(experiment_id, batch_id, run_id, revision):
         None,
     )
     if reservation is None:
-        raise RuntimeError("GPU 工作必須先完成本任務預算保留")
+        raise RuntimeError("工作必須先完成相符的本任務預算保留")
     reservation["status"] = "running"
     write_json(VOLUME_ROOT / "budget.json", ledger)
     directory = VOLUME_ROOT / batch_id / experiment_id
     directory.mkdir(parents=True, exist_ok=True)
-    for stale in ("result.json", "failure.json", "approved-public-exports.json"):
+    for stale in ("result.json", "result-attestation.json", "failure.json", "approved-public-exports.json"):
         (directory / stale).unlink(missing_ok=True)
     write_json(directory / "current-run.json", {"run_id": run_id, "revision": revision})
     volume.commit()
@@ -266,7 +286,7 @@ def train(experiment_id, batch_id, run_id, revision):
     try:
         result = execute(
             experiment_id,
-            device="cuda",
+            device=device,
             output=directory,
             dependencies=VOLUME_ROOT / batch_id,
             assets=Path("/app/assets/training"),
@@ -281,6 +301,16 @@ def train(experiment_id, batch_id, run_id, revision):
             "periodic_volume_commit_errors": commit_errors,
         }
         write_json(directory / "result.json", result)
+        write_json(
+            directory / "result-attestation.json",
+            {
+                "run_id": run_id,
+                "revision": revision,
+                "result_sha256": sha256(directory / "result.json"),
+                "device": device,
+                "proof": "authenticated Modal execution plus immutable private HF backup; SHA-256 is not a digital signature",
+            },
+        )
         return json.dumps(result, ensure_ascii=False, allow_nan=False)
     except Exception as error:
         write_json(
@@ -298,6 +328,37 @@ def train(experiment_id, batch_id, run_id, revision):
         finished.set()
         persistence.join(timeout=5)
         volume.commit()
+
+
+@app.function(
+    image=gpu_image,
+    gpu="L4",
+    cpu=(2, 2),
+    memory=(8192, 8192),
+    volumes={"/course": volume},
+    timeout=600,
+    retries=0,
+    max_containers=1,
+    scaledown_window=2,
+)
+def train(experiment_id, batch_id, run_id, revision):
+    return run_reserved(experiment_id, batch_id, run_id, revision, "cuda", "run")
+
+
+@app.function(
+    image=gpu_image,
+    cpu=(2, 2),
+    memory=(8192, 8192),
+    volumes={"/course": volume},
+    timeout=600,
+    retries=0,
+    max_containers=1,
+    scaledown_window=2,
+)
+def train_cpu(experiment_id, batch_id, run_id, revision):
+    if experiment_id != "simple_models":
+        raise ValueError("run-cpu 目前只開放已規劃的 simple_models")
+    return run_reserved(experiment_id, batch_id, run_id, revision, "cpu", "run-cpu")
 
 
 @app.function(
@@ -430,22 +491,104 @@ def approved_files(directory, approval, result):
 
 
 def inference_payload(saved, provenance):
-    """只保留推論需要的欄位，不複製 optimizer、RNG、教師或未知資料欄位。"""
-    allowed = (
-        "format_version",
-        "config",
-        "model",
-        "modal_config",
-        "tokenizer",
-        "bits",
-        "task",
-        "encoder",
-    )
-    clean = {key: saved[key] for key in allowed if key in saved}
-    if "model" not in clean and "encoder" not in clean:
-        raise ValueError("不是支援的推論 checkpoint，請另寫明確匯出器")
-    clean["metadata"] = provenance
-    return clean
+    from scripts.course_release import inference_payload as export_payload
+
+    return export_payload(saved, provenance)
+
+
+@app.function(
+    image=control_image,
+    cpu=(0.25, 0.25),
+    memory=(1024, 1024),
+    secrets=[hf_secret],
+    volumes={"/course": volume},
+    timeout=600,
+    retries=0,
+    max_containers=1,
+    scaledown_window=2,
+)
+def stage_approval(checkpoint_repo, experiment_id, batch_id, approval_text, approval_hash, approval_git_revision):
+    from huggingface_hub import HfApi, hf_hub_download
+
+    from scripts.course_release import validate_approval
+
+    if hashlib.sha256(approval_text.encode()).hexdigest() != approval_hash:
+        raise ValueError("Actions 傳送的審閱清單 SHA-256 不相符")
+    if not re.fullmatch(r"[0-9a-f]{40}", approval_git_revision):
+        raise ValueError("需要已提交的審閱程式版本")
+    approval = json.loads(approval_text)
+    source = validate_approval(approval, experiment_id, batch_id, checkpoint_repo)
+    volume.reload()
+    stage = VOLUME_ROOT / batch_id / experiment_id / "release-source" / approval_hash
+    api = HfApi(token=os.environ["HF_TOKEN"])
+    with tempfile.TemporaryDirectory(prefix="approved-private-") as temporary:
+        downloaded = hf_hub_download(
+            repo_id=checkpoint_repo,
+            token=os.environ["HF_TOKEN"],
+            filename=f"{source['prefix']}/result.json",
+            revision=source["revision"],
+            local_dir=temporary,
+        )
+        result = json.loads(Path(downloaded).read_text())
+        if (
+            result.get("status") != "completed"
+            or result.get("evidence_status") != "complete_run"
+            or result.get("experiment_id") != experiment_id
+            or result.get("revision") != approval["revision"]
+        ):
+            raise ValueError("固定 HF result 與已完成的審閱訓練不相符")
+        artifacts = {item["path"]: item for item in result["artifacts"]}
+        stage.mkdir(parents=True, exist_ok=True)
+        for item in approval["files"]:
+            if artifacts.get(item["path"], {}).get("sha256") != item["sha256"]:
+                raise ValueError(f"核准 SHA 與私有訓練 result 不相符：{item['path']}")
+            file = hf_hub_download(
+                repo_id=checkpoint_repo,
+                token=os.environ["HF_TOKEN"],
+                filename=f"{source['prefix']}/{item['path']}",
+                revision=source["revision"],
+                local_dir=temporary,
+            )
+            if sha256(file) != item["sha256"]:
+                raise ValueError(f"核准檔案與 HF 固定版本不相符：{item['path']}")
+            target = stage / item["path"]
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(file, target)
+            base = item.get("base_checkpoint")
+            if base:
+                if api.repo_info(base["repo"], repo_type="model").private:
+                    raise ValueError("公開 adapter 的 base_checkpoint 也必須公開")
+                base_file = hf_hub_download(
+                    repo_id=base["repo"],
+                    token=False,
+                    filename=base["filename"],
+                    revision=base["revision"],
+                    local_dir=temporary,
+                )
+                if sha256(base_file) != base["sha256"]:
+                    raise ValueError("adapter 的公開基模 SHA-256 不相符")
+                staged_base = stage / ".verified-bases" / f"{base['sha256']}.pt"
+                staged_base.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(base_file, staged_base)
+        approved_files(stage, approval, result)
+        write_json(stage / "result.json", result)
+        (stage / "approved-public-exports.json").write_text(approval_text, encoding="utf-8")
+        write_json(
+            stage / "approval-attestation.json",
+            {
+                "approval_sha256": approval_hash,
+                "approval_git_revision": approval_git_revision,
+                "source_result_sha256": sha256(downloaded),
+                "private_source": source,
+            },
+        )
+    volume.commit()
+    return {
+        "approval_sha256": approval_hash,
+        "approval_git_revision": approval_git_revision,
+        "private_source": source,
+        "files_verified": len(approval["files"]),
+    }
 
 
 @app.function(
@@ -459,86 +602,114 @@ def inference_payload(saved, provenance):
     max_containers=1,
     scaledown_window=2,
 )
-def release(checkpoint_repo, release_repo, experiment_id, batch_id, run_id, approval_revision):
-    import shutil
-
-    import torch
+def release(checkpoint_repo, release_repo, experiment_id, batch_id, run_id, approval_hash):
     from huggingface_hub import HfApi, hf_hub_download
 
+    from scripts.course_release import build_export, validate_approval, write_model_card
+
     volume.reload()
-    directory = VOLUME_ROOT / batch_id / experiment_id
+    directory = VOLUME_ROOT / batch_id / experiment_id / "release-source" / approval_hash
     result = json.loads((directory / "result.json").read_text())
     if result.get("status") != "completed":
         raise ValueError("未完成的實驗不能發布")
     approval_path = directory / "approved-public-exports.json"
-    if approval_revision:
-        approval_path = Path(
-            hf_hub_download(
-                repo_id=checkpoint_repo,
-                token=os.environ["HF_TOKEN"],
-                filename=f"course/{batch_id}/{experiment_id}/approved-public-exports.json",
-                revision=approval_revision,
-            )
-        )
     if not approval_path.is_file():
         raise ValueError("尚未審閱：缺少 approved-public-exports.json；保留私有，不重訓")
     approval = json.loads(approval_path.read_text())
-    files = approved_files(directory, approval, result)
+    if sha256(approval_path) != approval_hash:
+        raise ValueError("Volume 的核准清單已被變更")
+    validate_approval(approval, experiment_id, batch_id, checkpoint_repo)
+    approved_files(directory, approval, result)
+    attestation = json.loads((directory / "approval-attestation.json").read_text())
     provenance = {
         "revision": result["revision"],
         "experiment_id": experiment_id,
         "batch_id": batch_id,
-        "source_hf": result.get("hf", {}),
-        "scope": "small educational model; use accompanying evaluation",
+        "approval_git_revision": attestation["approval_git_revision"],
+        "approval_sha256": approval_hash,
+        "scope": approval["model_card"]["scope"],
     }
+    prefix = f"course/{batch_id}/{experiment_id}"
+    api = HfApi(token=os.environ["HF_TOKEN"])
     with tempfile.TemporaryDirectory(prefix="course-public-") as temporary:
         export = Path(temporary)
-        manifest = []
-        for item in files:
-            source, destination = directory / item["path"], export / item["path"]
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            if item.get("kind") == "checkpoint":
-                torch.save(
-                    inference_payload(torch.load(source, map_location="cpu", weights_only=True), provenance),
-                    destination,
-                )
-            elif item.get("kind") in ("metadata", "dataset", "license"):
-                shutil.copyfile(source, destination)
-            else:
-                raise ValueError("每個公開檔案需指定 checkpoint/metadata/dataset/license 類型")
-            manifest.append(
-                {
-                    **item,
-                    "source_sha256": item["sha256"],
-                    "sha256": sha256(destination),
-                    "bytes": destination.stat().st_size,
-                }
-            )
-        write_json(export / "export-manifest.json", {"files": manifest, "provenance": provenance})
-        (export / "README.md").write_text(
-            "# Tiny Perceptron 教學實驗\n\n"
-            f"實驗：`{experiment_id}`；程式版本：`{result['revision']}`。\n\n"
-            "此目錄僅包含經審閱的教學推論檔，授權逐檔列於 export-manifest.json。"
-            "量測範圍與評估限制請搭配教學閱讀；小型合成任務的結果不代表一般語言或多模態能力。\n",
-            encoding="utf-8",
-        )
-        commit = HfApi(token=os.environ["HF_TOKEN"]).upload_folder(
+        build_export(directory, export, approval, provenance)
+        write_model_card(export / "README.md", approval, release_repo, prefix)
+        weights_commit = api.upload_folder(
             repo_id=release_repo,
             folder_path=temporary,
-            path_in_repo=f"course/{batch_id}/{experiment_id}",
-            commit_message=f"Publish reviewed course inference files: {run_id}",
+            path_in_repo=prefix,
+            commit_message=f"Publish reviewed inference files: {run_id}",
         )
-    return json.dumps(
-        {
+        weight_files = [
+            {
+                "path": f"{prefix}/{path.relative_to(export).as_posix()}",
+                "output": path.relative_to(export).as_posix(),
+                "sha256": sha256(path),
+                "bytes": path.stat().st_size,
+            }
+            for path in sorted(export.rglob("*"))
+            if path.is_file() and path.name != "README.md"
+        ]
+        write_json(
+            export / "download-manifest.json",
+            {
+                "schema_version": 1,
+                "id": experiment_id,
+                "repo": release_repo,
+                "revision": weights_commit.oid,
+                "files": weight_files,
+                "inference": approval.get("inference", {}),
+            },
+        )
+        write_model_card(export / "README.md", approval, release_repo, prefix, weights_commit.oid)
+        final_commit = api.upload_folder(
+            repo_id=release_repo,
+            folder_path=temporary,
+            path_in_repo=prefix,
+            allow_patterns=["README.md", "download-manifest.json"],
+            commit_message=f"Pin model card and download hashes: {run_id}",
+        )
+        files = [
+            {
+                "path": f"{prefix}/{path.relative_to(export).as_posix()}",
+                "output": path.relative_to(export).as_posix(),
+                "sha256": sha256(path),
+                "bytes": path.stat().st_size,
+            }
+            for path in sorted(export.rglob("*"))
+            if path.is_file()
+        ]
+        public_manifest = {
+            "id": experiment_id,
+            "repo": release_repo,
+            "revision": final_commit.oid,
+            "files": files,
+            "inference": approval.get("inference", {}),
+        }
+        with tempfile.TemporaryDirectory(prefix="public-download-") as download:
+            for item in files:
+                file = hf_hub_download(
+                    repo_id=release_repo,
+                    token=False,
+                    filename=item["path"],
+                    revision=final_commit.oid,
+                    local_dir=download,
+                )
+                if sha256(file) != item["sha256"]:
+                    raise RuntimeError(f"學生匿名下載的公開檔案 SHA 不一致：{item['output']}")
+        response = {
             "experiment_id": experiment_id,
             "repo": release_repo,
-            "revision": commit.oid,
-            "files": manifest,
+            "revision": final_commit.oid,
+            "weights_revision": weights_commit.oid,
+            "public_manifest": public_manifest,
+            "anonymous_download_verified": True,
             "gpu_used": False,
-        },
-        ensure_ascii=False,
-        allow_nan=False,
-    )
+        }
+        write_json(VOLUME_ROOT / batch_id / experiment_id / "public-release.json", response)
+        volume.commit()
+    return json.dumps(response, ensure_ascii=False, allow_nan=False)
 
 
 @app.function(
@@ -574,33 +745,62 @@ def main(
     revision: str,
     batch_id: str = "course-v1",
     mode: str = "run",
-    approval_revision: str = "",
+    approval_file: str = "",
 ):
     for value in (experiment_id, batch_id, run_id):
         safe_name(value)
     if experiment_id == "preflight":
         mode = "preflight"
-    if mode not in ("preflight", "run", "release"):
-        raise ValueError("mode 必須是 preflight/run/release")
+    if mode not in ("preflight", "run", "run-cpu", "release"):
+        raise ValueError("mode 必須是 preflight/run/run-cpu/release")
+    if mode == "run-cpu" and experiment_id != "simple_models":
+        raise ValueError("run-cpu 只供 simple_models 使用")
     for repo in (checkpoint_repo, release_repo):
         if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo):
             raise ValueError("HF repo 必須是 owner/name")
+    approval_text, approval_hash = "", ""
+    if mode == "release":
+        from scripts.course_release import validate_approval
+
+        relative = Path(approval_file or f"docs/course-experiments/releases/{experiment_id}.json")
+        if (
+            relative.is_absolute()
+            or ".." in relative.parts
+            or not relative.as_posix().startswith("docs/course-experiments/releases/")
+        ):
+            raise ValueError("審閱清單必須在 repo 的 docs/course-experiments/releases/ 下")
+        if not re.fullmatch(r"[0-9a-f]{40}", revision):
+            raise ValueError("公開審閱需要完整的 checkout 程式 revision")
+        committed = subprocess.run(
+            ["git", "show", f"{revision}:{relative.as_posix()}"], cwd=ROOT, check=True, capture_output=True
+        ).stdout
+        if (ROOT / relative).read_bytes() != committed:
+            raise ValueError("審閱清單必須與指定 git commit 完全相同，不能發布未提交的修改")
+        approval_text = committed.decode("utf-8")
+        validate_approval(json.loads(approval_text), experiment_id, batch_id, checkpoint_repo)
+        approval_hash = hashlib.sha256(committed).hexdigest()
     output = ROOT / "outputs/modal-course"
     before = billing_snapshot()
     write_json(output / "billing-before.json", before)
     access = preflight.remote(checkpoint_repo, release_repo, run_id, batch_id, experiment_id, mode, revision, before)
     result, error = {"experiment_id": experiment_id, "mode": mode, "preflight": access}, None
     try:
-        if mode == "run":
+        if mode in ("run", "run-cpu"):
             try:
-                train.remote(experiment_id, batch_id, run_id, revision)
+                runner = train_cpu if mode == "run-cpu" else train
+                runner.remote(experiment_id, batch_id, run_id, revision)
             finally:
                 result = json.loads(backup.remote(checkpoint_repo, experiment_id, batch_id, run_id, revision))
                 result["preflight"] = access
         elif mode == "release":
-            result["release"] = json.loads(
-                release.remote(checkpoint_repo, release_repo, experiment_id, batch_id, run_id, approval_revision)
+            result["approval"] = stage_approval.remote(
+                checkpoint_repo, experiment_id, batch_id, approval_text, approval_hash, revision
             )
+            result["release"] = json.loads(
+                release.remote(checkpoint_repo, release_repo, experiment_id, batch_id, run_id, approval_hash)
+            )
+            write_json(output / "public-manifest.json", result["release"]["public_manifest"])
+            write_json(output / "release.json", result["release"])
     except Exception as failure:
         error = failure
         result.update(status="failed", exception_type=type(failure).__name__, message=str(failure))
