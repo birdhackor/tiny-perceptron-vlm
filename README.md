@@ -56,7 +56,7 @@ python scripts/train.py --task text --data data/generated/toy-text/train.jsonl
 
 已設定 Modal 與 Hugging Face 帳號時，可手動執行 GitHub Actions 的 **GPU training smoke test**，驗證 GPU 權重更新、HF checkpoint 上傳與下載續訓。帳號設定、時間限制與結果判讀見 [GPU 操作說明](docs/gpu-training.md)。
 
-想先觀察訓練後的模型，可下載[公開學生權重](https://huggingface.co/birdhackor/tiny-perceptron-course-models)。[下載清單](docs/course-experiments/public-models.json)只列已發布的固定版本，下載程式逐檔核對指紋；模型卡說明每份權重的用途、資料許可與實際成績。例如在上面已安裝的 CPU 環境中：
+想先觀察訓練後的模型，可下載[公開學生權重](https://huggingface.co/birdhackor/tiny-perceptron-course-models)：30組實驗共120份存檔，包含不同尺寸與教師／學生等比較版本。[下載清單](docs/course-experiments/public-models.json)只列已發布的固定版本，下載程式逐檔核對指紋；模型卡說明每份權重的用途、資料許可與實際成績。例如在上面已安裝的 CPU 環境中：
 
 ```bash
 python scripts/fetch_course_models.py --list

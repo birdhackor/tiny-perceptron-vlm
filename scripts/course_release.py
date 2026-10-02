@@ -130,6 +130,8 @@ def validate_approval(approval, experiment_id, batch_id, checkpoint_repo):
             raise ValueError("PKU 衍生檔案依本項目政策保持私有")
         if item.get("kind") not in ("checkpoint", "metadata", "dataset", "license"):
             raise ValueError("未知公開檔案 kind")
+        if "task" in item and (item["kind"] != "checkpoint" or item["task"] not in ("vision", "audio", "joint")):
+            raise ValueError("核准的多模態 task 必須是 vision/audio/joint")
         if path.suffix in (".pt", ".pth", ".ckpt", ".safetensors") and item["kind"] != "checkpoint":
             raise ValueError("權重必須經 checkpoint 推論匯出器")
         if item.get("base_checkpoint"):
@@ -142,6 +144,24 @@ def validate_approval(approval, experiment_id, batch_id, checkpoint_repo):
         if any(name not in names for name in companions):
             raise ValueError("必要 companion/tokenizer 必須一起列入審閱清單")
     return source
+
+
+def multimodal_task(saved, specification=None):
+    """明示的用途必須一致；舊教師的巢狀來源只能佐證，不能自動猜用途。"""
+    specification = specification or {}
+    metadata = saved.get("metadata", {})
+    roles = [saved.get("task"), metadata.get("task"), specification.get("task")]
+    if not any(role is not None for role in roles):
+        raise ValueError("多模態推論 checkpoint 缺少明確 task；需核對來源並在核准清單宣告")
+    original_metadata = metadata.get("metadata", {})
+    if isinstance(original_metadata, dict):
+        roles.append(original_metadata.get("task"))
+    declared = [role for role in roles if role is not None]
+    if any(role not in ("vision", "audio", "joint") for role in declared):
+        raise ValueError("多模態 task 必須是 vision/audio/joint")
+    if len(set(declared)) != 1:
+        raise ValueError("多模態 task 與原始來源／核准清單互相矛盾")
+    return declared[0]
 
 
 def inference_payload(saved, provenance, specification=None, companion_hashes=None):
@@ -172,6 +192,8 @@ def inference_payload(saved, provenance, specification=None, companion_hashes=No
         raise ValueError("未知 checkpoint 格式；需明確 architecture 或另行匯出 companion，不能猜測")
     clean = {key: saved[key] for key in fields if key in saved}
     clean["format_version"] = version
+    if version == "multimodal-v1":
+        clean["task"] = multimodal_task(saved, specification)
     if "tokenizer" in clean:
         allowed = ("type", "vocab_size", "sha256", "tokenizer_sha256", "specials", "special_ids", "special_token_ids")
         clean["tokenizer"] = {key: value for key, value in clean["tokenizer"].items() if key in allowed}
@@ -200,13 +222,15 @@ def inference_payload(saved, provenance, specification=None, companion_hashes=No
         "task",
         "scope",
     )
-    metadata = {key: original[key] for key in keys if key in original}
+    metadata = {key: original[key] for key in keys if key in original and (key != "task" or original[key] is not None)}
     if "tokenizer" in metadata and not isinstance(metadata["tokenizer"], str):
         raise ValueError("metadata tokenizer 只接受可核驗的類型名稱")
     for key in ("adapter", "scaling", "experiment", "task", "scope"):
         if key in metadata and not isinstance(metadata[key], str):
             raise ValueError("模型用途及 adapter metadata 只接受文字，不能包含未知資料")
     metadata.update(provenance)
+    if version == "multimodal-v1":
+        metadata["task"] = clean["task"]
     tokenizer_file = specification.get("tokenizer_file")
     if tokenizer_file:
         expected = companion_hashes[tokenizer_file]
@@ -238,6 +262,8 @@ def validate_export(path):
 
     saved = torch.load(path, map_location="cpu", weights_only=True)
     version = saved["format_version"]
+    if version == "multimodal-v1":
+        multimodal_task(saved)
     if version in (1, "quantized-v1", "multimodal-v1"):
         load_checkpoint(path)
     elif version == "simple-v1":

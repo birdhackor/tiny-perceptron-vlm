@@ -190,6 +190,8 @@ print(text)
 
 也可以先拿課程已訓練好的模型來試，不必先等一次訓練跑完。權重檔保存的是模型學到的數字；要用相同的模型結構與字表載入，才能把它變成可做預測的程式。接字表的存檔交給 `infer_simple.py`，Transformer 的存檔交給 `infer.py`；兩種檔案不能因為都叫 `.pt` 就互換。
 
+[公開模型首頁](https://huggingface.co/birdhackor/tiny-perceptron-course-models)提供30組實驗的120份存檔。同一組可能包含不同尺寸、教師與學生或多個比較版本；每組模型卡會說明任務、成績、授權及使用方式。先挑眼前章節需要的一組，依卡片準備匹配的字表、輸入與推論程式即可。下面的`--list`能列出目前已公開的組別；完整固定版本與檔案指紋也可查[下載清單](../docs/course-experiments/public-models.json)。
+
 下面先用已公開的文字 Transformer `text_foundation`。先列出可下載的實驗，再只取這一組：
 
 ```bash
@@ -496,6 +498,17 @@ python scripts/infer.py checkpoints/safety.pt --chat --prompt "盒子15；請提
 
 `outputs/course-experiments/course-v1/lora/`保存`adapter-concise.pt`、`adapter-vivid.pt`、兩份`merged-*.pt`以及完整更新對照`full-sft.pt`。adapter保存基模數字指紋、層名、rank、alpha與alpha/rank公式，`--adapter`會先核對是否真為訓練時的同一份原始浮點基模；形狀相同仍可能被拒絕。換短答版時重新載入相同基模，將參數改為`adapter-concise.pt`。若直接用`merged-vivid.pt`作checkpoint，就省略`--adapter`，因為修正已合進權重，再加一次會改變模型。[公開完整報告](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/course-experiments/results/lora.json)保留所有生成與切換、合併誤差；這兩項數值一致性檢查不能替代新題的內容與風格評估。
 
+若先試公開版本，可依[T.3](#T.3)的下載方法分別取得`style`和`lora`，再在CPU比較同一題：
+
+```bash
+.venv/bin/python scripts/fetch_course_models.py --model style
+.venv/bin/python scripts/fetch_course_models.py --model lora
+.venv/bin/python scripts/infer.py checkpoints/course/style/content.pt --adapter checkpoints/course/lora/adapter-concise.pt --chat --prompt "2+2=?" --tokens 96 --device cpu --json
+.venv/bin/python scripts/infer.py checkpoints/course/style/content.pt --adapter checkpoints/course/lora/adapter-vivid.pt --chat --prompt "2+2=?" --tokens 96 --device cpu --json
+```
+
+這兩條推論已用實際公開檔在CPU執行，兩次基模指紋都通過。短答版輸出`3`，生動版輸出`3，像把兩組積木合在一起再數。`；都產生EOS、沒有非法控制標記，但兩者都把4答成3。你可以直接看見風格變化，也看見內容仍錯。這是一題的操作例子，不替代上面的七題留出成績。[CPU使用紀錄](../docs/course-experiments/student-checks/media-and-raw-adapter-cli.json)保存固定HF版本、底座與adapter指紋、指令及原始輸出。
+
 練習在風格驗證資料挑一題，分別寫正確短答與正確生動答，兩份都加同一格式限制。例如用`0+5`並手動指定JSON必須有`answer`與`explanation`兩欄：短答為`{"answer":5,"explanation":"5"}`，生動答為`{"answer":5,"explanation":"5，像把空盒與裝五塊積木的盒子合起來，共有五塊。"}`。這個雙欄格式是本練習另加的限制，產生器的原JSON示範只含`answer`，不要把兩者混作同一目標。先分三欄判斷：兩份答案都為5，兩份都符合指定JSON欄位，只有後者用比喻；再看比喻是否貼切。因此想教的改變是增加有用比喻，同時保住答案與格式，而不是只讓回答變長。
 
 ## T.6 讓圖片與聲音先有可用的基礎特徵
@@ -539,6 +552,8 @@ python scripts/infer.py checkpoints/safety.pt --chat --prompt "盒子15；請提
 真實資料實跑另保存`fashion-mnist.pt`與`fsdd.pt`，各從直接SFT底座接新編碼器，全開250次；前者30張教學圖、後者jackson的20段教學錄音，每次四筆。它們不是上面預訓練合成編碼器、凍結接頭500步的CLI配方。服飾只在驗證4/10、測試3/10，真人數字驗證5/20、測試3/20；有效回答目標各7,528與2,000，總參數145,664與148,736，後者多了較長錄音所需的位置表。參數較多與訓練探針代價很低，都沒有保證新題答對。
 
 這條真實資料路徑把服飾28×28灰階轉RGB並縮至16×16、除255；音訊則先將原8kHz PCM16真正重採樣成16kHz FLOAT，再按16kHz算log-mel。沒有另做每張圖的平均／標準差像素歸一化，也沒有每段錄音的峰值／平均能量歸一化；特徵內的LayerNorm是模型中的另一層處理，不能拿它代替輸入說明。原圖或原聲音變得更複雜時，這套小尺度入口可能已經失去所需線索，[10.5](chapters/10.md#10.5)與[12.8](chapters/12.md#12.8)保留了實際錯例。
+
+你也可以先下載[T.3](#T.3)的公開`ocr`與`real_modal`權重，依模型卡的`--image`、`--audio`範例檢查自己的CPU入口。我們實際用數字圖片得到`42`、用第一張服飾測試圖得到`Ankle boot`；第一段數字0的測試錄音卻答成`8`。後者直接讀原8kHz檔並加`--resample-audio`，有正常結束，但答案仍然錯。這三個單次輸出只確認檔案能走過圖片／聲音讀取與回答流程，不能取代整份測試集的答對率；輸入指紋、命令與原始回答見[操作紀錄](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/course-experiments/student-checks/media-and-raw-adapter-cli.json)。
 
 正式checkpoint與中間更新檔已備份到私有HF固定版本，並逐份下載核對SHA-256。這表示保存的內容與來源指紋一致，不表示所有檔案都具備同一種續訓功能，也不把失敗回答變成成功。實跑報告中的完整實驗時間包含訓練、評估與本機保存，沒有包含Actions啟動、映像建立與HF上傳；訓練小迴圈時間又另有自己的範圍。它們不是讀者電腦的速度或價格保證。
 
@@ -834,5 +849,7 @@ GSM8K另外先掃200道完整原題，只兩道能連同真實chat前文及預�
 同份報告另記兩支有限策略的真REINFORCE，每支1,200次更新、76,800個訓練動作，新題則各有24次最高機率選擇與384個抽樣動作。嚴格支線新題0/24、0/384；弱支線靠列舉取得384/384代理分，嚴格正確仍0/384。自然資料支線則另建小語言模型，拿200筆GSM8K人類訓練答案做150次更新，保存完整原始記錄、分側、片段位置與人類解答前綴續寫。它們既不是教師生成，也沒有形成GSM8K解題成績。這些支線的單位、保存格式與限制要各自看，不能把有限策略的零自回歸token解讀成沒有訓練。
 
 三項應用都使用程式版本`910aebc6419c9fc6217279a27fde9851c5cfad30`，正式排程完整、沒有縮步或重試；各有獨立資料指紋及全checkpoint固定HF版本下載核對紀錄。Reasoning共有18份保存檔，整項L4實驗45.71秒。整個資料夾備份保留了當次檔案，但是否能精確續訓仍須逐格式檢查；例如有限策略的保存檔沒有另外保存閉包中的移動baseline與抽題器狀態。重做入口與各支保存檔的區別見[C.1](chapters/0C.md#C.1)、[C.7](chapters/0C.md#C.7)。
+
+公開之後，我們也實際下載三項應用的固定版本，在CPU走完一次檢索後回答、一次受限計算工具對話，以及一次算式步驟生成與外部檢查。工具模型確實提出一次合法計算請求，外層程式執行並回填結果，再收到正確最終回答；這和只印出一段像工具請求的文字不同。完整命令、請求與回填紀錄見[公開模型操作檢查](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/course-experiments/student-checks/application-workflows.json)。這些是單次操作檢查，不增加上面正式留出題的答對分子或分母。
 
 練習先不用訓練：假設4-bit檔案是60,000 bytes，卻只答對3/5，其他條件照表。依原判準寫下結論，再核對：它少了20,000 bytes，但答對比例差是`0.6-0.8=-0.2`，只支持保存變小，沒有支持保住答對數。開始真正實驗時，先填共同附件與判準，結果欄等量過才填；失敗結果也按原規則保留。

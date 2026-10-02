@@ -139,6 +139,40 @@ def test_multimodal_export_preserves_actual_patch8_configuration(tmp_path):
     assert torch.equal(model.vision(image), loaded.vision(image))
 
 
+@pytest.mark.parametrize("task", ["vision", "joint"])
+def test_teacher_copy_needs_reviewed_task_and_keeps_identical_weights(tmp_path, task):
+    model = MultiModalLM(TinyLM(ModelConfig(width=8)), vision_width=12, audio_width=10)
+    # 37061785026 的教師副本把來源 metadata 包了一層，save_checkpoint 因而保存 task=None。
+    save_checkpoint(tmp_path / "teacher.pt", model, metadata={"metadata": {"task": task}, "samples": ["PRIVATE"]})
+    source = torch.load(tmp_path / "teacher.pt", weights_only=True)
+    assert source["task"] is None
+    with pytest.raises(ValueError, match="缺少明確 task"):
+        validate_export(tmp_path / "teacher.pt")
+    with pytest.raises(ValueError, match="缺少明確 task"):
+        build_export(tmp_path, tmp_path / "incomplete", approval(tmp_path, ["teacher.pt"]), {})
+    build_export(tmp_path, tmp_path / "public", approval(tmp_path, ["teacher.pt"], task=task), {})
+    loaded, clean = load_checkpoint(tmp_path / "public/teacher.pt")
+    assert clean["task"] == clean["metadata"]["task"] == task
+    assert "metadata" not in clean["metadata"] and "samples" not in clean["metadata"]
+    assert all(torch.equal(value, loaded.state_dict()[name]) for name, value in model.state_dict().items())
+    assert validate_export(tmp_path / "public/teacher.pt") == "multimodal-v1"
+
+
+@pytest.mark.parametrize("location", ["task", "metadata", "original_metadata"])
+def test_multimodal_export_rejects_task_conflicts_and_invalid_roles(location):
+    saved = {"format_version": "multimodal-v1", "task": None, "metadata": {}}
+    if location == "task":
+        saved["task"] = "audio"
+    elif location == "metadata":
+        saved["metadata"]["task"] = "audio"
+    else:
+        saved["metadata"]["metadata"] = {"task": "audio"}
+    with pytest.raises(ValueError, match="互相矛盾"):
+        inference_payload(saved, {}, {"task": "vision"})
+    with pytest.raises(ValueError, match="vision/audio/joint"):
+        inference_payload(saved, {}, {"task": "vqa"})
+
+
 def bpe_file(path):
     tokenizer = Tokenizer(models.BPE())
     tokenizer.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
