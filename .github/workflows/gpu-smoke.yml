@@ -1,0 +1,68 @@
+name: GPU training smoke test
+
+# 只有明確呼叫時才使用 GPU；一般 push 與教材發布不會觸發。
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: modal-gpu-smoke
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+      MODAL_ENVIRONMENT: ${{ vars.MODAL_ENVIRONMENT || 'main' }}
+      HF_CHECKPOINT_REPO: ${{ vars.HF_CHECKPOINT_REPO }}
+      HF_RELEASE_REPO: ${{ vars.HF_RELEASE_REPO }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check required settings without revealing credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          missing=0
+          for name in MODAL_TOKEN_ID MODAL_TOKEN_SECRET HF_CHECKPOINT_REPO HF_RELEASE_REPO; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Missing repository secret or variable: $name"
+              missing=1
+            fi
+          done
+          exit "$missing"
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - name: Install only the Modal client
+        run: python -m pip install modal==1.6.0
+      - name: Train on Modal L4 and verify Hugging Face checkpoints
+        run: |
+          modal run scripts/modal_smoke.py \
+            --checkpoint-repo "$HF_CHECKPOINT_REPO" \
+            --release-repo "$HF_RELEASE_REPO" \
+            --run-id "gha-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --revision "$GITHUB_SHA"
+      - name: Save test evidence
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: modal-gpu-smoke-result
+          path: outputs/modal-smoke/result.json
+          if-no-files-found: ignore
+      - name: Show test result
+        run: |
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          result = json.loads(Path('outputs/modal-smoke/result.json').read_text())
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+              summary.write('## Modal GPU training verification\n\n')
+              summary.write(f"GPU: {result['gpu']}\n\n")
+              summary.write(f"Train loss: {result['loss_before']['train']:.4f} → {result['loss_after']['train']:.4f}\n\n")
+              summary.write('```json\n' + json.dumps(result, ensure_ascii=False, indent=2) + '\n```\n')
+          PY
