@@ -13,11 +13,15 @@
 | GPU 與更新 | CUDA、NVIDIA L4；80 步訓練，權重確實更新，梯度有限且非零 |
 | 訓練 loss | 5.624956 → 0.986167 |
 | 驗證 loss | 5.683379 → 1.317075 |
-| 訓練迴圈 | 1.256 秒；不包含映像建置、GPU 啟動、存檔、傳輸與續訓時間 |
+| 訓練迴圈 | 1.256 秒；包含逐步記錄與第 40／80 步存檔，不包含映像建置、GPU 啟動、HF 傳輸、迴圈結束後存檔與續訓時間 |
 | 中途 checkpoint | 第 40 步，包含 optimizer、Python／PyTorch／CUDA RNG |
 | HF 上傳下載 | 私有 repo 寫入成功；依指定 commit 重新下載，SHA-256 完全一致 |
 | HF 檔案續訓 | 從第 41 步跑到第 80 步，與不中斷訓練的最大權重差為 0 |
 | Modal Volume | 另一個 CPU container 可讀到相同 checkpoint，SHA-256 一致 |
+
+相同 80 步配方在本機 CPU 的單次計時為 0.214 秒；這次 GPU 迴圈花費約 5.87 倍時間。
+模型只有 31,584 個參數、batch size 4，且迴圈包含記錄與存檔；CPU 寫入本機目錄，
+GPU 寫入 Modal Volume。這是兩個環境的一次流程觀測，不能當成純運算效能或正式訓練的速度倍率。
 
 實測原始碼 commit 為 `b75ae446797e138a7ab733ae3c9b02d5ab7fbda4`。
 [成功工作紀錄](https://github.com/birdhackor/tiny-perceptron-vlm/actions/runs/37028829401)、
