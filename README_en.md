@@ -30,7 +30,7 @@ jupyter lab notebooks
 
 On Windows PowerShell, activate with `.venv\Scripts\Activate.ps1`. Select **Tiny Perceptron** and open `notebooks/01/1.1.ipynb`. Use `uv sync --frozen --group notebook` on Apple Silicon, or the matching `cu126`/`cu130` extra on compatible NVIDIA hardware. Driver requirements are in [environment notes](docs/environment.md).
 
-Activate `.venv` and use `python` directly, or pass the same extra to each `uv run`. Local lesson checks use CPU; separate formal training runs use NVIDIA L4 on Modal with PyTorch 2.14.1+cu126. Versions and results are recorded in the [experiment reports](docs/course-experiments/README.md). Apple MPS execution has not been verified on real hardware.
+Activate `.venv` and use `python` directly, or pass the same extra to each `uv run`. Local lesson checks use CPU; separate formal training runs use NVIDIA L4 on Modal with PyTorch 2.14.1+cu126. Versions and results are recorded in the [experiment reports](docs/course-experiments/README.md). The macOS CI verified basic matrix forward/backward operations on Apple MPS and a CPU comparison. The full course and formal model training have not been validated on MPS; see the [CI evidence](docs/validation-artifacts/release-compatibility-ci.json).
 
 Read the online course built with [Zensical](https://zensical.org/): full-text search, chapter navigation, page contents, light/dark modes and code copying. Every lesson retains its notebook download and Colab entry. SVGs can be enlarged, retain static labels and respect reduced-motion preferences. Website builds require the separate `--group site`. See [publishing instructions](docs/publishing.md) for local reading, verified outputs and GitHub Pages deployment. MathJax typesets formulas when online.
 
