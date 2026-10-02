@@ -9,7 +9,7 @@
 3. 想改程式時，按本節「在 Colab 動手做」，登入 Google 並執行全部 cell。小實驗使用 CPU 即可。
 4. 偏好本機 Jupyter，可下載 notebook，依暖身指南準備 repo 與套件。
 
-Colab 第一格使用最新 `main` 的共用程式；網站與 Colab notebook 連結則指向本次發布的 commit。重新跑舊版實驗時，請改成對應 commit 的共用程式。Colab 執行使用其 Python 與 pip 環境；本機與網站 CI 使用 `uv.lock` 的固定 CPU 環境。
+Colab 第一個程式格使用最新 `main` 的共用程式；網站與 Colab notebook 連結則指向本次發布的 commit。重新跑舊版實驗時，請改成對應 commit 的共用程式。Colab 執行使用其 Python 與 pip 環境；本機與網站 CI 使用 `uv.lock` 的固定 CPU 環境。
 
 ## 建置與驗證
 
@@ -17,13 +17,14 @@ Colab 第一格使用最新 `main` 的共用程式；網站與 Colab notebook �
 
 ```bash
 python scripts/build_course.py --check
+python scripts/check_course_reviews.py
 python -m ipykernel install --sys-prefix --name tiny-perceptron --display-name "Tiny Perceptron"
 python scripts/check_notebooks.py --mode kernel --workers 3
 python scripts/export_course.py --executed outputs/notebooks --revision main
 python scripts/check_site.py
 ```
 
-`--executed` 會核對每個 cell 的原始碼、執行次數與錯誤，拒絕舊教材的結果或未執行副本。只要有一節失敗，發布流程就會停止。讀取模式可省略 `--executed`，但不會填入假輸出。
+`--executed` 會核對每個 cell 的原始碼、執行次數與錯誤，拒絕舊教材的結果或未執行副本。讀者審閱也逐節核對來源雜湊；缺少審閱、要求修改或正文已變更而未重審時，發布會停止。只要有一節程式失敗，發布流程也會停止。讀取模式可省略 `--executed`，但不會填入假輸出。
 
 網站產物與已執行 Notebook 留在被 Git 忽略的 `outputs/`；發布時透過 Pages artifact 傳送，不把生成網頁或執行輸出提交到普通 Git。
 

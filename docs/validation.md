@@ -1,6 +1,28 @@
 # 教材實作驗證
 
-驗證日期：2026-10-01。環境為 Linux、Python 3.13.5、PyTorch 2.14.1 CPU。程式、Notebook 與介面已檢查；沒有執行 `--train` 的正式模型訓練，沒有將隨機權重的分數當成能力結果。
+驗證環境為 Linux、Python 3.13.5、PyTorch 2.14.1 CPU。小型數值實驗會執行必要的參數更新；沒有執行 `--train` 的正式模型訓練，也沒有將隨機權重的分數當成能力結果。
+
+## 完整改寫與圖解驗證
+
+2026-10-02：重寫222節正文，以及7節暖身、4節閱讀指南、4節名詞說明與11節訓練操作，共248個讀者小節。前置材料改成可點擊的具體小節；正文用例子說明問題、數字與練習，圖解保留在對應說明的位置。
+
+| 檢查 | 實際結果 |
+| --- | --- |
+| 獨立讀者審閱 | 248份、248位不同任務的獨立AI讀者報告全部通過；目前正文、直接圖解與報告記錄的必要前置SVG皆通過SHA-256核對 |
+| Notebook執行 | 最終222份副本由獨立CPU kernel執行，222通過、0失敗；3個worker，共161.64秒 |
+| 圖解 | 72張自行繪製SVG資產，本次新增32張且全部有正文引用；正文按需引用41張；有圖的小節另核對圖中位置、數字與箭頭 |
+| 手機版 | Chromium以390px寬度檢查最終254頁，無頁面水平溢出、破圖或重複段落ID；實看第一節、暖身、聲音、int4、重疊頻帶與蒸餾溫度圖 |
+| 圖解放大 | 手機可放大並在圖內左右滑動，縮回後恢復全圖；頁面本身維持390px |
+| 桌面與輸出 | 1440px桌面與390px手機均能閱讀實際CPU輸出；搜尋「量化」找到5節 |
+| 網站與下載 | 254頁、222份下載與222個Colab入口、61,230個內部連結、637個Notebook閱讀連結全部核對通過 |
+| 前置跳轉 | 手機實際從1.1點W.2連結，抵達暖身正確標題與段落，再返回原小節 |
+| 格式 | 最終Ruff lint通過，300個Python檔案的format檢查通過，Git空白檢查通過 |
+
+獨立AI讀者只取得分配的小節與正文明確連結的前置，審閱背景、術語、例子、程式解釋及練習；遇到問題會退回作者修正，再由原讀者核對。這是AI審閱紀錄，不是實際學生的使用測試。發布流程會拒絕缺少審閱、要求修訂、正文或圖解已改動的舊報告，也會拒絕未執行、失敗或來源不符的Notebook輸出。
+
+## 初版程式與資料驗證
+
+以下為2026-10-01的初版驗證；本次改寫沒有修改核心模型或CLI。
 
 | 檢查 | 實際結果 |
 | --- | --- |
@@ -10,14 +32,14 @@
 | 核心離線測試 | 32 passed、1 skipped；含4項資料包檢查，略過項目為 CUDA／MPS 裝置測試 |
 | CLI 操作 | 32 條路徑通過，0 失敗；訓練入口均未加 `--train` |
 | JupyterLab 啟動 | 實際 `/lab` 回應200，API包含 tiny-perceptron kernel；測完停止自行啟動的伺服器 |
-| 圖解 | 40 張自製 SVG；抽樣光柵化檢查繁體中文、圖形與位置 |
+| 初版圖解 | 40 張自製 SVG；抽樣光柵化檢查繁體中文、圖形與位置 |
 | 離線閱讀版 | 222 節網頁與操作文件匯出成功，可核對內部連結與圖檔 |
 | 規則資料 | 5 種 JSONL 的原始 SHA-256 與家族切分核對；另有100種字串家族的 OCR 產生器 |
 | 依賴與格式 | frozen CPU／Notebook 安裝、離線 lock 檢查、Ruff lint／format 檢查通過 |
 
 kernel 報告在 `outputs/notebooks/validation-kernel.json`，逐節執行副本也保存在該資料夾。CLI 報告為 `outputs/cli-validation.json`。這些是本次工作區的產物，被 Git 忽略；新 checkout 可用下面指令重新產生。
 
-## 網站發布驗證
+## 改寫前的網站發布驗證
 
 2026-10-02：加入 Colab 自動設定後，重新以獨立 CPU kernel 執行222份 Notebook，222通過、0失敗；核心測試仍為32 passed、1 skipped。匯出254頁並核對222個 Colab入口、222份下載與60,338個內部連結。發布程式也確認會拒絕過期原始碼、未執行與失敗的結果，並轉義輸出文字中的HTML。
 
@@ -48,13 +70,15 @@ LFS遠端驗證日期：2026-10-02。GitHub runner從固定公開來源重建8�
 
 ```bash
 python scripts/build_course.py --check
+python scripts/check_course_reviews.py
 python scripts/check_notebooks.py --mode python
-python scripts/check_notebooks.py --mode kernel
+python scripts/check_notebooks.py --mode kernel --workers 3
 pytest -ra
 ruff check .
 ruff format --check .
 uv lock --check --offline
-python scripts/export_course.py
+python scripts/export_course.py --executed outputs/notebooks --revision main
+python scripts/check_site.py
 ```
 
 核心／Notebook 測試離線執行。kernel 模式先依[暖身指南](../course/first-steps.md)註冊 tiny-perceptron kernel。硬體加速、訓練收斂、自然資料能力、效能提升與一般安全性尚未驗證；具體訓練與評估方式見[訓練操作](../course/training.md)。
