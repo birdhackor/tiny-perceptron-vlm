@@ -45,6 +45,8 @@ The default runs one forward/backward check with no optimizer update or checkpoi
 
 [Fixed training snapshots](assets/training/README.md) are published as separate Git LFS archives. Use `python scripts/fetch_training_assets.py --list` to choose and unpack them. Raw caches, checkpoints and outputs stay in ignored `data/`, `checkpoints/` and `outputs/`. External datasets retain their own licenses; see [asset storage](docs/asset-storage.md).
 
+With Modal and Hugging Face configured, manually run the **GPU training smoke test** GitHub Actions workflow to verify GPU parameter updates, checkpoint uploads and resuming from an HF download. See the [GPU operations guide](docs/gpu-training.md) for account settings, time limits and result checks.
+
 ## Maintenance
 
 Edit `course/chapters/`, format that file’s Python examples, then regenerate notebooks. Each section needs an independent reader review of its current text and SVGs; the [editorial protocol](docs/editorial-guide.md) documents the reports. Publication rejects outdated reviews. Components live in `tiny_perceptron/`; SVG sources are in `scripts/build_visuals.py`.
