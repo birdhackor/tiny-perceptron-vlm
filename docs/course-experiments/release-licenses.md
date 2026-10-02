@@ -13,6 +13,8 @@
 | UltraChat 200k | [HuggingFaceH4 固定資料卡][ultrachat-card]：`license: mit`；[原 UltraChat LICENSE][ultrachat-license] | 同時署名 `HuggingFaceH4/ultrachat_200k` 與原 UltraChat；資料 revision `8049631c405ae6576f93f445c6b8166f76f5505a`、`train_sft`；保留上游 `Copyright (c) 2023 THUNLP` 及完整 MIT notice，引用 [UltraChat 論文](https://arxiv.org/abs/2305.14233)。 | 課程自行訓練權重採 `MIT`；資料卡的 MIT 是資料許可證據，上游專案 LICENSE 提供其 notice 文本。 |
 | UltraFeedback binarized | [HuggingFaceH4 固定資料卡][ultrafeedback-card]：`license: mit`；[原 UltraFeedback LICENSE][ultrafeedback-license] | 同時署名 `HuggingFaceH4/ultrafeedback_binarized` 與原 UltraFeedback；資料 revision `3949bf5f8c17c394422ccfab0c31ea9c20bdeb85`、`train_prefs`；保留上游 `Copyright (c) 2023 THUNLP` 及完整 MIT notice，引用 [UltraFeedback 論文](https://arxiv.org/abs/2310.01377)。 | 課程自行訓練權重採 `MIT`；不要替 H4 加工版本杜撰未提供的 copyright holder。 |
 | FSDD | [固定 README 的 License][fsdd-card]：CC-BY-SA-4.0 | `Free Spoken Digit Dataset (FSDD)`；發布者 `Jakobovski/free-spoken-digit-dataset` 與貢獻者；revision `26eb9aaf76e81b692f806f9140c2d2777410d7a1`；CC BY-SA 4.0 連結。說明實際錄音／說話者索引及自訂 speaker holdout；原 WAV 未修改。 | 本次可直接採 **權重 CC-BY-SA-4.0、程式碼 MIT** 的配置。這是課程主動選擇的相容發布方式，不是認定所有 FSDD 訓練權重依法必然受 SA 約束。 |
+| Fashion-MNIST | [Zalando 原 LICENSE][fashion-license] 與 [固定資料卡][fashion-card]：MIT | `zalandoresearch/fashion-mnist`；原 notice `Copyright © 2017 Zalando SE, https://tech.zalando.com`；repo revision `b2617bb6d3ffa2e429640350f613e3291e10b141`、HF revision `531be5e2ccc9dba0c201ad3ae567a4f3d16ecdd2`。說明 first-five-per-label 50 張與自訂 3/1/1 holdout、16×16 RGB 預處理。 | 本課程 Fashion 分支權重採 `MIT`，附完整 Zalando notice；不把程式碼 MIT 當成資料許可證據。 |
+| GSM8K | [OpenAI 原 LICENSE][gsm-license] 與 [固定資料卡][gsm-card]：MIT | `openai/grade-school-math`；`Copyright (c) 2021 OpenAI`；repo revision `3101c7d5072418e28b9008a6636bde82a006892c`、HF revision `740312add88f781978c0658806c59bc2815b9866`。按實際分支標明前 200 題、人類原答案、截取／分窗／family split；僅評估使用不得寫成訓練來源。 | 本課程 GSM8K 訓練分支權重採 `MIT`，附完整 OpenAI notice；保留人類答案來源，不稱教師生成。 |
 | PKU-SafeRLHF | [固定資料卡][pku-card]：CC-BY-NC-4.0 | 私有模型卡保留 `PKU-Alignment/PKU-SafeRLHF`、revision `9421ffafec3fa40a1f1a7d567b4d525079477ecb`、`alpaca3-8b/train` 與資料卡 citation。 | **私有**：其資料、直接訓練、adapter、合併及蒸餾等衍生分支均不進公開權重包。這是本項目發布政策；CC BY-NC 本身允許符合條件的非商業公開分享，不能把「私有」寫成該許可的原文規定。 |
 
 權重包根目錄的 `LICENSE` 寫該權重的許可；`THIRD_PARTY_NOTICES.md` 寫上表的來源、revision、原 copyright、許可連結及修改說明。需附原文的 MIT notice 可分別保存為 `licenses/chinese-poetry-MIT.txt`、`licenses/UltraChat-MIT.txt`、`licenses/UltraFeedback-MIT.txt`。實際附帶的 TinyStories 語料與 FSDD WAV／改編資料各自保持原許可，不能由權重包的 MIT 聲明覆蓋。
@@ -134,3 +136,54 @@ PKU 資料卡宣告 CC-BY-NC-4.0。[官方法律文本](https://creativecommons.
 [fsdd-card]: https://github.com/Jakobovski/free-spoken-digit-dataset/blob/26eb9aaf76e81b692f806f9140c2d2777410d7a1/README.md#license
 [ultrachat-license]: https://raw.githubusercontent.com/thunlp/UltraChat/1f613e1b8dfc6d1e3a02efb6905de608ed06645b/LICENSE
 [ultrafeedback-license]: https://raw.githubusercontent.com/OpenBMB/UltraFeedback/bf80fd46a8c6ceecc86e8babb1ae8771f26a3cbb/LICENSE
+
+## Fashion-MNIST 與 GSM8K：固定原始 MIT notice
+
+2026-10-02 重新取得上述兩個固定 commit 的官方 LICENSE；內容 SHA 與本地來源 manifest／原檔一致。兩份固定官方 HF 資料卡的 YAML 均列出 `license:\n- mit`；GSM8K 資料卡另明示：
+
+> The GSM8K dataset is licensed under the [MIT License](https://opensource.org/licenses/MIT).
+
+公開模型卡保留下列全文，並以實際模型分支填寫來源／改動。程式碼的 birdhackor MIT notice 與資料原 copyright 分開。Fashion/FSDD 混合發布目錄按檔案列出 `fashion-mnist.pt: MIT`、`fsdd.pt: CC-BY-SA-4.0`；若 `model.pt` 是 FSDD 檔案別名，該檔也使用 CC-BY-SA-4.0。非 FSDD 的 synthetic audio 不因此改成 CC BY-SA。此映射須於完成報告中確認所選檔案與 hash，不能只看目錄名稱。
+
+Fashion-MNIST 原全文（Zalando SE）：
+
+```text
+The MIT License (MIT) Copyright © 2017 Zalando SE, https://tech.zalando.com
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the “Software”), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+```
+
+GSM8K 原全文（OpenAI）：
+
+```text
+MIT License
+
+Copyright (c) 2021 OpenAI
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+[fashion-license]: https://raw.githubusercontent.com/zalandoresearch/fashion-mnist/b2617bb6d3ffa2e429640350f613e3291e10b141/LICENSE
+[fashion-card]: https://huggingface.co/datasets/zalando-datasets/fashion_mnist/blob/531be5e2ccc9dba0c201ad3ae567a4f3d16ecdd2/README.md
+[gsm-license]: https://raw.githubusercontent.com/openai/grade-school-math/3101c7d5072418e28b9008a6636bde82a006892c/LICENSE
+[gsm-card]: https://huggingface.co/datasets/openai/gsm8k/blob/740312add88f781978c0658806c59bc2815b9866/README.md

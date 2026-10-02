@@ -430,7 +430,11 @@ def backup(checkpoint_repo, experiment_id, batch_id, run_id, revision):
         "revision": commit.oid,
         "prefix": prefix,
         "verified_checkpoints": verified,
-        "private_full_training_state": True,
+        "private_full_experiment_output": True,
+        "checkpoint_resume_scope": (
+            "Backup includes the full experiment directory. Optimizer/RNG resume support depends on each "
+            "checkpoint format; encoder and simple inference snapshots do not contain those states."
+        ),
     }
     write_json(result_path, result)
     result_commit = api.upload_file(
