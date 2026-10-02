@@ -36,6 +36,15 @@ def test_full_heldout_evaluation_does_not_stop_at_twenty():
     assert report["effective_tokens"] == 23 * 4  # y, e, s and EOS
 
 
+def test_text_generation_prompt_keeps_unicode_characters_complete():
+    model = TinyLM(ModelConfig(width=8, max_length=64))
+    text = "留別王侍御維\n孟浩然與未見字🦊"
+    sample = evaluate_lm(model, [{"text": text}], tokens=1)["samples"][0]
+    assert "\ufffd" not in sample["prompt"]
+    assert text.startswith(sample["prompt"])
+    assert len(sample["prompt"].encode("utf-8")) <= 24
+
+
 @pytest.mark.parametrize("marker", [5, 6])
 def test_generated_modal_marker_is_returned_as_failure_without_reexpansion(marker, monkeypatch):
     model = MultiModalLM(TinyLM(ModelConfig(width=8, max_length=64)))

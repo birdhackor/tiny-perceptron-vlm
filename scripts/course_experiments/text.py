@@ -480,7 +480,13 @@ def run_tokenizer(ctx):
             steps=steps,
             lr=0.003,
             name=name,
-            metadata={"tokenizer": name, "same_raw_document_schedule_sha256": _digest(exposure)},
+            metadata={
+                "tokenizer": name,
+                "tokenizer_sha256": hashlib.sha256((ctx.output / "tokenizer-bpe512.json").read_bytes()).hexdigest()
+                if name == "bpe512"
+                else None,
+                "same_raw_document_schedule_sha256": _digest(exposure),
+            },
         )
         runs[name] = {
             "vocab_size_including_8_specials": tok.vocab_size,
