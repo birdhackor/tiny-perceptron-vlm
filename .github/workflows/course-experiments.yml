@@ -1,6 +1,6 @@
 name: Course GPU experiments
 
-# 只有手動提交會執行；每完成一項後審閱，再提交下一項。
+# 訓練維持單項執行；已提交核准清單可逐項發布，第一個錯誤立即停止。
 on:
   workflow_dispatch:
     inputs:
@@ -29,6 +29,11 @@ on:
         type: string
         required: false
         default: ''
+      release_experiment_ids:
+        description: Optional JSON array or comma-separated IDs for serial reviewed release; mode must be release
+        type: string
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -40,7 +45,7 @@ concurrency:
 jobs:
   experiment:
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: ${{ inputs.mode == 'release' && (inputs.release_experiment_ids || '') != '' && 180 || 35 }}
     env:
       MODAL_TOKEN_ID: ${{ vars.MODAL_TOKEN_ID || secrets.MODAL_TOKEN_ID }}
       MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
@@ -52,14 +57,30 @@ jobs:
       BATCH_ID: ${{ inputs.batch_id }}
       EXPERIMENT_MODE: ${{ inputs.mode }}
       APPROVAL_FILE: ${{ inputs.approval_file }}
+      RELEASE_EXPERIMENT_IDS: ${{ inputs.release_experiment_ids || '' }}
     steps:
       - uses: actions/checkout@v7
         with:
           lfs: false
+      - name: Initialize serial release evidence
+        if: inputs.mode == 'release' && (inputs.release_experiment_ids || '') != ''
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          path = Path('outputs/course-release-batch/validation.json')
+          path.parent.mkdir(parents=True, exist_ok=True)
+          path.write_text(json.dumps({'status': 'not_started', 'revision': os.environ['GITHUB_SHA'], 'items': []}) + '\n')
+          PY
       - name: Check settings without revealing credentials
         shell: bash
         run: |
           set -euo pipefail
+          if [ -n "$RELEASE_EXPERIMENT_IDS" ] && [ "$EXPERIMENT_MODE" != "release" ]; then
+            echo "::error::release_experiment_ids is only valid for mode=release"
+            exit 1
+          fi
           missing=0
           for name in MODAL_TOKEN_ID MODAL_TOKEN_SECRET HF_CHECKPOINT_REPO HF_RELEASE_REPO; do
             if [ -z "${!name}" ]; then
@@ -72,9 +93,9 @@ jobs:
         with:
           python-version: '3.13'
       - name: Validate entrypoint syntax without importing training dependencies
-        run: python -m py_compile scripts/modal_course.py scripts/course_release.py
+        run: python -m py_compile scripts/modal_course.py scripts/course_release.py scripts/release_course_batch.py
       - name: Validate the committed public release approval before paid calls
-        if: inputs.mode == 'release'
+        if: inputs.mode == 'release' && (inputs.release_experiment_ids || '') == ''
         run: |
           python - <<'PY'
           import json
@@ -91,6 +112,13 @@ jobs:
               raise ValueError('Working file differs from the committed approval')
           validate_approval(json.loads(content), experiment, os.environ['BATCH_ID'], os.environ['HF_CHECKPOINT_REPO'])
           PY
+      - name: Validate all committed batch approvals before paid calls
+        if: inputs.mode == 'release' && (inputs.release_experiment_ids || '') != ''
+        run: |
+          mkdir -p outputs/course-release-batch
+          python scripts/release_course_batch.py \
+            --experiments "$RELEASE_EXPERIMENT_IDS" \
+            --validate-only > outputs/course-release-batch/validation.json
       - name: Download only the selected experiment's LFS training assets
         if: (inputs.mode == 'run' || inputs.mode == 'run-cpu') && inputs.experiment_id != 'preflight'
         shell: bash
@@ -122,6 +150,7 @@ jobs:
       - name: Select the existing Hugging Face Secret without reading its value
         run: python scripts/select_modal_hf_secret.py
       - name: Execute one bounded course experiment
+        if: inputs.mode != 'release' || (inputs.release_experiment_ids || '') == ''
         run: |
           modal run scripts/modal_course.py \
             --experiment-id "$EXPERIMENT_ID" \
@@ -132,21 +161,38 @@ jobs:
             --release-repo "$HF_RELEASE_REPO" \
             --run-id "gha-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
             --revision "$GITHUB_SHA"
+      - name: Release approved models one at a time
+        if: inputs.mode == 'release' && (inputs.release_experiment_ids || '') != ''
+        run: python scripts/release_course_batch.py --experiments "$RELEASE_EXPERIMENT_IDS"
       - name: Save experiment evidence and account-wide billing observations
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: course-${{ inputs.batch_id }}-${{ inputs.experiment_id }}-${{ github.run_attempt }}
-          path: outputs/modal-course/
+          name: ${{ inputs.mode == 'release' && (inputs.release_experiment_ids || '') != '' && format('course-release-batch-{0}-{1}', github.run_id, github.run_attempt) || format('course-{0}-{1}-{2}', inputs.batch_id, inputs.experiment_id, github.run_attempt) }}
+          path: ${{ inputs.mode == 'release' && (inputs.release_experiment_ids || '') != '' && 'outputs/course-release-batch/' || 'outputs/modal-course/' }}
           if-no-files-found: ignore
       - name: Show experiment evidence
         if: always()
         run: |
           python - <<'PY'
+          import json
           import os
           from pathlib import Path
-          path = Path('outputs/modal-course/result.json')
-          if path.exists():
-              with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
-                  summary.write('## Course experiment evidence\n\n```json\n' + path.read_text() + '\n```\n')
+          if os.environ.get('RELEASE_EXPERIMENT_IDS'):
+              path = Path('outputs/course-release-batch/summary.json')
+              if not path.is_file():
+                  path = Path('outputs/course-release-batch/validation.json')
+              if path.is_file() and path.stat().st_size:
+                  evidence = json.loads(path.read_text())
+                  with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+                      summary.write('## Serial model release\n\n')
+                      summary.write(f"Status: {evidence['status']}\n\n")
+                      for item in evidence.get('items', []):
+                          summary.write(f"- {item['experiment_id']}: {item.get('status', 'approval validated')}\n")
+                      summary.write('\nFull receipts and account-wide billing observations are in the batch artifact.\n')
+          else:
+              path = Path('outputs/modal-course/result.json')
+              if path.exists():
+                  with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+                      summary.write('## Course experiment evidence\n\n```json\n' + path.read_text() + '\n```\n')
           PY

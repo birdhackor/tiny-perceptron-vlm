@@ -1,0 +1,108 @@
+name: Release reviewed course models in sequence
+
+# 只發布已有且已提交的核准清單；這個 workflow 沒有訓練模式。
+on:
+  workflow_dispatch:
+    inputs:
+      experiment_ids:
+        description: Reviewed experiment IDs as a JSON array or comma-separated list
+        type: string
+        required: true
+      batch_id:
+        description: Batch from the committed course plan; the existing cumulative budget remains shared
+        type: string
+        required: true
+        default: course-v1
+      hf_secret_name:
+        description: Existing Modal Secret containing HF_TOKEN; blank uses the existing selector
+        type: string
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tiny-perceptron-course-gpu
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      MODAL_TOKEN_ID: ${{ vars.MODAL_TOKEN_ID || secrets.MODAL_TOKEN_ID }}
+      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+      MODAL_ENVIRONMENT: ${{ vars.MODAL_ENVIRONMENT || 'main' }}
+      HF_CHECKPOINT_REPO: ${{ vars.HF_CHECKPOINT_REPO }}
+      HF_RELEASE_REPO: ${{ vars.HF_RELEASE_REPO }}
+      HF_MODAL_SECRET: ${{ inputs.hf_secret_name || vars.HF_MODAL_SECRET }}
+      EXPERIMENT_IDS: ${{ inputs.experiment_ids }}
+      BATCH_ID: ${{ inputs.batch_id }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          lfs: false
+      - name: Initialize serial release evidence
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          path = Path('outputs/course-release-batch/validation.json')
+          path.parent.mkdir(parents=True, exist_ok=True)
+          path.write_text(json.dumps({'status': 'not_started', 'revision': os.environ['GITHUB_SHA'], 'items': []}) + '\n')
+          PY
+      - name: Check settings without revealing credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p outputs/course-release-batch
+          missing=0
+          for name in MODAL_TOKEN_ID MODAL_TOKEN_SECRET HF_CHECKPOINT_REPO HF_RELEASE_REPO; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Missing repository secret or variable: $name"
+              missing=1
+            fi
+          done
+          exit "$missing"
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - name: Validate all committed approvals before any release call
+        run: |
+          python scripts/release_course_batch.py \
+            --experiments "$EXPERIMENT_IDS" \
+            --validate-only > outputs/course-release-batch/validation.json
+      - name: Install only the existing Modal client version
+        run: python -m pip install modal==1.6.0
+      - name: Select the existing Hugging Face Secret without reading its value
+        run: python scripts/select_modal_hf_secret.py
+      - name: Release approved models one at a time
+        run: python scripts/release_course_batch.py --experiments "$EXPERIMENT_IDS"
+      - name: Save every item's release and billing evidence, including failures
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: course-release-batch-${{ github.run_id }}-${{ github.run_attempt }}
+          path: outputs/course-release-batch/
+          if-no-files-found: ignore
+      - name: Show batch status and completed items
+        if: always()
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          summary = Path('outputs/course-release-batch/summary.json')
+          validation = Path('outputs/course-release-batch/validation.json')
+          path = summary if summary.is_file() else validation
+          if path.is_file() and path.stat().st_size:
+              evidence = json.loads(path.read_text())
+              with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as stream:
+                  stream.write('## Serial model release\n\n')
+                  stream.write(f"Status: {evidence['status']}\n\n")
+                  for item in evidence.get('items', []):
+                      stream.write(f"- {item['experiment_id']}: {item.get('status', 'approval validated')}\n")
+                  stream.write('\nFull receipts and account-wide billing observations are in the batch artifact.\n')
+          PY

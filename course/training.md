@@ -641,9 +641,63 @@ python scripts/infer.py checkpoints/safety.pt --chat --prompt "盒子15；請提
 
 訓練會另保存`checkpoints/baseline.json`、`rms.json`、`moe.json`，從中抄出`parameters`總參數格數與`seconds`執行秒數。秒數受裝置與當時負載影響，不能只用一次結果宣稱某架構普遍更快。品質尚未實測時記未量測，保留原始報告，再比較其中實際取得的數字。
 
+上面三條200步命令是小資料的操作練習。我們另外完成了modern正式比較：從固定TinyStories包取512篇，按完整內容指紋作家族，整篇分成409／51／52篇；近重複故事尚未合併家族。每組寬度64、兩層、四頭、最多128位置，使用byte字表，同一seed 42、同一批次抽樣，每批16個窗口、AdamW學習率0.003、固定240次更新，各計入452,102個有效訓練目標。長故事的窗口都留在同一側；完整驗證與最後檢查的分母為39,256與41,914個下一byte／結束目標。
+
+| 每次改動 | 總參數 | 驗證代價 | 最後檢查代價 | 每次更新中位數（毫秒） |
+| --- | ---: | ---: | ---: | ---: |
+| 基準：位置表、LayerNorm、GELU、獨立輸出表 | 141,568 | 2.26331 | 2.29163 | 13.062 |
+| RoPE | 133,376 | 1.74158 | 1.77812 | 14.905 |
+| RMSNorm | 141,248 | 2.25913 | 2.28631 | 13.952 |
+| ReLU² | 141,568 | 2.23590 | 2.26438 | 12.893 |
+| SwiGLU | 174,848 | 2.25444 | 2.28009 | 13.336 |
+| 輸入輸出共享 | 124,672 | 2.36276 | 2.38422 | 12.768 |
+
+這是L4、PyTorch 2.14.1+cu126、FP32量測，關閉TF32；時間兩側同步，略過前三步後取中位數，包含向前、反向、梯度有限值檢查、裁剪與更新。共有形狀的表複製基準初值，新增或變形的表另以固定seed初始化；共享輸出則改用embedding的初值，起點差異見[14.6](chapters/14.md#14.6)。固定中間寬度256讓SwiGLU多了參數，不能把全表叫等參數或等FLOPs比較；FLOPs是實際浮點運算次數，本組沒有量測它。
+
+代價降低也要對照文字。最後檢查的第一筆提示 `Once upon a time, there `，基準續寫 `was a a and the the as a the as `，RoPE則為 `was a loked there was a bough a `；都不是合格故事。完整51／52篇的代價與每側前八篇的原樣生成，保存在[modern實報](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/course-experiments/results/modern.json)，不能把八筆生成當全部留出品質。單一種子、短訓與固定小語料也沒有測長度外推。第14章逐節把這些結果與局部機制分開；[14.3](chapters/14.md#14.3)的Q/K正規化只有CPU示範，沒有整模型訓練組。
+
+要重跑六組，先取資料包再執行完整入口：
+
+```bash
+.venv/bin/python scripts/fetch_training_assets.py --asset tinystories
+.venv/bin/python -m scripts.course_experiments.run --experiment modern --device cuda
+```
+
+`outputs/course-experiments/course-v1/modern/`保存`baseline.pt`、`rope.pt`、`rmsnorm.pt`、`relu2.pt`、`swiglu.pt`、`tied.pt`以及三側`dataset.json`；`model.pt`固定複製baseline，沒有按驗證成績挑選。完整入口的平均代價欄名是`heldout.validation.nll`，有效目標是`effective_tokens`，不同於上面單一`evaluate.py`的`mean_token_nll`。`--step-scale`小於1只作通路檢查，不能拿來替換此表。
+
+接著另跑MoE，沿用同一份409／51／52篇切分，但每組固定180次更新、337,761個有效訓練目標。三個Dense尺寸分別接近top-1使用代理、top-2使用代理與MoE總參數；四個MoE組則保持寬度64、每層四位expert，分別用top-1／top-2及輔助係數0／0.01。全部七組的尺寸、匹配剩餘差距與留出代價在[15.13](chapters/15.md#15.13)，路由梯度見[15.7](chapters/15.md#15.7)，負載與輔助項見[15.8–15.9](chapters/15.md#15.8)。這一組的180次更新不能直接與上表modern的240次當成相同訓練預算。
+
+例如top-2、0.01總共340,608個參數，每token容量代理208,256；代理相近的Dense有207,680個，總量相近的Dense則329,888個，沒有精確相等。它的最後檢查代價2.30170，兩個Dense對照分別2.30906、2.24943；哪種資源固定，影響比較答案。它也沒有在這輪跑得更快：每步27.242毫秒，兩個Dense為11.965與14.054毫秒。容量代理包含全部非expert參數，既不是精確權重訪問數，也不是FLOPs，算法範圍見[15.10](chapters/15.md#15.10)。
+
+取得同一TinyStories資料包後，執行：
+
+```bash
+.venv/bin/python -m scripts.course_experiments.run --experiment moe --device cuda
+```
+
+`outputs/course-experiments/course-v1/moe/`保存`dense_active_top1.pt`、`dense_active_top2.pt`、`dense_total.pt`與四份`top1_aux0.pt`、`top1_aux0.01.pt`、`top2_aux0.pt`、`top2_aux0.01.pt`。三側原始故事仍在`dataset.json`；`model.pt`固定複製top-2、0.01，供後面的教師教學使用，沒有用最後檢查成績挑選。完整訓練、51／52篇留出代價、每側前八篇的原樣續寫與每層路由計數，可核對[MoE實報](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/course-experiments/results/moe.json)。它仍會寫重複片語，不能把教師檔存在當成教師答案可靠。
+
 其他架構選項有 `--rotary`、`--activation swiglu` 或 `relu2`、`--tied`、`--heads` 與 `--kv-heads`。各自含義在第 14–16 章逐節講解，先選眼前要檢查的一項，不需要把所有開關一次打開。
 
 速度比較也先量測原方法。`--backend sdpa` 選 PyTorch 的注意力運算介面；真正使用哪種加速核心，依裝置、資料型態與條件決定。CPU 上算出相同結果，不能證明 GPU 上會更快。GPU 計時需要先暖身、在量測區間兩側等待裝置工作完成，這些原理見[16.1](chapters/16.md#16.1)。
+
+efficiency正式組先載入[T.4](#T.4)的`sft/model.pt`與同目錄`dataset.json`，不是TinyStories模型。先完整跑過`sft`讓預設依賴目錄有這兩個檔，再執行：
+
+```bash
+.venv/bin/python -m scripts.course_experiments.run --experiment efficiency --device cuda
+```
+
+它先保存`mha.pt`、`gqa.pt`各100次SFT更新，再從MHA起點分開訓練`ordinary.pt`、`accumulated.pt`、`activation_checkpoint.pt`、`sdpa.pt`各40次，保持同一批抽樣與有效目標數。`padded.pt`與`packed.pt`也各40次，但它們只學助手短文字，目標已改；本輪原問答最後檢查都只1/10，不能把裝填數值接近寫成問答品質保持，詳細對照在[16.5](chapters/16.md#16.5)。全部輸出在`outputs/course-experiments/course-v1/efficiency/`，`model.pt`固定複製ordinary，沒有選最好成績。
+
+同次實驗另核對快取、梯度與實際後端：[16.3](chapters/16.md#16.3)列數值容差與原始生成ID，[16.8](chapters/16.md#16.8)的profiler確定本輪FP32用了memory-efficient。真正Inductor只編譯一個固定形狀FFN，首次7.717秒、穩態比eager慢，沒有回本點，見[16.11](chapters/16.md#16.11)。`compile-input.pt`是內部傳給子程序的載荷，不能交給一般模型推論入口；`compile-result.json`另存編譯量測。完整有效分母、留出生成與每支線時間／記憶體可核對[efficiency實報](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/course-experiments/results/efficiency.json)。
+
+精度比較也從同一份`sft/model.pt`與`dataset.json`重新開始，保留原本單頭設定，沒有接在efficiency的四頭模型之後：
+
+```bash
+.venv/bin/python -m scripts.course_experiments.run --experiment precision --device cuda
+```
+
+`outputs/course-experiments/course-v1/precision/`中的`fp32.pt`、`bf16.pt`、`fp16.pt`各完成200次嘗試；本輪成功更新都是200、跳過都是0。AMP依算子使用BF16／FP16，保存的權重與Adam狀態仍是FP32；`model.pt`固定複製FP32，不以驗證成績挑選。原始單頭SFT起點最後檢查5/10，本輪三支分別7/10、6/10、4/10；訓練與推論都沒有測到AMP加速。數值、有限值核對及峰值量測範圍見[16.7](chapters/16.md#16.7)與[precision實報](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/course-experiments/results/precision.json)。不能只看檔名較低位元或程式跑完，就宣稱更省記憶體、品質保持或每次都成功更新。
 
 練習先寫一個假設，例如「只換正規化，留出代價會改善嗎？」列出保持固定的資料、步數與種子，跑完後同時保存品質與成本。這樣結果不論好壞，都能回答原來的問題。
 
