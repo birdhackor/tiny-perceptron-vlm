@@ -107,7 +107,7 @@ def main():
             "complete_runs": sum(e["status"] == "complete_run" for e in experiments),
             "sections": len(lessons),
         },
-        "note": "Review status reflects existing reports and hashes only; final strict gates also validate report content, figures, and unique reviewers. Experiments without a section mapping do not imply the section was omitted: offline notebooks verify mechanisms separately.",
+        "note": "Review status reflects existing reports and hashes only and may include legacy readers; it does not count completion of the current fresh review round. Actual current dispatches are recorded in review-dispatch/, and check_review_round.py enforces new identities and reviewed introductions alongside the reader/technical content gates. Experiments without a section mapping do not imply the section was omitted: offline notebooks verify mechanisms separately.",
         "experiments": experiments,
         "supporting_evidence": supporting,
         "sections": lessons,
