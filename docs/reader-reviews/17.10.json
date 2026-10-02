@@ -1,0 +1,34 @@
+{
+  "lesson_id": "17.10",
+  "source": "course/chapters/17.md#17.10",
+  "reviewer_task": "/root/manuscript_reviews/reader_17_10",
+  "source_sha256": "f9bc0751c004d55b60581e55b6d52585232283660a06008c07e2a2e08221d0d2",
+  "verdict": "pass",
+  "reader_summary": "本節回答「權重已壓縮，生成為何還可能不快甚至更慢」。我理解保存方式與計算方式各自有成本：教材的 QuantizedLinear 每次先拆碼、乘各輸出列的 scale，重建浮點權重，再交給普通線性運算。因此保存資料小，不表示乘法變成低位元，也不表示暫存記憶體按同一比例減少。32 個輸出、64 個輸入有 2048 個權重；原 FP32 權重是 8192 bytes，加 32 個 bias 的 128 bytes，共 8320。四位元碼只有 1024 bytes，但加每列 scale 的 128 與 bias 的 128，完整 buffer 是 1280；forward 仍可能建立 8192 bytes 的完整浮點權重。程式的 nn.Linear(64,32) 建立這層，QuantizedLinear(layer,bits=4) 轉成壓縮版本，torch.ones(2,64) 提供兩列各 64 個 1。parameters() 中各張量以 numel() 元素數乘 element_size() 每元素 bytes 加總，所以第一個 print 含原權重與 bias；storage_bytes() 報碼、scale 與 bias，values 的元素數乘每元素大小則只報碼。這份未變動的程式在初審實跑得到 8320、1280、1024，以及 (2,32) torch.float32，與本次重算一致。專用 kernel 可以邊讀小塊權重邊反量化而避開整張浮點矩陣，或用硬體支援的整數、混合精度路徑；能否加速仍看形狀、格式與實作。我能分別說出要量的檔案大小、載入最高記憶體、運行最高記憶體、prefill/decode 耗時。新版暖機說明也能照做：載入後用同形狀輸入試跑幾次，不把試跑納入正式時間；若首次呼叫會編譯，先等完成再重複測量取平均，載入與首次編譯成本另記。5.9 示範先跑一次、以 perf_counter 量十次並除十，也提醒機器負載與 GPU 同步會影響測量。練習只把 bits 改成 8；我先預測 2048 個碼各占一 byte，加各 128 bytes 的 scale 與 bias 得 2304，輸出形狀與 dtype 不變。初審對此單一修改實跑所得 2048、2304、(2,32) torch.float32 仍與目前練習及明示前置相符；本次沒有額外測試或速度測量，並能指出這些 bytes 不足以推導速度。",
+  "issues": [],
+  "checks": {
+    "background_links": {
+      "status": "pass",
+      "details": "本次完整重讀 17.10，以及本節明確連結的必要前置 17.md#17.7、17.md#17.8、16.md#16.2、05.md#5.9。對應 ## 標題節號分別為 17.7、17.8、16.2、5.9，依網站精確 HTML id 核對，沒有套用 GitHub slug。17.7 說明只量化權重、buffer、每列刻度、4-bit uint8 與 8-bit int8 的保存差別、浮點 forward；17.8 說明打包與拆碼，並將 bias 解釋為加在輸出上的偏移；16.2 定義 prefill、decode 與快取；新增 5.9 解釋 FP32 的四 bytes 計數及暖身後重複計時。沒有研究整章、整個 repository 或未明示的背景。"
+    },
+    "terminology": {
+      "status": "pass",
+      "details": "buffer、scale、bias、FP32、uint8/int8 與打包可由目前本節及明示前置理解；低位元 kernel 在本節直接定義為理解打包格式、刻度並替硬體安排乘法與讀取的底層運算。prefill/decode 在 16.2 有說明。先前未解的「暖機」現在具體指載入後用同樣形狀輸入試跑幾次，試跑不計入正式測量；首次編譯被明確限定為會編譯的後端，待首次呼叫完成後才重複測量取平均，載入及首次編譯成本另記。5.9 的 perf_counter、暖身與十次平均例子補足操作，未留下阻礙理解本節的未解詞。"
+    },
+    "examples": {
+      "status": "pass",
+      "details": "本次重讀與手算：原參數 2048×4+32×4=8320 bytes；4-bit buffer 是 2048/2+32×4+32×4=1280，而碼本身為 1024。重要程式片段與初審實跑相同，初審既有 .venv/bin/python 的短 CPU 輸出為「原層數字bytes 8320」「壓縮buffer bytes 1280」「整數碼bytes 1024」「運算結果 (2, 32) torch.float32」；本次沒有重複或擴大測試。必要前置 17.8 的 SVG 本次重新用 inkscape --export-type=png --export-width=1200 --export-filename=/tmp/reader_17_10_recheck.png 轉圖並用 view_image 實看：-8、-1 加 8 得 0、7，綠色虛線把 0000 指向右側低四位，橘色實線把 0111 指向左側高四位，01110000=112；0、1 加 8 得 8、9，1000 低位、1001 高位，10011000=152。兩組數字、交叉箭頭、左右標籤與正文一致。"
+    },
+    "program_explanation": {
+      "status": "pass",
+      "details": "我能說明 nn.Linear(64,32) 的 64 輸入、32 輸出與 32 個 bias，QuantizedLinear(layer,bits=4) 建立低位元保存版本，torch.ones(2,64) 建立兩筆輸入。sum(p.numel()*p.element_size() for p in layer.parameters()) 加總原參數的元素數×每元素 bytes；compressed.storage_bytes() 是碼、scale、bias 總量；compressed.values 的同樣乘積只量打包碼。tuple(compressed(x).shape) 與 compressed(x).dtype 核對輸出形狀及型別，這行沒有計時。正文將拆碼、乘 scale、還原完整浮點權重與普通線性運算串起來，說明 1280 bytes 的保存資料仍可能需要 8192 bytes 暫存權重。5.9 的先試跑一次、perf_counter 記起點、重複十次並除十，提供本節計時建議的具體操作。"
+    },
+    "exercise": {
+      "status": "pass",
+      "details": "本次依目前文字重新確認練習只改 bits=4 為 bits=8，不改層形狀或輸入；每個 int8 碼占一 byte，所以先預測碼 2048 bytes，加 scale 128 與 bias 128 得總 buffer 2304，原層仍 8320，輸出仍 (2,32) torch.float32。初審對這個相同修改已以既有 .venv/bin/python 短 CPU 執行核對，得到「原層數字bytes 8320」「壓縮buffer bytes 2304」「整數碼bytes 2048」「運算結果 (2, 32) torch.float32」；新版 17.7 也明示 8-bit 各碼用 int8。修改、預測與核對標準完整。可比較儲存與介面，速度仍需另量；本次未額外跑測試，也未宣稱驗證速度或最高記憶體。"
+    }
+  },
+  "figure_sha256": {
+    "course/figures/architecture_int4_packing.svg": "3f9e6cd1277e278d4c0ca8d2ab8a27ca2664f655fbbea3eae30f0cdf8b34816b"
+  }
+}

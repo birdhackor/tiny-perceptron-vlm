@@ -1,6 +1,6 @@
 # 小小感知機 Tiny Perceptron
 
-從一張接字表開始，逐步看懂能接收文字、圖片與聲音的小模型。一次只講一件事，先用譬喻與圖解，再用幾行程式驗算。
+看到「今天天氣」，電腦怎麼猜下一個字？這套教材從幾個字的編號與接字表開始，用完整例子、圖解和短程式，逐步解釋文字、圖片與聲音模型的運作。
 
 繁體中文 | [English](README_en.md)
 
@@ -8,15 +8,15 @@
 
 教材預覽版：網站提供正文、SVG 圖解與實際 CPU 輸出。每節按「在 Colab 動手做」可開啟同一課的完整 Notebook；第一個程式格會準備專案與套件，小實驗不必先租 GPU。也可下載本節 `.ipynb` 後依下方步驟在本機練習。Colab 雲端執行尚未實機驗證。
 
-![下一字對齊](course/figures/shift.svg)
+![文字與識別編號的對照](course/figures/character_ids.svg)
 
 ## 教材提供什麼
 
-18章與A／B／C支線、每節一份獨立 Notebook，以及40張自製 SVG 圖解與逐步提示。前段只用小矩陣、接字表、MLP與手寫注意力；後段才加入現代架構、Dense／MoE、cache／SDPA、量化與蒸餾。可以來回跳章，不需要從頭把同一個模型訓練到底。
+18章與A／B／C支線、每節一份獨立 Notebook，以及自製 SVG 圖解與逐步提示。前段只用小矩陣、接字表、MLP與手寫注意力；後段才加入現代架構、Dense／MoE、cache／SDPA、量化與蒸餾。可以來回跳章，不需要從頭把同一個模型訓練到底。
 
-文字與圖音模型、對話遮罩、DPO、量化儲存與訓練基本件直接以 PyTorch 實作。資料、訓練、推論與評估有可執行入口。LoRA、QAT、影片序列與小型 RL 等概念提供局部實驗；此版本沒有提供已訓練的通用影音助理。
+文字與圖音模型、對話遮罩、DPO、量化儲存與訓練基本件直接以 PyTorch 實作。資料、訓練、推論與評估有可執行入口。LoRA、QAT 與小型 RL 等概念提供局部實驗；影片目前提供逐幀切片的輔助函式，完整教學列為後續擴充。此版本沒有提供已訓練的通用影音助理。
 
-適合曾學大學微積分或線性代數、想從直覺瞭解模型的人。Python、tensor與Notebook操作可由暖身補起。開發時驗證了 CPU 執行與梯度，沒有正式訓練模型；權重與能力評估留給讀者之後在自己的 GPU 環境進行。詳見[驗證報告](docs/validation.md)。
+第一次接觸本專案也能從第一節開始；Python、tensor、機率、矩陣與梯度都有可按需查閱的暖身，不必先修完所有數學。每節先說明問題與具體例子，所需背景提供可點擊的小節連結。開發時驗證了 CPU 執行與梯度，沒有正式訓練模型；權重與能力評估留給讀者之後在自己的 GPU 環境進行。詳見[驗證報告](docs/validation.md)。
 
 ## 安裝與開啟 Notebook
 
@@ -68,8 +68,10 @@ docs/               大綱、研究、環境與驗證紀錄
 
 ```bash
 python scripts/build_visuals.py
+python scripts/format_course_code.py course/chapters/01.md
 python scripts/build_course.py
 python scripts/build_course.py --check
+python scripts/check_course_reviews.py
 python scripts/check_notebooks.py --mode python
 python scripts/check_notebooks.py --mode kernel --lesson 3.6
 pytest -ra
@@ -77,7 +79,7 @@ ruff check .
 ruff format --check .
 ```
 
-修改教材請改 `course/chapters/` 再產生 Notebook；執行輸出與網頁放在 `outputs/`。完整 kernel 檢查用 `--mode kernel`，每節開獨立工作桌。GitHub Actions 保留 Linux、macOS、Windows 的核心測試；Notebook整套驗證另行執行。
+修改教材請改 `course/chapters/`，先格式化該檔的 Python 範例再產生 Notebook。每節須由獨立讀者核對目前正文與 SVG，審閱協定見[編輯說明](docs/editorial-guide.md)；版本不符會阻止發布。執行輸出與網頁放在 `outputs/`。完整 kernel 檢查用 `--mode kernel`，每節開獨立工作桌。GitHub Actions 保留 Linux、macOS、Windows 的核心測試；Notebook整套驗證另行執行。
 
 ## 參考與授權
 

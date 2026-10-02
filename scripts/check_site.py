@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import re
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
@@ -37,6 +38,7 @@ def check(site):
         pages[path.resolve()] = parser
     failures = []
     local_links = 0
+    notebook_links = 0
     for path, parsed in pages.items():
         for link in parsed.links:
             url = urlsplit(link)
@@ -60,6 +62,19 @@ def check(site):
             notebook = json.loads(notebook_path.read_text(encoding="utf-8"))
             if notebook.get("metadata", {}).get("lesson_id") != item["id"]:
                 failures.append(f"下載了不同小節的 Notebook：{item['id']}")
+            for cell in notebook["cells"]:
+                if cell["cell_type"] != "markdown":
+                    continue
+                for link in re.findall(r"\[[^\]]+\]\(([^)]+)\)", "".join(cell["source"])):
+                    prefix = "https://birdhackor.github.io/tiny-perceptron-vlm/"
+                    if link.startswith(prefix):
+                        notebook_links += 1
+                        url = urlsplit(link[len(prefix) :])
+                        target = (site / unquote(url.path)).resolve()
+                        if target not in pages or (url.fragment and unquote(url.fragment) not in pages[target].ids):
+                            failures.append(f"{item['id']}: Notebook 前置缺頁面或段落 {link}")
+                    elif not urlsplit(link).scheme and ".md" in link:
+                        failures.append(f"{item['id']}: Notebook 殘留原稿路徑 {link}")
         colab = (
             "https://colab.research.google.com/github/birdhackor/tiny-perceptron-vlm/blob/"
             + info["revision"]
@@ -70,7 +85,10 @@ def check(site):
             failures.append(f"Colab 入口版本不符：{item['id']}")
     if failures:
         raise ValueError("\n".join(failures))
-    print(f"{len(pages)} 頁、{len(index)} 份下載與 Colab 入口、{local_links} 個內部連結通過")
+    print(
+        f"{len(pages)} 頁、{len(index)} 份下載與 Colab 入口、{local_links} 個內部連結、"
+        f"{notebook_links} 個 Notebook 閱讀連結通過"
+    )
 
 
 if __name__ == "__main__":

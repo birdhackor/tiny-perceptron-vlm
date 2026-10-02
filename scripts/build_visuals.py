@@ -2,6 +2,7 @@
 
 import html
 import math
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -87,6 +88,26 @@ def matrix(name, title, caption, allowed):
 
 
 def build():
+    # 第一節只教字元與編號；向量查表留到第二章。
+    body = label(20, 103, "原句", 24, anchor="start") + label(20, 178, "編號", 24, anchor="start")
+    for column, (char, identifier) in enumerate(zip("貓看狗，狗看貓。", [3, 2, 1, 4, 1, 2, 3, 0], strict=True)):
+        x = 100 + column * 82
+        color = "#ffe8c7" if char == "貓" else "#e8f1ff"
+        body += f'<rect x="{x}" y="68" width="70" height="50" rx="10" fill="{color}" stroke="#8da8ca"/>'
+        body += label(x + 35, 104, char, 30)
+        body += f'<path d="M{x + 35} 119V137" stroke="#466b97" stroke-width="2" marker-end="url(#arrow)"/>'
+        body += f'<rect x="{x}" y="143" width="70" height="50" rx="10" fill="{color}" stroke="#8da8ca"/>'
+        body += label(x + 35, 179, identifier, 30)
+    body += label(400, 239, "字表：0 → 。　1 → 狗　2 → 看　3 → 貓　4 → ，", 20)
+    body += label(400, 273, "反向查字表，就能把這排編號還原成原句。", 18)
+    save(
+        "character_ids",
+        "先約定字表，再替原句的每個字查編號",
+        "兩個橘色位置都是「貓」，所以都查到 3；編號本身不表示字義。",
+        body,
+        height=322,
+        animated=False,
+    )
     flow(
         "lookup",
         "像查字典：ID 找到一列向量",
@@ -537,6 +558,22 @@ def build():
     )
     import json
 
+    # 手寫的教材圖也是可直接修改的來源，重建時一併索引而不覆寫。
+    for source in sorted(DIRECTORY.glob("*.svg")):
+        if source.stem in VISUALS:
+            continue
+        drawing = ET.fromstring(source.read_text(encoding="utf-8"))
+        namespace = {"svg": "http://www.w3.org/2000/svg"}
+        title = drawing.find("svg:title", namespace)
+        description = drawing.find("svg:desc", namespace)
+        if title is None or description is None:
+            raise ValueError(f"手寫圖解需要標題與描述：{source.name}")
+        VISUALS[source.stem] = {
+            "title": "".join(title.itertext()),
+            "caption": "".join(description.itertext()),
+            "animated": "@keyframes" in source.read_text(encoding="utf-8"),
+            "source": "handwritten",
+        }
     (DIRECTORY / "index.json").write_text(json.dumps(VISUALS, ensure_ascii=False, indent=2) + "\n")
     print(f"{len(VISUALS)} 張自行繪製SVG")
 

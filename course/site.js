@@ -13,3 +13,14 @@ if (search) {
     document.getElementById("search-count").textContent = `${visible} 個小節`;
   });
 }
+document.querySelectorAll(".diagram-zoom").forEach((button) => {
+  const viewport = document.getElementById(button.getAttribute("aria-controls"));
+  const hint = button.closest("figure").querySelector(".diagram-scroll-hint");
+  button.hidden = false;
+  button.addEventListener("click", () => {
+    const enlarged = viewport.classList.toggle("is-enlarged");
+    button.setAttribute("aria-expanded", String(enlarged));
+    button.textContent = enlarged ? "縮回全圖" : "放大圖解";
+    hint.hidden = !enlarged;
+  });
+});

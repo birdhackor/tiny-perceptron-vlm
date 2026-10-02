@@ -6,54 +6,22 @@ import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-CHAPTER_FIGURES = {
-    "1": "shift",
-    "2": "context",
-    "3": "qkv",
-    "4": "residual",
-    "5": "backward",
-    "6": "bpe",
-    "7": "masks",
-    "8": "style",
-    "9": "honesty",
-    "10": "patchify",
-    "11": "alignment",
-    "12": "audio",
-    "13": "dpo",
-    "14": "rope",
-    "15": "moe",
-    "16": "cache",
-    "17": "quantization",
-    "18": "distillation",
-    "A": "rag",
-    "B": "tools",
-    "C": "reasoning",
+COURSE_URL = "https://birdhackor.github.io/tiny-perceptron-vlm/"
+READING_PAGES = {
+    "course/README.md": "course.html",
+    "course/first-steps.md": "first-steps.html",
+    "course/training.md": "training.html",
+    "course/glossary.md": "glossary.html",
+    "course/lessons.md": "index.html",
+    "README.md": "readme.html",
+    "docs/environment.md": "environment.html",
+    "docs/asset-storage.md": "asset-storage.html",
+    "docs/curriculum.md": "curriculum.html",
+    "docs/validation.md": "validation.html",
+    "assets/training/README.md": "training-assets.html",
 }
-FIGURE_SECTIONS = {
-    "lookup": ["1.1", "1.6", "2.1"],
-    "split": ["1.2", "5.10", "5.11", "5.12", "7.12"],
-    "softmax": ["1.4", "1.5", "1.7", "1.8", "1.15", "3.2", "3.5"],
-    "gradient": ["1.9", "1.10", "1.11", "1.12", "5.3", "5.4", "5.5", "5.14"],
-    "backward": ["1.13", "5.1", "5.2", "5.17", "16.6"],
-    "causal": ["3.6", "3.7", "16.8"],
-    "normalization": ["4.3", "14.2", "14.3"],
-    "checkpoint": ["5.7"],
-    "padding": ["7.6", "7.7", "7.8", "7.10"],
-    "lora": ["8.8", "8.9", "8.13"],
-    "safety": ["9.1", "9.4", "9.5", "9.6", "9.7", "9.8"],
-    "calibration": ["9.9", "9.10"],
-    "modal_expand": ["10.6", "10.7", "12.9", "18.13"],
-    "contrastive": ["10.9", "10.10", "10.11"],
-    "patchify": ["10.1", "10.2", "10.3", "10.4", "11.9", "11.10", "11.12", "11.13"],
-    "frames": ["12.1", "12.2", "12.3", "12.4"],
-    "joint": ["12.10", "12.11", "12.12"],
-    "dispatch": ["15.5", "15.6", "15.7", "15.12"],
-    "packing": ["16.5"],
-    "online_softmax": ["16.9"],
-    "int4": ["17.6", "17.8"],
-}
-SECTION_FIGURES = {sid: name for name, ids in FIGURE_SECTIONS.items() for sid in ids}
-BOOTSTRAP = """from pathlib import Path
+BOOTSTRAP = """# @title 準備本節的工具（首次執行）
+from pathlib import Path
 import os
 import subprocess
 import sys
@@ -84,8 +52,6 @@ if not (root / "tiny_perceptron").is_dir():
     raise RuntimeError("本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口")
 sys.path.insert(0, str(root))
 import torch
-from torch import nn
-from torch.nn import functional as F
 
 torch.set_num_threads(1)
 torch.manual_seed(42)
@@ -101,31 +67,80 @@ def cell(kind, source):
     return result
 
 
-def notebook(section_id, title, introduction, body):
-    cells = [cell("markdown", f"# {section_id} {title}\n\n{introduction}\n"), cell("code", BOOTSTRAP)]
-    figure = SECTION_FIGURES.get(section_id, CHAPTER_FIGURES[section_id.split(".")[0]])
-    visual = json.loads((ROOT / "course/figures/index.json").read_text(encoding="utf-8"))[figure]
-    hint = (
-        "橘色邊框只提示閱讀順序，靜態標註一直保留。系統的減少動態效果設定會停用動畫。"
-        if visual["animated"]
-        else "這張圖保留靜態標註；先核對箭頭、位置與每個數字的意思。"
+def notebook_reading_links(content, source):
+    # Notebook 位於 notebooks/，原稿位於 course/；前置統一接到可閱讀的網站頁面。
+    def convert(match):
+        target = match[2]
+        if "://" in target:
+            return match[0]
+        path_text, _, fragment = target.partition("#")
+        if not path_text and not re.fullmatch(r"[\dABC]+\.\d+", fragment):
+            return match[0]
+        path = (source.parent / path_text).resolve() if path_text else source.resolve()
+        if path.parent == ROOT / "course/chapters":
+            page = fragment + ".html" if re.fullmatch(r"[\dABC]+\.\d+", fragment) else f"chapter-{path.stem}.html"
+            if re.fullmatch(r"[\dABC]+\.\d+", fragment):
+                fragment = ""
+        else:
+            try:
+                relative = path.relative_to(ROOT).as_posix()
+            except ValueError:
+                return match[0]
+            if relative not in READING_PAGES:
+                if path_text and path.is_file():
+                    suffix = ("#" + fragment) if fragment else ""
+                    return (
+                        f"[{match[1]}](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/{relative}{suffix})"
+                    )
+                return match[0]
+            page = READING_PAGES[relative]
+        url = COURSE_URL + page + (("#" + fragment) if fragment else "")
+        return f"[{match[1]}]({url})"
+
+    return re.sub(r"\[([^\]]+)\]\(([^)]+)\)", convert, content)
+
+
+def notebook(section_id, title, body, source):
+    # 只呈現作者寫好的正文。圖解保持原來位置，不自動插入整章摘要或操作提示。
+    cells = [cell("markdown", f"# {section_id} {title}\n")]
+    blocks = re.compile(
+        r"```python\n(?P<python>.*?)```|!\[(?P<alt>[^\]]*)\]\(\.\./figures/(?P<figure>[^/)]+)\.svg\)", re.S
     )
-    cells += [
-        cell(
-            "markdown",
-            f"**先看圖：{visual['title']}**\n\n{visual['caption']}\n\n{hint}\n",
-        ),
-        cell(
-            "code",
-            f'from IPython.display import SVG, display\n\ndisplay(SVG(filename=str(root / "course/figures/{figure}.svg")))\n',
-        ),
-    ]
-    # 正文圖放在 Markdown 閱讀版；Notebook 已在圖解 cell 顯示同一張。
-    body = re.sub(r"!\[[^\]]*\]\(\.\./figures/[^)]+\.svg\)\n*", "", body)
-    chunks = re.split(r"```python\n(.*?)```", body, flags=re.S)
-    for i, text in enumerate(chunks):
-        if text.strip():
-            cells.append(cell("code" if i % 2 else "markdown", text.strip() + "\n"))
+    cursor = 0
+    for match in blocks.finditer(body):
+        prose = body[cursor : match.start()].strip()
+        if prose:
+            cells.append(cell("markdown", notebook_reading_links(prose, source) + "\n"))
+        if not any(c.get("metadata", {}).get("course_setup") for c in cells):
+            setup = cell("code", BOOTSTRAP)
+            setup["metadata"] = {
+                "course_setup": True,
+                "tags": ["hide-input"],
+                "jupyter": {"source_hidden": True},
+                "cellView": "form",
+            }
+            cells.append(setup)
+        if match["python"] is not None:
+            cells.append(cell("code", match["python"].strip() + "\n"))
+        else:
+            figure = match["figure"]
+            if not (ROOT / "course/figures" / f"{figure}.svg").is_file():
+                raise ValueError(f"{section_id} 的圖不存在：{figure}")
+            diagram = cell(
+                "code",
+                f'# @title 本節圖解\nfrom IPython.display import SVG, display\n\ndisplay(SVG(filename=str(root / "course/figures/{figure}.svg")))\n',
+            )
+            diagram["metadata"] = {
+                "course_figure": {"name": figure, "alt": match["alt"]},
+                "tags": ["hide-input"],
+                "jupyter": {"source_hidden": True},
+                "cellView": "form",
+            }
+            cells.append(diagram)
+        cursor = match.end()
+    prose = body[cursor:].strip()
+    if prose:
+        cells.append(cell("markdown", notebook_reading_links(prose, source) + "\n"))
     return {
         "cells": cells,
         "metadata": {
@@ -144,13 +159,10 @@ def build(check=False):
     for source in sorted(sources, key=lambda p: (0, int(p.stem)) if p.stem.isdigit() else (1, p.stem)):
         text = source.read_text(encoding="utf-8")
         parts = re.split(r"^## ([\dABC]+\.\d+) (.+)$", text, flags=re.M)
-        introduction = parts[0]
         for i in range(1, len(parts), 3):
             section_id, title, body = parts[i : i + 3]
             target = ROOT / "notebooks" / source.stem / f"{section_id}.ipynb"
-            serialized = (
-                json.dumps(notebook(section_id, title, introduction, body), ensure_ascii=False, indent=1) + "\n"
-            )
+            serialized = json.dumps(notebook(section_id, title, body, source), ensure_ascii=False, indent=1) + "\n"
             if check:
                 if not target.exists() or target.read_text(encoding="utf-8") != serialized:
                     stale.append(str(target.relative_to(ROOT)))
@@ -177,13 +189,15 @@ def build(check=False):
     rows = [
         "# 全部小節",
         "",
-        "每節可獨立開啟。先讀[操作與數學暖身](first-steps.md)，或從[閱讀路線](README.md)挑一條支線。",
+        "每節可獨立開啟，所需背景在正文提供具體連結。需要時查[基礎暖身](first-steps.md)，也可從[閱讀指南](README.md)挑一條路線。",
         "",
         "| 小節 | 正文 | Notebook |",
         "| --- | --- | --- |",
     ]
     for item in index:
-        rows.append(f"| {item['id']} {item['title']} | [閱讀](../{item['source']}) | [開啟](../{item['notebook']}) |")
+        rows.append(
+            f"| {item['id']} {item['title']} | [閱讀](../{item['source']}#{item['id']}) | [開啟](../{item['notebook']}) |"
+        )
     lessons = ROOT / "course/lessons.md"
     lesson_text = "\n".join(rows) + "\n"
     if check:

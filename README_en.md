@@ -1,6 +1,6 @@
 # Tiny Perceptron 小小感知機
 
-A from-scratch tutorial that grows from a next-character table into small text, image and audio models. Each lesson explains one idea through an analogy, a diagram and a short numerical experiment.
+How does a computer choose the next character after a short phrase? This from-scratch course starts with character IDs and a next-character table, using worked examples, diagrams and short programs to explain text, image and audio models.
 
 [繁體中文](README.md) | English
 
@@ -8,11 +8,11 @@ A from-scratch tutorial that grows from a next-character table into small text, 
 
 This preview provides lesson text, SVG diagrams and actual CPU outputs. Each lesson has an Open in Colab button for the same complete notebook, with repository and package setup in its first cell. Small exercises need no GPU. Notebook downloads are also available for local practice. Execution in a real Colab runtime has not been verified.
 
-The course has 18 chapters, three optional branches, 222 independently runnable notebooks and 40 original SVG diagrams with progressive highlights. Begin with small matrices, bigrams, MLPs and manual attention; introduce modern architecture, Dense/MoE, cache/SDPA, quantization and distillation later. Readers can switch models and revisit earlier examples.
+The course has 18 chapters, three optional branches, 222 independently runnable notebooks and original SVG diagrams with progressive highlights. Begin with small matrices, bigrams, MLPs and manual attention; introduce modern architecture, Dense/MoE, cache/SDPA, quantization and distillation later. Readers can switch models and revisit earlier examples.
 
-Core modules implement data handling, Transformers, multimodal inputs, DPO, packed quantization and training utilities directly in PyTorch. CLI tools cover data preparation, training, inference and evaluation. LoRA, QAT, video sequences and small RL exercises demonstrate individual mechanisms; this release does not include a trained general-purpose audiovisual assistant.
+Core modules implement data handling, Transformers, multimodal inputs, DPO, packed quantization and training utilities directly in PyTorch. CLI tools cover data preparation, training, inference and evaluation. LoRA, QAT and small RL exercises demonstrate individual mechanisms. Video currently has frame-slicing helpers; a complete video course is planned for a later extension. This release does not include a trained general-purpose audiovisual assistant.
 
-University calculus or linear algebra is sufficient background; the first-steps guide introduces Python, tensors and notebook operation. Validation uses CPU numerical and gradient checks. No actual model training was performed; readers will train and measure capabilities on their own hardware. See the [validation report](docs/validation.md).
+You can begin without prior knowledge of this project. Linked warmups introduce Python, tensors, probability, matrices, gradients and notebook operation as they become necessary. Lessons explain the problem and a worked example before introducing terminology. Validation uses CPU numerical and gradient checks. No actual model training was performed; readers will train and measure capabilities on their own hardware. See the [validation report](docs/validation.md).
 
 ## Setup
 
@@ -47,12 +47,14 @@ The default runs one forward/backward check with no optimizer update or checkpoi
 
 ## Maintenance
 
-Edit `course/chapters/`, then regenerate notebooks. Components live in `tiny_perceptron/`; SVG sources are in `scripts/build_visuals.py`.
+Edit `course/chapters/`, format that file’s Python examples, then regenerate notebooks. Each section needs an independent reader review of its current text and SVGs; the [editorial protocol](docs/editorial-guide.md) documents the reports. Publication rejects outdated reviews. Components live in `tiny_perceptron/`; SVG sources are in `scripts/build_visuals.py`.
 
 ```bash
 python scripts/build_visuals.py
+python scripts/format_course_code.py course/chapters/01.md
 python scripts/build_course.py
 python scripts/build_course.py --check
+python scripts/check_course_reviews.py
 python scripts/check_notebooks.py --mode python
 python scripts/check_notebooks.py --mode kernel --lesson 3.6
 pytest -ra
