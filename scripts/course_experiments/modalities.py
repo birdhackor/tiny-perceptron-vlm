@@ -441,6 +441,101 @@ def run_encoders(ctx):
 
         before = evaluate(splits["test"])
         trained = _fit(model, loss_fn, ctx, _steps(ctx, 250, 20), name=f"{modality}-training")
+
+        def confidence_metrics(logits, labels, temperature):
+            probabilities = (logits / temperature).softmax(-1)
+            # 正溫度保持 logits 的排名；用 logits 避免 softmax 捨入造成假平手。
+            predicted = (logits / temperature).argmax(-1)
+            correct = predicted == labels
+            confidence = probabilities.max(-1).values
+            one_hot = F.one_hot(labels, num_classes=len(classes)).to(probabilities.dtype)
+            bins, ece = [], 0.0
+            # [0,.2), [.2,.4), ..., [.8,1]；每題只進一格，空格也保存。
+            bin_ids = (confidence * 5).floor().long().clamp(max=4)
+            for bin_id in range(5):
+                selected = bin_ids == bin_id
+                count = int(selected.sum())
+                mean_confidence = float(confidence[selected].mean()) if count else None
+                accuracy = int(correct[selected].sum()) / count if count else None
+                if count:
+                    ece += count / len(labels) * abs(accuracy - mean_confidence)
+                bins.append(
+                    {
+                        "lower": bin_id / 5,
+                        "upper": (bin_id + 1) / 5,
+                        "upper_inclusive": bin_id == 4,
+                        "count": count,
+                        "mean_confidence": mean_confidence,
+                        "accuracy": accuracy,
+                    }
+                )
+            return {
+                "temperature": temperature,
+                "count": len(labels),
+                "correct": int(correct.sum()),
+                "accuracy": int(correct.sum()) / len(labels),
+                "mean_confidence": float(confidence.mean()),
+                "nll": float(F.cross_entropy(logits / temperature, labels)),
+                "brier": float((probabilities - one_hot).square().sum(-1).mean()),
+                "brier_definition": "mean over examples of sum over classes (probability - one_hot_label)^2",
+                "ece": ece,
+                "ece_definition": "sum over five equal-width confidence bins: count/N * abs(bin accuracy - bin mean confidence)",
+                "bins": bins,
+                "probabilities": probabilities.tolist(),
+                "predicted_labels": predicted.tolist(),
+                "confidence": confidence.tolist(),
+            }
+
+        with torch.no_grad():
+            validation_logits, validation_labels = classification(splits["validation"])
+        validation_logits = validation_logits.detach().float().cpu()
+        validation_labels = validation_labels.detach().cpu()
+        temperature_grid = [0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 5.0]
+        selection = [
+            {
+                "temperature": value,
+                "validation_nll": float(F.cross_entropy(validation_logits / value, validation_labels)),
+            }
+            for value in temperature_grid
+        ]
+        # 到這裡才固定溫度；test logits/labels 沒有參與任何選溫判準。
+        chosen_temperature = min(selection, key=lambda candidate: candidate["validation_nll"])["temperature"]
+        with torch.no_grad():
+            test_logits, test_labels = classification(splits["test"])
+        test_logits = test_logits.detach().float().cpu()
+        test_labels = test_labels.detach().cpu()
+        if not torch.equal(test_logits.argmax(-1), (test_logits / chosen_temperature).argmax(-1)):
+            raise AssertionError("正溫度校準不應改變這批分類的 argmax")
+        calibration = {
+            "method": "post-hoc positive temperature scaling; fixed-grid teaching approximation",
+            "source": "Guo et al. (2017), On Calibration of Modern Neural Networks",
+            "source_url": "https://proceedings.mlr.press/v70/guo17a.html",
+            "scope": "confidence for one of a fixed finite set of classifier labels, not probability an entire generated answer is correct",
+            "temperature_grid": temperature_grid,
+            "selection_split": "validation only",
+            "selection_rule": "minimum mean validation NLL; exact ties use first item in the predefined grid",
+            "selection": selection,
+            "chosen_temperature": chosen_temperature,
+            "validation": {
+                "count": len(validation_labels),
+                "logits": validation_logits.tolist(),
+                "labels": validation_labels.tolist(),
+                "families": [row["family"] for row in splits["validation"]],
+                "original": confidence_metrics(validation_logits, validation_labels, 1.0),
+                "calibrated": confidence_metrics(validation_logits, validation_labels, chosen_temperature),
+            },
+            "test": {
+                "count": len(test_labels),
+                "logits": test_logits.tolist(),
+                "labels": test_labels.tolist(),
+                "families": [row["family"] for row in splits["test"]],
+                "original": confidence_metrics(test_logits, test_labels, 1.0),
+                "calibrated": confidence_metrics(test_logits, test_labels, chosen_temperature),
+            },
+            "test_argmax_invariant": True,
+            "limitation": "held-out sets are very small and synthetic; bin estimates and temperature choice are unstable, and validation improvement does not guarantee test improvement or generalization",
+        }
+        write_json(ctx.output / f"{modality}-calibration.json", calibration)
         result = {
             "training": trained,
             "before": before,
@@ -451,6 +546,7 @@ def run_encoders(ctx):
             if modality == "vision"
             else {"width": 16, "bands": 16},
             "classes": classes,
+            "calibration": calibration,
             "scope": "synthetic colour/shape classification or tone >300 Hz; not natural perception",
         }
         training_payload = torch.load(ctx.output / f"{modality}-training.pt", map_location="cpu", weights_only=True)

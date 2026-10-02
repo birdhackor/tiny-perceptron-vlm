@@ -44,6 +44,12 @@ def asset_ignore(path):
 gpu_image = (
     modal.Image.debian_slim(python_version="3.13")
     .uv_sync(str(ROOT), extras=["cu126"], uv_version="0.12.22", extra_options="--no-dev")
+    .apt_install("build-essential")
+    .run_commands(
+        "python -c \"import pathlib, sysconfig; "
+        "p = pathlib.Path(sysconfig.get_path('include')) / 'Python.h'; "
+        "assert p.is_file(), f'Missing matching Python development header: {p}'; print(p)\""
+    )
     .env({"PYTHONPATH": "/app", "CUBLAS_WORKSPACE_CONFIG": ":4096:8", "HF_HUB_DISABLE_PROGRESS_BARS": "1"})
     .workdir("/app")
     .add_local_dir(ROOT / "tiny_perceptron", "/app/tiny_perceptron", ignore=["**/__pycache__/**"])
