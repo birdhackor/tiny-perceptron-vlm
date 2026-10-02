@@ -16,7 +16,7 @@
 
 文字與圖音模型、對話遮罩、DPO、量化儲存與訓練基本件直接以 PyTorch 實作。資料、訓練、推論與評估有可執行入口。LoRA、QAT 與小型 RL 等概念提供局部實驗；影片目前提供逐幀切片的輔助函式，完整教學列為後續擴充。此版本沒有提供已訓練的通用影音助理。
 
-第一次接觸本專案也能從第一節開始；Python、tensor、機率、矩陣與梯度都有可按需查閱的暖身，不必先修完所有數學。每節先說明問題與具體例子，所需背景提供可點擊的小節連結。已驗證 CPU 教材執行與梯度，以及 Modal L4 上的小型文字訓練、HF checkpoint 上傳下載與續訓；自然資料上的正式訓練與能力評估仍待進行。詳見[驗證報告](docs/validation.md)。
+第一次接觸本專案也能從第一節開始；Python、tensor、機率、矩陣與梯度都有可按需查閱的暖身，不必先修完所有數學。每節先說明問題與具體例子，所需背景提供可點擊的小節連結。CPU 小程式用來核對零件；另外的正式訓練會更新權重、固定留出題，並保存程式版本、資料來源與逐題結果。合成小任務與自然資料的短訓成績各有適用範圍，不能合起來宣稱通用助理能力。見[正式實驗與進度](docs/course-experiments/README.md)及[驗證報告](docs/validation.md)。
 
 ## 安裝與開啟 Notebook
 
@@ -56,6 +56,15 @@ python scripts/train.py --task text --data data/generated/toy-text/train.jsonl
 
 已設定 Modal 與 Hugging Face 帳號時，可手動執行 GitHub Actions 的 **GPU training smoke test**，驗證 GPU 權重更新、HF checkpoint 上傳與下載續訓。帳號設定、時間限制與結果判讀見 [GPU 操作說明](docs/gpu-training.md)。
 
+想先觀察訓練後的模型，可下載[公開學生權重](https://huggingface.co/birdhackor/tiny-perceptron-course-models)。[下載清單](docs/course-experiments/public-models.json)只列已發布的固定版本，下載程式逐檔核對指紋；模型卡說明每份權重的用途、資料許可與實際成績。例如在上面已安裝的 CPU 環境中：
+
+```bash
+python scripts/fetch_course_models.py --list
+python scripts/check_course_models.py --model text_foundation
+```
+
+第二條會匿名下載基礎文字模型、核對檔案並在 CPU 上執行推論。這是檔案與執行通路的檢查；回答是否正確要看對應的留出題評估。推論權重已去除更新器與隨機狀態，不能拿來精確接續同一次訓練；教材的完整訓練備份另行保存。
+
 ## 專案結構與維護
 
 ```text
@@ -74,6 +83,7 @@ python scripts/format_course_code.py course/chapters/01.md
 python scripts/build_course.py
 python scripts/build_course.py --check
 python scripts/check_course_reviews.py
+python scripts/check_technical_reviews.py
 python scripts/check_notebooks.py --mode python
 python scripts/check_notebooks.py --mode kernel --lesson 3.6
 pytest -ra
@@ -81,7 +91,7 @@ ruff check .
 ruff format --check .
 ```
 
-修改教材請改 `course/chapters/`，先格式化該檔的 Python 範例再產生 Notebook。每節須由獨立讀者核對目前正文與 SVG，審閱協定見[編輯說明](docs/editorial-guide.md)；版本不符會阻止發布。執行輸出與網頁放在 `outputs/`。完整 kernel 檢查用 `--mode kernel`，每節開獨立工作桌。GitHub Actions 保留 Linux、macOS、Windows 的核心測試；Notebook整套驗證另行執行。
+修改教材請改 `course/chapters/`，先格式化該檔的 Python 範例再產生 Notebook。每節須由獨立讀者核對目前正文與 SVG，再由另一位審閱者查核事實、原始來源與實測結果，分別見[編輯說明](docs/editorial-guide.md)與[正確性審閱](docs/technical-review-guide.md)；版本不符會阻止發布。執行輸出與網頁放在 `outputs/`。完整 kernel 檢查用 `--mode kernel`，每節開獨立工作桌。GitHub Actions 保留 Linux、macOS、Windows 的核心測試；Notebook整套驗證另行執行。
 
 ## 參考與授權
 
