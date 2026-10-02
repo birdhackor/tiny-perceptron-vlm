@@ -44,6 +44,26 @@ def main():
                 "hf_private_backup": result.get("hf") if result else None,
             }
         )
+    supporting = []
+    for spec in plan.get("supporting_experiments", []):
+        path = ROOT / "docs/course-experiments/results" / f"{spec['id']}.json"
+        result = read_json(path)
+        supporting.append(
+            {
+                "id": spec["id"],
+                "kind": spec["kind"],
+                "scope": spec["scope"],
+                "status": result.get("evidence_status", "pending") if result else "pending",
+                "lessons": spec["lessons"],
+                "evidence": path.relative_to(ROOT).as_posix() if result else None,
+                "evidence_sha256": hashlib.sha256(path.read_bytes()).hexdigest() if result else None,
+                "code_revision": result.get("revision") if result else None,
+                "probe_outcome": result.get("results", {}).get("status") if result else None,
+                "supported_routes": result.get("results", {}).get("supported_routes", []) if result else [],
+                "hf_private_backup": result.get("hf") if result else None,
+                "student_model_release": False,
+            }
+        )
     sources = [ROOT / "course" / name for name in ("README.md", "first-steps.md")]
     sources += sorted((ROOT / "course/chapters").glob("*.md"))
     sources += [ROOT / "course" / name for name in ("training.md", "glossary.md")]
@@ -89,6 +109,7 @@ def main():
         },
         "note": "Review status reflects existing reports and hashes only; final strict gates also validate report content, figures, and unique reviewers. Experiments without a section mapping do not imply the section was omitted: offline notebooks verify mechanisms separately.",
         "experiments": experiments,
+        "supporting_evidence": supporting,
         "sections": lessons,
     }
     path = ROOT / "docs/course-experiments/progress.json"

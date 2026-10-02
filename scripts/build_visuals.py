@@ -26,7 +26,7 @@ def box(x, y, w, h, title, subtitle="", color="#e8f1ff"):
     )
 
 
-def save(name, title, caption, body, height=330, animated=True):
+def save(name, title, caption, body, height=330, animated=True, title_size=24, caption_size=15):
     DIRECTORY.mkdir(parents=True, exist_ok=True)
     animated = animated and 'class="pulse' in body
     animation = (
@@ -42,8 +42,8 @@ def save(name, title, caption, body, height=330, animated=True):
     svg = f'''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 {height}" role="img" aria-labelledby="title desc">
     <title id="title">{escape(title)}</title><desc id="desc">{escape(caption)}。{"橘色輪流提示閱讀步驟，" if animated else ""}所有內容靜態可見。</desc>
     {animation}<defs><marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto"><path d="M0 0L10 5L0 10" fill="#466b97"/></marker></defs>
-    <rect width="800" height="{height}" fill="#fff"/>{label(400, 32, title, 24)}
-    {body}{label(400, height - 16, caption, 15)}
+    <rect width="800" height="{height}" fill="#fff"/>{label(400, 32, title, title_size)}
+    {body}{label(400, height - 16, caption, caption_size)}
     </svg>'''
     (DIRECTORY / f"{name}.svg").write_text(svg, encoding="utf-8")
     VISUALS[name] = {"title": title, "caption": caption, "animated": animated}
@@ -98,15 +98,17 @@ def build():
         body += f'<path d="M{x + 35} 119V137" stroke="#466b97" stroke-width="2" marker-end="url(#arrow)"/>'
         body += f'<rect x="{x}" y="143" width="70" height="50" rx="10" fill="{color}" stroke="#8da8ca"/>'
         body += label(x + 35, 179, identifier, 30)
-    body += label(400, 239, "字表：0 → 。　1 → 狗　2 → 看　3 → 貓　4 → ，", 20)
-    body += label(400, 273, "反向查字表，就能把這排編號還原成原句。", 18)
+    body += label(400, 239, "字表：0 → 。　1 → 狗　2 → 看　3 → 貓　4 → ，", 24)
+    body += label(400, 283, "反向查字表，就能把這排編號還原成原句。", 24)
     save(
         "character_ids",
         "先約定字表，再替原句的每個字查編號",
-        "兩個橘色位置都是「貓」，所以都查到 3；編號本身不表示字義。",
+        "兩個橘色的「貓」都查到 3；編號不表示字義",
         body,
-        height=322,
+        height=346,
         animated=False,
+        title_size=26,
+        caption_size=22,
     )
     flow(
         "lookup",

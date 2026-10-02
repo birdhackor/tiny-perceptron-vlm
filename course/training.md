@@ -703,52 +703,87 @@ efficiency正式組先載入[T.4](#T.4)的`sft/model.pt`與同目錄`dataset.jso
 
 ## T.9 真的縮小保存格式，再量品質
 
-先讀[17.2的整數刻度](chapters/17.md#17.2)、[17.8的低位元保存](chapters/17.md#17.8)。把浮點數四捨五入後仍存在原本的浮點容器，只是改了數值，檔案不一定變小。這裡使用真正把 4-bit 或 8-bit 整數緊密保存的格式。
+先讀[17.2的整數刻度](chapters/17.md#17.2)、[17.8的低位元保存](chapters/17.md#17.8)。把浮點數四捨五入後仍存在原本的浮點容器，只是改了數值，檔案不一定變小。現在用已完成的屬性問答實驗核對真正4-bit／8-bit儲存；先完成[T.4的課程SFT入口](#T.4)，讓`outputs/course-experiments/course-v1/sft/`中有`model.pt`與原始三側`dataset.json`。
 
 ```bash
-.venv/bin/python scripts/quantize.py checkpoints/attributes.pt --bits 4 --output checkpoints/attributes-int4.pt
-.venv/bin/python scripts/infer.py checkpoints/attributes-int4.pt --chat --prompt "color=red;shape=square;pitch=low;shape?"
-.venv/bin/python scripts/evaluate.py checkpoints/attributes.pt --data data/generated/attributes-sft/validation.jsonl --mode sft --tokens 128 --output outputs/float-validation.json
-.venv/bin/python scripts/evaluate.py checkpoints/attributes-int4.pt --data data/generated/attributes-sft/validation.jsonl --mode sft --tokens 128 --output outputs/int4-validation.json
+.venv/bin/python -m scripts.course_experiments.run --experiment quantization --device cpu
+.venv/bin/python scripts/infer.py outputs/course-experiments/course-v1/quantization/fp32.pt --chat --prompt "color=blue;shape=circle;pitch=low;color?" --tokens 24 --json
+.venv/bin/python scripts/infer.py outputs/course-experiments/course-v1/quantization/model.pt --chat --prompt "color=blue;shape=circle;pitch=low;color?" --tokens 24 --json
 ```
 
-這組命令先轉換 [T.4](#T.4) 保存的文字模型，再用同一屬性題推論、評估。`--bits 4` 指每個量化整數用四個位元，位元是只能放 0 或 1 的最小儲存單位。Linear是把一組特徵數加權混合成另一組的零件，見[4.1](chapters/04.md#4.1)。工具量化它的權重。還有三類數字保留浮點格式：嵌入查表用文字的 ID 找到一列起始特徵數；正規化調整每個位置那組特徵數的尺度；偏置是加權混合後另外加的可調數字。因此不是整個模型每個數字都變四位元。
+第一個命令載入直接SFT底座，額外更新120次，batch16、學習率0.003、seed42，再把同一份更新後權重各自轉成4-bit與8-bit。它保存`fp32.pt`、4-bit的`model.pt`、8-bit的`packed8.pt`及完整`result.json`，包含原45／5／10筆的訓練、驗證與最後測試切分。CPU可重跑流程，正式數字則來自NVIDIA L4；改用`--device cuda`需要自己的CUDA環境，裝置與時間不能混抄。後兩條命令用同一提示檢查FP32與4-bit的實際答案，`--json`保留原始ID、EOS與非法控制標記。本輪兩版都答`re`，標準答案`blue`，載入與停止都正常，內容仍錯。
+
+4-bit指每個量化整數用四個位元。Linear把一組特徵加權混合成另一組，見[4.1](chapters/04.md#4.1)。轉換只動13個Linear的權重；嵌入查表、正規化與bias仍是FP32，scale也要保存。因此三版141,568個參數的個數相同，保存方式改了，不是學生架構縮小。
+
+| 本次共同來源的版本 | 模型tensor bytes | 私有實跑檔案bytes | 測試完整匹配／題數 | 回答NLL／有效目標 |
+| --- | ---: | ---: | ---: | ---: |
+| FP32 | 566,272 | 588,358 | 6/10 | 0.4565／69 |
+| 4-bit | 168,736 | 182,277 | 6/10 | 0.4278／69 |
+| 8-bit | 226,336 | 242,085 | 6/10 | 0.4554／69 |
+
+NLL是平均負對數代價，越低表示這批標準答案的機率較高；69個目標包含回答與EOS，不含問題。三版EOS皆10/10，完成匹配也都是6/10，原始生成ID逐項相同。但驗證五題的FP32／4-bit／8-bit是2／1／2題正確，不能只憑測試這一欄宣稱四位元保住所有新題。[公開完整報告](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/course-experiments/results/quantization.json)的`results.runs`逐版保存`storage`、`validation`、`test`與`timing`，實際更新總共讀到13,610個有效目標；`fp32-training.pt`另保存optimizer，不拿它與部署檔作大小比較。
 
 推論目前會把緊密保存的整數還原成浮點數再計算。它可以減少檔案大小，卻不能直接宣稱推論記憶體同樣減少或運算更快。
 
-原模型可能讓輸入查表與輸出計分共用同一份權重表，也就是只保存一份數字、在兩個地方使用。這次轉換會把它們分開：輸入表仍保存浮點數，輸出表則保存量化整數。終端 JSON 的 `input_output_sharing_removed` 為 `true`，表示原本共用的表已被拆開；為 `false`，表示原模型本來就沒有共用，並非轉換失敗。拆開後要各自保存資料，所以不能只由「每個數字少了幾個位元」推算整個檔案的縮小比例。原始 checkpoint 若包含更新工具，其檔案大小也不能拿來當純權重壓縮比例的分母。
+本次底座本來就不共享輸入與輸出表，沒有額外拆開共享語意。若你另有訓練好的浮點模型，可用`.venv/bin/python scripts/quantize.py checkpoints/attributes.pt --bits 4 --output checkpoints/attributes-int4.pt`獨立轉換；這條命令不做上述120次更新，不能套用本表成績。它的`input_output_sharing_removed`會指出是否拆開共享表，見[17.9](chapters/17.md#17.9)。原始checkpoint可能保存optimizer與隨機狀態；本表FP32雖沒有optimizer，仍有隨機狀態及不同metadata。只比較數值儲存用tensor bytes；私有原檔與公開剔除訓練狀態後的匯出檔大小也要各量一次。
 
 要讓模型預先適應誤差，可看[17.14的量化感知訓練](chapters/17.md#17.14)，常縮寫 QAT。那節用模擬量化檢查前向誤差與近似梯度，真正的低位元加速還需要支援的格式與硬體運算核心。
 
-量化命令終端JSON中的`source_file_bytes`與`quantized_file_bytes`是兩個實際檔案大小，`model_tensor_storage_bytes`是量化檔內各數值陣列的儲存bytes。接著依T.4對照兩份評估報告，按相同`row`並排`target`與`generated`，分別記原版答對、量化版答對，以及生成文字是否改變。推論問題`shape?`的理想答案是`square`，終端直接印實際助手回答，不能把載入成功當成答對。
+課程報告的`storage.file_bytes`與`storage.tensor_bytes`分別對應本表的檔案與數值大小；`test.generated_samples`用`family`、`question`、`expected`、`generated_ids`與`exact`逐題核對。這套欄名與單一`quantize.py`命令的`source_file_bytes`／`quantized_file_bytes`不同，讀報告時要使用實際欄位。本輪L4固定八步decode，FP32約2.371毫秒／步、4-bit約4.882毫秒／步，參考反量化路徑較慢；完整暖機、提示長度與共存模型記憶體界線見[17.10](chapters/17.md#17.10)。
 
 練習保存原版和4-bit版的實際檔案大小，再用相同驗證題逐題比較答案。把「少了多少 bytes」和「多少題改變」分成兩欄；bytes 是位元組；一個位元組包含八個位元，也就是 `1 byte = 8 bits`。這兩欄不能互相取代。
 
 ## T.10 用較小學生學教師，再與普通訓練比較
 
-先讀[18.1的教師訊號](chapters/18.md#18.1)、[18.6的文字單位對齊](chapters/18.md#18.6)。學生是你實際要部署的較小模型；教師提供答案或候選比例。蒸餾不會自動讓學生比教師更正確，也可能把教師的錯誤與風格一起學走。
+先讀[18.1的教師訊號](chapters/18.md#18.1)、[18.6的文字單位對齊](chapters/18.md#18.6)。學生是實際要部署的較小模型，教師提供答案或候選比例；學生變小先由架構決定，教師訊號是否有幫助則要和同架構的普通訓練比較。這次已完成完整L4實跑，保留沒有提升、量化後退步與教師答錯的結果。
 
-如果只能取得教師回答，先把題目、回答、教師版本與生成設定保存成對話資料，再沿 [T.4](#T.4) 的 SFT 路線教學生。如果能讀取教師每個位置的候選分佈，可用下面的白盒路線：
-
-```bash
-.venv/bin/python scripts/train.py --task distill --teacher checkpoints/attributes.pt --data data/generated/attributes-sft/train.jsonl --width 16 --layers 1 --train --steps 500 --alpha 0.5 --temperature 2 --output checkpoints/student.pt
-.venv/bin/python scripts/evaluate.py checkpoints/student.pt --data data/generated/attributes-sft/validation.jsonl --mode sft --output outputs/student-validation.json
-```
-
-這裡需要 [T.4](#T.4) 已檢查的 `attributes.pt` 作教師。`--width 16 --layers 1` 縮小學生，`--alpha 0.5` 混合真值與教師訊號，`--temperature 2` 讓候選比例較平緩，避免只看第一名。這些比例與溫度的具體算法在第 18 章逐項展開。
-
-教師與學生使用同一 byte 詞表，位置也需一致，才能比較同一題同一候選的比例。正式訓練沒有教師檔案時工具會停止；不更新的通路檢查可以用隨機教師，但那只證明尺寸能相接。多模態輸入還會展開額外位置，須先看[18.13](chapters/18.md#18.13)，不能直接減兩份不同長度的輸出。
-
-公平比較應有相同小架構、相同步數與資料的普通訓練學生，再與蒸餾學生比。以下只移除教師訊號，其他學生設定相同：
+重跑前先完成[T.4的完整直接SFT](#T.4)、[T.5的條件式風格](#T.5)與[T.8的MoE](#T.8)，讓預設`outputs/course-experiments/course-v1/`下的三個來源資料夾各有`model.pt`與`dataset.json`。風格使用條件式教師；MoE固定使用top-2、輔助係數0.01。工具核對原家族切分，缺權重或資料會停止。另取GSM8K固定200題包作完整短題診斷：
 
 ```bash
-.venv/bin/python scripts/train.py --task sft --data data/generated/attributes-sft/train.jsonl --width 16 --layers 1 --train --steps 500 --seed 42 --output checkpoints/student-sft.pt
-.venv/bin/python scripts/evaluate.py checkpoints/student-sft.pt --data data/generated/attributes-sft/validation.jsonl --mode sft --tokens 32 --output outputs/student-sft-validation.json
+.venv/bin/python scripts/fetch_training_assets.py --asset gsm8k
+.venv/bin/python -m scripts.course_experiments.run --experiment distillation --device cpu
+.venv/bin/python scripts/infer.py outputs/course-experiments/course-v1/distillation/sft-w32-ce.pt --chat --prompt "color=red;shape=square;pitch=high;joint?" --tokens 24 --json
+.venv/bin/python scripts/infer.py outputs/course-experiments/course-v1/distillation/sft-w32-ce_kl.pt --chat --prompt "color=red;shape=square;pitch=high;joint?" --tokens 24 --json
 ```
 
-蒸餾命令預設同樣seed42，學生評估預設同樣生成32個單位。依T.4將两份學生報告按相同`row`並排`target`、`generated`與`exact_match`，再比較`mean_token_nll`與有效位置數；想看教師成績，也用同一份validation評估`attributes.pt`，不能改題或只報最好的一方。CE 是對標準答案的代價，KL 是教師與學生分佈的差異；不要只拿大教師與小學生比較，就把所有進步歸功於蒸餾。
+第二條是全部11個學生支線、共3,900次更新的完整入口，CPU需要時間；有自己的CUDA環境可改`--device cuda`。本次正式數字來自L4，訓練、評估及本機保存合計約90.14秒，不包含環境啟動與HF上傳。輸出資料夾保存全部教師副本、學生、教師生成ID及logit快取，`result.json`含完整報告；主`model.pt`是寬32的屬性CE+KL學生，MoE與風格學生各用自己的名稱，不能混作同一個任務。
 
-練習先挑幾道有真值的題檢查教師，包括格式與安全行為，再決定要保留哪些示範。完成學生後看同一組新題，記錄小了多少、答對多少，以及哪些教師錯誤也出現在學生身上。
+屬性教師寬64、兩層、141,568參數，學生寬16或32、各一層，分別13,744／33,632參數。每個寬度各做三支：CE用真值、`teacher_hard`用實際教師greedy回答、`ce_kl`用一半CE加一半教師KL。T=2在雙方softmax前使用，KL內部只乘一次T²。三支同初始化、同題目抽樣計畫、batch16、學習率0.003，各400次更新。教師與學生共用264-ID byte詞表，白盒訊號對齊同一標準回答前文的有效位置，問題與PAD不直接計分。
+
+| 共同10道屬性留出題 | 完整匹配 | 回答NLL／69目標 | 模型tensor bytes |
+| --- | ---: | ---: | ---: |
+| 教師 | 5/10 | 0.5058 | 566,272 |
+| 寬16 CE／教師硬回答 | 各1/10 | 各1.1134 | 各54,976 |
+| 寬16 CE+KL | 1/10 | 1.2407 | 54,976 |
+| 寬32 CE／教師硬回答 | 各4/10 | 各0.4393 | 各134,528 |
+| 寬32 CE+KL | 4/10 | 0.5037 | 134,528 |
+| 同一寬32 KL學生packed4 | 3/10 | 0.5960 | 64,160 |
+
+每支屬性學生都讀44,985個回答與EOS目標，留出生成最多24個新token、greedy；表中各版EOS10/10、無非法控制ID。教師對45道訓練題全答對且正常EOS，所以本輪教師硬回答和真值ID相同，CE與硬目標學生權重也相同。KL沒有提高答對數，寬32與教師原始ID一致率雖由CE的3/10升到4/10，獨立真值仍各4/10。後兩條推論命令的標準答案是`square,high`，CE實際答`square,low`、KL答`square,high`；其他題也有反向變化，見[18.10](chapters/18.md#18.10)，不能只展示這一題宣布整體提升。
+
+白盒教師快取另花約0.049秒、占345,101 bytes，硬回答生成另花0.827秒；寬32學生更新時間約CE 2.859秒、KL 3.345秒。這輪匹配了更新與有效目標數，沒有匹配包括教師在內的總時間。一般硬回答長短不同，就算步數與抽題索引相同，有效目標數也可能改變，應讀每支`effective_supervised_tokens`而非自行假設。
+
+其餘兩個任務也有完整對照。風格185／28／27筆分家族，寬32的CE／硬回答／KL各300次更新、96,835個目標，算術內容都0/21，日期3/6，總內容3/27；JSON格式7/7有效、EOS27/27。教師同樣3/27，還在生成的185筆訓練硬回答中留下五個錯日期。模型學會模板沒有學會新算式，讀[18.11](chapters/18.md#18.11)時對照`{"answer": 10}`與`2+2=?`的真值4。
+
+MoE教師340,608參數，Dense學生33,632，兩支各300次更新、559,651個目標，只讀原409篇訓練故事前32篇；共同驗證51篇、最後測試52篇皆完整計NLL。測試共352個片段、41,914個文字與片段EOS目標，教師／CE／KL代價2.3017／2.4601／2.3890；KL比CE低，仍重複寫`the`，原文下一24-byte續段匹配均0/52。這種匹配不等於開放故事創作評分，教師與學生的訓練篇數也不同；比較界線見[18.12](chapters/18.md#18.12)。
+
+GSM8K另外先掃200道完整原題，只兩道能連同真實chat前文及預留24個生成token放入128-token上下文，且真值加EOS也符合生成預算。其餘198題不截短、不計正確率；兩題要求算5小時與60天，教師卻答屬性片語，教師和所有學生均0/2、EOS2/2。`unseen-gsm8k-complete-prompts.json`保存選擇與完整題目，這是很小的域外失敗診斷，不是完整GSM8K benchmark。缺少可用完整題時工具會明示`not_run`與原因，不能列出0/0當成一次測試。
+
+多模態另接[11.5的圖片教師](chapters/11.md#11.5)與[12.12的聯合教師](chapters/12.md#12.12)。先用T.4的完整直接SFT來源，按固定實驗入口準備編碼器、接頭、圖片問答與聯合教師；這組命令需要自己的CUDA環境，順序不能跳過：
+
+```bash
+.venv/bin/python -m scripts.course_experiments.run --experiment encoders --device cuda
+.venv/bin/python -m scripts.course_experiments.run --experiment projector --device cuda
+.venv/bin/python -m scripts.course_experiments.run --experiment vqa --device cuda
+.venv/bin/python -m scripts.course_experiments.run --experiment joint --device cuda
+.venv/bin/python -m scripts.course_experiments.run --experiment multimodal_distillation --device cpu
+```
+
+前四步與T.6的獨立CLI配方不同，會在預設輸出根目錄建立依賴資料夾，`vqa/`與`joint/`各保存教師`model.pt`及`dataset.json`。圖片來源固定選160步的`all`支線，聯合來源400步；它們的正式測試分別9/12與12/12，仍應保留圖片來源的錯題和聯合來源驗證只有8/12的限制。若把前四條改成CPU，目前模態來源入口使用短排程檢查流程，會產生不同的教師，不能套用這些GPU教師成績。最後一條壓縮入口則在CPU也完整訓練四支350次更新的學生；要重現同一教師來源，需保留相同已訓練權重與原家族資料，單獨下載推論權重不足以重建訓練資料切分。
+
+多模態學生共36,096參數、144,384 bytes浮點數值，教師各145,664參數、582,656 bytes；圖片token由16改4，文字部分由寬64兩層改成寬32一層。每個任務的CE與CE+KL共用初始化與批次，batch4、lr=0.003、T=2，圖片各8,391個有效回答目標、聯合各16,104個。圖片36／12／12筆，最後12題、72個真值目標，CE與KL答對9/12及8/12；聯合24／12／12筆，最後12題、138個目標，答對8/12及6/12。四支都EOS12/12、無非法控制ID，並未因此保住全部能力。聯合KL學生遮圖後的12串生成ID完全相同，對方形仍答`circle`；遮音訊後整題由6/12降為3/12。[18.13](chapters/18.md#18.13)保存真實答案預測列、教師快取成本、逐題干預及可載入學生的命令；練習先核對相同答案ID，再核對相同測試分母，不能直接將長短不同的整段logits配對。
+
+[公開完整實報](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/course-experiments/results/distillation.json)的`results.tasks`分為`attributes`、`style_transfer`、`moe_to_dense`，各自的`teacher_test`與`runs`保存共同真值、原始ID、EOS、NLL與實際分母。浮點學生和packed學生的實跑檔案還有不同metadata與隨機狀態，純數值用`storage.tensor_bytes`比較；公開剔除訓練狀態後的檔案大小另量。部署packed版本仍反量化成FP32，沒有量低位元kernel加速。練習按相同`family`與`question`並排寬32 CE／KL的全部十題，記下新增正確與新增錯誤的題數，再核對總數仍各4/10；接著找出packed4把`blue`變成`ble`的一題，區分教師訊號與量化兩步的影響。
 
 ## T.11 留下別人能核對的實驗紀錄
 
