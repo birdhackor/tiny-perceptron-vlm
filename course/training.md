@@ -17,6 +17,8 @@ python scripts/fetch_training_assets.py --asset tinystories
 
 第一行列出可選的包與大小，不訓練模型；第二行只取得 TinyStories 這個短故事樣本包，核對檔案後解到 `data/training/`。資料包的來源、版本、授權和 SHA-256 都有記錄。SHA-256 是由檔案內容算出的指紋，用來確認取得的內容與記錄一致；它不保證資料本身沒有偏差或錯誤。
 
+現在不只備好了資料，也已完成[T.4的兩個小型文字實驗](#T.4)：TinyStories包有512篇完整英文故事，中文詩包有365首完整古典詩。前者選自上游training材料，後者是未切分的詩集；我們在訓練前自行留出一部分來檢查，而不是把包內每篇都交給模型練習。這份自己的最後檢查不能冒稱官方test，唐詩的結果也不能代表現代中文對話能力。完整來源、固定版本與資料授權可由[實跑報告](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/course-experiments/results/real_text.json)追到各資料包的記錄。
+
 把資料讀進訓練工具前，先打開幾筆看實際欄位，再安排未用來教模型的題目。例如選[本頁T.4的屬性問答](#T.4)，把單一能力限定為「從列出的屬性回答形狀」，答案必須與shape欄位完全相同。這裡先用可直接閱讀的示意小表練習分組，不需要執行指令，也不代表產生器預設會採用這份切分。
 
 | 題號 | 教學輸入 | 標準答案 | 題目家族 |
@@ -122,7 +124,7 @@ MLP 的開始報告約為 `train_loss=3.0041`、`validation_loss=3.0252`；這�
 .venv/bin/python scripts/train_simple.py --model bigram --seed 42 --device cpu --train --steps 200 --output checkpoints/bigram.pt > outputs/bigram-after.json
 ```
 
-`--train` 明確開啟更新，`--steps 200` 是更新次數，`--output` 指定 `.pt` 模型檔。結束報告的 `validation_loss` 用更新完成的模型重算；`train_loss` 則是最後一步更新之前那次前向的代價。200 步是實驗起點，不保證留出代價改善，這裡沒有提供或假定訓練後數字。
+`--train` 明確開啟更新，`--steps 200` 是更新次數，`--output` 指定 `.pt` 模型檔。結束報告的 `train_loss` 與 `validation_loss` 都用最後一次更新完成後的模型重新計算，才能在同一個時點比較。另一欄 `last_batch_loss_before_update` 保留最後一步更新之前算出的代價，別把它和更新後的 `train_loss` 混為一個數字。200步是這次實驗的設定，仍不保證未教過的題目會改善。
 
 更新完成後，將下面程式存為 `outputs/compare_bigram.py`，執行 `.venv/bin/python outputs/compare_bigram.py`，它會讀真正的前後報告並保存比較：
 
@@ -149,7 +151,7 @@ Path("outputs/bigram-comparison.json").write_text(text + "\n")
 print(text)
 ```
 
-`change` 小於零代表代價降低。通過練習的條件是能指出同一份留出集合的平均代價如何變化，並把它與訓練代價分開說；平均改善不表示每篇文件都改善。這個 CLI 沒有候選查詢、生成或逐文件報告，本練習只要求它能提供的平均代價比較；存檔也不能直接交給 Transformer 的 `infer.py`。
+`change` 小於零代表代價降低。通過練習的條件是能指出同一份留出集合的平均代價如何變化，並把它與訓練代價分開說；平均改善不表示每篇文件都改善。這個 `train_simple.py` 命令印的是平均代價，不會印生成文字。它保存的是接字表或固定窗口MLP的數字與字表，和後面Transformer的結構不同，不能直接交給 `infer.py`；下面的完整實驗入口會替這兩種小模型產生句子。
 
 完成 bigram 後，才用同一資料與種子執行 MLP 的 `--train` 命令：
 
@@ -159,11 +161,34 @@ print(text)
 
 複製上面的比較程式，另存為 `outputs/compare_mlp.py`。程式內三個路徑也要改：讀取起點的 `outputs/bigram-before.json` 改成 `outputs/mlp-before.json`，讀取終點的 `outputs/bigram-after.json` 改成 `outputs/mlp-after.json`，寫出結果的 `outputs/bigram-comparison.json` 改成 `outputs/mlp-comparison.json`。只改程式檔名不會改它讀取或寫入的資料。保存後執行 `.venv/bin/python outputs/compare_mlp.py`，核對model是mlp、前後參數格數一致，再讀取它印出的代價與change。
 
-記錄兩者的 `parameters` 與各自前後代價。MLP 同時改變可見前文、模型結構與參數量，不能把差異全歸功於窗口。
+現在把這些步驟接起來看真實結果。我們在CPU上，用相同的文件切分與種子42，實際各更新200次；MLP的特徵寬度都為16。四組設定是在執行前固定的，完成後才並排查看另外兩篇test，沒有再用test挑步數。下表每一格都是「訓練前 → 最後一次更新後」的平均下一字代價。
+
+| 模型 | 參數格數 | 訓練：9篇 | 驗證：1篇 | 最後檢查：2篇 |
+| --- | ---: | ---: | ---: | ---: |
+| 接字表，只看1字 | 289 | 3.77327 → 1.05676 | 3.61663 → 1.07435 | 3.59724 → 1.08973 |
+| MLP，看1字 | 833 | 2.97138 → 0.33352 | 2.94521 → 0.43103 | 3.04028 → 0.43627 |
+| MLP，看3字 | 1,345 | 3.00414 → 0.21302 | 3.02520 → 0.30577 | 3.02634 → 0.31105 |
+| MLP，看5字 | 1,857 | 2.83350 → 0.19883 | 2.78032 → 0.51252 | 2.82708 → 0.61287 |
+
+這裡平均的是每一個下一字目標的代價，不是每篇先算平均再把篇數除一遍。9篇訓練短文共103個目標、1篇驗證有11個、2篇test有22個，都包括每篇最後的結束標記。三側的分母不同，但四個模型在同一側用的題目與分母相同，所以可以對照；1篇與2篇仍是很小的測驗。
+
+四種模型的練習代價都下降了，說明它們確實調整了猜法。然而5字MLP的練習代價最低，驗證與test卻比3字高。這正是我們保留新題的理由：不能只挑最會做練習題的模型。窗口變長也讓MLP的參數變多；接字表換成MLP則連結構都改了，所以不能把整張表的差別都歸因於窗口長短。
+
+再看它們自己寫出的文字。相同開頭`顏色=`，接字表每次選最高機率的下一字，生成`三角。`；3字MLP則生成`藍；形狀=三角。`。前者連顏色與形狀欄位都混在一起，後者至少保留了這個短文格式。這不是問答正確率：這個開頭沒有指定必須是哪種顏色或形狀，能寫出一篇合格式的短文也不等於理解所有未見組合。平均逐字代價與自由生成要各自看，不能拿其中一項替另一項作保證。
+
+想一次重做表裡四組及生成例子，在根目錄執行：
+
+```bash
+.venv/bin/python -m scripts.course_experiments.run --experiment simple_models --device cpu
+```
+
+終端會印出完成摘要；詳細結果保存於 `outputs/course-experiments/course-v1/simple_models/result.json`，`results.runs` 下的 `before_nll` 與 `after_nll_same_post_update_time` 對應表裡前後代價，`samples` 保存完整開頭與新生成文字。同一目錄的 `bigram.pt`、`mlp1.pt`、`mlp3.pt`、`mlp5.pt` 是這四種簡單模型的存檔，不能當成TinyLM權重混用。[課程實測原始報告](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/course-experiments/results/simple_models.json)還保留版本、資料指紋與各次紀錄，方便核對這些數字來自哪一次執行。
+
+練習先遮住表的驗證與test欄，只按訓練代價選一組，再揭開新題欄：你會選5字MLP，但這一次它在兩組新題的平均代價都比3字高。用自己的話說出為什麼不能只追練習成績，再回看[2.5的圖](chapters/02.md#2.5)。若換資料、種子或步數，需重新保存前後報告，不能沿用這張表當作你的成績。
 
 ## T.4 把文字訓練和對話練習分開看
 
-先讀[4.7的題目與下一字對齊](chapters/04.md#4.7)、[7.1的對話格式](chapters/07.md#7.1)與[7.3的回答位置](chapters/07.md#7.3)。文字接續讓每個有下一項的位置練習；SFT（supervised fine-tuning，監督式微調）用理想回答作示範，只把助手回答與結束標記當作答案。使用者問題仍提供線索，但不算回答代價。
+文字接續路線先讀[4.7的題目與下一字對齊](chapters/04.md#4.7)；想做屬性問答，再讀[7.1的對話格式](chapters/07.md#7.1)與[7.3的回答位置](chapters/07.md#7.3)。文字接續讓每個有下一項的位置練習；SFT（supervised fine-tuning，監督式微調）用理想回答作示範，只把助手回答與結束標記當作答案。使用者問題仍提供線索，但不算回答代價。
 
 先產生不用下載的小資料，種子明定為 42：
 
@@ -231,6 +256,44 @@ print("已保存起始模型；沒有求導或更新")
 .venv/bin/python scripts/infer.py checkpoints/text.pt --prompt "color=" --tokens 32 --temperature 0 --cache --device cpu > outputs/text-prompt-after.txt
 ```
 
+上面的200步是用小型CPU模型練流程的起點。我們已另用相同種類、種子42切出的9／1／2篇短文，完成一次更寬的兩層模型訓練：每位置64個特徵、一個注意力頭、最多128個位置，手寫注意力，共141,568個參數。這次在NVIDIA L4上更新600次，每批抽16篇，學習率固定0.003。下表才是這份完整實跑的成績，不能拿來當上面width32、一層、200步命令的預期數字。
+
+| 資料側：短文篇數／計分目標數 | 訓練前平均代價 | 600次更新後平均代價 |
+| --- | ---: | ---: |
+| 訓練：9篇／321個目標 | 5.79243 | 0.06352 |
+| 驗證：1篇／35個目標 | 5.73454 | 0.96282 |
+| 最後檢查：2篇／70個目標 | 5.74439 | 0.61395 |
+
+這批英文每個字母與標點各用一個UTF-8 byte表示，這次模型每次處理一個byte；各篇還計入最後的結束目標。訓練與留出代價都降低，說明模型不只收到梯度，也確實改變了猜法。但是驗證只有一篇，不能由這個數字說它已會一般文字任務。給它`color=blue;shape=circle;`，它生成`side=right.`，驗證原文卻以`side=left.`結尾。提示沒有提供左右線索，右邊可以是合法續寫，卻沒有重現這篇原文；[5.8](chapters/05.md#5.8)會拆清loss與生成各自在測什麼。
+
+要用自己的NVIDIA GPU與CUDA版PyTorch重跑這份600步實驗，執行：
+
+```bash
+.venv/bin/python -m scripts.course_experiments.run --experiment text_foundation --device cuda
+```
+
+完整報告保存於 `outputs/course-experiments/course-v1/text_foundation/result.json`，同目錄的 `model.pt` 是這份文字續寫模型，`start.pt` 是它零次更新的起點。報告還包含一次80步中途接續檢查，以及[5.13的四格預算比較](chapters/05.md#5.13)，所以整組耗時不是純600步訓練時間；讀法見[5.9](chapters/05.md#5.9)。[課程公開原始報告](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/course-experiments/results/text_foundation.json)可供核對數值；權重則由這個重跑命令在你的環境產生。
+
+看懂這個小世界後，可以換成故事與詩，不必沿用同一份權重一路訓練。我們為兩種材料各建立一個新的模型：同樣每位置64個特徵、兩層、一個注意力頭、128個位置與141,568個參數，種子42，在L4上各更新800次，每批16個文字窗口，學習率固定0.003。先取整篇、按合併空白後的完整內容指紋去重，再以約80%／10%／10%自行切分；近重複版本尚未聚成同一家族，這個限制見[5.12](chapters/05.md#5.12)。
+
+| 材料 | 訓練／驗證／最後檢查篇數 | 訓練代價：前→後 | 驗證代價：前→後 | 最後檢查代價：前→後 |
+| --- | --- | ---: | ---: | ---: |
+| TinyStories完整故事 | 409／51／52 | 5.76175→1.72200 | 5.76091→1.80083 | 5.75491→1.78880 |
+| 古典中文詩 | 292／36／37 | 5.70992→1.85955 | 5.71337→2.58325 | 5.71744→2.56432 |
+
+長篇材料會切成最多128個輸入位置的窗口，各窗口重新開始自己的前文；同一篇的所有窗口仍在同一側，每個下一byte目標只計一次，各篇最後再計一個結束目標。英文驗證與最後檢查分別有42,453與40,685個有效目標，中文則有6,707與8,314個，表中的留出代價用了這些完整分母。不同語言的文字、篇長與練習量都不同，不能把英文的較低數字當成它比中文更有能力的證據。
+
+報告另把總代價換成每個原文byte的bit數，稱為bits per byte、BPB，算法見[6.5](chapters/06.md#6.5)。這裡把結束目標的代價也放入分子，分母只數原文bytes；驗證結果英文為2.60117、中文為3.74695。它仍是各自這批材料的預測代價，沒有把故事與古詩變成同一張能力考卷。更直接的限制是實際續寫：英文仍會反覆接片語，中文仍會重複字，見[5.8](chapters/05.md#5.8)與[6.1](chapters/06.md#6.1)的原樣示例。
+
+想重做這一組，先取得兩個固定資料包，再用可執行CUDA的環境訓練：
+
+```bash
+.venv/bin/python scripts/fetch_training_assets.py --asset tinystories --asset chinese-poetry
+.venv/bin/python -m scripts.course_experiments.run --experiment real_text --device cuda
+```
+
+產物放在 `outputs/course-experiments/course-v1/real_text/`：`tinystories.pt`與`chinese-poetry.pt`是兩個不同模型，兩份`*-data/manifest.json`記錄各切分的篇數與指紋，`result.json`保存前後分數和生成。數值、資料來源與授權可以核對[本次公開完整報告](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/course-experiments/results/real_text.json)。這次只是在小批固定材料上確認更新與觀察限制，不能據此宣稱一般故事創作能力，也沒有評估現代中文或指令問答能力。
+
 如果選屬性問答，從同一個未訓練的起點開始即可，不必先教文字：
 
 ```bash
@@ -294,7 +357,7 @@ print("固定提示結束：", Path(f"outputs/{kind}-prompt-after.txt").read_tex
 
 練習要求說出同一組新題的平均代價如何變、SFT 完全匹配率如何變，再指出 `samples` 中有哪些答案真的改變。生成不好但代價下降也要記錄；兩項量測不是同一件事，不能只挑一個變好的回答。跳過表非空時先依原因處理，再重新比較，不能悄悄丟掉難題。
 
-訓練中斷可用 `--resume --checkpoint` 恢復模型、optimizer（優化器／更新工具）、步數與隨機狀態，目前限文字與 SFT。optimizer 保存管理參數更新所需的歷史，例如最近梯度方向與大小，見[5.4](chapters/05.md#5.4)。`--steps` 是整段訓練的總步數，不是多加幾步；已完成 200 步後要求接續到 200 步會被拒絕。單用 `--checkpoint` 則只載入模型，建立新的更新工具與排程，正是本節從零更新起點開始的方式。
+訓練中斷可用 `--resume --checkpoint` 恢復模型、optimizer（優化器／更新工具）、步數與隨機狀態，目前限文字與 SFT。optimizer 保存管理參數更新所需的歷史，例如最近梯度方向與大小，見[5.4](chapters/05.md#5.4)。`--steps` 是整段訓練的總步數，不是多加幾步；已完成 200 步後要求接續到 200 步會被拒絕。若要驗證中斷後仍走同一條更新路線，還必須保留原來的學習率與總步數計畫，不能把增加`--steps`當成不改排程。單用 `--checkpoint` 則只載入模型，建立新的更新工具與排程，正是本節從零更新起點開始的方式。
 
 ## T.5 把風格、指令遵循與安全拆成不同目標
 

@@ -4,10 +4,10 @@ import argparse
 import json
 
 import numpy as np
-import soundfile as sf
 import torch
 from PIL import Image
 
+from scripts.audio_utils import load_mono_audio
 from tiny_perceptron.data import ByteTokenizer
 from tiny_perceptron.model import ModelConfig, TinyLM
 from tiny_perceptron.multimodal import AudioEncoder, MultiModalLM, VisionEncoder, generate_modal, scene, tone
@@ -48,6 +48,7 @@ def main():
     p.add_argument("checkpoint")
     p.add_argument("--image")
     p.add_argument("--audio")
+    p.add_argument("--resample-audio", action="store_true", help="明確將 --audio 波形重採樣為 16 kHz，不只改取樣率標籤")
     p.add_argument("--color", choices=["red", "green", "blue"], default="red")
     p.add_argument("--shape", choices=["circle", "square"], default="square")
     p.add_argument("--frequency", type=float, default=220.0)
@@ -57,6 +58,8 @@ def main():
     args = p.parse_args()
     if args.tokens < 1:
         raise ValueError("tokens 必須為正")
+    if args.resample_audio and not args.audio:
+        raise ValueError("--resample-audio 需搭配 --audio 音訊檔案")
     device = choose_device(args.device)
     tok = ByteTokenizer()
     model, saved, task = load_modal_checkpoint(args.checkpoint, device)
@@ -81,17 +84,18 @@ def main():
         markers.append(tok.image_id)
     if task != "vision":
         if args.audio:
-            samples, rate = sf.read(args.audio, dtype="float32")
-            if rate != 16000 or samples.ndim != 1 or samples.size == 0:
-                raise ValueError("這個課堂encoder需真正16kHz mono；請先重取樣，不只改metadata")
+            samples, audio_source = load_mono_audio(args.audio, resample=args.resample_audio)
             wave = torch.from_numpy(samples)
-            sources["audio"] = {"type": "file", "path": args.audio, "sample_rate": rate}
+            sources["audio"] = audio_source
         else:
             wave = tone(args.frequency)
             sources["audio"] = {"type": "synthetic-tone", "frequency": args.frequency, "sample_rate": 16000}
         wave = wave.to(device)
         markers.append(tok.audio_id)
-    question = args.prompt or {"vision": "shape?", "audio": "pitch?", "joint": "joint?"}[task]
+    default_question = {"vision": "shape?", "audio": "pitch?", "joint": "joint?"}[task]
+    if args.audio and saved.get("metadata", {}).get("experiment") == "fsdd":
+        default_question = "digit?"
+    question = args.prompt or default_question
     ids = [tok.bos_id, tok.user_id] + markers + tok.encode(question) + [tok.eos_id, tok.assistant_id]
     prefix = torch.tensor(ids, device=device)
     output = generate_modal(model, prefix, image, wave, args.tokens)
@@ -100,6 +104,7 @@ def main():
         json.dumps(
             {
                 "task": task,
+                "prompt": question,
                 **report,
                 "input_sources": sources,
                 "visual_tokens": 0 if image is None else (image_size // model.vision.patch_size) ** 2,
