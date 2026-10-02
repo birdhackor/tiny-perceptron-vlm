@@ -241,14 +241,24 @@ def test_malformed_duplicate_or_shell_shaped_id_list_is_rejected(value):
         batch.parse_experiments(value)
 
 
-def test_cli_and_workflow_are_release_only_without_training_dependencies():
+@pytest.mark.parametrize("pipe_encoding", ["utf-8", "cp1252"])
+def test_cli_and_workflow_are_release_only_without_training_dependencies(pipe_encoding):
     root = Path(__file__).resolve().parents[1]
     completed = subprocess.run(
-        [sys.executable, "-I", "scripts/release_course_batch.py", "--help"],
+        [
+            sys.executable,
+            "-I",
+            "-c",
+            "import sys,runpy;sys.stdout.reconfigure(encoding=sys.argv[1]);"
+            "sys.argv=['release_course_batch.py','--help'];"
+            "runpy.run_path('scripts/release_course_batch.py',run_name='__main__')",
+            pipe_encoding,
+        ],
         cwd=root,
         check=True,
         capture_output=True,
         text=True,
+        encoding="utf-8",
     )
     assert "--validate-only" in completed.stdout and "--mode" not in completed.stdout
     workflow = (root / ".github/workflows/course-models-release.yml").read_text()
