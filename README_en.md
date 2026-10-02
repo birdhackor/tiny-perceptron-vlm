@@ -47,7 +47,7 @@ The default runs one forward/backward check with no optimizer update or checkpoi
 
 With Modal and Hugging Face configured, manually run the **GPU training smoke test** GitHub Actions workflow to verify GPU parameter updates, checkpoint uploads and resuming from an HF download. See the [GPU operations guide](docs/gpu-training.md) for account settings, time limits and result checks.
 
-To inspect trained models without retraining, use the [public student weights](https://huggingface.co/birdhackor/tiny-perceptron-course-models). The [download manifest](docs/course-experiments/public-models.json) contains only published, pinned revisions; downloads verify each file hash. Model cards document scope, data licenses and measured results. From the installed CPU environment above:
+To inspect trained models without retraining, use the [public student weights](https://huggingface.co/birdhackor/tiny-perceptron-course-models): 30 experiment groups with 120 checkpoint files, including different sizes and teacher/student comparisons. The [download manifest](docs/course-experiments/public-models.json) contains only published, pinned revisions; downloads verify each file hash. Model cards document scope, data licenses and measured results. From the installed CPU environment above:
 
 ```bash
 python scripts/fetch_course_models.py --list
