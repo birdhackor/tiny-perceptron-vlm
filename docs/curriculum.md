@@ -1,6 +1,6 @@
 # 小小感知機：教學大綱 v0.8
 
-這份 v0.8 保留教學設計與研究取捨。對應的 222 節正文、Notebook、圖解與基本操作入口已完成，從[教材入口](../course/README.md)開始閱讀。實際訓練品質與硬體效能仍待讀者執行量測；實作範圍與限制見[訓練操作](../course/training.md)。
+這份 v0.8 保留教學設計與研究取捨。對應的 222 節正文、Notebook、圖解與基本操作入口已完成，從[教材入口](../course/README.md)開始閱讀。課程已另完成30組正式實驗及CUDA Flash補驗，逐組的配置、成績與限制保存在[實驗證據](course-experiments/README.md)，不能把規劃中的預期成果當成測得的能力。學生權重發布與本輪獨立審閱以[目前進度](course-experiments/progress.json)及[公開版本清單](course-experiments/public-models.json)為準；重跑方式見[訓練操作](../course/training.md)。
 
 共同基礎：**猜下一個字 → 理解上下文 → Attention → 可訓練、可驗證的 Dense Transformer → 文字對話**。先用字元 tokenizer，BPE 可回讀；之後按問題進入行為、多模態、架構、效率與壓縮單元。
 
@@ -25,7 +25,7 @@
 - PKU Safe RLHF：`e8cca16665ef2340ac92c6514f05519310251581`。
 - PyTorch TorchAO：`a701b6a6058720c21f95908b7ae4a24bf0cae1b6`。
 
-另檢閱 Stanford CS336 2025／2026、MIT 6.S191 2025／2026、Harvard AC215 2025／2026 的官方公開課綱／教材，以及李宏毅 2025／2026 課程的筆記與作業副本。大學官網與 YouTube 的直連受代理限制，無頭瀏覽器實測亦未改善；台大資料列為鏡像證據，Harvard 2026 尚未授課的單元列為預定內容。未將影片入口視為已觀看或核實上傳日期。
+規劃時另檢閱 Stanford CS336 2025／2026、MIT 6.S191 2025／2026、Harvard AC215 2025／2026 的官方公開課綱／教材，以及李宏毅 2025／2026 課程的筆記與作業副本。當時大學官網與 YouTube 的直連受代理限制，無頭瀏覽器實測亦未改善；台大資料列為鏡像證據，Harvard 2026 尚未授課的單元列為當時預定內容。未將影片入口視為已觀看或核實上傳日期；這段研究紀錄也不代表那些來源的現況已重新查證。
 
 | 觀察 | 本教學的調整 |
 | --- | --- |
@@ -65,18 +65,11 @@ MiniMind-V 使用已訓練的 MiniMind LLM 與凍結的 SigLIP2 視覺編碼器�
 
 Notebook 的教學核心程式會直接呈現。進入完整模型後，明確指出對應的 Python 檔案與本節改動；相同版本的共用模型維持單一來源。每份 Notebook 必須能從新 kernel 由上到下執行。需要權重時，明示使用讀者自行訓練或課程提供的哪一個 checkpoint。
 
-Notebook 首跑指南須涵蓋開啟介面、選對專案 kernel 與 restart-and-run-all。現有 `notebook` dependency group 提供 ipykernel／matplotlib，尚未包含 JupyterLab server；實作教材時另提供本地 JupyterLab 安裝／啟動指引及 Colab 入口，並實測，不把 kernel 套件當作完整介面。
+Notebook 首跑指南涵蓋開啟介面、選對專案 kernel 與 restart-and-run-all。目前 `notebook` dependency group 已包含 ipykernel、matplotlib、JupyterLab 與 nbclient；安裝及啟動步驟見[W.1](../course/first-steps.md#W.1)。網站各節提供Colab入口；本地CPU kernel驗證與Colab雲端實機驗證分開記錄，不能互相代替。
 
 每節開頭列出「只需閱讀的函式／小段程式、執行入口、指定資料／checkpoint、預期輸出」。教材版本與練習副本分開，提供易於 diff 的文字程式和改動導覽；採用同一套內容來源維持 Notebook 與模型程式一致。
 
-每小節固定使用六步：
-
-1. 看一個現象或提出一個具體問題。
-2. 在執行前預測結果。
-3. 用直覺、圖或小矩陣解釋。
-4. 實作本節的最小改動。
-5. 和前一版比較，檢查預期行為。
-6. 做一個只改一個變數的練習。
+每小節用連貫段落帶讀者看一個問題、追蹤一個具體例子，再讀程式與結果。可以先預測、手算或看圖，但依當節概念選擇合適的說明順序，不套固定六步或每節相同的小標題。練習明定改哪裡、先預測什麼及如何核對；實際編寫與逐節回查依[讀者審閱標準](editorial-guide.md)。
 
 「只改一個變數」用來理解機制。研究方法品質時，另宣告匹配的是參數、有效訓練 tokens、估計計算量或實測時間；為匹配預算而調整寬度、步數或 learning rate，須一併列出。結構／梯度／數值觀察可完成概念驗收，品質比較允許無差異或退步。
 
@@ -151,7 +144,7 @@ flowchart LR
 | 圖片與音訊 | 10–12 | embedding、序列、文字 SFT 的 loss mask；基模能依文字屬性回答。 | 先接圖片，再把同一介面用到聲音；頻譜可獨立學習，最後用聯合任務驗證兩種線索。 |
 | 偏好學習 | 13 | 第 7 章 SFT；第 8–9 章的行為目標與評估有助於設計偏好資料。 | 從兩個回答的比較，逐步進入 log probability、reference model 和 DPO。 |
 | 架構比較 | 14–15 | 第 3–5 章的 Attention、Dense FFN 與訓練。 | 現代 Dense 各項獨立比較；MoE 可直接替換初始 Dense FFN，不必讀完第 14 章。 |
-| 執行效率 | 16 | 有一個可生成的模型；各節另列位置／mask／有效 loss 等前置。 | 由實測瓶頸選擇 cache、packing、SDPA 等實驗；FlashAttention 列硬體延伸。 |
+| 執行效率 | 16 | 有一個可生成的模型；各節另列位置／mask／有效 loss 等前置。 | 由實測瓶頸選擇 cache、packing、SDPA 等實驗；FlashAttention先用CPU小例子理解分塊，再讀實際CUDA核驗。 |
 | 量化 | 17 | 數值、Linear 權重與 dtype。 | 基本數值實驗可從第 2 章跳入；完整模型壓縮再使用既有 checkpoint。 |
 | 蒸餾 | 18 | cross-entropy、模型輸出與學生訓練。 | 先模仿教師答案，再學分布；對話蒸餾重用第 7 章 labels，組合量化時再接第 17 章。 |
 | 上下文與檢索 | A | 第 7 章的 prompt 與對話。 | 先手動給例子和資料，再用本地字詞檢索做最小 RAG。 |
@@ -182,7 +175,7 @@ flowchart LR
 
 每節開頭明示前置概念、使用的模型與資料、權重來源和預計資源。純概念實驗使用小矩陣、短序列或自行生成資料；需要已訓練模型時可載入指定 checkpoint。教材提供可選的產生腳本，供讀者回頭探索訓練。
 
-指定資產清單須記錄模型／tokenizer 版本、配置、資料生成器與 split seed、檔案 hash、來源／授權、訓練入口、是否下載，以及固定的能力檢查。跳讀先驗證該 checkpoint 能完成本章依賴的內容任務，再改風格、模態或訓練方法；固定 steps／tokens 上限後量測時間和記憶體。這是實作要求，尚未發布資產。
+指定資產清單記錄模型／tokenizer版本、配置、資料生成器與split seed、檔案hash、來源／授權、訓練入口及能力檢查。固定資料包見[訓練資產](../assets/training/README.md)，實際公開的推論權重見[固定HF版本清單](course-experiments/public-models.json)。跳讀先讀模型卡的留出成績，再核對本章依賴；能載入不表示具備所需能力，未達成的任務保留失敗。比較時固定steps／tokens上限並量測時間和記憶體。
 
 Checkpoint 相容性在各實驗內處理：更換 tokenizer 時匹配詞表、embedding 與輸出層；更換架構時使用相容模型和權重。KV cache、SDPA 等等價改寫使用同一權重驗證；GQA、MoE 等結構改動另做訓練比較。行為、模態與壓縮實驗各自記錄基準和改動，並使用適當的 held-out 測試。
 
@@ -491,7 +484,7 @@ Expert 是參數不同的 FFN，是否形成語意上的分工需由資料和觀
 - 16.10 怎麼用重算換記憶體？加入 activation checkpointing。觀察：時間／記憶體取捨。
 - 16.11 編譯有何代價與收益？實驗 torch.compile。觀察：編譯成本與穩態執行時間。
 
-成果：對已能運作的模型進行有依據的最佳化。SDPA 是介面，實際後端依硬體、dtype 與 shape 決定；FlashAttention 實測列 GPU 選修。
+成果：對已能運作的模型進行有依據的最佳化。SDPA是介面，實際後端依硬體、dtype與shape決定。課程已提供L4上FP16／BF16 Flash前向與反傳的profiler、誤差及成本補驗；讀者可先讀[16.8–16.9](../course/chapters/16.md#16.8)的實報與範圍，不必先租GPU。自行重跑仍需相容CUDA環境，方法見[T.8](../course/training.md#T.8)。
 
 各小節按瓶頸選讀。16.4 的 GQA 需另建相容架構並訓練評估；cache、SDPA 等實驗先固定權重檢查等價性，再比較成本。
 
