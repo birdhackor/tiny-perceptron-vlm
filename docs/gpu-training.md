@@ -20,6 +20,11 @@ HF 建立私有 Model repo 保存 checkpoint，以及公開 Model repo 保存日
 - Key：`HF_TOKEN`
 - Value：HF token
 
+如果已用其他名稱建立 Secret，工作流程會沿用唯一包含 `HF_TOKEN` 的 Secret；
+有多個候選時，可用 GitHub Repository variable `HF_MODAL_SECRET` 指定名稱。
+也可在 Run workflow 的 `hf_secret_name` 欄位指定，優先於 Repository variable。
+這個檢查只取得 Secret 名稱並確認 key 存在，不讀取 token 內容。
+
 GitHub 的 `Actions → Variables` 設定：
 
 | 名稱 | 值 |
