@@ -51,6 +51,7 @@ Modal SDK 1.6.0 僅安裝在執行工具環境；模型依賴仍由原本 `uv.lo
 6. 另一個 Modal container 可讀到 Volume 的相同 checkpoint。
 
 結果在 Actions 的 Summary 和 `modal-gpu-smoke-result` artifact。
+2026-10-02 已完成首次完整 L4 訓練、HF 上傳下載與續訓，數值與限制見 [實測紀錄](validation.md#modal-gpu-與-hf-checkpoint-實測)。
 HF 檔案放在私有 repo 的 `smoke-tests/gha-工作ID-嘗試次數/training/`；
 Modal Volume 名稱為 `tiny-perceptron-checkpoints`，每次工作有獨立子目錄。
 測試不向公開 Model repo 發布權重；公開 repo 的寫入與正式模型能力另行驗證。

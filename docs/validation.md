@@ -1,6 +1,36 @@
 # 教材實作驗證
 
-驗證環境為 Linux、Python 3.13.5、PyTorch 2.14.1 CPU。小型數值實驗會執行必要的參數更新；沒有執行 `--train` 的正式模型訓練，也沒有將隨機權重的分數當成能力結果。
+教材初版與改寫驗證環境為 Linux、Python 3.13.5、PyTorch 2.14.1 CPU。後續新增 Modal L4 的小型文字訓練與 HF checkpoint 續訓實測，記錄如下。自然資料上的正式能力評估仍待進行，沒有將隨機權重的分數當成能力結果。
+
+## Modal GPU 與 HF checkpoint 實測
+
+2026-10-02：透過 GitHub Actions 啟動 Modal NVIDIA L4，使用 PyTorch 2.14.1+cu126，
+以既有 `scripts/train.py --train` 訓練 31,584 個參數的文字模型。
+資料為課程自建的顏色、形狀與左右位置規則；這次驗證訓練流程，不推論一般語言能力。
+
+| 檢查 | 實際結果 |
+| --- | --- |
+| GPU 與更新 | CUDA、NVIDIA L4；80 步訓練，權重確實更新，梯度有限且非零 |
+| 訓練 loss | 5.624956 → 0.986167 |
+| 驗證 loss | 5.683379 → 1.317075 |
+| 訓練迴圈 | 1.256 秒；不包含映像建置、GPU 啟動、存檔、傳輸與續訓時間 |
+| 中途 checkpoint | 第 40 步，包含 optimizer、Python／PyTorch／CUDA RNG |
+| HF 上傳下載 | 私有 repo 寫入成功；依指定 commit 重新下載，SHA-256 完全一致 |
+| HF 檔案續訓 | 從第 41 步跑到第 80 步，與不中斷訓練的最大權重差為 0 |
+| Modal Volume | 另一個 CPU container 可讀到相同 checkpoint，SHA-256 一致 |
+
+實測原始碼 commit 為 `b75ae446797e138a7ab733ae3c9b02d5ab7fbda4`。
+[成功工作紀錄](https://github.com/birdhackor/tiny-perceptron-vlm/actions/runs/37028829401)、
+[原始結果 artifact](https://github.com/birdhackor/tiny-perceptron-vlm/actions/runs/37028829401/artifacts/11236417007)
+與 [JSON 證據副本](gpu-smoke-result.json) 可核對完整數值與 HF revision。
+操作方式見 [GPU 指引](gpu-training.md)。
+
+checkpoint 位於 HF 私有 Model repo `birdhackor/tiny-perceptron-checkpoints` 的
+`smoke-tests/gha-37028829401-1/training/`。第 40 步上傳 commit 為
+`307c7cef6234fe9e853448175a82fa727c0d5c70`，續訓完成上傳 commit 為
+`3bcd0e9ab3e170a06d728e8a0a4e63e43cab0f00`。
+公開教學 repo 僅驗證可讀，尚未發布模型或驗證寫入。
+圖音訓練、大模型記憶體需求、長時間中斷恢復與正式資料能力尚未驗證。
 
 ## 完整改寫與圖解驗證
 
@@ -81,4 +111,4 @@ python scripts/export_course.py --executed outputs/notebooks --revision main
 python scripts/check_site.py
 ```
 
-核心／Notebook 測試離線執行。kernel 模式先依[暖身指南](../course/first-steps.md)註冊 tiny-perceptron kernel。硬體加速、訓練收斂、自然資料能力、效能提升與一般安全性尚未驗證；具體訓練與評估方式見[訓練操作](../course/training.md)。
+核心／Notebook 測試離線執行。kernel 模式先依[暖身指南](../course/first-steps.md)註冊 tiny-perceptron kernel。Modal GPU 小模型實測見本頁記錄；自然資料能力、效能提升與一般安全性尚未驗證。具體訓練與評估方式見[訓練操作](../course/training.md)。
