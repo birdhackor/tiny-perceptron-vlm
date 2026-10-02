@@ -17,15 +17,15 @@ on:
       mode:
         description: Run privately, check access, or publish already-reviewed files without retraining
         type: choice
-        options: [run, preflight, release]
+        options: [run, run-cpu, preflight, release]
         default: run
       hf_secret_name:
         description: Modal Secret containing HF_TOKEN (leave blank to discover)
         type: string
         required: false
         default: ''
-      approval_revision:
-        description: Private HF commit containing approved-public-exports.json (release only)
+      approval_file:
+        description: Committed reviewed manifest path (blank selects docs/course-experiments/releases/ID.json)
         type: string
         required: false
         default: ''
@@ -51,7 +51,7 @@ jobs:
       EXPERIMENT_ID: ${{ inputs.experiment_id }}
       BATCH_ID: ${{ inputs.batch_id }}
       EXPERIMENT_MODE: ${{ inputs.mode }}
-      APPROVAL_REVISION: ${{ inputs.approval_revision }}
+      APPROVAL_FILE: ${{ inputs.approval_file }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -72,9 +72,27 @@ jobs:
         with:
           python-version: '3.13'
       - name: Validate entrypoint syntax without importing training dependencies
-        run: python -m py_compile scripts/modal_course.py
+        run: python -m py_compile scripts/modal_course.py scripts/course_release.py
+      - name: Validate the committed public release approval before paid calls
+        if: inputs.mode == 'release'
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import subprocess
+          from pathlib import Path
+          from scripts.course_release import validate_approval
+          experiment = os.environ['EXPERIMENT_ID']
+          relative = Path(os.environ.get('APPROVAL_FILE') or f'docs/course-experiments/releases/{experiment}.json')
+          if relative.is_absolute() or '..' in relative.parts or not relative.as_posix().startswith('docs/course-experiments/releases/'):
+              raise ValueError('Approval must be a committed release manifest inside the repository')
+          content = subprocess.run(['git', 'show', f"{os.environ['GITHUB_SHA']}:{relative.as_posix()}"], check=True, capture_output=True).stdout
+          if relative.read_bytes() != content:
+              raise ValueError('Working file differs from the committed approval')
+          validate_approval(json.loads(content), experiment, os.environ['BATCH_ID'], os.environ['HF_CHECKPOINT_REPO'])
+          PY
       - name: Download only the selected experiment's LFS training assets
-        if: inputs.mode == 'run' && inputs.experiment_id != 'preflight'
+        if: (inputs.mode == 'run' || inputs.mode == 'run-cpu') && inputs.experiment_id != 'preflight'
         shell: bash
         run: |
           set -euo pipefail
@@ -109,7 +127,7 @@ jobs:
             --experiment-id "$EXPERIMENT_ID" \
             --batch-id "$BATCH_ID" \
             --mode "$EXPERIMENT_MODE" \
-            --approval-revision "$APPROVAL_REVISION" \
+            --approval-file "$APPROVAL_FILE" \
             --checkpoint-repo "$HF_CHECKPOINT_REPO" \
             --release-repo "$HF_RELEASE_REPO" \
             --run-id "gha-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \

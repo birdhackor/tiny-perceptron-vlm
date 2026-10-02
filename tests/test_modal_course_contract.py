@@ -30,6 +30,7 @@ def helpers():
         "sha256",
         "safe_name",
         "compute_reservation_guard",
+        "cpu_reservation_guard",
         "reserve_budget",
         "private_only_paths",
         "approved_files",
@@ -91,6 +92,18 @@ def test_live_rates_must_fit_reservation_and_known_units():
         helper["compute_reservation_guard"]({"unknown": "0.001"})
     with pytest.raises(ValueError, match="單位"):
         helper["compute_reservation_guard"]({"gpu_L4": "0.000222", "cpu": "0.0000131", "memory": "0.00000222"})
+
+
+@pytest.mark.parametrize("mode", ["preflight", "run-cpu", "release"])
+def test_cpu_execution_and_release_share_the_budget_without_gpu(mode):
+    helper = helpers()
+    ledger = {}
+    reservation = helper["reserve_budget"](ledger, "cpu-run", "course-v1", "simple_models", mode, snapshot())
+    assert reservation["this_job_usd"] == "0.04"
+    assert ledger["reservations"][0]["compute_guard"]["gpu_used"] is False
+    assert Decimal(ledger["reservations"][0]["compute_guard"]["compute_upper_bound_usd"]) < Decimal("0.04")
+    with pytest.raises(RuntimeError, match="未啟動"):
+        helper["cpu_reservation_guard"](snapshot()["rates"] | {"cpu_hour_cost": "100"}, mode)
 
 
 def test_public_exports_require_matching_revision_license_and_hash(tmp_path):
@@ -169,12 +182,18 @@ def test_only_one_bounded_gpu_function_and_manual_serial_workflow():
                     assert ast.literal_eval(options["retries"]) == 0
                     assert "secrets" not in options
     assert gpu_functions == ["train"]
+    for name in ("train_cpu", "stage_approval", "release"):
+        options = {keyword.arg: keyword.value for keyword in functions[name].decorator_list[0].keywords}
+        assert "gpu" not in options and ast.literal_eval(options["timeout"]) == 600
     workflow = (ROOT / ".github/workflows/course-experiments.yml").read_text()
     assert "workflow_dispatch:" in workflow and "\n  push:" not in workflow and "\n  pull_request:" not in workflow
     assert "cancel-in-progress: false" in workflow and "modal==1.6.0" in workflow
     assert "vars.MODAL_TOKEN_ID || secrets.MODAL_TOKEN_ID" in workflow
     assert "--list-assets" in workflow and 'git lfs pull --include="$include"' in workflow
     assert "/app/docs/course-experiments/plan.json" in SOURCE.read_text()
+    assert "options: [run, run-cpu, preflight, release]" in workflow
+    assert "git', 'show'" in workflow and "--approval-file" in workflow
+    assert "public-manifest.json" in SOURCE.read_text()
 
 
 def test_archive_mount_filter_reads_relative_paths_and_rejects_lfs_pointers(tmp_path, monkeypatch):

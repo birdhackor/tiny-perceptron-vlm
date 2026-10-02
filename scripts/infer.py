@@ -5,6 +5,7 @@ import json
 
 import torch
 
+from tiny_perceptron.adapters import load_lora_adapter
 from tiny_perceptron.model import TinyLM, generate
 from tiny_perceptron.tokenization import generation_report, load_tokenizer
 from tiny_perceptron.training import choose_device, load_checkpoint
@@ -13,6 +14,7 @@ from tiny_perceptron.training import choose_device, load_checkpoint
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("checkpoint")
+    parser.add_argument("--adapter", help="正式 lora-v1 權重；基底 hash、config 與各層 A/B 尺寸必須匹配")
     parser.add_argument("--prompt", default="顏色=")
     parser.add_argument("--chat", action="store_true")
     parser.add_argument("--tokens", type=int, default=32)
@@ -28,6 +30,12 @@ def main():
         raise ValueError("多模態 checkpoint 請使用 scripts/infer_modal.py")
     if args.tokens < 1:
         raise ValueError("tokens 必須為正")
+    adapter = None
+    if args.adapter:
+        if payload.get("format_version") != 1:
+            raise ValueError("--adapter 需要原始浮點 native checkpoint 基底")
+        adapter = load_lora_adapter(model, args.adapter, base_state=payload["model"])
+        adapter["base_checkpoint"] = args.checkpoint
     tok = load_tokenizer(args.tokenizer, model.config.vocab_size, payload)
     ids = [tok.bos_id] + tok.encode(args.prompt)
     if args.chat:
@@ -41,6 +49,8 @@ def main():
         use_cache=args.cache,
     )
     report = generation_report(tok, output[0, len(ids) :].tolist())
+    if adapter is not None:
+        report["adapter"] = adapter
     print(json.dumps(report, ensure_ascii=False) if args.json else report["answer"])
 
 
