@@ -59,7 +59,8 @@ def helpers():
 
 
 def snapshot():
-    return {"rates": {"gpu_L4": "0.000222", "cpu": "0.0000131", "memory": "0.00000222"}}
+    # 首次 preflight 的真實 API 欄位與每小時單價。
+    return {"rates": {"gpu_hour_cost_l4": "0.80000", "cpu_hour_cost": "0.04730", "mem_gib_hour_cost": "0.00800"}}
 
 
 def test_failed_attempts_and_other_batches_keep_the_same_budget():
@@ -79,12 +80,17 @@ def test_failed_attempts_and_other_batches_keep_the_same_budget():
 def test_live_rates_must_fit_reservation_and_known_units():
     helper = helpers()
     guard = helper["compute_reservation_guard"](snapshot()["rates"])
+    expected = Decimal("0.95860") * Decimal("602") / Decimal("3600") + Decimal("0.04")
+    assert abs(Decimal(guard["conservative_compute_usd"]) - expected) < Decimal("1e-24")
+    assert guard["seconds_per_hour"] == 3600
     assert Decimal(guard["conservative_compute_usd"]) < Decimal("0.22")
-    costly = snapshot()["rates"] | {"gpu_L4": "0.01"}
+    costly = snapshot()["rates"] | {"gpu_hour_cost_l4": "2.00"}
     with pytest.raises(RuntimeError, match="未啟動"):
         helper["compute_reservation_guard"](costly)
     with pytest.raises(ValueError, match="單位"):
         helper["compute_reservation_guard"]({"unknown": "0.001"})
+    with pytest.raises(ValueError, match="單位"):
+        helper["compute_reservation_guard"]({"gpu_L4": "0.000222", "cpu": "0.0000131", "memory": "0.00000222"})
 
 
 def test_public_exports_require_matching_revision_license_and_hash(tmp_path):
@@ -109,6 +115,19 @@ def test_public_exports_require_matching_revision_license_and_hash(tmp_path):
     restricted = result | {"results": {"safety": {"private_only_artifacts": ["model.pt"]}}}
     with pytest.raises(ValueError, match="private_only"):
         helper["approved_files"](tmp_path, approval, restricted)
+    data_dir = tmp_path / "pku-excerpts"
+    data_dir.mkdir()
+    private_data = data_dir / "train.jsonl"
+    private_data.write_text(' {"text": "private"}\n')
+    data_item = {
+        **item,
+        "path": "pku-excerpts/train.jsonl",
+        "kind": "dataset",
+        "sha256": helper["sha256"](private_data),
+    }
+    restricted_data = result | {"results": {"safety": {"private_only_data": ["pku-excerpts"]}}}
+    with pytest.raises(ValueError, match="private_only_data"):
+        helper["approved_files"](tmp_path, approval | {"files": [data_item]}, restricted_data)
     file.write_bytes(b"changed")
     with pytest.raises(ValueError, match="已變更"):
         helper["approved_files"](tmp_path, approval, result)
