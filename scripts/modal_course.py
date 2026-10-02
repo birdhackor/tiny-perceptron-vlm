@@ -102,22 +102,20 @@ def billing_snapshot():
 
 
 def compute_reservation_guard(rates):
-    """以 live 單價核對保留額；不認識的 resource key 先停止，避免猜單位。"""
-    aliases = {
-        "gpu": {"l4", "gpul4"},
-        "cpu": {"cpu", "physicalcpu", "cpuphysical", "cpuphysicalcore", "physicalcpucore"},
-        "memory": {"memory", "memorygib", "gib", "ramgib"},
+    """使用實測 API 的每小時欄位；明確除以 3600，不由名稱猜單位。"""
+    hourly_keys = {
+        "gpu": "gpu_hour_cost_l4",
+        "cpu": "cpu_hour_cost",
+        "memory": "mem_gib_hour_cost",
     }
-    matched = {}
-    for key, value in rates.items():
-        normalized = re.sub(r"[^a-z0-9]", "", key.lower())
-        for resource, names in aliases.items():
-            if normalized in names:
-                matched[resource] = Decimal(value)
-    if set(matched) != set(aliases):
-        raise ValueError("無法辨認 live billing rates 的 L4/physical CPU/GiB 單位；先檢查 preflight 的 rates")
+    if not all(key in rates for key in hourly_keys.values()):
+        raise ValueError("live billing rates 缺少已確認每小時單位的 L4/physical CPU/GiB 欄位；先檢查 preflight")
+    hourly = {resource: Decimal(rates[key]) for resource, key in hourly_keys.items()}
+    if any(not value.is_finite() or value < 0 for value in hourly.values()):
+        raise ValueError("live 每小時單價必須為有限的非負值")
+    per_second = {resource: value / Decimal("3600") for resource, value in hourly.items()}
     # 600 秒函式、2 秒 idle，另保留 US$0.04 給 CPU preflight/備份/帳本。
-    gpu_envelope = Decimal("602") * (matched["gpu"] + 2 * matched["cpu"] + 8 * matched["memory"])
+    gpu_envelope = Decimal("602") * (per_second["gpu"] + 2 * per_second["cpu"] + 8 * per_second["memory"])
     estimate = gpu_envelope + CPU_RESERVATION_USD
     if estimate > GPU_RESERVATION_USD:
         raise RuntimeError(f"live 單價的保守估算 US${estimate} 超過本次 US${GPU_RESERVATION_USD} 保留額；未啟動 GPU")
@@ -125,7 +123,10 @@ def compute_reservation_guard(rates):
         "gpu_envelope_usd": str(gpu_envelope),
         "cpu_auxiliary_allowance_usd": str(CPU_RESERVATION_USD),
         "conservative_compute_usd": str(estimate),
-        "units": "L4 second; physical CPU core second; GiB second",
+        "input_units": "USD per L4 hour; physical CPU core hour; GiB hour",
+        "input_rates": {key: str(rates[key]) for key in hourly_keys.values()},
+        "rates_per_second": {resource: str(value) for resource, value in per_second.items()},
+        "seconds_per_hour": 3600,
         "excludes": "storage and network; account-wide billing cannot isolate this project",
     }
 
@@ -381,7 +382,7 @@ def private_only_paths(value):
     paths = []
     if isinstance(value, dict):
         for key, item in value.items():
-            if key == "private_only_artifacts":
+            if key in ("private_only_artifacts", "private_only_data"):
                 for entry in item if isinstance(item, list) else [item]:
                     paths.append(entry if isinstance(entry, str) else entry["path"])
             else:
@@ -412,7 +413,7 @@ def approved_files(directory, approval, result):
         ):
             raise ValueError("公開檔案路徑無效")
         if any(str(relative) == name or str(relative).startswith(str(name).rstrip("/") + "/") for name in denied):
-            raise ValueError(f"禁止公開 private_only_artifacts：{relative}")
+            raise ValueError(f"禁止公開 private_only_artifacts/private_only_data：{relative}")
         if item.get("redistribution_approved") is not True or not item.get("license"):
             raise ValueError(f"缺少公開授權：{relative}")
         if relative.suffix in (".pt", ".pth", ".ckpt", ".safetensors") and item.get("kind") != "checkpoint":
