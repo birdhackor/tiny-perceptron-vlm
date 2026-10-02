@@ -2,6 +2,16 @@
 
 教材本機驗證環境為 Linux、Python 3.13.5、PyTorch 2.14.1 CPU；正式訓練另使用 Modal NVIDIA L4、Python 3.13.3、PyTorch 2.14.1+cu126。本頁保留不同階段的紀錄。最新逐組訓練、自然資料短訓、私有備份與學生權重證據見[正式實驗](course-experiments/README.md)及[當前進度](course-experiments/progress.json)；早期流程測試與改寫前的審閱不能代替本輪驗收。
 
+## 本輪正式訓練與公開權重驗收
+
+2026-10-02：30組正式實驗全部完成，對應段落已依實測修改；另完成L4上的Flash Attention輸出／梯度、實際CUDA後端、時間與記憶體探針。[實驗清單](course-experiments/plan.json)逐項連到報告；支持範圍與失敗結果都保留，沒有以下載成功或低代價推論一般能力。
+
+30組共120份公開推論權重已固定在[下載清單](course-experiments/public-models.json)的Hugging Face版本。最新一輪以CPU完成全部匿名下載、檔案大小／SHA-256核對、模型重建與實際執行，共148個子命令；逐組證據及程式版本見[完整操作驗收](course-experiments/student-checks/all-models-validation.json)。另實際檢查數字圖片、原始服飾圖、原8kHz錄音重採樣、兩個原始LoRA接頭，以及檢索、受限工具回填和算式步驟外部檢查；這些單次操作不增加正式測試集的答對數。
+
+第一次完整驗收發現兩份多模態教師副本缺少task宣告，檢查器如實拒絕。修復核對原教師metadata，在匯出清單明示vision／joint並增加缺漏與衝突檢查；重新發布後，六份同組模型的全部tensor與推論設定逐項相同，見[修復比對](course-experiments/student-checks/multimodal-task-repair.json)。[原失敗紀錄](course-experiments/student-checks/multimodal_distillation.json)與[原發布版本](course-experiments/public-releases/history/multimodal_distillation.pre-task-repair.json)仍可回查。修正後完整程式測試為328 passed、1 skipped，13.94秒；這不是模型品質分數。
+
+本階段累計Modal運算預留額US$8.22，上限US$10；[費用保留紀錄](course-experiments/budget-reservations.json)包含原執行、發布與修復，不是實際帳單。本輪248節的新讀者審閱、另一批技術審閱，以及最終222份Notebook／網站發布，是後續獨立關卡；本段不宣稱它們已完成。
+
 ## 早期 GPU 連線與 HF checkpoint 流程測試
 
 2026-10-02：透過 GitHub Actions 啟動 Modal NVIDIA L4，使用 PyTorch 2.14.1+cu126，
