@@ -484,7 +484,7 @@ def approved_files(directory, approval, result):
             or not path.resolve().is_relative_to(directory.resolve())
         ):
             raise ValueError("公開檔案路徑無效")
-        if any(str(relative) == name or str(relative).startswith(str(name).rstrip("/") + "/") for name in denied):
+        if any(relative.is_relative_to(Path(name)) for name in denied):
             raise ValueError(f"禁止公開 private_only_artifacts/private_only_data：{relative}")
         if item.get("redistribution_approved") is not True or not item.get("license"):
             raise ValueError(f"缺少公開授權：{relative}")

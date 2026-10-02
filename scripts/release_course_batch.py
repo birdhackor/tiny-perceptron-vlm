@@ -349,4 +349,8 @@ def main():
 
 
 if __name__ == "__main__":
+    # Windows 的隔離模式忽略 PYTHONUTF8；重導至 pipe 時中文 help／JSON 仍需 UTF-8。
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8")
     raise SystemExit(main())

@@ -141,6 +141,12 @@ def test_public_exports_require_matching_revision_license_and_hash(tmp_path):
     restricted_data = result | {"results": {"safety": {"private_only_data": ["pku-excerpts"]}}}
     with pytest.raises(ValueError, match="private_only_data"):
         helper["approved_files"](tmp_path, approval | {"files": [data_item]}, restricted_data)
+    public_dir = tmp_path / "pku-excerpts-example"
+    public_dir.mkdir()
+    public_data = public_dir / "train.jsonl"
+    public_data.write_bytes(b"public example")
+    public_item = data_item | {"path": "pku-excerpts-example/train.jsonl", "sha256": helper["sha256"](public_data)}
+    assert helper["approved_files"](tmp_path, approval | {"files": [public_item]}, restricted_data) == [public_item]
     file.write_bytes(b"changed")
     with pytest.raises(ValueError, match="已變更"):
         helper["approved_files"](tmp_path, approval, result)
