@@ -11,6 +11,12 @@ PRIVATE_TEXT_KEYS = {"samples", "messages", "prompt", "generated", "text", "targ
 def clarify_backup_scope(result):
     """Preserve the original observation and annotate an inaccurate older scope sentence."""
     hf = result.get("hf", {})
+    if hf.get("private_full_training_state") is True:
+        hf["legacy_backup_flag_scope"] = (
+            "This older flag was written for full-directory private backup, not as a per-format resume check. "
+            "Resume support depends on the checkpoint format and training entrypoint. Simple-v1 files contain "
+            "weights/vocabulary only; full-directory backup alone does not establish exact resumed training."
+        )
     if "encoder and simple inference snapshots do not contain those states" in hf.get("checkpoint_resume_scope", ""):
         hf["checkpoint_resume_scope_correction"] = (
             "The original scope sentence is inaccurate for the private encoder files: run_encoders copies "

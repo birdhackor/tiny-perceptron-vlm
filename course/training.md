@@ -2,7 +2,7 @@
 
 讀過接字表的例子後，你可能想問：「它能不能真的學好一小組句子？」這頁帶你選一個有限任務、準備例子、更新模型，最後拿沒用來教它的新題檢查。先讀與任務相關的正文，再使用這些指令；這頁是動手時的操作橋樑，不要求第一次開網站就讀完。
 
-指令都從專案根目錄執行，也就是有 `pyproject.toml` 的資料夾。如何下載專案、啟用 `.venv` 和執行指令，請先看[暖身 W.1](first-steps.md#W.1)；檔案與錯誤訊息見[W.7](first-steps.md#W.7)。以下訓練配方尚未做正式 GPU 收斂驗證，步數是可改的起點。網站上的小型 CPU 結果只能幫你檢查數值機制。
+指令都從專案根目錄執行，也就是有 `pyproject.toml` 的資料夾。如何下載專案、啟用 `.venv` 和執行指令，請先看[暖身 W.1](first-steps.md#W.1)；檔案與錯誤訊息見[W.7](first-steps.md#W.7)。正文中的短程式先用 CPU 檢查一個機制；本頁另外整理實際更新模型的操作。標明「課程實測」的結果都有固定版本與完整實驗報告，仍可能失敗或只適用很小的題目。你自行更改的步數、資料和設定，要另存自己的結果，不能把課程成績當成重跑保證。
 
 ## T.1 先決定要拿哪些例子教模型
 
@@ -30,6 +30,8 @@ python scripts/fetch_training_assets.py --asset tinystories
 此例的describe也要求回答形狀。A與B只是同一組屬性換個問法，要放在同一側；可以用A、B教學，把C整個家族留作最後檢查。實際T.4產生的對話紀錄，問題在messages中role為user的content，標準答案在role為assistant的content，family保存題目家族。先查看這三處，就能分清原始資料、教學輸入與希望回答。文字接續的TinyStories則使用text欄位保存完整故事，沒有這種問題／標準回答配對，不應硬把兩種格式當成同一種。
 
 圖片與音訊尤其要核對檔案路徑、尺寸與取樣率。一段錄音是一筆訓練例子；取樣率的「樣本」則是聲音測量點，例如每秒8,000個點，兩者不同。這批FSDD原錄音為8,000點／秒，[T.6的音訊訓練入口](#T.6)要求16,000點／秒且不自動轉換；取樣與時間軸見[12.1](chapters/12.md#12.1)。本節先選資料，使用前需明確重採樣，不能只改檔名。
+
+現在也有[真實圖片與錄音的完整實跑](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/course-experiments/results/real_modal.json)。Fashion-MNIST的50張原training圖，十類各按3／1／1張分開，成為我們自己的30／10／10；FSDD的60段則固定jackson教學20段、nicolas驗證20段、theo最後檢查20段，每人0至9各兩次，不把同一說話者拆到三側。服飾測試3/10、真人數字3/20，皆只是一個很小的配方結果，不是官方benchmark或自然圖片問答。錄音從8kHz實際插值成16kHz、點數加倍而時長不變，完整方法見[12.2](chapters/12.md#12.2)，辨識失敗見[12.8](chapters/12.md#12.8)。
 
 現在先預測：用A教學，再拿B答對，能否證明模型會做新的屬性組合？按[1.2的完整題目分組](chapters/01.md#1.2)核對，答案是不能，因為A、B屬於同一家族。把它們一起留在教學側，C留在最後檢查側；C的合格答案是circle，答square就不合格。再選一包，仿照小表寫出一筆教學題、一筆未教過家族的新題、各自標準答案與分組理由。若還不能定義答案對錯，先縮小任務，再增加資料。
 
@@ -185,6 +187,28 @@ print(text)
 終端會印出完成摘要；詳細結果保存於 `outputs/course-experiments/course-v1/simple_models/result.json`，`results.runs` 下的 `before_nll` 與 `after_nll_same_post_update_time` 對應表裡前後代價，`samples` 保存完整開頭與新生成文字。同一目錄的 `bigram.pt`、`mlp1.pt`、`mlp3.pt`、`mlp5.pt` 是這四種簡單模型的存檔，不能當成TinyLM權重混用。[課程實測原始報告](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/course-experiments/results/simple_models.json)還保留版本、資料指紋與各次紀錄，方便核對這些數字來自哪一次執行。
 
 練習先遮住表的驗證與test欄，只按訓練代價選一組，再揭開新題欄：你會選5字MLP，但這一次它在兩組新題的平均代價都比3字高。用自己的話說出為什麼不能只追練習成績，再回看[2.5的圖](chapters/02.md#2.5)。若換資料、種子或步數，需重新保存前後報告，不能沿用這張表當作你的成績。
+
+也可以先拿課程已訓練好的模型來試，不必先等一次訓練跑完。權重檔保存的是模型學到的數字；要用相同的模型結構與字表載入，才能把它變成可做預測的程式。接字表的存檔交給 `infer_simple.py`，Transformer 的存檔交給 `infer.py`；兩種檔案不能因為都叫 `.pt` 就互換。
+
+下面先用已公開的文字 Transformer `text_foundation`。先列出可下載的實驗，再只取這一組：
+
+```bash
+.venv/bin/python scripts/fetch_course_models.py --list
+.venv/bin/python scripts/fetch_course_models.py --model text_foundation
+.venv/bin/python scripts/infer.py checkpoints/course/text_foundation/model.pt --prompt "color=blue;shape=circle;" --tokens 32 --device cpu --json
+```
+
+`--list` 只列清單；第二行從公開 Hugging Face 下載固定版本，核對每個檔案的內容指紋，放到 `checkpoints/course/text_foundation/`。第三行才載入模型並接寫文字，`--tokens 32` 是最多新生成32個小單位，遇到結束標記可提早停下。這個模型學的是英文規則短文，和上面中文接字表的資料不同；它不是一般聊天助手。
+
+我們用公開檔案在 CPU 實際取得 `answer="side=right."`、`eos=true`。`answer` 是新接出的文字，`eos` 表示模型自己產生結束標記；完整輸出也保留 `generated_ids` 與非法特殊標記檢查。題目只給顏色和形狀，沒有指定左右，因此這一例只能確認能載入、生成並結束，不能算成「答對一道左右問答」。
+
+若要連下載內容、每份權重的重建與 CPU 執行一併核對，可執行：
+
+```bash
+.venv/bin/python scripts/check_course_models.py --model text_foundation
+```
+
+工具會保存一份含指令、版本、檔案指紋與實際輸出的紀錄到 `docs/course-experiments/student-checks/`。這是操作檢查，不代替留出測驗。公開學生包只保留推論需要的數字，沒有更新器和隨機狀態；可以拿來開始另一次微調，但不能用它逐步重現被中斷的原訓練。要延續同一次訓練，請看[5.7的完整存檔與續訓](chapters/05.md#5.7)。
 
 ## T.4 把文字訓練和對話練習分開看
 
@@ -491,16 +515,34 @@ python scripts/infer.py checkpoints/safety.pt --chat --prompt "盒子15；請提
 .venv/bin/python scripts/train.py --task vision --checkpoint checkpoints/attributes.pt --vision-encoder checkpoints/vision-encoder.pt --freeze projector --train --steps 500 --output checkpoints/vision.pt
 .venv/bin/python scripts/train.py --task audio --checkpoint checkpoints/attributes.pt --audio-encoder checkpoints/audio-encoder.pt --freeze projector --train --steps 500 --output checkpoints/audio.pt
 .venv/bin/python scripts/train.py --task joint --checkpoint checkpoints/attributes.pt --vision-encoder checkpoints/vision-encoder.pt --audio-encoder checkpoints/audio-encoder.pt --freeze partial --train --steps 500 --output checkpoints/joint.pt
-.venv/bin/python scripts/infer_modal.py checkpoints/vision.modal.pt --color blue --shape circle --prompt "shape?" --tokens 16
-.venv/bin/python scripts/infer_modal.py checkpoints/audio.modal.pt --frequency 880 --prompt "pitch?" --tokens 16
-.venv/bin/python scripts/infer_modal.py checkpoints/joint.modal.pt --color red --shape square --frequency 220 --prompt "joint?" --tokens 16
+.venv/bin/python scripts/infer_modal.py checkpoints/vision.pt --color blue --shape circle --prompt "shape?" --tokens 16
+.venv/bin/python scripts/infer_modal.py checkpoints/audio.pt --frequency 880 --prompt "pitch?" --tokens 16
+.venv/bin/python scripts/infer_modal.py checkpoints/joint.pt --color red --shape square --frequency 220 --prompt "joint?" --tokens 16
 ```
 
 三個推論問題已在命令明定：`shape?`問形狀，藍色圓形的理想回答是`circle`；`pitch?`問高低音，880Hz應為`high`；`joint?`同時問形狀與音高，紅色方形加220Hz應為`square,low`。終端輸出JSON，讀`answer`才是模型實際回答，`task`是所載入任務。例如`{"task":"audio","answer":"high"}`只是理想欄位示意，並非已完成500步的成績。逐題記下問題、理想回答與實際`answer`，若回答不同就記錯，不能只看命令沒有報錯。
 
 這一組命令有順序：先完成 [T.4](#T.4) 取得 `attributes.pt`，再完成上面的編碼器，才有這些載入檔案。`--freeze projector` 只更新轉接頭，`partial` 還開放文字模型首末層，`none` 更新全部零件。凍結與資料安排各自影響結果，要一次比較一個條件。
 
-每次保存兩份檔案：`.pt` 是文字模型，`.modal.pt` 包含模態編碼器與轉接頭。模態指文字、圖片或聲音這種輸入種類。用前者檢查原本的文字問答，用後者做圖片或聲音推論；這條通路目前不能恢復模態更新工具接續訓練。
+目前這個訓練入口每次保存兩份權重檔。指定的`vision.pt`是原生`multimodal-v1`格式：包含文字模型、圖片與聲音編碼器、接頭、各自配置、目前步數、優化器、隨機數狀態與可訓練參數名單，供推論或恢復未完成的同一排程。另存的`vision.modal.pt`是較舊推論格式，只存權重、文字配置與任務名；它仍能供`infer_modal.py`推論，卻缺少精確續訓所需的優化器與隨機數資料。模態指文字、圖片或聲音這種輸入種類，檔名有modal不表示保存狀態反而更多。
+
+若原排程還沒跑完，用相同任務、資料、總步數、批次大小與學習率，讓`--checkpoint checkpoints/vision.pt --resume`恢復已存步數後的部分；原先只訓接頭，就要保持同一凍結範圍。載入工具會核對配置與可訓練名單。這不表示任意權重檔都能精確續訓：舊`.modal.pt`、只含編碼器權重的檔案與其他推論快照，都沒有這項保證。換成另一訓練階段則載入原生檔、不要加`--resume`，再明定新的凍結範圍。純文字能力檢查要對包裝內的`model.language`使用同一批留出題，見[11.7](chapters/11.md#11.7)；原生多模態檔不能直接交給只接受文字模型的`infer.py`。
+
+以上CLI配方是自己練習的入口。我們另用`scripts/course_experiments/modalities.py`完成固定資料與完整留出評估的GPU實驗，兩者的目標、抽樣、學習率和保存格式要分別閱讀，不能把正式數字當成上面500步命令的預期輸出。例如正式編碼器各訓練250步，視覺六類在新位置測試6/6，音訊在14段新頻率測試11/14，見[10.5](chapters/10.md#10.5)與[12.8](chapters/12.md#12.8)；這不是上面CLI各兩題的`holdout_accuracy`。
+
+正式圖片接頭從[T.4直接SFT分支](#T.4)的寬64、兩層文字`model.pt`起步，該底座原本十道屬性留出題是5/10，不是另一份先預訓練再SFT的分支。接頭用已訓練16維視覺特徵，只有1,088個參數開放，其他權重固定；18張合成圖訓練、六張驗證、六張最後測試，每次抽四張、更新300次、學習率0.003、種子42，目標是`red circle`這類完整描述。固定小批代價4.1480降到1.2093，語言權重逐項相同，最後完整描述卻0/6，例如紅圓圖只答`red`。像轉接器接通後收到了半句，仍不能叫作已完整聽懂；逐題失敗見[11.3](chapters/11.md#11.3)與[原始公開證據](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/course-experiments/results/projector.json)。
+
+接著正式問答每張圖問形狀與顏色，從同一接頭起點分別再更新160次。只訓接頭、只加最後文字區塊、全部開放的最後圖片題分別3/12、12/12、9/12，原十道文字題卻分別剩5/10、2/10、1/10。全部開放加文字回放，圖片仍9/12、文字4/10，見[11.5](chapters/11.md#11.5)與[11.7](chapters/11.md#11.7)。正式partial只開最後區塊，和上面CLI的首末區塊不同；回放0.5也只是每題抽到文字的機率，不能讀成一半有效目標。這次沒有一種配方同時在兩類題都最好。
+
+另用18,238個有效回答目標的兩階段預算，與直接問答18,256個比較，最後圖片題9/12對10/12；直接路線沒有另測文字保留，不能由此選出兼顧所有能力的勝者。這些計數讓你能沿著[11.6](chapters/11.md#11.6)重算預算，也提醒步數、參數多寡與單一新任務高分，不能代替完整用途的選擇。
+
+真實資料實跑另保存`fashion-mnist.pt`與`fsdd.pt`，各從直接SFT底座接新編碼器，全開250次；前者30張教學圖、後者jackson的20段教學錄音，每次四筆。它們不是上面預訓練合成編碼器、凍結接頭500步的CLI配方。服飾只在驗證4/10、測試3/10，真人數字驗證5/20、測試3/20；有效回答目標各7,528與2,000，總參數145,664與148,736，後者多了較長錄音所需的位置表。參數較多與訓練探針代價很低，都沒有保證新題答對。
+
+這條真實資料路徑把服飾28×28灰階轉RGB並縮至16×16、除255；音訊則先將原8kHz PCM16真正重採樣成16kHz FLOAT，再按16kHz算log-mel。沒有另做每張圖的平均／標準差像素歸一化，也沒有每段錄音的峰值／平均能量歸一化；特徵內的LayerNorm是模型中的另一層處理，不能拿它代替輸入說明。原圖或原聲音變得更複雜時，這套小尺度入口可能已經失去所需線索，[10.5](chapters/10.md#10.5)與[12.8](chapters/12.md#12.8)保留了實際錯例。
+
+正式checkpoint與中間更新檔已備份到私有HF固定版本，並逐份下載核對SHA-256。這表示保存的內容與來源指紋一致，不表示所有檔案都具備同一種續訓功能，也不把失敗回答變成成功。實跑報告中的完整實驗時間包含訓練、評估與本機保存，沒有包含Actions啟動、映像建立與HF上傳；訓練小迴圈時間又另有自己的範圍。它們不是讀者電腦的速度或價格保證。
+
+例如正式編碼器的自訂保存檔有優化器、步數與Python／CPU PyTorch隨機數狀態，不是只剩權重；但它不是原生多模態格式，也沒有完整CUDA隨機數恢復與相容的CLI續訓流程。不要把它和前面`train.py`保存的原生`vision.pt`混為一種，是否能精確恢復要逐一看格式與工具。
 
 如果改用自己的資料，一行可以寫成：
 
@@ -510,17 +552,19 @@ python scripts/infer.py checkpoints/safety.pt --chat --prompt "盒子15；請提
 
 圖片路徑相對於 JSONL 所在資料夾，入口會轉成 RGB 並縮到 16×16。音訊需非空、16 kHz 單聲道可解碼檔案，不會自動重採樣。這些小尺寸是為玩具任務設計的；字體或自然照片的細節可能已在縮圖時丟失，增加步數無法找回。
 
-數字圖片的原理見[11.12](chapters/11.md#11.12)。要做正常圖、空白圖與錯配圖練習，先另準備OCR資料，再訓練能回答`read digits`的圖片模型；前面的形狀模型没有學過這個問題，不能直接拿它當OCR模型。
+數字圖片的原理見[11.12](chapters/11.md#11.12)。要做正常圖、空白圖與錯配圖練習，先另準備OCR資料，再訓練能回答`read digits`的圖片模型；前面的形狀模型沒有學過這個問題，不能直接拿它當OCR模型。
 
 ```bash
 .venv/bin/python scripts/prepare_ocr.py --output data/generated/ocr --seed 42
 .venv/bin/python scripts/train.py --task vision --data data/generated/ocr/train.jsonl --checkpoint checkpoints/attributes.pt --vision-encoder checkpoints/vision-encoder.pt --freeze none --train --steps 500 --output checkpoints/ocr.pt
-.venv/bin/python scripts/evaluate_modal.py checkpoints/ocr.modal.pt --data data/generated/ocr/validation.jsonl --ablation none --limit 30 --tokens 16 --seed 42 --output outputs/ocr-normal.json
-.venv/bin/python scripts/evaluate_modal.py checkpoints/ocr.modal.pt --data data/generated/ocr/validation.jsonl --ablation blank --limit 30 --tokens 16 --seed 42 --output outputs/ocr-blank.json
-.venv/bin/python scripts/evaluate_modal.py checkpoints/ocr.modal.pt --data data/generated/ocr/validation.jsonl --ablation shuffle --limit 30 --tokens 16 --seed 42 --output outputs/ocr-shuffle.json
+.venv/bin/python scripts/evaluate_modal.py checkpoints/ocr.pt --data data/generated/ocr/validation.jsonl --ablation none --limit 30 --tokens 16 --seed 42 --output outputs/ocr-normal.json
+.venv/bin/python scripts/evaluate_modal.py checkpoints/ocr.pt --data data/generated/ocr/validation.jsonl --ablation blank --limit 30 --tokens 16 --seed 42 --output outputs/ocr-blank.json
+.venv/bin/python scripts/evaluate_modal.py checkpoints/ocr.pt --data data/generated/ocr/validation.jsonl --ablation shuffle --limit 30 --tokens 16 --seed 42 --output outputs/ocr-shuffle.json
 ```
 
 產生器保存`train.jsonl`、`validation.jsonl`、`test.jsonl`與相對圖片路徑，三種位移的同一數字留在同側；固定seed42的驗證檔有30筆。訓練只讀train，三次檢查都讀同一份validation、同一模型和生成長度；`none`保留原圖，`blank`用全零圖，`shuffle`換入另一筆的圖但保留原問題與原答案。終端只有總覽；開啟三份輸出JSON的`samples`，按`row`並排`target`、`generated`及`exact_match`，從同份validation的第`row+1`行找到原圖與`question`。
+
+已完成的[正式OCR配方](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/course-experiments/results/ocr.json)使用同樣固定字型與按字串分組的資料，但由實驗工具載入直接SFT底座，批次八張；它不是上面CLI命令的實跑成績。500次更新後驗證9/30、測試2/30，測試CER為40/57，EOS卻是30/30。這份失敗結果在[11.13](chapters/11.md#11.13)有逐字解釋，提醒我們保存成功、會停止生成與能讀對數字都要分別核對。
 
 錯配報告另外保存`donor_row`，是換入圖片來源的0起算行號。到validation第`donor_row+1`行查看它的圖片與答案，另記「生成文字是否符合換入圖的數字」。報告的`exact_match`仍對原答案計分，因此模型正確讀出換入圖時，這欄反而可能為false；若換入圖剛好數字相同，也不能用該題辨認影響。空白圖沒有可讀數字，本資料並未教特定空白理想回答，這裡只記它生成什麼，不預設它必須拒絕。
 
