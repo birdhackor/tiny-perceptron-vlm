@@ -1,6 +1,7 @@
 """將教材與核對過的 Notebook 輸出整理成 Markdown，再由 Zensical 建置全站。"""
 
 import argparse
+import hashlib
 import html
 import json
 import re
@@ -194,6 +195,13 @@ def build(destination, executed_root=None, revision="main"):
         (docs / folder).mkdir()
         for name in names:
             shutil.copyfile(ROOT / "course/web" / name, docs / folder / name)
+
+    # 發布引用依內容命名的樣式，讓瀏覽器載入修正版；原檔留給 zensical serve。
+    stylesheet = docs / "stylesheets/course.css"
+    style_hash = hashlib.sha256(stylesheet.read_bytes()).hexdigest()[:12]
+    style_url = f"stylesheets/course.{style_hash}.css"
+    shutil.copyfile(stylesheet, docs / style_url)
+    configuration = configuration.replace('"stylesheets/course.css"', json.dumps(style_url))
 
     for item, notebook in zip(index, notebooks, strict=True):
         content = [f"# {item['id']} {item['title']} {{#{item['id']}}}"]
