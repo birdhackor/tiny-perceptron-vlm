@@ -10,7 +10,7 @@
 
 第一次完整驗收發現兩份多模態教師副本缺少task宣告，檢查器如實拒絕。修復核對原教師metadata，在匯出清單明示vision／joint並增加缺漏與衝突檢查；重新發布後，六份同組模型的全部tensor與推論設定逐項相同，見[修復比對](course-experiments/student-checks/multimodal-task-repair.json)。[原失敗紀錄](course-experiments/student-checks/multimodal_distillation.json)與[原發布版本](course-experiments/public-releases/history/multimodal_distillation.pre-task-repair.json)仍可回查。修正後完整程式測試為328 passed、1 skipped，13.94秒；這不是模型品質分數。
 
-本階段累計Modal運算預留額US$8.22，上限US$10；[費用保留紀錄](course-experiments/budget-reservations.json)包含原執行、發布與修復，不是實際帳單。本輪新讀者審閱已完成，結果見下一節；另一批技術審閱，以及最終222份Notebook／網站發布仍在準備，本段不宣稱它們已完成。
+本階段累計Modal運算預留額US$8.22，上限US$10；[費用保留紀錄](course-experiments/budget-reservations.json)包含原執行、發布與修復，不是實際帳單。本輪新讀者審閱與222份Notebook執行已完成，結果見下文；另一批技術審閱與最終網站發布仍在準備。
 
 後續跨平台CI在Windows找到發布控制工具的兩處問題：以字串斜線比對私有目錄，沒有正確處理Windows路徑；隔離Python的中文help重導至非UTF-8 pipe也會失敗。修正採路徑元件比對並明示CLI輸出UTF-8，未更動上面操作驗收記錄的24份訓練／推論程式或公開權重。固定版本`1ac7fcbfafca30a7ec1d46d82947a16f82fb7bbe`的[實際CI證據](validation-artifacts/release-compatibility-ci.json)確認Linux與Windows各329 passed、1 skipped，macOS為330 passed；格式檢查亦通過。macOS環境檢查實際選用Apple MPS，完成256×256矩陣前向／反向，以及測試中的32×32矩陣CPU比對；這只驗證基本運算，不代表整套模型訓練或教材已在MPS跑過。Colab雲端仍未實機驗證。
 
@@ -18,7 +18,13 @@
 
 2026-10-03：正式實驗改寫後，248節全部交由248個不同的新AI讀者任務審閱，與改寫前的身分分開。每節只提供指定正文及明確連結的必要前置；首節另外審閱導言，共25份。讀者檢查背景、術語、例子、程式解釋與練習，短CPU例子實跑、已讀SVG實際渲染查看；問題退回作者修正，再由讀者回查。這是AI審閱，尚未做真人學生測試。
 
-當前正文、圖、五項檢查與248份報告全部通過；新身分、25份導言及原始UTF-8指紋另由[本輪核對](validation-artifacts/fresh-reader-round.json)保存。實際派工與結果消化見[派工核對](validation-artifacts/actual-reader-dispatches.json)；最早一批協調紀錄只保存報告路徑，後續紀錄保存小節或完整報告雜湊，這份核對明列其差別，不把名稱或hash當成已看懂的自動證明。另一批全新技術審閱正在進行，不能以理解審閱替代事實正確性核對；正式發布前還需重新執行222份Notebook及網站檢查。
+理解審閱階段結束時，正文、圖、五項檢查與248份報告全部通過；新身分、25份導言及原始UTF-8指紋另由[本輪核對](validation-artifacts/fresh-reader-round.json)保存。實際派工與結果消化見[派工核對](validation-artifacts/actual-reader-dispatches.json)；最早一批協調紀錄只保存報告路徑，後續紀錄保存小節或完整報告雜湊，這份核對明列其差別，不把名稱或hash當成已看懂的自動證明。另一批全新技術審閱正在進行；若發現事實問題而修改正文，還會安排讀者回查並更新最終核對。正式發布前也需完成網站檢查。
+
+## 本輪 Notebook 執行
+
+2026-10-03：依完成理解審閱的正文重新產生222份Notebook，再以單一worker逐份啟動獨立CPU Jupyter kernel。全部222份通過、0失敗，耗時467.08秒；497個程式cell都有執行序號，共保留497個輸出區塊。逐份原始檔與執行副本的SHA、套件版本和結果見[當次核對](validation-artifacts/reader-round-notebook-kernels.json)。
+
+核對另逐cell確認執行副本與當前教材內容相同，沒有錯誤輸出。這份紀錄對應理解審閱後的版本；技術查核若再修改某份Notebook，該份仍須重新執行。尚未在Colab雲端執行，也尚未完成本輪網站發布。
 
 ## 早期 GPU 連線與 HF checkpoint 流程測試
 
