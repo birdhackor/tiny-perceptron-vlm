@@ -1,0 +1,266 @@
+"""T.1 個人離線資料、分組、凍結分母與必要前置短例核對；不訓練。"""
+import contextlib
+import hashlib
+import io
+import json
+import os
+import platform
+import re
+import socket
+import subprocess
+import sys
+import tarfile
+import tempfile
+from collections import Counter
+from pathlib import Path
+
+sys.path.insert(0, str(Path.cwd()))
+import numpy as np
+import soundfile as sf
+import torch
+from scripts.prepare_data import generate_records
+from scripts.course_experiments.common import split_records
+from scripts.course_experiments.text import _deduplicate_text
+from scripts.course_experiments.modalities import _resample_8_to_16
+from tiny_perceptron.data import ByteTokenizer
+from tiny_perceptron.modal_data import modal_example
+
+torch.set_num_threads(1)
+torch.manual_seed(42)
+socket.socket.connect = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("offline audit"))
+ROOT = Path.cwd()
+OUT = ROOT / "docs/technical-reviews/artifacts"
+ENV = {"python": platform.python_version(), "torch": str(torch.__version__),
+       "torch_commit": str(torch.version.git_version), "device": "cpu",
+       "numpy": np.__version__, "soundfile": sf.__version__,
+       "OMP_NUM_THREADS": os.environ.get("OMP_NUM_THREADS", ""),
+       "MKL_NUM_THREADS": os.environ.get("MKL_NUM_THREADS", "")}
+assert ENV["torch"] == "2.14.1+cpu"
+assert ENV["torch_commit"] == "5c4886908584029761b579af026dcfb627c84070"
+
+def digest(data):
+    return hashlib.sha256(data).hexdigest()
+
+def save(name, value):
+    (OUT / name).write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+def load(path):
+    return json.loads(Path(path).read_text(encoding="utf-8"))
+
+def rows(path):
+    return [json.loads(line) for line in Path(path).read_text(encoding="utf-8").splitlines() if line]
+
+def run(command):
+    proc = subprocess.run(command, capture_output=True, text=True, timeout=40)
+    assert proc.returncode == 0, proc.stderr
+    return {"command": " ".join(command), "exit_code": proc.returncode,
+            "stdout": proc.stdout, "stderr": proc.stderr, "environment": ENV}
+
+result = {"reviewer_task": "/root/technical_round_coordinator/technical_t_1_fresh",
+          "run_on": "2026-10-03", "environment": ENV, "scope": "只讀既有資料；無下載、GPU、模型更新或正式排程"}
+listed = run([sys.executable, "scripts/fetch_training_assets.py", "--list"])
+save("T.1-list-execution.json", listed)
+result["listed"] = [json.loads(line) for line in listed["stdout"].splitlines()]
+assert len(result["listed"]) == 8
+assert (ROOT / "pyproject.toml").is_file()
+
+manifest = load("assets/training/manifest.json")
+asset_checks = []
+for asset in manifest["assets"]:
+    archive = Path(asset["archive"])
+    assert archive.stat().st_size == asset["archive_bytes"]
+    assert digest(archive.read_bytes()) == asset["archive_sha256"]
+    expected = {r["path"]: r for r in asset["files"]}
+    seen = set()
+    with tarfile.open(archive, "r:gz") as package:
+        for item in package:
+            assert item.isfile() and item.name in expected and item.name not in seen
+            data = package.extractfile(item).read()
+            record = expected[item.name]
+            assert len(data) == record["bytes"] and digest(data) == record["sha256"]
+            seen.add(item.name)
+    assert seen == set(expected)
+    metadata = load(f"assets/training/sources/{asset['id']}.json")
+    pins = {k: v for k, v in metadata.items() if k in
+            ("source_revision", "source_sha", "source_repository_revision", "hf_revision", "revision", "license")}
+    asset_checks.append({"asset": asset["id"], "archive_sha256": asset["archive_sha256"],
+                         "files_verified": len(seen), "training_records": asset["training_records"],
+                         "license": asset["license"], "metadata_sha256": digest(Path(f"assets/training/sources/{asset['id']}.json").read_bytes()),
+                         "metadata_pins": pins})
+result["asset_integrity"] = asset_checks
+
+formal_text = load("docs/course-experiments/results/real_text.json")
+text_checks = {}
+for asset, filename in (("tinystories", "tinystories-train-512.jsonl"),
+                        ("chinese-poetry", "chinese-classical-train-365.jsonl")):
+    path = Path("data/training/text-initial") / filename
+    original_rows = rows(path)
+    assert all(digest(r["text"].encode()) == r["text_sha256"] for r in original_rows)
+    schema_keys = sorted({key for row in original_rows for key in row})
+    paired_dialogues = sum("messages" in row or ("question" in row and "answer" in row) for row in original_rows)
+    assert paired_dialogues == 0
+    if asset == "tinystories":
+        prefix = Path("data/training/text-initial/tinystories-train-prefix-complete.txt").read_text()
+        pieces = prefix.split("<|endoftext|>")
+        assert not pieces[-1].strip()
+        complete = [piece.strip() for piece in pieces[:-1]]
+        assert complete == [r["text"] for r in original_rows]
+        assert len(complete) == 512 and all(r["source_split"] == "train" for r in original_rows)
+    else:
+        upstream = load("data/training/text-initial/tang300-source.json")
+        texts = ["\n".join([r["title"], r["author"], *r["paragraphs"]]) for r in upstream]
+        assert len(upstream) == 366 and len(set(texts)) == 365
+        assert list(dict.fromkeys(texts)) == [r["text"] for r in original_rows]
+        assert all(r["source_split"] == "unpartitioned" for r in original_rows)
+    parts = split_records(_deduplicate_text(original_rows), seed=42)
+    measured = {}
+    for side, side_rows in parts.items():
+        data = "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in side_rows).encode()
+        frozen = formal_text["results"]["runs"][asset]["data"][side]
+        assert len(side_rows) == frozen["records"] and digest(data) == frozen["sha256"]
+        measured[side] = {"records": len(side_rows), "sha256": digest(data)}
+    text_checks[asset] = {"input_sha256": digest(path.read_bytes()), "source_records": len(original_rows),
+                           "source_revision": original_rows[0]["source_revision"],
+                           "license": original_rows[0]["license"], "text_field_complete": True,
+                           "schema_keys_union": schema_keys, "paired_dialogue_records": paired_dialogues,
+                           "split_reconstructed_without_training": measured}
+result["text_packages"] = text_checks
+
+with tempfile.TemporaryDirectory(prefix="T.1-generated-") as temp:
+    generations = []
+    for kind in ("toy-text", "attributes-sft"):
+        generations.append(run([sys.executable, "scripts/prepare_data.py", "--kind", kind, "--seed", "42", "--output", temp]))
+    save("T.1-generated-execution.json", {"scope": "T.1 所指規則資料的離線生成契約；僅把輸出目錄改到當次暫存", "runs": generations})
+
+attributes = generate_records("attributes-sft")
+questions = {r["messages"][0]["content"]: r for r in attributes}
+abc = []
+for name, question, answer in (
+    ("A", "color=red;shape=square;pitch=low;shape?", "square"),
+    ("B", "color=red;shape=square;pitch=low;describe", "square"),
+    ("C", "color=blue;shape=circle;pitch=high;shape?", "circle")):
+    row = questions[question]
+    assert row["messages"][1]["content"] == answer
+    abc.append({"id": name, "question": question, "answer": answer, "family": row["family"]})
+assert abc[0]["family"] == abc[1]["family"] != abc[2]["family"]
+assignment = {r["family"]: side for side, rs in split_records(attributes, seed=42).items() for r in rs}
+result["T.1_table"] = {"rows": abc, "default_generated_sides": {r["id"]: assignment[r["family"]] for r in abc},
+                       "teaching_table_sides": {"A": "train", "B": "train", "C": "test"},
+                       "C_circle_exact": "circle" == abc[2]["answer"], "C_square_wrong": "square" != abc[2]["answer"],
+                       "interpretation": "A 教過後 B 答對不能驗證新屬性家族；小表切分不冒稱產生器預設"}
+
+formal_modal = load("docs/course-experiments/results/real_modal.json")
+modal_checks = {}
+tok = ByteTokenizer()
+for asset, run_result in formal_modal["results"].items():
+    checks = {}
+    for side, split in run_result["data"]["splits"].items():
+        families = [r["family"] for r in split["records"]]
+        assert len(families) == split["count"]
+        if asset == "fashion-mnist":
+            counts = Counter(re.search(r'label-(\d+)', name)[1] for name in families)
+            assert set(counts) == set(map(str, range(10)))
+            assert set(counts.values()) == ({3} if side == "train" else {1})
+        else:
+            speaker = {name.split("_")[1] for name in families}
+            assert speaker == {dict(train="jackson", validation="nicolas", test="theo")[side]}
+            counts = Counter(name.split("_")[0] for name in families)
+            assert set(counts) == set(map(str, range(10))) and set(counts.values()) == {2}
+        checks[side] = {"records": len(families), "family_sha256": digest(json.dumps(families).encode()),
+                        "per_label": dict(sorted(counts.items())), "speakers": sorted(speaker) if asset == "fsdd" else []}
+    assert not any(set(run_result["data"]["splits"][a]["records"][i]["family"] for i in range(run_result["data"]["splits"][a]["count"])) &
+                   set(r["family"] for r in run_result["data"]["splits"][b]["records"])
+                   for a, b in (("train", "validation"), ("train", "test"), ("validation", "test")))
+    for side in ("validation", "test"):
+        report = run_result[side]
+        comparisons = []
+        for sample in report["samples"]:
+            raw_ids = sample["generated_ids"]
+            content = raw_ids[:raw_ids.index(tok.eos_id)] if tok.eos_id in raw_ids else raw_ids
+            correct = content == tok.encode(sample["target"])
+            assert correct == sample["exact_match"]
+            comparisons.append({"row": sample["row"], "family": sample["family"], "target": sample["target"],
+                                "generated": sample["generated"], "generated_ids": raw_ids,
+                                "exact_match_recomputed": correct, "eos": sample["eos"]})
+        assert len(comparisons) == report["examples"]
+        assert sum(r["exact_match_recomputed"] for r in comparisons) == report["correct"]
+        checks[side]["scoring"] = {"correct": report["correct"], "examples": report["examples"],
+                                    "effective_tokens": report["effective_tokens"], "samples": comparisons}
+    modal_checks[asset] = checks
+result["frozen_modal_denominators"] = modal_checks
+
+audio_checks = []
+with tempfile.TemporaryDirectory(prefix="T.1-resample-") as temp:
+    for conversion in formal_modal["results"]["fsdd"]["resampling"]:
+        source = Path("data/training/fsdd-initial/recordings") / conversion["source"]
+        info = sf.info(source)
+        values, rate = sf.read(source, dtype="float32")
+        assert digest(source.read_bytes()) == conversion["source_sha256"]
+        assert rate == 8000 and info.channels == 1 and info.subtype == "PCM_16"
+        output = _resample_8_to_16(values)
+        destination = Path(temp) / source.name
+        sf.write(destination, output, 16000, subtype="FLOAT")
+        assert len(output) == 2 * len(values) == conversion["samples_after"]
+        assert len(values) == conversion["samples_before"]
+        assert len(values) / rate == len(output) / 16000
+        audio_checks.append({"source": source.name, "source_sha256": conversion["source_sha256"],
+                             "derived_sha256_recomputed": digest(destination.read_bytes()),
+                             "frozen_derived_sha256": conversion["derived_sha256"],
+                             "whole_file_sha_matches_frozen": digest(destination.read_bytes()) == conversion["derived_sha256"],
+                             "source_rate": rate, "target_rate": 16000, "samples_before": len(values),
+                             "samples_after": len(output), "duration_seconds": len(values) / rate})
+    first = Path("data/training/fsdd-initial/recordings/0_jackson_5.wav")
+    record = {"audio": str(first.resolve()), "question": "digit?", "answer": "0"}
+    try:
+        modal_example(record, ROOT, "audio")
+    except ValueError as error:
+        guard = str(error)
+    else:
+        raise AssertionError("8kHz should be rejected")
+    record["audio"] = str(Path(temp) / first.name)
+    _, _, _, wave = modal_example(record, ROOT, "audio")
+    assert len(wave) == 9182 and wave.device.type == "cpu"
+    result["audio_entry"] = {"8khz_error": guard, "16khz_accepted_points": len(wave), "device": str(wave.device)}
+result["audio_resampling"] = {"count": len(audio_checks), "source_hashes_all_match": True,
+       "replay_scope": "只驗證點數/時間/入口契約；重寫 FLOAT WAV 的整檔 SHA 未宣稱等同凍結產物，亦未重播 GPU 生成成績", "recordings": audio_checks}
+assert len(audio_checks) == 60
+
+fashion = formal_modal["results"]["fashion-mnist"]["data"]["splits"]
+practice = [dict(side="train", **fashion["train"]["records"][0]),
+            dict(side="test", **fashion["test"]["records"][1])]
+assert practice[0]["family"] != practice[1]["family"]
+save("T.1-exercise-execution.json", {"environment": ENV, "original_table": result["T.1_table"],
+     "chosen_pack": "fashion-mnist", "exercise_records": practice,
+     "decision_rule": "完整服飾類別 byte ID 必須與標準答案相同；同一原圖及衍生提示以 image family 整組留在一側",
+     "scope": "這是資料與答案安排練習，不執行模型，也不測一般視覺能力"})
+
+prereq_runs = []
+for section in ("W.7", "1.2", "12.1", "12.2", "12.8"):
+    body = (OUT / f"T.1-read-{section}.txt").read_text()
+    fences = re.findall(r"```python\n(.*?)```", body, re.S)
+    namespace = {"__name__": "__main__"}
+    torch.manual_seed(42)
+    stdout = io.StringIO()
+    with contextlib.redirect_stdout(stdout):
+        for fence in fences:
+            exec(compile(fence, f"{section}-original-fence", "exec"), namespace)
+    prereq_runs.append({"section": section, "scope": "親讀必要前置中的原始短 Python 例；不是 Notebook/kernel 執行",
+                       "fences": fences, "stdout": stdout.getvalue(), "environment": ENV})
+save("T.1-prereq-short-execution.json", {"runs": prereq_runs})
+
+global_reports = []
+for path in sorted(Path("docs/course-experiments/results").glob("*.json")):
+    report = load(path)
+    item = {"path": str(path), "sha256": digest(path.read_bytes()),
+            **{k: report.get(k) for k in ("experiment_id", "revision", "device", "seed", "torch_version", "python_version", "gpu", "step_scale", "evidence_status", "status")},
+            "artifact_count": len(report.get("artifacts", [])), "code_hash_count": len(report.get("code_sha256", {})),
+            "results_keys": list(report.get("results", {})), "modal_run_id": report.get("modal", {}).get("run_id")}
+    assert re.fullmatch(r"[0-9a-f]{40}", item["revision"])
+    assert item["status"] == "completed" and item["evidence_status"] == "complete_run"
+    assert item["artifact_count"] > 0 and item["code_hash_count"] > 0
+    global_reports.append(item)
+result["intro_global_fixed_report_scope"] = {"read_files": global_reports,
+       "supports": "各課程實測報告存在、保留原碼版本/指紋、當次環境與結果/產物；不代表每個CLI或任意環境已驗證，也不保證品質與重跑數字"}
+save("T.1-cpu-audit-execution.json", result)
+print(json.dumps({"environment": ENV, "assets": len(asset_checks), "text_counts": {k: v["source_records"] for k, v in text_checks.items()},
+                  "resampled": len(audio_checks), "global_reports": len(global_reports), "outcome": "all assertions passed"}, ensure_ascii=False))

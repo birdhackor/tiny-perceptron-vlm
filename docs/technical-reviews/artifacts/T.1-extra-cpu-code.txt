@@ -1,0 +1,112 @@
+import contextlib
+import hashlib
+import io
+import json
+import os
+import platform
+import re
+import sys
+import tarfile
+import tempfile
+import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path.cwd()))
+import numpy as np
+import soundfile as sf
+import torch
+from PIL import Image
+from tiny_perceptron.assets import unpack_asset
+from tiny_perceptron.data import split_documents
+from tiny_perceptron.multimodal import AudioEncoder, log_mel, tone
+
+torch.set_num_threads(1)
+torch.manual_seed(42)
+out = Path("docs/technical-reviews/artifacts")
+env = {"python": platform.python_version(), "torch": str(torch.__version__), "device": "cpu",
+       "soundfile": sf.__version__, "libsndfile": sf.__libsndfile_version__,
+       "OMP_NUM_THREADS": os.environ["OMP_NUM_THREADS"], "MKL_NUM_THREADS": os.environ["MKL_NUM_THREADS"]}
+result = {"environment": env, "scope": "必要前置的短練習；不執行 Notebook、訓練或資料下載"}
+
+def run_code(section, code):
+    stdout = io.StringIO()
+    with contextlib.redirect_stdout(stdout):
+        exec(compile(code, section, "exec"), {"__name__": "__main__"})
+    return {"section": section, "code": code, "stdout": stdout.getvalue()}
+
+result["exercises"] = [
+    run_code("1.2 重複例", 'from tiny_perceptron.data import split_documents\ndocs = ["貓看狗。", "狗看貓。", "鳥看魚。", "魚看鳥。", "貓看狗。", "貓看狗。"]\nparts = split_documents(docs, seed=42)\nprint({k:len(v) for k,v in parts.items()})\nassert sum(map(len,parts.values())) == 4\n'),
+    run_code("1.2 新句例", 'from tiny_perceptron.data import split_documents\ndocs = ["貓看狗。", "狗看貓。", "鳥看魚。", "魚看鳥。", "貓看狗。", "鳥看貓。"]\nparts = split_documents(docs, seed=42)\nprint({k:len(v) for k,v in parts.items()})\nassert sum(map(len,parts.values())) == 5\n'),
+    run_code("12.1 880Hz例", 'from tiny_perceptron.multimodal import tone\nwave=tone(880.0)\nprint(tuple(wave.shape),[round(v,3) for v in wave[:3].tolist()],round(wave.min().item(),2),round(wave.max().item(),2))\nassert tuple(wave.shape)==(1600,)\n'),
+    run_code("12.2 3200點例", 'samples=3200\nfor rate in [16000,8000]:\n    print(rate,samples/rate,rate/2,round(rate/440,2))\n'),
+    run_code("12.8 width12例", 'from tiny_perceptron.multimodal import tone, log_mel, AudioEncoder\nwave=tone()[None]\nspectrogram=log_mel(wave)\nfeatures=AudioEncoder(bands=16,width=12)(wave)\nprint(tuple(spectrogram.shape),tuple(features.shape))\nassert tuple(features.shape)==(1,11,12)\n'),
+    run_code("12.8 bands32例", 'from tiny_perceptron.multimodal import tone, log_mel, AudioEncoder\nwave=tone()[None]\nspectrogram=log_mel(wave)\nfeatures=AudioEncoder(bands=32,width=8)(wave)\nprint(tuple(spectrogram.shape),tuple(features.shape),tuple(log_mel(wave,bands=32).shape))\nassert tuple(features.shape)==(1,11,8)\n')]
+result["W.7_changed_cwd"] = {"cwd": str(Path("notebooks").resolve()),
+                            "pyproject_exists": (Path("notebooks") / "pyproject.toml").exists(),
+                            "tiny_perceptron_exists": (Path("notebooks") / "tiny_perceptron").exists()}
+assert result["W.7_changed_cwd"]["pyproject_exists"] is False
+
+images = []
+for line in Path("data/training/vision-initial/train.jsonl").read_text().splitlines():
+    row = json.loads(line)
+    path = Path("data/training/vision-initial") / row["image"]
+    sha = hashlib.sha256(path.read_bytes()).hexdigest()
+    assert sha == row["sha256"]
+    with Image.open(path) as image:
+        image.load()
+        assert image.size == (28, 28) and image.mode == "L"
+    images.append({"source_row": row["source_row"], "label": row["label"], "family": path.name,
+                   "sha256": sha, "size": [28, 28], "mode": "L"})
+result["fashion_images"] = {"count": len(images), "all_sha_and_dimensions_match": True, "images": images}
+
+with tempfile.TemporaryDirectory(prefix="T.1-unpack-contract-") as temporary:
+    root = Path(temporary)
+    archive = root / "test.tar.gz"
+    data = b'{"text":"toy"}\n'
+    with tarfile.open(archive, "w:gz") as package:
+        item = tarfile.TarInfo("training/examples.jsonl")
+        item.size = len(data)
+        package.addfile(item, io.BytesIO(data))
+    asset = {"id": "reviewer-generated-contract-test", "archive_bytes": archive.stat().st_size,
+             "archive_sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
+             "files": [{"path": "training/examples.jsonl", "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}]}
+    destination = root / "data"
+    first = unpack_asset(archive, asset, destination)
+    second = unpack_asset(archive, asset, destination)
+    bad = dict(asset, archive_sha256="0" * 64)
+    try:
+        unpack_asset(archive, bad, root / "bad")
+    except ValueError as error:
+        hash_error = str(error)
+    else:
+        raise AssertionError("mismatched hash must be rejected")
+    result["unpack_contract"] = {"first": first, "second": second, "bad_hash_error": hash_error,
+                                  "source": "self-generated 15-byte toy JSONL; not a download or training corpus"}
+
+with tempfile.TemporaryDirectory(prefix="T.1-wav-header-") as temporary:
+    first, second = Path(temporary) / "a.wav", Path(temporary) / "b.wav"
+    values = np.array([0, .125, -.125], dtype="float32")
+    sf.write(first, values, 16000, subtype="FLOAT")
+    time.sleep(1.1)
+    sf.write(second, values, 16000, subtype="FLOAT")
+    a, b = first.read_bytes(), second.read_bytes()
+    def chunks(raw):
+        parsed = {}
+        offset = 12
+        while offset + 8 <= len(raw):
+            name = raw[offset:offset+4].decode("ascii")
+            length = int.from_bytes(raw[offset+4:offset+8], "little")
+            parsed[name] = raw[offset+8:offset+8+length]
+            offset += 8 + length + length % 2
+        return parsed
+    ca, cb = chunks(a), chunks(b)
+    assert ca["data"] == cb["data"] and a != b
+    differing = [name for name in ca if ca[name] != cb[name]]
+    result["wav_byte_replay_limit"] = {"first_sha256": hashlib.sha256(a).hexdigest(),
+      "second_sha256": hashlib.sha256(b).hexdigest(), "audio_data_chunk_equal": True,
+      "differing_chunks": differing, "first_peak_hex": ca["PEAK"].hex(), "second_peak_hex": cb["PEAK"].hex(),
+      "observation": "同一浮點陣列寫两次，當次只有 PEAK chunk bytes 不同。未持有正式凍結 WAV 原檔，故不能推定 CPU 衍生檔與正式產物逐位元相同；T.1 點數/時長主張不要求整檔重寫 SHA 相同。"}
+
+(out / "T.1-extra-cpu-execution.json").write_text(json.dumps(result,ensure_ascii=False,indent=2)+"\n")
+print(json.dumps({"outcome":"all assertions passed", "environment":env, "exercise_count":len(result["exercises"]),
+                  "image_count":len(images), "wav_differing_chunks":differing},ensure_ascii=False))
