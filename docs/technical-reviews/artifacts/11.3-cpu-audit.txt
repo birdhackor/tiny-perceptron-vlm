@@ -1,0 +1,186 @@
+"""11.3 本人離線 CPU 核對：原例、全凍結練習、固定報告分母；不訓練模型。"""
+from pathlib import Path
+import hashlib
+import io
+import contextlib
+import json
+import math
+import platform
+import random
+import re
+import sys
+import inspect
+
+ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(ROOT))
+import torch
+from tiny_perceptron.data import ByteTokenizer
+from tiny_perceptron.model import TinyLM, ModelConfig, masked_loss
+from tiny_perceptron.multimodal import MultiModalLM, expand_modalities
+from scripts.course_experiments import modalities
+
+torch.set_num_threads(1)
+def guard(event, args):
+    if event.startswith("socket.") or event in ("subprocess.Popen", "os.system"):
+        raise RuntimeError("offline CPU review forbids network/subprocess")
+sys.addaudithook(guard)
+
+def digest(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+raw = (ROOT / "course/chapters/11.md").read_bytes()
+headers = list(re.finditer(rb"(?m)^## [^\r\n]+", raw))
+i = next(i for i, h in enumerate(headers) if h[0].startswith(b"## 11.3 "))
+section = raw[headers[i].start():headers[i+1].start()]
+assert hashlib.sha256(section).hexdigest() == "7beb90dc72ef04c523072797feb71b6d625763307882b4815070ac9c0d1fddc1"
+code = re.search(rb"```python\n(.*?)```", section, re.S)[1].decode()
+original = {}
+captured = io.StringIO()
+with contextlib.redirect_stdout(captured):
+    exec(compile(code, "11.3 original fence", "exec"), original)
+model, out, loss = (original[k] for k in ("model", "out", "loss"))
+tok = original["tok"]
+valid = out["labels"] != -100
+logprob = out["logits"].log_softmax(-1)
+manual = -logprob[valid].gather(1, out["labels"][valid, None]).mean()
+g = model.image_projector.weight.grad
+manual_norm = g.square().sum().sqrt()
+torch.manual_seed(0)
+fresh = MultiModalLM(TinyLM(ModelConfig(width=8)))
+assert all(torch.equal(v, fresh.state_dict()[k]) for k, v in model.state_dict().items())
+assert torch.allclose(manual, loss, atol=1e-6, rtol=0)
+assert torch.allclose(manual_norm, g.norm(), atol=1e-7, rtol=0)
+assert valid.sum().item() == 11
+assert out["logits"].shape == (1, 30, 264)
+assert out["labels"][valid].tolist() == tok.encode("red square") + [tok.eos_id]
+assert model.language.embedding.weight.grad is None
+result = {
+    "environment": {"python": platform.python_version(), "torch": str(torch.__version__),
+                    "torch_git_version": torch.version.git_version, "device": "cpu",
+                    "threads": str(torch.get_num_threads()), "network": "audit denied",
+                    "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"},
+    "source_sha256": hashlib.sha256(section).hexdigest(),
+    "original": {"stdout": captured.getvalue(), "loss": float(loss.detach()),
+                 "manual_mean_negative_log_probability": float(manual.detach()),
+                 "logits_shape": list(out["logits"].shape), "labels": out["labels"].tolist(),
+                 "answer_bytes": list(b"red square"), "answer_ids": tok.encode("red square"),
+                 "effective_targets": int(valid.sum()),
+                 "trainable": [(n, p.numel()) for n, p in model.named_parameters() if p.requires_grad],
+                 "projector_grad_norm": float(g.norm()), "manual_norm": float(manual_norm),
+                 "frozen_embedding_grad_is_none": model.language.embedding.weight.grad is None,
+                 "all_weights_equal_fresh_seed_zero": True, "optimizer_steps": 0},
+}
+
+exercise_code = code.replace("model.image_projector.requires_grad_(True)",
+                             "model.image_projector.requires_grad_(False)")
+exercise_code = exercise_code.replace("loss.backward()", "print(sum(p.numel() for p in model.parameters() if p.requires_grad))\nloss.backward()")
+exercise = {}
+captured = io.StringIO()
+try:
+    with contextlib.redirect_stdout(captured):
+        exec(compile(exercise_code, "11.3 exact exercise modification", "exec"), exercise)
+except RuntimeError as error:
+    message = str(error)
+else:
+    raise AssertionError("the all-frozen exercise must raise RuntimeError")
+assert captured.getvalue() == "0\n"
+assert not exercise["loss"].requires_grad and exercise["loss"].grad_fn is None
+result["exercise"] = {"stdout_before_error": captured.getvalue(), "exception_type": "RuntimeError",
+                      "message": message, "loss_requires_grad": False, "loss_grad_fn": None,
+                      "trainable_parameters": 0, "expected_failure_verified": True}
+
+# 只重算標籤／分母與已保存報告；不呼叫正式訓練或重新生成描述。
+projector_path = ROOT / "docs/course-experiments/results/projector.json"
+report = json.loads(projector_path.read_text())
+r = report["results"]
+t = r["training"]
+splits = r["data"]["splits"]
+history = t["history"]
+counts = []
+for step in range(300):
+    rng = random.Random(42 + step)
+    counts.append(sum(len(tok.encode(rng.choice(splits["train"]["records"])["answer"])) + 1 for _ in range(4)))
+assert counts == [row["effective_targets"] for row in history]
+assert sum(counts) == t["effective_targets"] == 14408
+assert len(history) == t["steps"] == 300
+assert t["trainable_parameters"] == 1088
+assert round(t["initial_loss"], 4) == 4.1480
+assert round(t["final_loss"], 4) == 1.2093
+assert round(r["before"]["mean_token_nll"], 4) == 4.0965
+assert round(r["test"]["mean_token_nll"], 4) == 1.3195
+for split in ("validation", "test"):
+    evaluation = r[split]
+    rows = splits[split]["records"]
+    assert len(rows) == evaluation["examples"] == 6
+    assert sum(len(tok.encode(row["answer"])) + 1 for row in rows) == evaluation["effective_tokens"] == 72
+    correct, eos = 0, 0
+    for sample in evaluation["samples"]:
+        ids = sample["generated_ids"]
+        tail = ids[:ids.index(tok.eos_id)] if tok.eos_id in ids else ids
+        assert tok.decode(tail) == sample["generated"]
+        assert (tail == tok.encode(sample["target"])) == sample["exact_match"]
+        correct += tail == tok.encode(sample["target"])
+        eos += tok.eos_id in ids
+    assert correct == evaluation["correct"] == 0
+    assert eos / 6 == evaluation["eos_rate"]
+assert [s["generated"] for s in r["test"]["samples"][:3]] == ["red", "red", "reeeeeeeeen"]
+assert sum(s["eos"] for s in r["test"]["samples"]) == 5
+assert len(r["test"]["samples"][4]["generated_ids"]) == 16
+assert not r["test"]["samples"][4]["eos"]
+assert t["weights_changed"] and t["nonzero_gradient_seen"] and r["language_weights_unchanged"]
+
+sft_path = ROOT / "docs/course-experiments/results/sft.json"
+sft = json.loads(sft_path.read_text())
+after = sft["results"]["after"]["test"]
+assert after["matches"] == sum(s["exact"] for s in after["samples"]) == 5
+assert after["examples"] == len(after["samples"]) == 10
+assert after["effective_tokens"] == 69
+result["fixed_report_audit"] = {
+    "scope": "讀取固定正式 GPU 報告並 CPU 重算其資料與字串分母；沒有重跑正式實驗",
+    "projector_sha256": digest(projector_path), "revision": report["revision"],
+    "formal_environment": {k: report[k] for k in ("device", "seed", "torch_version", "python_version", "gpu")},
+    "trainable_parameters": 1088, "optimizer_steps": 300, "batch": 4,
+    "split_counts_offsets": {k: {"count": v["count"], "offsets": sorted({row["offset"] for row in v["records"]})} for k, v in splits.items()},
+    "per_step_counts_match_history": True, "effective_training_targets": sum(counts),
+    "fixed_probe": {"initial": t["initial_loss"], "final": t["final_loss"], "seed": 41},
+    "test_nll": {"before": r["before"]["mean_token_nll"], "after": r["test"]["mean_token_nll"], "effective_targets": 72},
+    "validation": {k: r["validation"][k] for k in ("examples", "correct", "effective_tokens", "eos_rate")},
+    "test": {k: r["test"][k] for k in ("examples", "correct", "effective_tokens", "eos_rate", "samples")},
+    "language_weights_unchanged_recorded": r["language_weights_unchanged"],
+    "projector_weights_changed_recorded": t["weights_changed"],
+    "nonzero_gradient_recorded": t["nonzero_gradient_seen"],
+    "sft": {"source_sha256": digest(sft_path), "revision": sft["revision"],
+            "checkpoint": sft["results"]["checkpoint"], "matches": 5, "examples": 10,
+            "effective_targets": 69, "branch": "results.after.test; direct model.pt"},
+    "code_sha_matches_projector": {
+        p: digest(ROOT / p) == report["code_sha256"][p]
+        for p in ("tiny_perceptron/data.py", "tiny_perceptron/model.py", "tiny_perceptron/multimodal.py",
+                  "scripts/course_experiments/modalities.py", "scripts/course_experiments/common.py",
+                  "scripts/course_experiments/text.py", "tiny_perceptron/training.py")},
+}
+probe_rng = random.Random(41)
+probe_rows = [probe_rng.choice(splits["train"]["records"]) for _ in range(4)]
+result["fixed_report_audit"]["fixed_probe"]["effective_targets"] = sum(len(tok.encode(row["answer"])) + 1 for row in probe_rows)
+result["fixed_report_audit"]["fixed_probe"]["families"] = [row["family"] for row in probe_rows]
+assert all(result["fixed_report_audit"]["code_sha_matches_projector"].values())
+fit_lr = inspect.signature(modalities._fit).parameters["lr"].default
+batch = inspect.signature(modalities._loss_fn).parameters["batch"].default
+assert fit_lr == 0.003 and batch == 4
+assert 'ctx.dependency("sft")' in inspect.getsource(modalities._modal)
+assert 'ctx.dependency("projector")' in inspect.getsource(modalities.run_vqa)
+formal_shape_model = MultiModalLM(TinyLM(ModelConfig(width=64, layers=2)))
+modalities._freeze(formal_shape_model, "projector")
+trainable = [(n, p.numel()) for n, p in formal_shape_model.named_parameters() if p.requires_grad]
+assert trainable == [("image_projector.weight", 1024), ("image_projector.bias", 64)]
+try:
+    modalities._fit(exercise["model"], None, None, 0)
+except ValueError as error:
+    empty_message = str(error)
+else:
+    raise AssertionError("empty trainable configuration must fail before optimizer creation")
+result["fixed_program_contract"] = {
+    "fit_default_lr": fit_lr, "loss_fn_default_batch": batch,
+    "dependency_source_inspection": "_modal引用sft/model.pt；run_vqa引用projector/model.pt；沒有真正載入任何checkpoint",
+    "width64_projector_trainable": trainable, "all_frozen_preflight_error": empty_message,
+    "scope": "執行函式預設與凍結名單核對；_fit的空名單檢查在建立優化器前就拋錯，未進入訓練迴圈"}
+print(json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False))

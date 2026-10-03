@@ -1,0 +1,169 @@
+import hashlib
+import json
+import os
+import random
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+import torch
+from scripts.course_experiments.modalities import _freeze, _sequence, _vision_records
+from tiny_perceptron.model import ModelConfig, TinyLM, masked_loss
+from tiny_perceptron.multimodal import MultiModalLM, scene
+
+torch.set_num_threads(1)
+root = Path.cwd()
+sha = lambda p: hashlib.sha256(Path(p).read_bytes()).hexdigest()
+environment = {
+    "python": sys.version,
+    "torch": torch.__version__,
+    "torch_commit": torch.version.git_version,
+    "device": "cpu",
+    "threads": str(torch.get_num_threads()),
+    "OMP_NUM_THREADS": os.environ["OMP_NUM_THREADS"],
+    "MKL_NUM_THREADS": os.environ["MKL_NUM_THREADS"],
+}
+counts = {}
+for width, layers in [(8, 1), (8, 2), (8, 4), (64, 2)]:
+    model = MultiModalLM(TinyLM(ModelConfig(width=width, layers=layers)))
+    modes = {}
+    flag_counts = {}
+    for mode in ["projector", "partial", "all"]:
+        _freeze(model, mode)
+        modes[mode] = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        flag_counts[mode] = {
+            "modules": {
+                n: sum(p.numel() for p in getattr(model, n).parameters() if p.requires_grad)
+                for n in ["language", "vision", "audio", "image_projector", "audio_projector"]
+            },
+            "language_blocks": [sum(p.numel() for p in block.parameters() if p.requires_grad) for block in model.language.blocks],
+        }
+    counts[f"width={width},layers={layers}"] = {
+        "modes": modes,
+        "flag_counts": flag_counts,
+        "last_block": sum(p.numel() for p in model.language.blocks[-1].parameters()),
+        "module_counts": {
+            n: sum(p.numel() for p in getattr(model, n).parameters())
+            for n in ["language", "vision", "audio", "image_projector", "audio_projector"]
+        },
+        "float32_element_size": next(model.parameters()).element_size(),
+    }
+
+torch.manual_seed(42)
+model = MultiModalLM(TinyLM(ModelConfig(width=8)))
+_freeze(model, "all")
+ids, labels, count = _sequence(
+    {"modality": "vision", "question": "shape?", "answer": "square"}, SimpleNamespace(device="cpu")
+)
+output = model(ids, labels, image=scene())
+masked_loss(output["logits"], output["labels"]).backward()
+gradient_check = {
+    "effective_labels_before_expansion": count,
+    "effective_labels_after_expansion": int((output["labels"] != -100).sum()),
+    "all_audio_parameters_require_grad": all(p.requires_grad for p in model.audio.parameters()),
+    "all_audio_gradients_none": all(p.grad is None for p in model.audio.parameters()),
+    "all_audio_projector_gradients_none": all(p.grad is None for p in model.audio_projector.parameters()),
+    "image_projector_gradient_nonzero": bool(model.image_projector.weight.grad.norm() > 0),
+}
+
+active = torch.nn.Parameter(torch.tensor([1.0, 2.0]))
+unused = torch.nn.Parameter(torch.tensor([3.0, 4.0]))
+optimizer = torch.optim.AdamW([active, unused], lr=0.001)
+before_states = len(optimizer.state)
+active.square().sum().backward()
+optimizer.step()
+state = optimizer.state[active]
+adam_check = {
+    "states_before_first_step": before_states,
+    "states_after_first_step": len(optimizer.state),
+    "active_state_keys": sorted(state),
+    "active_state_shapes": {k: list(v.shape) for k, v in state.items()},
+    "active_parameter_shape": list(active.shape),
+    "unused_grad_none": unused.grad is None,
+    "unused_has_state": unused in optimizer.state,
+    "unused_values": unused.detach().tolist(),
+}
+
+path = Path("docs/course-experiments/results/vqa.json")
+record = json.loads(path.read_text())
+results = record["results"]
+formal = {
+    "source": str(path),
+    "sha256": sha(path),
+    "run": {k: record[k] for k in ["revision", "device", "seed", "torch_version", "python_version", "gpu", "step_scale", "evidence_status", "status"]},
+    "configuration": {},
+    "variants": {},
+    "scope": "親讀凍結 GPU 結果，CPU 只重算記錄與抽樣分母，沒有重新訓練或重跑正式排程。",
+}
+rows = results["data"]["splits"]["train"]["records"]
+assert rows == _vision_records(("shape?", "color?"))["train"]
+step_counts = []
+for step in range(160):
+    rng = random.Random(42 + step)
+    total = 0
+    for _ in range(4):
+        # run_vqa passes a nonempty replay list even for replay_ratio=0.
+        # _loss_fn therefore consumes rng.random() before rng.choice().
+        rng.random()
+        row = rng.choice(rows)
+        total += len(row["answer"].encode()) + 1
+    step_counts.append(total)
+assert sum(step_counts) == 3830
+formal["configuration"] = {
+    "seed": 42,
+    "steps": 160,
+    "batch": 4,
+    "lr": 0.003,
+    "optimizer": "AdamW, constant lr",
+    "data_split_counts": {s: d["count"] for s, d in results["data"]["splits"].items()},
+    "data_split_sha256": {s: d["sha256"] for s, d in results["data"]["splits"].items()},
+    "training_draws": 640,
+    "reconstructed_step_effective_targets": step_counts,
+    "reconstructed_effective_targets": sum(step_counts),
+    "upstream_projector": {k: results["two_stage_alignment_training"][k] for k in ["config", "modal_config", "steps", "effective_tokens", "trainable_parameters"]},
+}
+for name in ["projector_only", "partial", "all"]:
+    variant = results["variants"][name]
+    training = variant["training"]
+    assert [h["effective_targets"] for h in training["history"]] == step_counts
+    checks = {}
+    for split in ["validation", "test"]:
+        evaluation = variant[split]
+        samples = evaluation["samples"]
+        rebuilt = []
+        for sample in samples:
+            tokens = sample["generated_ids"]
+            raw = tokens[: tokens.index(2)] if 2 in tokens else tokens
+            expected = [byte + 8 for byte in sample["target"].encode()]
+            exact = raw == expected
+            assert exact == sample["exact_match"]
+            rebuilt.append({k: sample[k] for k in ["row", "family", "question", "target", "generated", "generated_ids", "exact_match"]})
+        assert sum(s["exact_match"] for s in samples) == evaluation["correct"]
+        assert len(samples) == evaluation["examples"] == 12
+        groups = {}
+        for question in ["shape?", "color?"]:
+            part = [s for s in samples if s["question"] == question]
+            groups[question] = {"correct": sum(s["exact_match"] for s in part), "examples": len(part)}
+        checks[split] = {
+            "correct": evaluation["correct"],
+            "examples": len(samples),
+            "effective_targets": evaluation["effective_tokens"],
+            "groups": groups,
+            "samples": rebuilt,
+        }
+    formal["variants"][name] = {
+        "training": {k: training[k] for k in ["config", "modal_config", "parameters", "trainable_parameters", "steps", "effective_tokens", "weights_changed", "nonzero_gradient_seen", "cpu_smoke"]},
+        "history_effective_targets_sum": sum(h["effective_targets"] for h in training["history"]),
+        "freeze_scope": variant["freeze_scope"],
+        **checks,
+    }
+formal["same_recorded_before_predictions"] = all(
+    results["variants"][n]["before"]["samples"] == results["variants"]["projector_only"]["before"]["samples"]
+    for n in ["partial", "all"]
+)
+code_paths = ["tiny_perceptron/model.py", "tiny_perceptron/multimodal.py", "tiny_perceptron/attention.py", "tiny_perceptron/modern.py", "tiny_perceptron/data.py", "scripts/course_experiments/modalities.py"]
+formal["recorded_code_hashes_match_current"] = {p: sha(p) == record["code_sha256"][p] for p in code_paths}
+assert all(formal["recorded_code_hashes_match_current"].values())
+assert formal["same_recorded_before_predictions"]
+
+print(json.dumps({"environment": environment, "counts": counts, "gradient_check": gradient_check, "adamw_lazy_state": adam_check, "formal": formal, "three_positions_repeated_ten_times": 3 * 10}, ensure_ascii=False, indent=2))
