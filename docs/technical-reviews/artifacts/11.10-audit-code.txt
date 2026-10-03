@@ -1,0 +1,135 @@
+import hashlib
+import json
+import random
+import sys
+from pathlib import Path
+
+import torch
+from torch import nn
+
+from tiny_perceptron.data import ByteTokenizer, pad_batch, render_chat
+from tiny_perceptron.model import ModelConfig, TinyLM
+from tiny_perceptron.multimodal import MultiModalLM, VisionEncoder, patchify, scene
+
+torch.set_num_threads(1)
+frozen_path = Path("docs/course-experiments/results/vision_ablation.json")
+frozen = json.loads(frozen_path.read_text())
+train_rows = frozen["results"]["data"]["splits"]["train"]["records"]
+tok = ByteTokenizer()
+counts = []
+chosen_batches = []
+for step in range(200):
+    rng = random.Random(frozen["seed"] + step)
+    rows = [rng.choice(train_rows) for _ in range(4)]
+    counts.append(sum(len(tok.encode(row["answer"])) + 1 for row in rows))
+    chosen_batches.append([[row["family"], row["question"]] for row in rows])
+
+variants = {}
+for patch_string, variant in frozen["results"]["patch_variants"].items():
+    patch = int(patch_string)
+    training = variant["training"]
+    assert [row["effective_targets"] for row in training["history"]] == counts
+    assert len(training["history"]) == training["steps"] == 200
+    assert sum(counts) == training["effective_targets"] == 4765
+    model = MultiModalLM(TinyLM(ModelConfig(**training["config"])))
+    model.vision = VisionEncoder(patch_size=patch)
+    parameters = sum(p.numel() for p in model.parameters())
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    assert parameters == training["parameters"] == training["trainable_parameters"] == trainable
+    samples = variant["test"]["samples"]
+    groups = {}
+    sample_checks = []
+    for sample in samples:
+        ids = sample["generated_ids"]
+        raw = ids[:ids.index(tok.eos_id)] if tok.eos_id in ids else ids
+        correct = raw == tok.encode(sample["target"])
+        assert correct == sample["exact_match"]
+        group = groups.setdefault(sample["question"], {"correct": 0, "count": 0})
+        group["count"] += 1
+        group["correct"] += int(correct)
+        sample_checks.append({k: sample[k] for k in ("row", "family", "question", "target", "generated", "exact_match")})
+    assert groups == variant["test"]["groups"]
+    assert sum(g["correct"] for g in groups.values()) == variant["test"]["correct"] == 9
+    variants[patch_string] = {
+        "visual_tokens": variant["visual_tokens"],
+        "training_config": training["config"],
+        "modal_config": training["modal_config"],
+        "parameter_recount": parameters,
+        "trainable_parameter_recount": trainable,
+        "projection_shape": list(model.vision.projection.weight.shape),
+        "position_shape": list(model.vision.position.shape),
+        "steps": training["steps"],
+        "effective_targets": sum(counts),
+        "history_counts_match_reconstructed_4_question_batches": True,
+        "seconds": training["seconds"],
+        "rounded_seconds": round(training["seconds"], 2),
+        "timing_scope": training["timing_scope"],
+        "initial_probe_loss": training["initial_loss"],
+        "final_probe_loss": training["final_loss"],
+        "loss_probe": training["loss_probe"],
+        "test_groups_recomputed_from_generated_ids": groups,
+        "test_samples": sample_checks,
+    }
+
+boundary_checks = {}
+for max_length in (64, 128):
+    model = TinyLM(ModelConfig(max_length=max_length))
+    try:
+        output = model(embeddings=torch.zeros(1, 84, model.config.width))
+        boundary_checks[str(max_length)] = {"accepted": True, "shape": list(output["logits"].shape)}
+    except ValueError as error:
+        boundary_checks[str(max_length)] = {"accepted": False, "error": str(error)}
+assert boundary_checks["64"]["accepted"] is False
+assert boundary_checks["128"]["accepted"] is True
+
+patches = patchify(scene()[None], 2)
+try:
+    nn.Linear(48, 8)(patches)
+    raise AssertionError("48-column old projection must reject 12-value patch")
+except RuntimeError as error:
+    boundary_checks["projection_48_to_12"] = str(error)
+assert list(patches.shape) == [1, 64, 12]
+
+example = render_chat([
+    {"role": "user", "content": "很長的問題"},
+    {"role": "assistant", "content": "是"},
+])
+label_counts = {}
+for length in (2, 19, 22):
+    try:
+        _, labels, _ = pad_batch([example], max_length=length)
+        label_counts[str(length)] = int((labels != -100).sum())
+    except ValueError as error:
+        label_counts[str(length)] = {"error": str(error)}
+assert isinstance(label_counts["2"], dict)
+assert label_counts["19"] == 1
+assert label_counts["22"] == 4
+
+inspected_paths = [
+    "scripts/course_experiments/modalities.py", "scripts/course_experiments/common.py",
+    "tiny_perceptron/multimodal.py", "tiny_perceptron/attention.py",
+    "tiny_perceptron/model.py", "tiny_perceptron/data.py", "tiny_perceptron/training.py",
+]
+source_hashes = {p: hashlib.sha256(Path(p).read_bytes()).hexdigest() for p in inspected_paths}
+for p, digest in source_hashes.items():
+    assert digest == frozen["code_sha256"][p]
+result = {
+    "environment": {"python": sys.version, "torch": torch.__version__,
+                    "torch_git": torch.version.git_version, "device": "cpu", "threads": "1"},
+    "scope": "離線CPU只重算凍結紀錄分母/評分/參數及短前向邊界；沒有載入權重、更新參數或重跑GPU排程。",
+    "frozen_source_path": str(frozen_path),
+    "frozen_source_sha256": hashlib.sha256(frozen_path.read_bytes()).hexdigest(),
+    "recorded_formal_environment": {k: frozen[k] for k in ("revision", "device", "seed", "torch_version", "python_version", "gpu", "step_scale", "evidence_status")},
+    "source_hashes_match_frozen_run": source_hashes,
+    "training_batch_size": 4,
+    "reconstructed_effective_targets_per_step": counts,
+    "batch_identity_stream_sha256": hashlib.sha256(json.dumps(chosen_batches, sort_keys=True).encode()).hexdigest(),
+    "first_batch": chosen_batches[0], "last_batch": chosen_batches[-1],
+    "split_summary": {name: {"count": value["count"], "sha256": value["sha256"], "offsets": sorted({r["offset"] for r in value["records"]})} for name, value in frozen["results"]["data"]["splits"].items()},
+    "variants": variants,
+    "parameter_difference_derivation": "16*(192-48) + 16*(4-16) = 2304-192 = 2112 = 147776-145664；其餘模組相同。",
+    "boundary_checks": boundary_checks,
+    "truncated_effective_label_counts": label_counts,
+    "exit_code": 0,
+}
+print(json.dumps(result, ensure_ascii=False, indent=2))

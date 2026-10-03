@@ -1,0 +1,97 @@
+import json, hashlib, sys, math
+from pathlib import Path
+from types import SimpleNamespace
+import torch
+from tiny_perceptron.data import ByteTokenizer
+from tiny_perceptron.model import TinyLM, ModelConfig
+from tiny_perceptron.multimodal import MultiModalLM, scene
+from scripts.course_experiments.modalities import _vision_records, _freeze
+
+torch.set_num_threads(1)
+root = Path.cwd()
+path = root / "docs/course-experiments/results/vision_ablation.json"
+d = json.loads(path.read_text())
+r = d["results"]
+tok = ByteTokenizer()
+assert tok.encode("circle") + [tok.eos_id] == [107, 113, 122, 107, 116, 109, 2]
+records = r["data"]["splits"]["test"]["records"]
+assert records == _vision_records(("shape?", "color?"))["test"]
+manifest_checks = {}
+for split, rows in _vision_records(("shape?", "color?" )).items():
+    digest = hashlib.sha256(json.dumps(rows, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+    assert digest == r["data"]["splits"][split]["sha256"]
+    manifest_checks[split] = {"count": len(rows), "offsets": sorted({x["offset"] for x in rows}), "sha256": digest}
+model = MultiModalLM(TinyLM(ModelConfig(**r["training"]["config"])))
+_freeze(model, "all")
+parameter_total = sum(p.numel() for p in model.parameters())
+assert parameter_total == 145664
+assert all(p.requires_grad for p in model.parameters())
+all_flags = {name: all(p.requires_grad for p in module.parameters()) for name, module in (("vision", model.vision), ("image_projector", model.image_projector), ("language", model.language), ("audio", model.audio))}
+scored = {}
+for key in ("none", "blank", "shuffle", "shape_swap_relabelled"):
+    v = r["interventions"][key]
+    rows = v["samples"]
+    assert len(rows) == 12
+    groups = {}
+    checked_rows = []
+    for i, s in enumerate(rows):
+        ids = s["generated_ids"]
+        raw = ids[:ids.index(tok.eos_id)] if tok.eos_id in ids else ids
+        assert tok.decode(raw) == s["generated"]
+        target = records[i]["answer"]
+        if key == "shape_swap_relabelled" and s["question"] == "shape?":
+            target = "square" if target == "circle" else "circle"
+        assert s["target"] == target
+        ok = raw == tok.encode(target)
+        assert ok == s["exact_match"]
+        g = groups.setdefault(s["question"], {"correct": 0, "count": 0})
+        g["correct"] += int(ok); g["count"] += 1
+        if key == "shuffle": assert s["donor_row"] == (i + 6) % 12
+        checked_rows.append({"row": i, "question": s["question"], "target": target, "generated": s["generated"], "generated_ids": ids, "correct": ok, "donor_row": s["donor_row"]})
+    assert groups == v["groups"]
+    total = sum(g["correct"] for g in groups.values())
+    assert total == v["correct"]
+    assert v["effective_tokens"] == sum(len(tok.encode(s["target"])) + 1 for s in rows) == 72
+    scored[key] = {"correct": total, "count": 12, "groups": groups, "checked_rows": checked_rows}
+assert [scored[k]["correct"] for k in scored] == [9, 5, 3, 9]
+pairs = []
+for i in range(0, 12, 2):
+    a = r["interventions"]["none"]["samples"][i]
+    b = r["interventions"]["shape_swap_relabelled"]["samples"][i]
+    assert a["generated_ids"] == b["generated_ids"] == tok.encode("circle") + [tok.eos_id]
+    pairs.append({"row": i, "family": a["family"], "original_target": a["target"], "swapped_target": b["target"], "original_generated_ids": a["generated_ids"], "swapped_generated_ids": b["generated_ids"], "both_correct": bool(a["exact_match"] and b["exact_match"])})
+assert sum(x["both_correct"] for x in pairs) == 0
+new_color = []
+for s in r["interventions"]["shuffle"]["samples"]:
+    if s["question"] != "color?": continue
+    donor = records[s["donor_row"]]
+    ok = s["generated"] == donor["color"]
+    assert ok
+    new_color.append({"row": s["row"], "original_target": s["target"], "donor_row": s["donor_row"], "donor_color": donor["color"], "generated": s["generated"], "correct_new_image": ok})
+assert len(new_color) == 6
+assert len(r["training"]["history"]) == r["training"]["steps"] == 100
+assert sum(x["effective_targets"] for x in r["training"]["history"]) == r["training"]["effective_targets"] == 2370
+assert r["training"]["weights_changed"] and r["training"]["nonzero_gradient_seen"]
+assert all(math.isfinite(x["loss"]) and math.isfinite(x["grad_norm"]) for x in r["training"]["history"])
+for color in ("red", "green", "blue"):
+    circle = scene(color, "circle", offset=2)
+    square = scene(color, "square", offset=2)
+    assert circle.device.type == square.device.type == "cpu"
+    assert not torch.equal(circle, square)
+    assert set(circle.unique().tolist()) == set(square.unique().tolist()) == {0.0, 1.0}
+vp = root / "docs/course-experiments/results/vqa.json"
+vd = json.loads(vp.read_text())
+model_receipt = next(x for x in vd["artifacts"] if x["path"] == "model.pt")
+all_receipt = next(x for x in vd["artifacts"] if x["path"] == "all.pt")
+assert model_receipt["sha256"] == all_receipt["sha256"]
+assert vd["results"]["variants"]["all"]["freeze_scope"] == "all"
+result = {
+    "environment": {"python": sys.version, "torch": torch.__version__, "torch_commit": torch.version.git_version, "device": "cpu", "threads": str(torch.get_num_threads())},
+    "fixed_result_path": str(path.relative_to(root)), "fixed_result_sha256": hashlib.sha256(path.read_bytes()).hexdigest(), "fixed_run": {k:d[k] for k in ("revision", "seed", "device", "torch_version", "python_version", "gpu", "status", "evidence_status")},
+    "scope": "離線CPU核對固定結果及程式契約，未重跑正式訓練、未讀取或下載權重、未用CPU示範外推GPU速度或通用品質。",
+    "training": {k:v for k,v in r["training"].items() if k != "history"}, "manifest_checks": manifest_checks, "all_flags": all_flags, "parameter_total": parameter_total,
+    "interventions": scored, "shape_pairs": pairs, "both_correct": 0, "pair_count": 6, "shuffle_color_relabelled": new_color,
+    "circle_token_ids_with_eos": tok.encode("circle") + [tok.eos_id],
+    "upstream_vqa": {"path": str(vp.relative_to(root)), "sha256": hashlib.sha256(vp.read_bytes()).hexdigest(), "revision": vd["revision"], "model_receipt": model_receipt, "all_receipt": all_receipt, "all_steps": vd["results"]["variants"]["all"]["training"]["steps"]}
+}
+print(json.dumps(result, ensure_ascii=False, indent=2))

@@ -1,0 +1,209 @@
+"""11.9：離線有界 CPU 核對；不載入權重、不訓練、不執行正式排程。"""
+import hashlib
+import io
+import json
+import platform
+import sys
+from pathlib import Path
+
+import PIL
+import numpy as np
+import torch
+from PIL import Image
+
+sys.path.insert(0, str(Path.cwd()))
+from tiny_perceptron.data import ByteTokenizer
+from tiny_perceptron.multimodal import VisionEncoder, scene
+
+torch.set_num_threads(1)
+torch.manual_seed(0)
+root = Path.cwd()
+digest = lambda p: hashlib.sha256(Path(p).read_bytes()).hexdigest()
+formal_path = root / "docs/course-experiments/results/vision_ablation.json"
+formal = json.loads(formal_path.read_text())
+result = {
+    "scope": "短 CPU 輸入／公式與固定正式紀錄核對；沒有模型重播或重訓。",
+    "environment": {
+        "python": platform.python_version(),
+        "torch": torch.__version__,
+        "torch_commit": torch.version.git_version,
+        "pillow": PIL.__version__,
+        "numpy": np.__version__,
+        "device": "cpu",
+        "threads": str(torch.get_num_threads()),
+    },
+    "source_hashes": {
+        p: digest(root / p) for p in (
+            "tiny_perceptron/multimodal.py",
+            "tiny_perceptron/data.py",
+            "scripts/course_experiments/modalities.py",
+            "docs/course-experiments/results/vision_ablation.json",
+        )
+    },
+}
+assert result["environment"]["torch"] == "2.14.1+cpu"
+assert result["environment"]["torch_commit"] == "5c4886908584029761b579af026dcfb627c84070"
+assert result["source_hashes"]["docs/course-experiments/results/vision_ablation.json"] == "70898240196727e51cae2e06b5dc5b6ee5f7294579bcd941d65c7ded4b4a6b50"
+pixels = []
+for offset, expected in ((7, (45, 8)), (0, (81, 64))):
+    image = scene("red", "square", offset=offset)
+    crop = image[:, 4:12, 4:12]
+    pos = torch.nonzero(image[0] > 0)
+    cp = torch.nonzero(crop[0] > 0)
+    counts = (int((image[0] > 0).sum()), int((crop[0] > 0).sum()))
+    assert counts == expected
+    assert tuple(image.shape) == (3, 16, 16)
+    assert tuple(crop.shape) == (3, 8, 8)
+    pixels.append({
+        "offset": offset,
+        "center_x": 8 + offset,
+        "original_shape": list(image.shape),
+        "crop_shape": list(crop.shape),
+        "red_counts": list(counts),
+        "original_y_minmax": [int(pos[:, 0].min()), int(pos[:, 0].max())],
+        "original_x_minmax": [int(pos[:, 1].min()), int(pos[:, 1].max())],
+        "retained_global_y_minmax": [int(cp[:, 0].min()) + 4, int(cp[:, 0].max()) + 4],
+        "retained_global_x_minmax": [int(cp[:, 1].min()) + 4, int(cp[:, 1].max()) + 4],
+        "comparison_dtype": str((image[0] > 0).dtype),
+        "sum_dtype": str((image[0] > 0).sum().dtype),
+    })
+result["pixel_geometry"] = pixels
+red = scene("red", "square")
+blue = scene("blue", "square")
+assert red[:, 8, 8].tolist() == [1.0, 0.0, 0.0]
+assert blue[:, 8, 8].tolist() == [0.0, 0.0, 1.0]
+result["prerequisite_10_1"] = {
+    "red_central_rgb": red[:, 8, 8].tolist(),
+    "blue_central_rgb": blue[:, 8, 8].tolist(),
+    "black_corner": red[:, 0, 0].tolist(),
+    "batch_shape": list(red.unsqueeze(0).shape),
+}
+# 裁切後完全相同，但原图在裁切外有不同像素：此映射不是一對一。
+first = torch.zeros(3, 16, 16)
+second = first.clone()
+second[0, 0, 0] = 1
+assert not torch.equal(first, second)
+assert torch.equal(first[:, 4:12, 4:12], second[:, 4:12, 4:12])
+result["crop_collision"] = {"originals_equal": False, "processed_equal": True}
+# 2×2 的兩種小筆畫排列，BOX 縮成一格後都是 64，不能唯一反推位置。
+small_a = Image.fromarray(np.array([[255, 0], [0, 0]], dtype=np.uint8))
+small_b = Image.fromarray(np.array([[0, 255], [0, 0]], dtype=np.uint8))
+shrunk_a = small_a.resize((1, 1), Image.Resampling.BOX)
+shrunk_b = small_b.resize((1, 1), Image.Resampling.BOX)
+assert shrunk_a.getpixel((0, 0)) == shrunk_b.getpixel((0, 0)) == 64
+result["downsample_collision"] = {
+    "inputs": [[[255, 0], [0, 0]], [[0, 255], [0, 0]]],
+    "output_values": [shrunk_a.getpixel((0, 0)), shrunk_b.getpixel((0, 0))],
+    "resampler": "Pillow 12.3.0 BOX; only this illustrative pixel aggregation, not an OCR accuracy measurement",
+}
+encoder = VisionEncoder()
+crop = scene("red", "square", offset=7)[:, 4:12, 4:12]
+try:
+    encoder(crop.unsqueeze(0))
+    raise AssertionError("8×8 must be rejected by the default 16×16 entrance")
+except ValueError as exc:
+    rejection = str(exc)
+padded = torch.nn.functional.pad(crop, (4, 4, 4, 4))
+assert padded.shape == (3, 16, 16)
+assert int((padded[0] > 0).sum()) == 8
+with torch.no_grad():
+    padded_tokens = encoder(padded.unsqueeze(0))
+result["entrance_and_padding"] = {
+    "8x8_rejection": rejection,
+    "padded_shape": list(padded.shape),
+    "red_after_padding": int((padded[0] > 0).sum()),
+    "padded_forward_shape": list(padded_tokens.shape),
+    "scope": "只驗證預設入口形狀及空白填補；隨機初值 encoder 沒有品質證據。",
+}
+assert formal["revision"] == "22a0bb1b870e4df4af76630243ef55b7ca27840c"
+assert formal["evidence_status"] == "complete_run"
+training = formal["results"]["training"]
+assert training["steps"] == len(training["history"]) == 100
+assert [x["step"] for x in training["history"]] == list(range(1, 101))
+assert training["parameters"] == training["trainable_parameters"] == 145664
+assert sum(x["effective_targets"] for x in training["history"]) == training["effective_targets"] == 2370
+records = formal["results"]["data"]["splits"]["test"]["records"]
+assert len(records) == 12
+assert len({(x["color"], x["shape"], x["offset"]) for x in records}) == 6
+assert {x["color"] for x in records} == {"red", "green", "blue"}
+assert {x["shape"] for x in records} == {"circle", "square"}
+assert {x["question"] for x in records} == {"shape?", "color?"}
+assert {x["offset"] for x in records} == {2}
+tok = ByteTokenizer()
+mode_audits = {}
+for mode in ("none", "edge_cropped", "blank", "shuffle", "shape_swap_relabelled"):
+    measured = formal["results"]["interventions"][mode]
+    samples = measured["samples"]
+    assert len(samples) == measured["examples"] == 12
+    assert measured["skipped"] == []
+    checked_samples = []
+    for sample in samples:
+        ids = sample["generated_ids"]
+        assert tok.eos_id in ids
+        raw = ids[:ids.index(tok.eos_id)]
+        decoded = tok.decode(raw)
+        exact = raw == tok.encode(sample["target"])
+        assert decoded == sample["generated"]
+        assert exact == sample["exact_match"]
+        row = records[sample["row"]]
+        if mode in ("none", "edge_cropped"):
+            assert sample["target"] == row["answer"]
+            assert sample["question"] == row["question"]
+        checked_samples.append({k: sample[k] for k in (
+            "row", "family", "question", "target", "generated", "generated_ids", "exact_match"
+        )})
+    counts = {
+        question: {
+            "correct": sum(x["exact_match"] for x in samples if x["question"] == question),
+            "count": sum(x["question"] == question for x in samples),
+            "generated_values": sorted({x["generated"] for x in samples if x["question"] == question}),
+        }
+        for question in ("color?", "shape?")
+    }
+    assert sum(x["exact_match"] for x in samples) == measured["correct"]
+    assert all(counts[q]["correct"] == measured["groups"][q]["correct"] for q in counts)
+    assert counts["shape?"]["count"] == 6
+    assert counts["shape?"]["correct"] == 3
+    assert counts["shape?"]["generated_values"] == ["circle"]
+    if mode in ("none", "edge_cropped", "shape_swap_relabelled"):
+        assert measured["correct"] == 9
+        assert counts["color?"]["correct"] == 6
+    mode_audits[mode] = {"correct": measured["correct"], "examples": 12, "groups": counts, "samples": checked_samples}
+result["formal_run"] = {
+    "result_path": str(formal_path.relative_to(root)),
+    "result_sha256": digest(formal_path),
+    "revision": formal["revision"],
+    "historical_environment": {k: formal[k] for k in ("python_version", "torch_version", "device", "gpu", "seed", "step_scale")},
+    "training": {k: training[k] for k in ("parameters", "trainable_parameters", "steps", "effective_targets", "config", "modal_config", "weights_changed")},
+    "test_records": records,
+    "audited_interventions": mode_audits,
+    "paired_shape_both_correct": sum(
+        a["exact_match"] and b["exact_match"]
+        for a, b in zip(mode_audits["none"]["samples"], mode_audits["shape_swap_relabelled"]["samples"], strict=True)
+        if a["question"] == "shape?"
+    ),
+}
+assert result["formal_run"]["paired_shape_both_correct"] == 0
+# 只依已親讀原始建圖程式重建輸入，未呼叫模型／訓練程序。
+crop_inputs = []
+for row in records:
+    image = scene(row["color"], row["shape"], offset=7)[:, 4:12, 4:12]
+    rendered = Image.fromarray((image.permute(1, 2, 0).numpy() * 255).astype("uint8")).resize((16, 16))
+    buf = io.BytesIO()
+    rendered.save(buf, format="PNG")
+    reread = rendered.convert("RGB").resize((16, 16))
+    tensor = torch.from_numpy(np.array(reread, copy=True)).permute(2, 0, 1).float() / 255
+    entry = next(x for x in formal["artifacts"] if x["path"] == f"crop-{len(crop_inputs)}.png")
+    png_sha = hashlib.sha256(buf.getvalue()).hexdigest()
+    assert png_sha == entry["sha256"]
+    assert tuple(tensor.shape) == (3, 16, 16)
+    crop_inputs.append({
+        "family": row["family"], "question": row["question"], "reference_answer": row["answer"],
+        "construction_offset": 7, "slice": "[:,4:12,4:12]", "resized_shape": list(tensor.shape),
+        "original_active_pixels": int((scene(row["color"], row["shape"], offset=7).sum(0) > 0).sum()),
+        "cropped_active_pixels": int((image.sum(0) > 0).sum()),
+        "png_sha256": png_sha, "matches_frozen_original_png_sha256": True,
+    })
+result["crop_input_reconstruction"] = crop_inputs
+result["assertions"] = "全部 assertions 通過；正式輸出只重新計數，沒有重新推論正式模型。"
+print(json.dumps(result, ensure_ascii=False, indent=2))
