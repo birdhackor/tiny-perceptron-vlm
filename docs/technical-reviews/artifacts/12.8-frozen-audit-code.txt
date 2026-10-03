@@ -1,0 +1,89 @@
+import hashlib
+import json
+import math
+from pathlib import Path
+
+def digest(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+def read(path):
+    return json.loads(Path(path).read_text())
+
+enc_path = "docs/course-experiments/results/encoders.json"
+real_path = "docs/course-experiments/results/real_modal.json"
+enc = read(enc_path)
+real = read(real_path)
+audio = enc["results"]["audio"]
+fsdd = real["results"]["fsdd"]
+for result in [enc, real]:
+    assert result["seed"] == 42 and result["step_scale"] == 1
+    assert result["evidence_status"] == "complete_run"
+    for name in ["tiny_perceptron/multimodal.py", "tiny_perceptron/model.py", "scripts/course_experiments/modalities.py"]:
+        assert digest(name) == result["code_sha256"][name]
+
+assert audio["training"]["parameters"] == 610
+assert audio["training"]["steps"] == len(audio["training"]["history"]) == 250
+assert sum(x["effective_targets"] for x in audio["training"]["history"]) == 2000
+assert all(x["effective_targets"] == 8 for x in audio["training"]["history"])
+assert audio["config"] == {"width": 16, "bands": 16}
+audio_splits = audio["data"]["splits"]
+assert [audio_splits[k]["count"] for k in ["train", "validation", "test"]] == [16, 8, 14]
+families = {k: {x["frequency"] for x in v["records"]} for k, v in audio_splits.items()}
+assert families == {"train": {140,180,220,260,340,380,420,460}, "validation": {160,240,360,440}, "test": {200,280,290,300,310,320,400}}
+for first, second in [("train", "validation"), ("train", "test"), ("validation", "test")]:
+    assert not families[first] & families[second]
+for split in audio_splits.values():
+    for row in split["records"]:
+        assert row["answer"] == ("high" if row["frequency"] > 300 else "low")
+        assert (row["amplitude"], row["seconds"]) in [(0.25, 0.1), (0.5, 0.12)]
+assert (audio["before"]["correct"], audio["before"]["count"]) == (6,14)
+assert (audio["validation"]["correct"], audio["validation"]["count"]) == (8,8)
+assert (audio["test"]["correct"], audio["test"]["count"]) == (11,14)
+wrong = [x for x in audio["test"]["samples"] if not x["correct"]]
+assert [x["row"] for x in wrong] == [7,10,11]
+assert [(x["family"], x["target"], x["predicted"]) for x in wrong] == [("300","low","high"),("320","high","low"),("320","high","low")]
+cal = audio["calibration"]
+assert cal["chosen_temperature"] == 0.5 and cal["selection_split"] == "validation only"
+assert cal["test"]["original"]["predicted_labels"] == cal["test"]["calibrated"]["predicted_labels"]
+assert cal["test"]["original"]["ece"] < cal["test"]["calibrated"]["ece"]
+
+assert fsdd["training"]["steps"] == len(fsdd["training"]["history"]) == 250
+assert sum(x["effective_targets"] for x in fsdd["training"]["history"]) == 2000
+assert fsdd["training"]["parameters"] == fsdd["training"]["trainable_parameters"] == 148736
+fsdd_splits = fsdd["data"]["splits"]
+for key, speaker in [("train","jackson"),("validation","nicolas"),("test","theo")]:
+    split = fsdd_splits[key]
+    assert split["count"] == len(split["records"]) == 20
+    assert {r["family"] for r in split["records"]} == {f"{d}_{speaker}_{i}.wav" for d in range(10) for i in [5,6]}
+    assert all(r["answer"] == r["family"].split("_")[0] for r in split["records"])
+assert fsdd["validation"]["correct"] == sum(s["exact_match"] for s in fsdd["validation"]["samples"]) == 5
+assert fsdd["test"]["correct"] == sum(s["exact_match"] for s in fsdd["test"]["samples"]) == 3
+assert fsdd["validation"]["examples"] == fsdd["test"]["examples"] == 20
+assert all(x["eos"] for x in fsdd["validation"]["samples"] + fsdd["test"]["samples"])
+assert [x["target"] for x in fsdd["test"]["samples"] if x["exact_match"]] == ["2","2","4"]
+assert [x["generated"] for x in fsdd["test"]["samples"] if x["target"] == "1"] == ["4","4"]
+assert fsdd["test"]["effective_tokens"] == 40
+conversions = fsdd["resampling"]
+assert len(conversions) == 60
+assert all(x["source_rate"] == 8000 and x["target_rate"] == 16000 and x["samples_after"] == 2*x["samples_before"] for x in conversions)
+illustrated = next(x for x in conversions if x["source"] == "0_jackson_5.wav")
+assert illustrated["samples_before"] == 4591 and illustrated["samples_after"] == 9182
+assert 4591/8000 == 9182/16000 == 0.573875
+maximum = max(x["samples_after"] for x in conversions)
+assert math.ceil(maximum/160) + 100 == fsdd["training"]["config"]["max_length"] == 176
+
+def training_snapshot(value):
+    return {**{k:v for k,v in value.items() if k != "history"}, "history_count":len(value["history"]), "history_effective_targets_sum":sum(x["effective_targets"] for x in value["history"]), "history_per_step_effective_targets":sorted({x["effective_targets"] for x in value["history"]})}
+
+snapshot = {
+    "command_scope": "只读取凍結結果、重算分母與核對原始程式 SHA；未重播正式模型、未訓練、未用 GPU",
+    "inputs": [{"path":p, "sha256":digest(p)} for p in [enc_path, real_path]],
+    "encoders_run": {k:enc[k] for k in ["revision","device","seed","torch_version","python_version","gpu","step_scale","evidence_status","hf"]},
+    "real_modal_run": {k:real[k] for k in ["revision","device","seed","torch_version","python_version","gpu","step_scale","evidence_status","hf"]},
+    "audio": {"training":training_snapshot(audio["training"]), **{k:audio[k] for k in ["before","validation","test","data","config","classes"]}},
+    "audio_calibration": {"chosen_temperature":cal["chosen_temperature"], "selection_split":cal["selection_split"], "test_original":{k:cal["test"]["original"][k] for k in ["count","correct","mean_confidence","nll","ece","brier"]}, "test_calibrated":{k:cal["test"]["calibrated"][k] for k in ["count","correct","mean_confidence","nll","ece","brier"]}},
+    "fsdd": {"training":training_snapshot(fsdd["training"]), "data":fsdd["data"], "validation":fsdd["validation"], "test":fsdd["test"], "resampling":conversions},
+    "computed": {"maximum_resampled_samples":maximum,"required_context":math.ceil(maximum/160)+100,"example_duration_seconds":4591/8000,"audio_wrong_rows":[7,10,11],"fsdd_wrong_test_count":17,"fsdd_eos_count":20},
+}
+Path("docs/technical-reviews/artifacts/12.8-frozen-evidence.json").write_text(json.dumps(snapshot, ensure_ascii=False, indent=2) + "\n")
+print(json.dumps({"assertions":"all passed", "audio":{"before":"6/14","validation":"8/8","test":"11/14","updates":250,"parameters":610,"effective_targets":2000}, "fsdd":{"validation":"5/20","test":"3/20","EOS":"20/20","updates":250,"parameters":148736,"effective_targets":2000}, "context":176,"illustrated_samples":[4591,9182],"duration":4591/8000}, ensure_ascii=False, indent=2))

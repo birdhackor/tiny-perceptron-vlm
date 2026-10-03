@@ -1,0 +1,31 @@
+import json,math,sys,torch
+from tiny_perceptron.multimodal import tone,mel_filter_bank,log_mel,AudioEncoder
+
+torch.set_num_threads(1)
+wave=tone(440.0,seconds=0.2)
+window=torch.hann_window(400)
+x=torch.stft(wave,400,160,window=window,return_complex=True)
+x2=torch.stft(2*wave,400,160,window=window,return_complex=True)
+p=mel_filter_bank() @ x.abs().square()
+p2=mel_filter_bank() @ x2.abs().square()
+z=log_mel(wave)
+z2=log_mel(2*wave)
+d=z2-z
+assert torch.equal(z,p.clamp(min=1e-8).log())
+assert torch.equal(p2,4*p)
+assert bool(z.isfinite().all())
+assert float(d.mean()) < math.log(4)
+assert torch.allclose(d[p>=1e-8],torch.full_like(d[p>=1e-8],math.log(4)),atol=2e-6,rtol=0)
+assert torch.equal(log_mel(torch.zeros_like(wave)),torch.full_like(z,math.log(1e-8)))
+e=AudioEncoder();e.train();train=e(wave);e.eval();infer=e(wave)
+assert torch.equal(train,infer)
+probes=torch.tensor([float('nan'),float('inf'),float('-inf'),0.0,1.0])
+assert probes.isfinite().tolist()==[False,False,False,True,True]
+print(json.dumps({
+ 'environment':{'python':sys.version.split()[0],'torch':torch.__version__,'torch_git':torch.version.git_version,'device':'cpu','threads':str(torch.get_num_threads())},
+ 'tone':{'frequency_hz':440,'seconds':0.2,'sample_rate':16000,'n_fft':400,'hop_length':160,'bands':16,'dtype':str(wave.dtype),'samples':wave.numel(),'mel_cells':p.numel(),'shape':list(p.shape),'floor':1e-8,'raw_power_min':float(p.min()),'base_below_floor':int((p<1e-8).sum()),'both_below_floor':int((p2<1e-8).sum()),'mean_log_difference':float(d.mean()),'log4':math.log(4),'no_floor_shift_max_error':float((d[p>=1e-8]-math.log(4)).abs().max()),'exact_power_times4':torch.equal(p2,4*p),'project_equals_explicit_frontend':torch.equal(z,p.clamp(min=1e-8).log()),'silence_all_floor':torch.equal(log_mel(torch.zeros_like(wave)),torch.full_like(z,math.log(1e-8))),'train_eval_encoder_equal':torch.equal(train,infer)},
+ 'math':{'ln1e8':math.log(1e-8),'ln1e4':math.log(1e-4),'ln1e3':math.log(1e-3),'ln4':math.log(4),'linear_ratio':1/1e-4,'ln_ratio':math.log(1)-math.log(1e-4),'crossing_example_p':5e-9,'crossing_shift':math.log(max(4*5e-9,1e-8))-math.log(max(5e-9,1e-8))},
+ 'finite_probes':probes.isfinite().tolist(),
+ 'unclamped_zero_log':str(torch.zeros(1).log().item()),
+ 'result':'all assertions passed; no training, model downloads, GPU, or network'
+},ensure_ascii=False,indent=2))

@@ -1,0 +1,37 @@
+import sys
+from pathlib import Path
+sys.path.insert(0,str(Path.cwd()))
+import torch,json,platform,hashlib
+torch.set_num_threads(1)
+import torch
+from tiny_perceptron.data import ByteTokenizer
+from tiny_perceptron.model import TinyLM, ModelConfig, masked_loss
+from tiny_perceptron.multimodal import MultiModalLM, tone
+
+torch.manual_seed(0)
+tok = ByteTokenizer()
+model = MultiModalLM(TinyLM(ModelConfig(width=8)))
+prefix = [tok.bos_id, tok.user_id, tok.audio_id, tok.eos_id, tok.assistant_id]
+answer = tok.encode("high") + [tok.eos_id]
+ids = torch.tensor(prefix + answer)
+labels = torch.tensor([-100] * len(prefix) + answer)
+out = model(ids, labels, waveform=tone(440))
+loss = masked_loss(out["logits"], out["labels"])
+loss.backward()
+print("分數形狀", tuple(out["logits"].shape))
+print("聲音接頭收到梯度", model.audio_projector.weight.grad.norm().item() > 0)
+
+from tiny_perceptron.multimodal import log_mel
+valid=(out["labels"]!=-100)
+print(json.dumps({"python":platform.python_version(),"torch":torch.__version__,"device":str(out["logits"].device),"threads":torch.get_num_threads(),"prefix":prefix,"answer":answer,"input_length":len(ids),"wave_samples":len(tone(440)),"log_mel_shape":list(log_mel(tone(440)[None]).shape),"feature_shape":list(model.audio(tone(440)[None]).shape),"projector_shape":list(model.audio_projector.weight.shape),"labels":out["labels"].tolist(),"valid_indices":valid.nonzero().tolist(),"valid_count":int(valid.sum()),"loss":float(loss.detach()),"projector_grad_norm":float(model.audio_projector.weight.grad.norm()),"rule_high":440>300,"optimiser_updates":0},ensure_ascii=False,indent=2))
+assert int(valid.sum())==len(answer)
+assert out["logits"].shape==(1,len(ids)+10-1,264)
+assert out["labels"][valid].tolist()==answer
+assert model.audio_projector.weight.grad.norm()>0
+assert tok.audio_id not in tok.encode("音訊")
+try:
+ masked_loss(out["logits"],labels[None])
+except (ValueError,RuntimeError) as e:
+ print("未展開標籤錯誤：",type(e).__name__,str(e))
+else:
+ raise AssertionError("舊標籤不應接受")

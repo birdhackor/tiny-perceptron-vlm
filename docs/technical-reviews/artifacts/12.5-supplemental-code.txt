@@ -1,0 +1,39 @@
+import json, math, os, sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+import torch
+from tiny_perceptron.multimodal import tone
+assert torch.version.cuda is None and not torch.cuda.is_available()
+torch.set_default_device("cpu")
+torch.set_num_threads(1)
+z=torch.tensor(3+4j)
+assert z.abs().item()==5.0 and z.abs().square().item()==25.0
+wave=tone(440.0,seconds=0.2)
+window=torch.hann_window(400)
+s=torch.stft(wave,400,160,window=window,return_complex=True)
+power=s.abs().square()
+padded=torch.nn.functional.pad(wave[None,None],(200,200),mode="reflect")[0,0]
+manual=torch.fft.rfft(padded.unfold(0,400,160)*window,dim=-1).T
+max_error=(manual-s).abs().max().item()
+assert torch.allclose(s,manual,atol=2e-5,rtol=2e-5)
+assert wave.numel()==3200 and tuple(wave.unfold(0,400,160).shape)==(18,400)
+assert tuple(power.mean(-1).shape)==(201,)
+assert torch.allclose(power.mean(-1),power.sum(-1)/21)
+t450=tone(450.0,seconds=0.2)
+p450=torch.stft(t450,400,160,window=window,return_complex=True).abs().square().mean(-1)
+peak450=p450.argmax().item()
+assert peak450==11
+frame=wave[200:600].double()*torch.hann_window(400,dtype=torch.float64)
+fft400=torch.fft.rfft(frame,n=400)
+fft3200=torch.fft.rfft(frame,n=3200)
+zero_pad_error=(fft3200[::8]-fft400).abs().max().item()
+assert torch.allclose(fft3200[::8],fft400,rtol=1e-12,atol=1e-12)
+result={
+ "environment":{"python":sys.version,"torch":str(torch.__version__),"torch_git_version":str(torch.version.git_version),"device":str(wave.device),"threads":str(torch.get_num_threads()),"OMP_NUM_THREADS":os.environ.get("OMP_NUM_THREADS"),"MKL_NUM_THREADS":os.environ.get("MKL_NUM_THREADS")},
+ "complex":{"real":z.real.item(),"imaginary":z.imag.item(),"abs":z.abs().item(),"abs_square":z.abs().square().item(),"angle_radians":torch.angle(z).item()},
+ "stft":{"samples":wave.numel(),"input_dtype":str(wave.dtype),"output_dtype":str(s.dtype),"power_dtype":str(power.dtype),"shape":list(s.shape),"explicit_reflect_pad_points_each_side":200,"manual_fft_max_error":max_error,"unfold_unpadded_shape":list(wave.unfold(0,400,160).shape),"time_average_divisor":21,"time_mean_shape":list(power.mean(-1).shape),"mean_power_bins_10_11_12":[power.mean(-1)[k].item() for k in [10,11,12]],"center_times_first_five_seconds":[k*160/16000 for k in range(5)],"last_center_seconds":20*160/16000},
+ "tone450":{"peak_bin":peak450,"peak_hz":peak450*16000/400,"mean_power_bins_10_to_13":[p450[k].item() for k in range(10,14)]},
+ "zero_padding":{"observed_samples":400,"fft_sizes":[400,3200],"bin_spacings_hz":[40.0,5.0],"nested_grid_max_error":zero_pad_error,"interpretation":"同一400點乘窗資料只在更密頻率位置取樣；FFT3200每第8格與FFT400一致，未添加聲音觀測。"},
+ "result":"所有assertions通過；僅核這些CPU確定性算例，不外推任意峰的估計誤差或GPU表現。"
+}
+print(json.dumps(result,ensure_ascii=False,indent=2))

@@ -1,0 +1,49 @@
+import json
+import torch
+from torch import nn
+from torch.nn import functional as F
+from tiny_perceptron.model import ModelConfig, TinyLM
+from tiny_perceptron.multimodal import tone, log_mel, AudioEncoder, MultiModalLM
+
+torch.manual_seed(0)
+torch.set_num_threads(1)
+wave = tone()[None]
+spec = log_mel(wave)
+turned = spec.transpose(-1, -2)
+encoder = AudioEncoder(bands=16, width=8)
+features = encoder(wave)
+head = nn.Linear(8, 2)
+loss = F.cross_entropy(head(features.mean(1)), torch.tensor([0]))
+loss.backward()
+audio16 = AudioEncoder(bands=16, width=16)
+classifier16 = nn.Linear(16, 2)
+base = MultiModalLM(TinyLM(ModelConfig(width=64, layers=2, max_length=128)))
+expanded = MultiModalLM(TinyLM(ModelConfig(width=64, layers=2, max_length=176)))
+x = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
+out = {
+    "wave_shape": list(wave.shape),
+    "spectrogram_shape": list(spec.shape),
+    "transposed_shape": list(turned.shape),
+    "features_shape": list(features.shape),
+    "transpose_inverse_exact": torch.equal(turned.transpose(-1, -2), spec),
+    "frame_vector_exact": torch.equal(turned[0, 0], spec[0, :, 0]),
+    "gradient_projection_norm": float(encoder.projection.weight.grad.norm()),
+    "projection_weight_shape": list(encoder.projection.weight.shape),
+    "layernorm_shape": list(encoder.feature[0].normalized_shape),
+    "width16_encoder_parameters": sum(p.numel() for p in audio16.parameters()),
+    "width16_classifier_parameters": sum(p.numel() for p in classifier16.parameters()),
+    "width16_total_parameters": sum(p.numel() for p in audio16.parameters()) + sum(p.numel() for p in classifier16.parameters()),
+    "multimodal_parameters_context128": sum(p.numel() for p in base.parameters()),
+    "multimodal_parameters_context176": sum(p.numel() for p in expanded.parameters()),
+    "context_parameter_delta": (176 - 128) * 64,
+    "frames_0_1_seconds": log_mel(tone(seconds=0.1)).shape[-1],
+    "frames_0_12_seconds": log_mel(tone(seconds=0.12)).shape[-1],
+    "mean_original": x.mean(0).tolist(),
+    "mean_reversed": x.flip(0).mean(0).tolist(),
+    "mean_repeated": x.repeat(2, 1).mean(0).tolist(),
+}
+assert out["width16_total_parameters"] == 610
+assert out["multimodal_parameters_context176"] == 148736
+assert out["gradient_projection_norm"] > 0
+assert out["transpose_inverse_exact"] and out["frame_vector_exact"]
+print(json.dumps(out, ensure_ascii=False, indent=2))

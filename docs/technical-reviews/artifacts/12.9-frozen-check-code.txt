@@ -1,0 +1,84 @@
+import sys,json,hashlib,random,platform
+from pathlib import Path
+sys.path.insert(0,str(Path.cwd()))
+import torch
+from tiny_perceptron.data import ByteTokenizer
+from tiny_perceptron.multimodal import MultiModalLM
+from tiny_perceptron.model import TinyLM,ModelConfig
+from scripts.course_experiments.modalities import _audio_records
+torch.set_num_threads(1)
+def digest(path): return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+def canonical(value): return hashlib.sha256(json.dumps(value,ensure_ascii=False,sort_keys=True).encode()).hexdigest()
+audio_path='docs/course-experiments/results/audio.json'
+a=json.loads(Path(audio_path).read_text())
+e=json.loads(Path('docs/course-experiments/results/encoders.json').read_text())
+f=json.loads(Path('docs/course-experiments/results/real_modal.json').read_text())
+t=a['results']['training']; data=a['results']['data']['splits'];tok=ByteTokenizer()
+splits=_audio_records()
+for side,rows in splits.items():
+ assert rows==data[side]['records']
+ assert len(rows)==data[side]['count']
+ assert canonical(rows)==data[side]['sha256']
+ assert all(row['answer']==('high' if row['frequency']>300 else 'low') for row in rows)
+for x,y in [('train','validation'),('train','test'),('validation','test')]:
+ assert not ({r['frequency'] for r in splits[x]}&{r['frequency'] for r in splits[y]})
+history=[]
+for step in range(300):
+ rng=random.Random(a['seed']+step)
+ rows=[rng.choice(splits['train']) for _ in range(4)]
+ count=sum(len(tok.encode(r['answer']))+1 for r in rows)
+ assert count==t['history'][step]['effective_targets']
+ assert t['history'][step]['step']==step+1
+ history.append(count)
+assert len(t['history'])==t['steps']==300
+assert sum(history)==t['effective_tokens']==t['effective_targets']==5409
+config=ModelConfig(**t['config']); model=MultiModalLM(TinyLM(config),audio_width=t['modal_config']['audio_width'],vision_width=t['modal_config']['vision_width'])
+assert sum(p.numel() for p in model.parameters())==t['parameters']==145664
+assert all(p.requires_grad for p in model.parameters())
+assert t['trainable_parameters']==t['parameters']
+checks=[]
+for side in ['validation','test']:
+ result=a['results'][side];rows=data[side]['records'];samples=result['samples']
+ assert len(samples)==len(rows)==result['examples']
+ correct=eos=effective=0
+ details=[]
+ for row,s in zip(rows,samples,strict=True):
+  ids=s['generated_ids'];raw=ids[:ids.index(tok.eos_id)] if tok.eos_id in ids else ids
+  exact=raw==tok.encode(row['answer'])
+  assert exact==s['exact_match']
+  assert s['target']==row['answer']
+  assert s['generated']==tok.decode(raw)
+  assert s['family']==row['family']
+  ended=tok.eos_id in ids
+  assert ended==s['eos']
+  assert s['generation_error'] is None
+  assert not s['invalid_special_tokens']
+  correct+=exact;eos+=ended;effective+=len(tok.encode(row['answer']))+1
+  details.append({**row,'generated':s['generated'],'exact_match':exact,'eos':ended})
+ assert correct==result['correct']
+ assert correct/len(rows)==result['exact_match']
+ assert eos/len(rows)==result['eos_rate']
+ assert effective==result['effective_tokens']
+ checks.append({'split':side,'examples':len(rows),'correct':correct,'eos':eos,'effective_targets':effective,'all_samples':details})
+classifier=e['results']['audio'];crows=classifier['data']['splits']['test']['records']
+assert crows==splits['test']
+wrong_classifier=[{**r,'predicted':s['predicted']} for r,s in zip(crows,classifier['test']['samples'],strict=True) if not s['correct']]
+assert sum(s['correct'] for s in classifier['test']['samples'])==classifier['test']['correct']==11
+code_paths=['tiny_perceptron/data.py','tiny_perceptron/model.py','tiny_perceptron/multimodal.py','scripts/course_experiments/modalities.py','scripts/course_experiments/text.py','scripts/course_experiments/common.py']
+code_hashes={p:digest(p) for p in code_paths}
+assert all(code_hashes[p]==a['code_sha256'][p] for p in code_paths)
+fs=f['results']['fsdd'];fscheck={}
+for side in ['train','validation','test']:
+ rows=fs['data']['splits'][side]['records'];fscheck[side]={'count':len(rows),'speakers':sorted({Path(r['audio']).stem.split('_')[1] for r in rows}),'digits':sorted({r['answer'] for r in rows}),'upstream_recordings':sorted({Path(r['audio']).stem.split('_')[2] for r in rows})}
+assert [fscheck[s]['count'] for s in fscheck]==[20,20,20]
+assert [fscheck[s]['speakers'][0] for s in fscheck]==['jackson','nicolas','theo']
+assert fs['training']['steps']==250
+for side,correct in [('validation',5),('test',3)]:
+ r=fs[side];assert sum(s['exact_match'] for s in r['samples'])==r['correct']==correct
+ assert len(r['samples'])==20 and sum(s['eos'] for s in r['samples'])==20
+ fscheck[side].update(correct=correct,percentage=correct/20*100,eos=20)
+conversion=fs['resampling'][0];assert conversion['samples_before']==4591 and conversion['samples_after']==9182
+assert conversion['source_rate']==8000 and conversion['target_rate']==16000
+assert 4591/8000==9182/16000==0.573875
+result={'reviewed_on':'2026-10-03','environment':{'python':platform.python_version(),'torch':torch.__version__,'device':'cpu','threads':'1'},'scope':'離線親讀凍結結果並復算manifest/目標/完整生成判準，沒有執行正式訓練或重新評估權重；CUDA品質結果只引用固定seed42正式run。','frozen_source':{'path':audio_path,'sha256':digest(audio_path),'revision':a['revision'],'seed':a['seed'],'device':a['device'],'gpu':a['gpu'],'torch':a['torch_version'],'python':a['python_version'],'evidence_status':a['evidence_status'],'hf_result_revision':a['hf']['result_revision']},'code_hashes_match_frozen':code_hashes,'config':t['config'],'modal_config':t['modal_config'],'parameters':t['parameters'],'trainable_parameters':t['trainable_parameters'],'steps':300,'batch':4,'sampled_examples':1200,'effective_target_counts_per_step':history,'effective_targets':sum(history),'loss_probe':t['loss_probe'],'initial_loss':t['initial_loss'],'final_loss':t['final_loss'],'weights_changed':t['weights_changed'],'nonzero_gradient_seen':t['nonzero_gradient_seen'],'splits':{s:{'frequency_families':sorted({r['frequency'] for r in rows}),'count':len(rows),'variants':sorted({(r['amplitude'],r['seconds']) for r in rows}),'low':sum(r['answer']=='low' for r in rows),'high':sum(r['answer']=='high' for r in rows),'manifest_sha256':canonical(rows)} for s,rows in splits.items()},'evaluations':checks,'classifier_comparison':{'source_path':'docs/course-experiments/results/encoders.json','sha256':digest('docs/course-experiments/results/encoders.json'),'count':14,'correct':11,'errors':wrong_classifier,'calibration_scope':classifier['calibration']['scope'],'chosen_temperature':classifier['calibration']['chosen_temperature'],'not_reused_for_audio_qa':True},'prerequisite_fsdd_figure':{'source_path':'docs/course-experiments/results/real_modal.json','sha256':digest('docs/course-experiments/results/real_modal.json'),'steps':250,'splits':fscheck,'first_conversion':conversion,'duration_seconds':4591/8000}}
+print(json.dumps(result,ensure_ascii=False,indent=2))
