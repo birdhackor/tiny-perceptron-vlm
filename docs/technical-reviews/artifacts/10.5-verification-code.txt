@@ -1,0 +1,65 @@
+import hashlib
+import json
+import platform
+from collections import Counter
+from pathlib import Path
+import torch
+from torch import nn
+from tiny_perceptron.multimodal import VisionEncoder, scene
+from scripts.course_experiments.modalities import _vision_records
+
+print(json.dumps({'python':platform.python_version(),'torch':torch.__version__,'torch_commit':torch.version.git_version,'device':'cpu'},ensure_ascii=False))
+encoder=VisionEncoder(width=16)
+classifier=nn.Linear(16,6)
+parts={name:p.numel() for name,p in encoder.named_parameters()}
+print('encoder_parameter_parts',parts)
+print('total_encoder_and_classifier',sum(parts.values())+sum(p.numel() for p in classifier.parameters()))
+assert sum(parts.values())+sum(p.numel() for p in classifier.parameters())==1446
+for filename,key in [('encoders','vision'),('real_modal','fashion-mnist')]:
+    path=Path('docs/course-experiments/results')/(filename+'.json')
+    result=json.loads(path.read_text()); branch=result['results'][key]
+    print('result_file',filename,'sha256',hashlib.sha256(path.read_bytes()).hexdigest(),'revision',result['revision'])
+    h=branch['training']['history']
+    assert len(h)==250
+    assert sum(x['effective_targets'] for x in h)==branch['training']['effective_targets']
+    print('updates_targets_probe',len(h),sum(x['effective_targets'] for x in h),branch['training']['initial_loss'],branch['training']['final_loss'])
+    for name in ['before','validation','test']:
+        split=branch[name];samples=split['samples']
+        actual=sum(x.get('correct',x.get('exact_match')) for x in samples)
+        assert actual==split['correct']
+        print('evaluation',filename,name,len(samples),actual,'EOS',sum(x.get('eos',False) for x in samples))
+    for name,side in branch['data']['splits'].items():
+        records=side['records'];assert side['count']==len(records)
+        print('split',filename,name,len(records),'answers',dict(Counter(r['answer'] for r in records)))
+    if filename=='encoders':
+        assert all(_vision_records()[s]==branch['data']['splits'][s]['records'] for s in ['train','validation','test'])
+    else:
+        assert branch['training']['effective_targets']==7528
+        print('test_names',[(x['target'],x['generated'],x['eos']) for x in branch['test']['samples']])
+red=scene('red','square');blue=scene('blue','square')
+print('RGB_spatial_means',red.mean((1,2)).tolist(),blue.mean((1,2)).tolist())
+print('scalar_means',red.mean().item(),blue.mean().item())
+assert red.mean().item()==blue.mean().item()==81/768
+left=torch.tensor([[1.,0.],[1.,0.]]);right=left.flip(1)
+assert torch.equal(left.mean(),right.mean())
+print('position_average_collision',left.mean().item(),right.mean().item())
+from types import SimpleNamespace
+from PIL import Image
+from scripts.course_experiments.modalities import _media, _freeze
+from tiny_perceptron.model import TinyLM, ModelConfig
+from tiny_perceptron.multimodal import MultiModalLM
+root=Path('data/training/vision-initial')
+rows=[json.loads(x) for x in (root/'train.jsonl').read_text().splitlines() if x]
+assert len(rows)==50
+properties=Counter()
+for row in rows:
+    path=root/row['image']
+    with Image.open(path) as image:properties[(image.mode,image.size)]+=1
+    derived,_=_media({'modality':'vision','image':str(path)},SimpleNamespace(device=torch.device('cpu')))
+    assert tuple(derived.shape)==(3,16,16)
+    assert torch.equal(derived[0],derived[1]) and torch.equal(derived[1],derived[2])
+    assert 0<=derived.min().item()<=derived.max().item()<=1
+print('fashion_original_properties',str(dict(properties)),'derived_all_50','RGB 3x16x16 equal channels 0..1')
+model=MultiModalLM(TinyLM(ModelConfig(width=64,layers=2)))
+_freeze(model,'all','vision')
+print('all_open_vision_and_language',all(p.requires_grad for p in model.vision.parameters()),all(p.requires_grad for p in model.language.parameters()))

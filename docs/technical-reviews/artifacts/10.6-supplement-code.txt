@@ -1,0 +1,109 @@
+import hashlib
+import json
+import math
+import platform
+from pathlib import Path
+
+import torch
+from torch import nn
+
+from tiny_perceptron.data import ByteTokenizer
+
+torch.set_num_threads(1)
+torch.set_default_device("cpu")
+torch.manual_seed(0)
+vision = torch.randn(1, 16, 8)
+projector = nn.Linear(8, 12)
+output = projector(vision)
+manual = vision @ projector.weight.T + projector.bias
+same_seed_vision = vision.clone()
+torch.manual_seed(0)
+repeat_vision = torch.randn(1, 16, 8)
+repeat_projector = nn.Linear(8, 12)
+assert torch.equal(same_seed_vision, repeat_vision)
+assert torch.equal(projector.weight, repeat_projector.weight)
+assert torch.equal(projector.bias, repeat_projector.bias)
+assert torch.allclose(output, manual)
+formal_shape = nn.Linear(16, 64)
+formal_shape_output = formal_shape(torch.zeros(1, 16, 16))
+assert sum(p.numel() for p in formal_shape.parameters()) == 1088
+errors = {}
+for width in (16, 10):
+    invalid = nn.Linear(8, width)(vision)
+    for operation in ("add", "linear"):
+        try:
+            if operation == "add":
+                invalid + torch.zeros(1, 16, 12)
+            else:
+                nn.Linear(12, 4)(invalid)
+        except RuntimeError as error:
+            errors[f"output_{width}_{operation}"] = str(error)
+        else:
+            raise AssertionError("expected incompatible width error")
+small_weight = torch.tensor([[1., 0.], [0., 1.], [1., 1.]])
+small_output = small_weight @ torch.tensor([1., 2.])
+assert torch.equal(small_output, torch.tensor([1., 2., 3.]))
+same_input = torch.ones(1, 16, 8)
+assert torch.equal(projector(same_input), projector(same_input.clone()))
+path = Path("docs/course-experiments/results/projector.json")
+raw = path.read_bytes()
+record = json.loads(raw)
+r = record["results"]
+training = r["training"]
+history = training["history"]
+assert len(history) == training["steps"] == 300
+assert [row["step"] for row in history] == list(range(1, 301))
+assert all(math.isfinite(row["loss"]) and math.isfinite(row["grad_norm"]) for row in history)
+assert sum(row["effective_targets"] for row in history) == training["effective_targets"] == 14408
+assert training["trainable_parameters"] == 1088
+assert training["config"]["width"] == 64
+assert training["modal_config"]["vision_width"] == 16
+assert training["modal_config"]["image_size"] == 16
+assert training["modal_config"]["patch_size"] == 4
+assert training["weights_changed"] is True
+tok = ByteTokenizer()
+recomputed = {}
+for split in ("before", "validation", "test"):
+    evaluation = r[split]
+    rows = evaluation["samples"]
+    exact = []
+    for row in rows:
+        ids = row["generated_ids"]
+        text_ids = ids[:ids.index(tok.eos_id)] if tok.eos_id in ids else ids
+        equality = text_ids == tok.encode(row["target"])
+        assert equality == row["exact_match"]
+        assert (tok.eos_id in ids) == row["eos"]
+        assert tok.decode(text_ids) == row["generated"]
+        exact.append(equality)
+    assert len(rows) == evaluation["examples"] == 6
+    assert sum(exact) == evaluation["correct"] == 0
+    assert sum(len(tok.encode(row["target"])) + 1 for row in rows) == evaluation["effective_tokens"] == 72
+    recomputed[split] = {"samples": len(rows), "correct": sum(exact), "effective_tokens": 72,
+                         "mean_token_nll": evaluation["mean_token_nll"],
+                         "eos_count": sum(row["eos"] for row in rows), "samples_full": rows}
+pins = {}
+for name, declared in [("formal-modalities.py", "scripts/course_experiments/modalities.py"),
+                       ("formal-multimodal.py", "tiny_perceptron/multimodal.py")]:
+    digest = hashlib.sha256(Path("outputs/technical-sources/10.6-fresh", name).read_bytes()).hexdigest()
+    assert digest == record["code_sha256"][declared]
+    pins[declared] = digest
+print(json.dumps({
+    "environment": {"python": platform.python_version(), "torch": torch.__version__,
+                    "torch_git_version": torch.version.git_version, "device": "cpu", "threads": str(torch.get_num_threads())},
+    "original_linear": {"input": list(vision.shape), "output": list(output.shape),
+                        "weight": list(projector.weight.shape), "shared_affine_max_error": float((output-manual).abs().max()),
+                        "seed_repeat_equal": True},
+    "formal_shape_only": {"output": list(formal_shape_output.shape), "weight": list(formal_shape.weight.shape),
+                          "bias": list(formal_shape.bias.shape), "trainable_parameters": 1088},
+    "width_errors": errors, "small_example": {"output": small_output.tolist(), "matrix_rank": int(torch.linalg.matrix_rank(small_weight))},
+    "same_representation_same_projection": True,
+    "formal_record_inspection": {"path": str(path), "sha256": hashlib.sha256(raw).hexdigest(),
+        "revision": record["revision"], "device": record["device"], "seed": record["seed"],
+        "torch_version": record["torch_version"], "step_scale": record["step_scale"],
+        "training_history_count": len(history), "steps_contiguous_1_to_300": True,
+        "effective_targets_sum": 14408, "first_history": history[0], "last_history": history[-1],
+        "initial_probe_loss": training["initial_loss"], "final_probe_loss": training["final_loss"],
+        "weights_changed": training["weights_changed"], "language_weights_unchanged": r["language_weights_unchanged"],
+        "evaluations": recomputed, "splits": r["data"]["splits"], "source_code_hash_matches": pins,
+        "scope": "離線重算凍結紀錄的配置、步數及byte評分；沒有重跑訓練、沒有載入或生成模型答案。"}
+}, ensure_ascii=False, indent=2))
