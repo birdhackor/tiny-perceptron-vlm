@@ -1,0 +1,153 @@
+import hashlib
+import json
+import os
+import re
+import sys
+from collections import Counter
+from fractions import Fraction
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(ROOT))
+import torch
+from tiny_perceptron.data import ByteTokenizer
+
+def offline_guard(event, args):
+    if event.startswith('socket.') or event in ('subprocess.Popen', 'os.system', 'os.exec', 'os.fork'):
+        raise RuntimeError('offline bounded review forbids network and child processes')
+sys.addaudithook(offline_guard)
+torch.set_num_threads(1)
+
+def sha(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+def accuracy(groups):
+    return (sum(g['correct'] for g in groups.values()) / sum(g['count'] for g in groups.values()),
+            sum(g['correct'] / g['count'] for g in groups.values()) / len(groups))
+
+raw = (ROOT / 'docs/technical-reviews/artifacts/11.11-original-code.txt').read_text()
+exercise = raw.replace('"count": 10', '"count": 20')
+assert exercise != raw
+namespace = {}
+# The original fence is preserved separately; only the exercise's count is changed.
+import contextlib
+import io
+exercise_stdout = io.StringIO()
+with contextlib.redirect_stdout(exercise_stdout):
+    exec(compile(exercise, '11.11 exercise count 10 -> 20', 'exec'), namespace)
+assert namespace['groups']['稀少'] == {'correct': 0, 'count': 20}
+assert namespace['micro'] == 90 / 110
+assert namespace['macro'] == 0.5
+model_a = {'common': {'correct': 90, 'count': 90}, 'rare': {'correct': 0, 'count': 10}}
+model_b = {'common': {'correct': 81, 'count': 90}, 'rare': {'correct': 9, 'count': 10}}
+assert accuracy(model_a) == (0.9, 0.5)
+assert accuracy(model_b) == (0.9, 0.9)
+# A high group macro can still conceal one small subgroup or internal failure.
+assert sum([1] * 9 + [0]) / 10 == 0.9
+# The union must count each original question once when slices overlap.
+overlap = {'red': {1, 2}, 'circle': {2, 3}}
+assert sum(map(len, overlap.values())) == 4 and len(set.union(*overlap.values())) == 3
+
+TOK = ByteTokenizer()
+def checked_samples(e):
+    values = []
+    for s in e['samples']:
+        ids = s['generated_ids']
+        raw_ids = ids[:ids.index(TOK.eos_id)] if TOK.eos_id in ids else ids
+        assert TOK.decode(raw_ids) == s['generated']
+        exact = raw_ids == TOK.encode(s['target'])
+        assert exact == s['exact_match']
+        values.append(dict(s, recomputed_exact=exact))
+    assert len(values) == e['examples']
+    assert sum(s['recomputed_exact'] for s in values) == e['correct']
+    return values
+
+vp = ROOT / 'docs/course-experiments/results/vision_ablation.json'
+v = json.loads(vp.read_bytes())
+assert v['evidence_status'] == 'complete_run' and v['step_scale'] == 1.0
+assert v['results']['training']['steps'] == 100
+assert v['results']['training']['weights_changed']
+assert v['code_sha256']['scripts/course_experiments/modalities.py'] == sha(ROOT / 'scripts/course_experiments/modalities.py')
+records = v['results']['data']['splits']['test']['records']
+vision = {}
+for mode in ('none', 'blank', 'shuffle', 'shape_swap_relabelled'):
+    e = v['results']['interventions'][mode]
+    samples = checked_samples(e)
+    group = {}
+    for r, s in zip(records, samples, strict=True):
+        g = group.setdefault(r['question'], {'correct': 0, 'count': 0})
+        g['correct'] += s['recomputed_exact']
+        g['count'] += 1
+    assert group == e['groups']
+    micro, macro = accuracy(group)
+    assert micro == e['exact_match'] and abs(macro - e['macro_accuracy']) < 1e-15
+    shape_samples = [s for s in samples if s['question'] == 'shape?']
+    by_target = {}
+    for s in shape_samples:
+        g = by_target.setdefault(s['target'], {'correct': 0, 'count': 0})
+        g['correct'] += s['recomputed_exact']
+        g['count'] += 1
+    assert set(s['generated'] for s in shape_samples) == {'circle'}
+    vision[mode] = {'groups': group, 'micro': micro, 'macro': macro,
+                    'shape_target_groups': by_target, 'samples': samples}
+assert vision['none']['groups'] == {'shape?': {'correct': 3, 'count': 6}, 'color?': {'correct': 6, 'count': 6}}
+assert vision['none']['shape_target_groups'] == {'circle': {'correct': 3, 'count': 3}, 'square': {'correct': 0, 'count': 3}}
+assert vision['blank']['groups'] == {'shape?': {'correct': 3, 'count': 6}, 'color?': {'correct': 2, 'count': 6}}
+
+fp = ROOT / 'docs/course-experiments/results/real_modal.json'
+f = json.loads(fp.read_bytes()); fe = f['results']['fashion-mnist']
+assert f['evidence_status'] == 'complete_run' and fe['training']['steps'] == 250
+assert fe['training']['weights_changed']
+assert f['code_sha256']['scripts/course_experiments/modalities.py'] == sha(ROOT / 'scripts/course_experiments/modalities.py')
+fashion = {}
+for mode in ('validation', 'test'):
+    samples = checked_samples(fe[mode]); group = {}
+    for s in samples:
+        g = group.setdefault(s['target'], {'correct': 0, 'count': 0})
+        g['correct'] += s['recomputed_exact']; g['count'] += 1
+    micro, macro = accuracy(group)
+    assert len(group) == 10 and all(g['count'] == 1 for g in group.values())
+    fashion[mode] = {'groups_by_true_class': group, 'micro': micro, 'macro': macro, 'samples': samples}
+assert fashion['test']['micro'] == fashion['test']['macro'] == 0.3
+assert {s['target'] for s in fashion['test']['samples'] if s['recomputed_exact']} == {'Ankle boot', 'Sneaker', 'Sandal'}
+assert next(s['generated'] for s in fashion['validation']['samples'] if s['target'] == 'Sneaker') == 'Sandal'
+splits = {}
+for side, expected in (('train', 30), ('validation', 10), ('test', 10)):
+    d = fe['data']['splits'][side]
+    assert len(d['records']) == d['count'] == expected
+    counts = Counter(r['answer'] for r in d['records'])
+    assert len(counts) == 10 and set(counts.values()) == {3 if side == 'train' else 1}
+    splits[side] = {'count': expected, 'counts_by_true_class': dict(counts), 'manifest_sha256': d['sha256'], 'families': [r['family'] for r in d['records']]}
+assert not set(splits['train']['families']) & set(splits['test']['families'])
+assert not set(splits['train']['families']) & set(splits['validation']['families'])
+assert not set(splits['validation']['families']) & set(splits['test']['families'])
+asset_path = ROOT / 'assets/training/sources/fashion-mnist.json'
+asset = json.loads(asset_path.read_bytes())
+assert asset['selected_rows'] == asset['decoded_image_count'] == 50
+assert asset['source_split'] == 'train' and set(asset['counts_per_class'].values()) == {5}
+assert all(i['width'] == i['height'] == 28 and i['mode'] == 'L' for i in asset['images'])
+
+from types import SimpleNamespace
+from PIL import Image
+from scripts.course_experiments.modalities import _media
+probe_path = Path('/tmp/11.11-preprocessing-probe.png')
+Image.new('L', (28, 28), 128).save(probe_path)
+probe, audio = _media({'modality': 'vision', 'image': str(probe_path)}, SimpleNamespace(device='cpu'))
+assert tuple(probe.shape) == (3, 16, 16) and audio is None
+assert torch.equal(probe[0], probe[1]) and torch.equal(probe[1], probe[2])
+assert abs(float(probe.min()) - 128/255) < 1e-7
+assert abs(float(probe.max()) - 128/255) < 1e-7
+preprocessing_probe = {'input': '自行構造28×28灰階常數128圖片，沒有取用訓練圖片', 'shape': list(probe.shape), 'channels_equal': True, 'min': float(probe.min()), 'max': float(probe.max()), 'scope': '實際_media的RGB、16×16縮圖、float/255轉換；不是服飾品質重測。'}
+
+output = {
+    'command': "timeout 30 env OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 CUDA_VISIBLE_DEVICES='' HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1 TRANSFORMERS_OFFLINE=1 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python docs/technical-reviews/artifacts/11.11-bounded-check-code.txt > docs/technical-reviews/artifacts/11.11-bounded-check-output.json",
+    'environment': {'python': sys.version, 'torch': str(torch.__version__), 'device': 'cpu', 'torch_threads': str(torch.get_num_threads()), 'OMP_NUM_THREADS': os.environ['OMP_NUM_THREADS'], 'MKL_NUM_THREADS': os.environ['MKL_NUM_THREADS']},
+    'exercise': {'only_change': '稀少組 count 10 -> 20，correct 仍為 0', 'code_sha256': hashlib.sha256(exercise.encode()).hexdigest(), 'code': exercise, 'stdout': exercise_stdout.getvalue(), 'micro': namespace['micro'], 'macro': namespace['macro'], 'fraction': str(Fraction(90,110))},
+    'same_total_comparison': {'a': {'groups': model_a, 'micro_macro': accuracy(model_a)}, 'b': {'groups': model_b, 'micro_macro': accuracy(model_b)}},
+    'overlap_derivation': {'memberships': 4, 'unique_questions': 3, 'explanation': '重疊分組的成員總數不能冒作題數；union 去重後才是按題的分母。'},
+    'vision': {'source': str(vp.relative_to(ROOT)), 'source_sha256': sha(vp), 'revision': v['revision'], 'formal_device': v['device'], 'seed': v['seed'], 'training': {k:x for k,x in v['results']['training'].items() if k != 'history'}, 'test_records': records, 'interventions': vision},
+    'fashion': {'source': str(fp.relative_to(ROOT)), 'source_sha256': sha(fp), 'revision': f['revision'], 'formal_device': f['device'], 'seed': f['seed'], 'training': {k:x for k,x in fe['training'].items() if k != 'history'}, 'evaluations': fashion, 'splits': splits, 'asset_source': str(asset_path.relative_to(ROOT)), 'asset_sha256': sha(asset_path), 'selection': asset['selection'], 'upstream_revision': asset['hf_revision'], 'source_split': asset['source_split'], 'image_properties': asset['image_properties']},
+    'preprocessing_probe': preprocessing_probe,
+    'result': '全部 assertions 通過；原練習與數學反例離線 CPU 真執行；正式來源只重算凍結逐題記錄，沒有執行模型、重訓、下載或外推。'
+}
+print(json.dumps(output, ensure_ascii=False, indent=2))
