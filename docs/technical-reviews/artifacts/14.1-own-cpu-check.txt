@@ -1,0 +1,96 @@
+import contextlib
+import hashlib
+import io
+import json
+import math
+import os
+import platform
+import re
+import sys
+from pathlib import Path
+
+import torch
+
+from tiny_perceptron.data import ByteTokenizer
+from tiny_perceptron.model import ModelConfig, TinyLM
+
+root = Path('/workspace/tiny-perceptron-vlm')
+artifact = root / 'docs/technical-reviews/artifacts'
+mode = sys.argv[1]
+env = {
+    'python': platform.python_version(), 'torch': str(torch.__version__),
+    'torch_commit': str(torch.version.git_version), 'device': 'cpu',
+    'OMP_NUM_THREADS': os.environ.get('OMP_NUM_THREADS', ''),
+    'MKL_NUM_THREADS': os.environ.get('MKL_NUM_THREADS', ''),
+    'network': '此程式未呼叫網路；HF/Transformers offline，CUDA_VISIBLE_DEVICES空白'
+}
+assert torch.version.cuda is None
+torch.set_default_device('cpu')
+raw = (artifact / '14.1-source-raw.txt').read_bytes()
+code = re.search(rb'```python\n(.*?)```', raw, re.S)[1].decode()
+if mode in ('exercise-22-25', 'exercise-22-26'):
+    target = '22, 25' if mode.endswith('25') else '22, 26'
+    changed = code.replace('score(3, 5)', 'score(' + target + ')')
+    assert changed != code
+    stream = io.StringIO()
+    scope = {}
+    with contextlib.redirect_stdout(stream):
+        exec(compile(changed, '<14.1-exercise>', 'exec'), scope)
+    expected = '-0.7071\n-0.7071\n' + ('-0.7071\n' if mode.endswith('25') else '-1.0\n')
+    assert stream.getvalue() == expected
+    result = {'environment': env, 'mode': mode, 'exact_code': changed,
+              'code_sha256': hashlib.sha256(changed.encode()).hexdigest(),
+              'stdout': stream.getvalue(), 'raw_last_score': scope['score'](*map(int, target.split(', '))),
+              'expected': expected, 'exit_code': 0}
+else:
+    rpath = root / 'docs/course-experiments/results/modern.json'
+    receipt = json.loads(rpath.read_text())
+    six_configs = {}
+    for name, variant in receipt['results']['variants'].items():
+        conf = variant['model']['config']
+        tr = variant['training']
+        assert (conf['width'], conf['layers'], conf['heads'], conf['max_length']) == (64, 2, 4, 128)
+        assert tr['steps'] == tr['optimizer_updates'] == 240 and tr['skipped_updates'] == 0
+        assert tr['effective_tokens'] == 452102
+        six_configs[name] = {'config':conf, 'requested_steps':tr['requested_steps'],
+                             'steps':tr['steps'], 'optimizer_updates':tr['optimizer_updates'],
+                             'skipped_updates':tr['skipped_updates'], 'effective_tokens':tr['effective_tokens']}
+    selected = {}
+    for name in ['baseline', 'rope']:
+        v = receipt['results']['variants'][name]
+        train = v['training']
+        assert train['steps'] == train['optimizer_updates'] == 240
+        assert train['skipped_updates'] == 0
+        assert train['effective_tokens'] == 452102
+        for side, count, expected in [('validation', 39256, {'baseline':2.26331, 'rope':1.74158}), ('test',41914,{'baseline':2.29163,'rope':1.77812})]:
+            ev = v['heldout'][side]
+            assert ev['effective_tokens'] == count
+            assert abs(ev['nll_sum'] / count - ev['nll']) < 1e-12
+            assert round(ev['nll'], 5) == expected[name]
+        selected[name] = {'model':v['model'], 'changes':v['changes'],
+                          'copied_initial_tables':v['copied_initial_tables'],
+                          'training': {k: train[k] for k in ['steps','requested_steps','optimizer_updates','skipped_updates','effective_tokens','batch_size','learning_rate','history']},
+                          'heldout':{side:{k:value for k,value in ev.items() if k != 'samples'} for side,ev in v['heldout'].items()},
+                          'test_sample0':v['heldout']['test']['samples'][0]}
+    assert selected['rope']['test_sample0']['prompt'] == 'Once upon a time, there '
+    assert selected['rope']['test_sample0']['generated'] == 'was a loked there was a bough a '
+    models={name:TinyLM(ModelConfig(width=64,layers=2,heads=4,rotary=(name=='rope'))) for name in ['baseline','rope']}
+    counts={name:sum(p.numel() for p in model.parameters()) for name,model in models.items()}
+    assert counts == {'baseline':141568,'rope':133376}
+    assert counts['baseline'] - counts['rope'] == 128*64 == 8192
+    assert models['rope'].position is None
+    trigs={str(d):[math.cos(d*math.pi/180),math.sin(d*math.pi/180)] for d in [45,90,135]}
+    angles={'2_to_5':(5-2)*45,'12_to_15':(15-12)*45,'common_10':10*45,'3_to_5':(5-3)*45,'22_to_25':(25-22)*45,'22_to_26':(26-22)*45}
+    q=torch.tensor([1.0,0.0]); k=q.clone()
+    softmax=torch.tensor([-0.7071067811865476,0.0]).softmax(0).tolist()
+    bytes_check={text:{'utf8':list(text.encode('utf-8')),'ids':ByteTokenizer().encode(text)} for text in ['A','貓','狗']}
+    result={'environment':env,'mode':mode,'receipt_path':str(rpath.relative_to(root)),
+            'receipt_sha256':hashlib.sha256(rpath.read_bytes()).hexdigest(),
+            'formal_provenance':{k:receipt[k] for k in ['revision','device','seed','torch_version','python_version','gpu','step_scale','evidence_status','status']},
+            'runtime':receipt['results']['runtime'],'dataset':receipt['results']['dataset'],
+            'six_variants':six_configs,'selected':selected,
+            'fresh_cpu_parameter_counts':counts,'parameter_difference':8192,
+            'trigonometric_coordinates_float64':trigs,'angle_arithmetic_degrees':angles,
+            'negative_score_softmax_example':softmax,'utf8_examples':bytes_check,
+            'formal_gpu_rerun':False,'scope':'只重新核對凍結報告欄位/分母/五位小數、CPU結構計数及數學，不重跑正式GPU訓練，不推論一般品質或速度。'}
+print(json.dumps(result,ensure_ascii=False,indent=2))
