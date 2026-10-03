@@ -1,0 +1,147 @@
+import copy
+import hashlib
+import inspect
+import json
+import platform
+import sys
+from pathlib import Path
+
+import torch
+import torch._tensor
+import torch.nn.parameter
+
+from tiny_perceptron.model import ModelConfig, TinyLM
+from tiny_perceptron.quantization import QuantizedLinear, replace_linear_layers
+from tiny_perceptron.training import load_checkpoint
+
+
+def sha(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+result = {
+    "environment": {
+        "python": sys.version,
+        "torch": torch.__version__,
+        "torch_commit": torch.version.git_version,
+        "device": "cpu",
+        "threads": str(torch.get_num_threads()),
+        "platform": platform.platform(),
+    },
+    "scope": "離線CPU機制與既有公開tensor核對；不更新參數、不重跑正式排程、不作GPU品質或速度外推",
+}
+torch.manual_seed(0)
+original = TinyLM(ModelConfig(width=8, tied=False)).eval()
+duplicate = copy.deepcopy(original)
+result["deepcopy"] = {
+    "all_parameter_values_equal": all(torch.equal(p, q) for p, q in zip(original.parameters(), duplicate.parameters())),
+    "all_parameter_objects_distinct": all(p is not q for p, q in zip(original.parameters(), duplicate.parameters())),
+    "all_parameter_storage_distinct": all(p.data_ptr() != q.data_ptr() for p, q in zip(original.parameters(), duplicate.parameters())),
+}
+prior = original.embedding.weight.detach().clone()
+with torch.no_grad():
+    duplicate.embedding.weight[0, 0] += 1
+result["deepcopy"]["copy_mutation_preserves_original"] = torch.equal(prior, original.embedding.weight)
+returned = replace_linear_layers(duplicate, bits=4)
+result["replacement"] = {
+    "returns_same_module": returned is duplicate,
+    "quantized_linear_count": sum(isinstance(m, QuantizedLinear) for m in duplicate.modules()),
+    "ordinary_linear_count": sum(isinstance(m, torch.nn.Linear) for m in duplicate.modules()),
+    "embedding_type": type(duplicate.embedding).__name__,
+    "final_norm_type": type(duplicate.final_norm).__name__,
+    "embedding_dtype": str(duplicate.embedding.weight.dtype),
+    "norm_dtype": str(duplicate.final_norm.weight.dtype),
+}
+layer = torch.nn.Linear(2, 1).eval()
+x = torch.ones(1, 2)
+y = layer(x)
+with torch.no_grad():
+    z = layer(x)
+result["eval_no_grad"] = {"eval_requires_grad": y.requires_grad, "no_grad_requires_grad": z.requires_grad}
+tied = TinyLM(ModelConfig(width=8, tied=True)).eval()
+result["tying"] = {"before_same_parameter": tied.output.weight is tied.embedding.weight}
+converted = replace_linear_layers(copy.deepcopy(tied), bits=4)
+result["tying"].update({
+    "after_output_type": type(converted.output).__name__,
+    "after_output_has_parameter_weight": hasattr(converted.output, "weight"),
+    "after_output_buffer_names": list(dict(converted.output.named_buffers())),
+    "original_still_tied": tied.output.weight is tied.embedding.weight,
+})
+result["official_installed_source"] = {}
+for suffix, module in [("module", torch.nn.Module), ("grad-mode", torch.no_grad), ("tensor", torch._tensor), ("parameter", torch.nn.parameter)]:
+    installed = Path(inspect.getsourcefile(module))
+    downloaded = Path(f"outputs/technical-sources/17.9-torch-{suffix}.py")
+    result["official_installed_source"][suffix] = {
+        "installed_sha256": sha(installed),
+        "official_sha256": sha(downloaded),
+        "byte_identical": installed.read_bytes() == downloaded.read_bytes(),
+    }
+root = Path("checkpoints/course/quantization")
+release = json.loads(Path("docs/course-experiments/public-releases/quantization.json").read_text())["release"]
+manifest = release["public_manifest"]
+expected = {item["output"]: item["sha256"] for item in manifest["files"]}
+fp32, fp_payload = load_checkpoint(root / "fp32.pt", "cpu")
+result["public_tensor_provenance"] = {
+    "immutable_revision": release["revision"],
+    "weights_revision": release["weights_revision"],
+    "publisher_repo": release["repo"],
+    "config": fp_payload["config"],
+    "files": [],
+}
+for filename, bits in [("fp32.pt", None), ("model.pt", 4), ("packed8.pt", 8)]:
+    candidate, payload = load_checkpoint(root / filename, "cpu")
+    detail = {
+        "filename": filename,
+        "url": f"https://huggingface.co/{release['repo']}/resolve/{release['revision']}/course/course-v1/quantization/{filename}",
+        "sha256": sha(root / filename),
+        "matches_release_manifest": sha(root / filename) == expected[filename],
+        "format_version": str(payload["format_version"]),
+        "bits": payload.get("bits"),
+        "config": payload["config"],
+    }
+    if bits is not None:
+        direct = replace_linear_layers(copy.deepcopy(fp32).eval(), bits=bits)
+        left, right = direct.state_dict(), candidate.state_dict()
+        detail["all_state_keys_equal"] = left.keys() == right.keys()
+        detail["all_tensors_match_direct_fp32_conversion"] = all(torch.equal(left[k], right[k]) for k in left)
+        detail["tensor_count"] = len(left)
+        detail["different_tensors"] = [
+            {
+                "name": k,
+                "dtype": str(left[k].dtype),
+                "different_elements": int((left[k] != right[k]).sum()),
+                "max_absolute_difference": float((left[k].double() - right[k].double()).abs().max()),
+            }
+            for k in left if not torch.equal(left[k], right[k])
+        ]
+    result["public_tensor_provenance"]["files"].append(detail)
+qpath = Path("docs/course-experiments/results/quantization.json")
+spath = Path("docs/course-experiments/results/sft.json")
+q = json.loads(qpath.read_text())
+s = json.loads(spath.read_text())
+result["formal_results"] = {
+    "quantization_result_sha256": sha(qpath),
+    "sft_result_sha256": sha(spath),
+    "quantization_revision": q["revision"],
+    "sft_revision": s["revision"],
+    "recorded_device": q["device"],
+    "recorded_gpu": q["gpu"],
+    "seed": q["seed"],
+    "teacher_provenance": q["results"]["teacher_provenance"],
+    "teacher_hash_matches_sft_model_artifact": q["results"]["teacher_provenance"]["sha256"] == next(a["sha256"] for a in s["artifacts"] if a["path"] == "model.pt"),
+    "dataset_hash_matches_sft_artifact": q["results"]["data"]["sha256"] == next(a["sha256"] for a in s["artifacts"] if a["path"] == "dataset.json"),
+    "data": q["results"]["data"],
+    "training": {k: q["results"]["training"][k] for k in ("steps", "optimizer_updates", "batch_size", "learning_rate", "training_examples", "training_sequence_chunks", "effective_supervised_tokens", "batch_plan_sha256", "initialization_sha256", "final_sha256")},
+    "same_fp32_source": q["results"]["same_fp32_source"],
+    "reloaded_packed_before_evaluation": q["results"]["reloaded_packed_checkpoints_before_evaluation"],
+    "source_test": {k: s["results"]["after"]["test"][k] for k in ("matches", "records", "effective_tokens")},
+    "converted_test": {k: {key: run["test"][key] for key in ("correct", "examples", "supervised_tokens", "answer_nll")} for k, run in q["results"]["runs"].items()},
+    "source_code_fingerprint": q["code_sha256"]["scripts/course_experiments/compression.py"],
+    "downloaded_original_code_sha256": sha("outputs/technical-sources/17.9-compression-5af615e.py"),
+}
+assert result["formal_results"]["teacher_hash_matches_sft_model_artifact"]
+assert result["formal_results"]["dataset_hash_matches_sft_artifact"]
+assert result["formal_results"]["source_code_fingerprint"] == result["formal_results"]["downloaded_original_code_sha256"]
+assert all(item["byte_identical"] for item in result["official_installed_source"].values())
+assert all(item["matches_release_manifest"] for item in result["public_tensor_provenance"]["files"])
+print(json.dumps(result, ensure_ascii=False, indent=2))

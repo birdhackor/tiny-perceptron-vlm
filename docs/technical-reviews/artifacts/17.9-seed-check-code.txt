@@ -1,0 +1,88 @@
+import copy
+import hashlib
+import inspect
+import json
+import platform
+import sys
+from pathlib import Path
+
+import torch
+import torch.nn.modules.linear
+import torch.nn.modules.sparse
+import torch.random
+
+from tiny_perceptron.model import ModelConfig, TinyLM
+
+
+def tensor_hash(value):
+    return hashlib.sha256(value.detach().cpu().contiguous().numpy().tobytes()).hexdigest()
+
+
+def state_hash(model):
+    h = hashlib.sha256()
+    for name, value in model.state_dict().items():
+        h.update(name.encode())
+        h.update(value.detach().cpu().contiguous().numpy().tobytes())
+    return h.hexdigest()
+
+
+generator = torch.manual_seed(0)
+start = torch.random.get_rng_state().clone()
+for_four_bit = TinyLM(ModelConfig(width=8, tied=False)).eval()
+after_initialization = torch.random.get_rng_state().clone()
+copy_source_state = state_hash(for_four_bit)
+copy_source_rng = torch.random.get_rng_state().clone()
+duplicate = copy.deepcopy(for_four_bit)
+after_deepcopy_rng = torch.random.get_rng_state().clone()
+torch.manual_seed(0)
+second_start = torch.random.get_rng_state().clone()
+for_eight_bit = TinyLM(ModelConfig(width=8, tied=False)).eval()
+torch.manual_seed(0)
+torch.rand(1)
+different_order = TinyLM(ModelConfig(width=8, tied=False)).eval()
+result = {
+    "environment": {
+        "python": sys.version,
+        "torch": torch.__version__,
+        "torch_commit": torch.version.git_version,
+        "device": "cpu",
+        "threads": str(torch.get_num_threads()),
+        "platform": platform.platform(),
+    },
+    "scope_zh": "只核本環境的隨機初始化與副本來源。建立三個width8模型與一份deepcopy，不執行原例/練習前向、不訓練、不下載、不推論跨版本/平台/GPU可重現性。",
+    "seed": 0,
+    "generator_initial_seed": generator.initial_seed(),
+    "start_rng_sha256": tensor_hash(start),
+    "after_initialization_rng_sha256": tensor_hash(after_initialization),
+    "reset_same_seed_restores_start_rng": torch.equal(start, second_start),
+    "model_construction_consumes_rng": not torch.equal(start, after_initialization),
+    "same_seed_same_order_model_state_equal": all(torch.equal(p, q) for p, q in zip(for_four_bit.state_dict().values(), for_eight_bit.state_dict().values())),
+    "four_bit_branch_initialization_sha256": state_hash(for_four_bit),
+    "eight_bit_branch_initialization_sha256": state_hash(for_eight_bit),
+    "extra_draw_changes_initialization": state_hash(different_order) != state_hash(for_four_bit),
+    "extra_draw_initialization_sha256": state_hash(different_order),
+    "deepcopy_values_equal": state_hash(duplicate) == copy_source_state,
+    "deepcopy_parameter_objects_distinct": all(p is not q for p, q in zip(for_four_bit.parameters(), duplicate.parameters())),
+    "deepcopy_parameter_storage_distinct": all(p.data_ptr() != q.data_ptr() for p, q in zip(for_four_bit.parameters(), duplicate.parameters())),
+    "deepcopy_does_not_consume_rng_here": torch.equal(copy_source_rng, after_deepcopy_rng),
+    "official_installed_sources": {},
+}
+for suffix, module in [("random", torch.random), ("linear", torch.nn.modules.linear), ("sparse", torch.nn.modules.sparse)]:
+    installed = Path(inspect.getsourcefile(module))
+    original = Path(f"outputs/technical-sources/17.9-torch-{suffix}.py")
+    result["official_installed_sources"][suffix] = {
+        "official_sha256": hashlib.sha256(original.read_bytes()).hexdigest(),
+        "installed_sha256": hashlib.sha256(installed.read_bytes()).hexdigest(),
+        "byte_identical": original.read_bytes() == installed.read_bytes(),
+    }
+assert result["generator_initial_seed"] == 0
+assert result["reset_same_seed_restores_start_rng"]
+assert result["model_construction_consumes_rng"]
+assert result["same_seed_same_order_model_state_equal"]
+assert result["extra_draw_changes_initialization"]
+assert result["deepcopy_values_equal"]
+assert result["deepcopy_parameter_objects_distinct"]
+assert result["deepcopy_parameter_storage_distinct"]
+assert result["deepcopy_does_not_consume_rng_here"]
+assert all(item["byte_identical"] for item in result["official_installed_sources"].values())
+print(json.dumps(result, ensure_ascii=False, indent=2))

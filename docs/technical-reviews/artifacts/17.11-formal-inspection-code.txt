@@ -1,0 +1,31 @@
+import ast, pathlib, hashlib, json, torch
+root = pathlib.Path("docs/technical-reviews/artifacts")
+pin = json.loads((root / "17.11-formal-pinned-source.json").read_bytes())
+assert pin["sha256"] == "28d8ce258369672d71a24f7efbcbf68f3e5e8114e073620aba91c4d807043a44"
+assert hashlib.sha256(pin["raw_utf8_source"].encode()).hexdigest() == pin["sha256"]
+tree = ast.parse(pin["raw_utf8_source"])
+node = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "_QATLinear")
+forward = next(n for n in node.body if isinstance(n, ast.FunctionDef) and n.name == "forward")
+assert not any(isinstance(n, ast.Assign) and any(isinstance(t,ast.Name) and t.id == "x" for t in n.targets) for n in ast.walk(forward))
+assert ast.unparse(forward.body[-1].value) == "F.linear(x, simulated, self.bias)"
+print("pinned_QAT_forward", ast.unparse(forward))
+for n, stamp in [("qat", "20261002T221108297539Z"), ("quantization", "20261002T221059258895Z")]:
+    p = pathlib.Path(f"docs/course-experiments/results/{n}.json")
+    b = p.read_bytes(); record = json.loads(b); r = record["results"]
+    assert record["evidence_status"] == "complete_run" and record["unfinished_schedules"] == []
+    assert record["code_sha256"]["scripts/course_experiments/compression.py"] == pin["sha256"]
+    assert record["code_sha256"]["tiny_perceptron/quantization.py"] == hashlib.sha256(pathlib.Path("tiny_perceptron/quantization.py").read_bytes()).hexdigest()
+    if n == "qat": assert r["activation_quantization"] is False
+    release_path = pathlib.Path(f"docs/course-experiments/public-releases/{n}.json")
+    release = json.loads(release_path.read_bytes())
+    approval_path = pathlib.Path(release["approval"]["approval_path"])
+    assert hashlib.sha256(approval_path.read_bytes()).hexdigest() == release["approval"]["approval_sha256"]
+    card_path = pathlib.Path(f"checkpoints/course/{n}/README.md")
+    card_sha = hashlib.sha256(card_path.read_bytes()).hexdigest()
+    card_pin = next(f for f in release["release"]["public_manifest"]["files"] if f["output"] == "README.md")
+    assert card_sha == card_pin["sha256"]
+    student_path = pathlib.Path(f"docs/course-experiments/student-checks/{n}.{stamp}.json")
+    student = json.loads(student_path.read_bytes())
+    assert student["public_source"]["revision"] == release["release"]["revision"]
+    assert student["status"] == "passed" and all(c["returncode"] == 0 for c in student["commands"])
+    print("FROZEN", json.dumps({"experiment":n,"result_sha256":hashlib.sha256(b).hexdigest(),"revision":record["revision"],"seed":record["seed"],"device":record["device"],"torch":record["torch_version"],"evidence_status":record["evidence_status"],"data_counts":r["data"]["counts"],"data_families":r["data"]["families"],"family_intersections":r["data"]["family_intersections"],"activation_quantization_field":r.get("activation_quantization", "未設此欄位；weight-only由原碼與card核對"),"card_url":f"https://huggingface.co/{release['release']['repo']}/resolve/{release['release']['revision']}/course/course-v1/{n}/README.md","card_sha256":card_sha,"public_release_sha256":hashlib.sha256(release_path.read_bytes()).hexdigest(),"approval_sha256":hashlib.sha256(approval_path.read_bytes()).hexdigest(),"student_check_sha256":hashlib.sha256(student_path.read_bytes()).hexdigest(),"student_scope":student["scope"],"training":{k:v for k,v in r["training"].items() if k in ["steps","optimizer_updates","training_examples","effective_supervised_tokens"]} if n=="quantization" else {name:{k:v for k,v in branch.items() if k in ["steps","optimizer_updates","training_examples","effective_supervised_tokens"]} for name,branch in r["training"].items()},"packed_linear_modules":r["runs"]["qat_packed4" if n=="qat" else "packed4"]["storage"]["packed_linear_modules"],"scope":"親核既有固定配置、pin與CPU學生檢查，未重跑正式訓練或GPU評測；不主張activation量化的GPU品質"}, ensure_ascii=False))
