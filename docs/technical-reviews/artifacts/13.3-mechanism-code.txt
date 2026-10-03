@@ -1,0 +1,85 @@
+import hashlib
+import json
+import math
+import random
+import sys
+from pathlib import Path
+
+import torch
+
+from tiny_perceptron.alignment import sequence_log_probability
+from tiny_perceptron.data import IGNORE, ByteTokenizer, pad_batch, render_chat
+from scripts.course_experiments.common import split_records
+from scripts.course_experiments.text import arithmetic_records
+
+torch.set_num_threads(1)
+print('environment', json.dumps({'python': sys.version, 'torch': torch.__version__, 'torch_git': torch.version.git_version, 'device': 'cpu', 'threads': str(torch.get_num_threads())}))
+logits = torch.tensor([[[0.0, 2.0, 0.0], [2.0, 0.0, 0.0], [0.0, 0.0, 2.0]]])
+labels = torch.tensor([[-100, 0, 2]])
+p = math.exp(2) / (math.exp(2) + 2)
+l = math.log(p)
+score = sequence_log_probability(logits, labels)
+observed = {'p_float64': p, 'log_float64': l, 'two_sum_float64': 2*l, 'two_probability_float64': p*p, 'three_sum_float64': 3*l, 'three_probability_float64': p**3, 'two_score_float32': score.item(), 'two_exp_float32': score.exp().item()}
+assert abs(score.item() - 2*l) < 1e-6
+assert abs(score.exp().item() - p*p) < 1e-6
+changed = logits.clone()
+changed[:, 0, :] = torch.tensor([999.0, -999.0, 0.0])
+assert torch.equal(sequence_log_probability(changed, labels), score)
+padded_logits = torch.cat([logits, torch.tensor([[[100.0, -100.0, 0.0]]])], dim=1)
+padded_labels = torch.cat([labels, torch.tensor([[-100]])], dim=1)
+assert torch.equal(sequence_log_probability(padded_logits, padded_labels), score)
+try:
+    sequence_log_probability(logits, torch.full_like(labels, -100))
+except ValueError as e:
+    observed['all_ignored_error'] = str(e)
+else:
+    raise AssertionError('all ignored answer must be rejected')
+print('arithmetic_and_mask', json.dumps(observed, ensure_ascii=False))
+
+tok = ByteTokenizer()
+examples = []
+for answer in ['4', '10']:
+    x, y = render_chat([{'role': 'user', 'content': '2+2=?'}, {'role': 'assistant', 'content': answer}])
+    n = int((y != IGNORE).sum())
+    assert n == len(answer.encode('utf-8')) + 1
+    assert y[-1].item() == tok.eos_id
+    print('answer_alignment', json.dumps({'answer': answer, 'inputs': x.tolist(), 'labels': y.tolist(), 'effective_target_ids': y[y != IGNORE].tolist(), 'answer_targets_including_eos': n, 'assistant_index': x.tolist().index(tok.assistant_id)}, ensure_ascii=False))
+    examples.append((x, y))
+x, y, valid = pad_batch(examples)
+assert y[0, -1].item() == IGNORE and not valid[0, -1].item()
+print('padding_alignment', json.dumps({'inputs': x.tolist(), 'labels': y.tolist(), 'attention_valid': valid.tolist()}, ensure_ascii=False))
+
+# Only reconstruct the small arithmetic generator, family split and token counts.
+# No model, optimizer, loss callback, fit function, or training scheduler is run.
+fixed = json.loads(Path('docs/course-experiments/results/dpo.json').read_text())
+parts = split_records(arithmetic_records(), seed=42)
+pairs = {s: [{'family': r['family'], 'prompt': r['messages'][0]['content'], 'chosen': r['messages'][-1]['content'], 'rejected': str(r['a']+r['b']+1)} for r in rows] for s, rows in parts.items()}
+split_summary = {}
+for s, records in pairs.items():
+    jsonl_bytes = ''.join(json.dumps(row, ensure_ascii=False) + '\n' for row in records).encode('utf-8')
+    digest = hashlib.sha256(jsonl_bytes).hexdigest()
+    assert digest == fixed['results']['data'][s]['sha256']
+    split_summary[s] = {'records': len(records), 'families': len({r['family'] for r in records}), 'records_sha256': digest}
+print('formal_data_reconstruction', json.dumps(split_summary))
+answer_lengths = []
+for row in pairs['train']:
+    lengths = []
+    for side in ['chosen', 'rejected']:
+        x, y = render_chat([{'role': 'user', 'content': row['prompt']}, {'role': 'assistant', 'content': row[side]}])
+        lengths.append(int((y != IGNORE).sum()))
+    answer_lengths.append(tuple(lengths))
+sampler = random.Random(42)
+chosen_tokens = rejected_tokens = 0
+for _ in range(250):
+    for c, r in sampler.choices(answer_lengths, k=8):
+        chosen_tokens += c
+        rejected_tokens += r
+total = chosen_tokens + rejected_tokens
+for name in ['model', 'beta1']:
+    run = fixed['results']['runs'][name]
+    assert run['training']['steps'] == 250
+    assert run['training']['effective_answer_tokens_both_sides'] == total == 9448
+print('formal_denominator_audit', json.dumps({'seed': 42, 'pair_draws': 250*8, 'answer_sequence_exposures': 250*8*2, 'chosen_targets': chosen_tokens, 'rejected_targets': rejected_tokens, 'both_sides_targets': total, 'distinct_train_records': len(pairs['train']), 'max_answer_targets': max(max(x) for x in answer_lengths), 'scope': 'CPU token-accounting reconstruction only; no training or GPU results reproduced'}))
+for path in ['tiny_perceptron/alignment.py', 'tiny_perceptron/data.py', 'scripts/course_experiments/common.py', 'scripts/course_experiments/text.py', 'docs/course-experiments/results/dpo.json']:
+    print('read_sha256', path, hashlib.sha256(Path(path).read_bytes()).hexdigest())
+print('all_checks_passed')
