@@ -1,0 +1,66 @@
+from pathlib import Path
+from contextlib import redirect_stdout
+from io import StringIO
+from fractions import Fraction
+from collections import Counter
+import json
+import os
+import re
+import sys
+
+root = Path.cwd()
+source = root / "course/chapters/01.md"
+raw = source.read_bytes()
+headings = list(re.finditer(rb"(?m)^## [^\r\n]+", raw))
+index = next(i for i, h in enumerate(headings) if h[0].startswith(b"## 1.4 "))
+body = raw[headings[index].start():headings[index + 1].start()].decode()
+code = re.search(r"```python\n(.*?)```", body, re.S)[1]
+
+
+def run_original_fence(program):
+    output = StringIO()
+    namespace = {}
+    with redirect_stdout(output):
+        exec(compile(program, "course/chapters/01.md#1.4:original-fence", "exec"), namespace)
+    return namespace, output.getvalue()
+
+
+original, original_stdout = run_original_fence(code)
+assert dict(original["counts"]) == {"貓": 3, "狗": 1, "鳥": 1}
+assert original["total"] == 5
+assert original["probability"] == {"貓": 0.6, "狗": 0.2, "鳥": 0.2}
+assert code.count('text = "貓貓貓狗鳥"') == 1
+exercise_code = code.replace('text = "貓貓貓狗鳥"', 'text = "貓貓貓狗狗狗鳥"')
+exercise, exercise_stdout = run_original_fence(exercise_code)
+assert dict(exercise["counts"]) == {"貓": 3, "狗": 3, "鳥": 1}
+assert exercise["total"] == 7
+exact = {char: Fraction(count, exercise["total"]) for char, count in exercise["counts"].items()}
+assert exact == {"貓": Fraction(3, 7), "狗": Fraction(3, 7), "鳥": Fraction(1, 7)}
+assert {char: round(p, 3) for char, p in exercise["probability"].items()} == {"貓": 0.429, "狗": 0.429, "鳥": 0.143}
+assert exercise["counts"]["貓"] == original["counts"]["貓"] == 3
+assert exercise["probability"]["貓"] < original["probability"]["貓"]
+
+p = original["probability"]
+omitted = {char: prob for char, prob in p.items() if char != "鳥"}
+assert abs(sum(omitted.values()) - 1) > 1e-6
+assert max(p, key=p.get) == "貓"
+assert all(p[char] > 0 for char in ["狗", "鳥"])
+assert Fraction.from_float(0.6) != Fraction(3, 5)
+assert 1e-6 == 0.000001
+assert abs(-0.2) == 0.2
+
+# Transparent fixed count model: it never accepts a context argument.
+contexts = {context: dict(p) for context in ["貓看", "狗吃"]}
+assert contexts["貓看"] == contexts["狗吃"]
+reordered_text = "鳥狗貓貓貓"
+assert Counter(reordered_text) == original["counts"]
+
+result = {
+    "date_utc": "2026-10-03",
+    "environment": {"python": sys.version, "executable": sys.executable, "device": "cpu; standard-library only", "OMP_NUM_THREADS": os.environ.get("OMP_NUM_THREADS"), "MKL_NUM_THREADS": os.environ.get("MKL_NUM_THREADS")},
+    "original": {"text": original["text"], "counts": dict(original["counts"]), "values": list(original["counts"].values()), "items": list(original["counts"].items()), "total": original["total"], "probability": p, "sum": sum(p.values()), "stdout": original_stdout},
+    "exercise": {"text": exercise["text"], "counts": dict(exercise["counts"]), "total": exercise["total"], "exact_probability": {k: str(v) for k, v in exact.items()}, "probability": exercise["probability"], "rounded_3dp": {k: round(v, 3) for k, v in exercise["probability"].items()}, "sum": sum(exercise["probability"].values()), "stdout": exercise_stdout},
+    "checks": {"all_assertions_passed": True, "omitted_bird_sum": sum(omitted.values()), "omitted_bird_absolute_error": abs(sum(omitted.values()) - 1), "mode": max(p, key=p.get), "other_candidates_positive": {c: p[c] for c in ["狗", "鳥"]}, "float_0.6_exact_ratio": list((0.6).as_integer_ratio()), "float_0.6_error_from_three_fifths": str(Fraction.from_float(0.6) - Fraction(3, 5)), "tolerance_literal": 1e-6, "contexts": contexts, "reordered_input_counts": dict(Counter(reordered_text))},
+    "scope": "Original fence executed verbatim; exercise changes only text literal. Additional exact arithmetic and bounded checks support this five/seven-code-point count example. No random sampling, training, GPU, quality or speed benchmark."
+}
+print(json.dumps(result, ensure_ascii=False, indent=2))

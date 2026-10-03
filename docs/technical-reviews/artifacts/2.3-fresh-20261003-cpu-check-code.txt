@@ -1,0 +1,105 @@
+"""Offline bounded CPU review: original, exercise, and documented shape semantics."""
+from pathlib import Path
+from contextlib import redirect_stdout
+import hashlib
+import io
+import json
+import sys
+import torch
+from torch import nn
+
+torch.set_num_threads(1)
+torch.set_default_device("cpu")
+assert torch.version.cuda is None and not torch.cuda.is_available()
+base = Path(__file__).resolve().parent
+prefix = "2.3-fresh-20261003"
+
+def run_file(suffix):
+    path = base / f"{prefix}-{suffix}-code.txt"
+    raw = path.read_bytes()
+    ns = {"__name__": "__main__"}
+    capture = io.StringIO()
+    with redirect_stdout(capture):
+        exec(compile(raw, str(path), "exec"), ns)
+    return ns, {"code_sha256": hashlib.sha256(raw).hexdigest(), "stdout": capture.getvalue()}
+
+original, original_record = run_file("original")
+layer, x, y = original["layer"], original["x"], original["y"]
+assert torch.equal(y, torch.tensor([[10.0, 2.0]]))
+original_record.update(x_shape=list(x.shape), weight_shape=list(layer.weight.shape),
+    bias_shape=list(layer.bias.shape), transposed_shape=list(layer.weight.T.shape),
+    y_shape=list(y.shape), y=y.tolist(), manual=original["manual"].tolist(),
+    allclose=bool(torch.allclose(y, original["manual"])),
+    requires_grad={"weight": layer.weight.requires_grad, "bias": layer.bias.requires_grad,
+                   "output": y.requires_grad},
+    is_leaf={"weight": layer.weight.is_leaf, "bias": layer.bias.is_leaf})
+exercise, exercise_record = run_file("exercise")
+assert torch.equal(exercise["y"], torch.tensor([[14.0, 2.0]]))
+assert torch.equal(exercise["y"] - y, torch.tensor([[4.0, 0.0]]))
+exercise_record.update(y=exercise["y"].tolist(), delta_from_original=(exercise["y"]-y).tolist(),
+                       manual=exercise["manual"].tolist(), assert_passed=True)
+try:
+    x @ layer.weight
+except RuntimeError as exc:
+    no_transpose = {"exception": type(exc).__name__, "message": str(exc)}
+else:
+    raise AssertionError("The untransposed non-square matrix should be incompatible.")
+
+zero_y = layer(torch.zeros(2, 3))
+assert torch.equal(zero_y, torch.tensor([[1.0, 0.0], [1.0, 0.0]]))
+inp = torch.arange(24, dtype=torch.float32).reshape(2, 4, 3)
+out = layer(inp)
+separate = torch.stack([torch.stack([layer(inp[b, t]) for t in range(4)]) for b in range(2)])
+assert out.shape == (2, 4, 2) and torch.equal(out, separate)
+perturbed = inp.clone()
+perturbed[0, 0, 0] += 7
+delta = layer(perturbed) - out
+expected_delta = torch.zeros(2, 4, 2)
+expected_delta[0, 0, 0] = 7
+assert torch.equal(delta, expected_delta)
+square_weight = torch.tensor([[1., 0., 2.], [0., -1., 1.], [2., 3., 1.]])
+correct_square, reversed_square = x @ square_weight.T, x @ square_weight
+assert correct_square.shape == reversed_square.shape == (1, 3)
+assert not torch.equal(correct_square, reversed_square)
+prerequisite, prerequisite_record = run_file("prerequisite")
+context = prerequisite["context"]
+expected_context = torch.tensor([[1., 10., 2., 20., 3., 30.], [3., 30., 2., 20., 1., 10.]])
+assert context.shape == (2, 6) and torch.equal(context, expected_context)
+context_layer = nn.Linear(6, 2)
+with torch.no_grad():
+    context_layer.weight.copy_(torch.tensor([[1., 0., 0., 0., 1., 0.], [0., 0., 1., 0., 0., 1.]]))
+    context_layer.bias.zero_()
+context_result = context_layer(context)
+assert torch.equal(context_result, torch.tensor([[4., 32.], [4., 12.]]))
+prerequisite_record.update(embedding_shape=list(prerequisite["x"].shape),
+    context_shape=list(context.shape), context=context.tolist(),
+    linear_in_features=context_layer.in_features, linear_out_features=context_layer.out_features,
+    mixed_shape=list(context_result.shape), mixed_values=context_result.tolist())
+
+# One backward operation, no optimizer and no parameter update or training loop.
+weights_before, bias_before = layer.weight.detach().clone(), layer.bias.detach().clone()
+loss = layer(x).square().sum()
+loss.backward()
+assert torch.equal(layer.weight.grad, torch.tensor([[20., 40., 80.], [4., 8., 16.]]))
+assert torch.equal(layer.bias.grad, torch.tensor([20., 4.]))
+assert torch.equal(layer.weight, weights_before) and torch.equal(layer.bias, bias_before)
+records = {
+    "environment": {"python": sys.version, "torch": str(torch.__version__),
+        "torch_git_version": str(torch.version.git_version), "device": "cpu",
+        "cuda_build": str(torch.version.cuda), "cuda_available": str(torch.cuda.is_available()),
+        "threads": str(torch.get_num_threads())},
+    "original": original_record, "exercise": exercise_record,
+    "no_transpose": no_transpose,
+    "bias_at_zero_input": zero_y.tolist(),
+    "three_dimensional": {"input_shape": list(inp.shape), "output_shape": list(out.shape),
+        "output": out.tolist(), "equal_to_per_position_calls": torch.equal(out, separate),
+        "one_input_position_changed": [0, 0, 0], "change": 7,
+        "output_delta": delta.tolist()},
+    "square_matrix": {"with_transpose": correct_square.tolist(),
+                      "without_transpose": reversed_square.tolist(), "shape": [1, 3]},
+    "prerequisite_2_2": prerequisite_record,
+    "autograd": {"loss": loss.item(), "weight_gradient": layer.weight.grad.tolist(),
+                 "bias_gradient": layer.bias.grad.tolist(), "parameters_unchanged": True},
+    "result": "All original, exercise, and bounded CPU assertions passed."
+}
+print(json.dumps(records, ensure_ascii=False, indent=2))

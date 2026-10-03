@@ -1,0 +1,103 @@
+from pathlib import Path
+import contextlib
+import hashlib
+import io
+import json
+import math
+import platform
+import re
+
+import torch
+
+torch.set_num_threads(1)
+art = Path('docs/technical-reviews/artifacts')
+
+def fence(lesson):
+    raw = (art / f'1.15-source-{lesson}.md').read_bytes()
+    return re.search(rb'```python\n(.*?)\n```', raw, re.S)[1].decode()
+
+def run(code):
+    namespace = {}
+    stdout = io.StringIO()
+    with contextlib.redirect_stdout(stdout):
+        exec(compile(code, '<raw course fence>', 'exec'), namespace)
+    return stdout.getvalue(), namespace
+
+original = fence('1.15')
+exercise = original.replace('[3.0, 1.0, 0.0]', '[3.0, 1.0, 2.0]')
+assert exercise != original
+exercise_stdout, ns = run(exercise)
+assert ns['z'].tolist() == [3.0, 1.0, 2.0]
+assert ns['z'].argmax().item() == 0
+
+temperature_rows = []
+for values in ([3.0, 1.0, 0.0], [3.0, 1.0, 2.0]):
+    z = torch.tensor(values)
+    z_before = z.clone()
+    for temperature in [0.5, 1.0, 2.0]:
+        p = (z / temperature).softmax(dim=0)
+        # Independent stabilized math implementation, with double precision.
+        exp_values = [math.exp((v - max(values)) / temperature) for v in values]
+        reference = [v / sum(exp_values) for v in exp_values]
+        observed = p.tolist()
+        max_error = max(abs(a - b) for a, b in zip(observed, reference))
+        assert max_error < 1e-7
+        assert abs(p.sum().item() - 1.0) < 2e-7
+        assert (z / temperature).argmax().item() == 0
+        assert torch.equal(z, z_before)
+        temperature_rows.append({
+            'z': values, 'temperature': temperature,
+            'scaled_scores': (z / temperature).tolist(),
+            'probability_float32': observed, 'probability_math_float64': reference,
+            'sum': p.sum().item(), 'argmax': 0, 'max_absolute_error': max_error,
+            'z_unchanged': True,
+        })
+
+base14 = fence('1.14')
+seed_runs = []
+for seed in [42, 7, 42]:
+    stdout, namespace = run(base14.replace('manual_seed(42)', f'manual_seed({seed})'))
+    seed_runs.append({'seed': seed, 'stdout': stdout,
+                      'length': len(namespace['output']),
+                      'p': namespace['p'].tolist(),
+                      'start': namespace['output'][0]})
+assert seed_runs[0]['stdout'] == seed_runs[2]['stdout']
+assert seed_runs[0]['stdout'] != seed_runs[1]['stdout']
+assert all(x['length'] == 13 and x['start'] == '貓' for x in seed_runs)
+assert seed_runs[0]['p'] == seed_runs[1]['p']
+
+sampling_weights = torch.tensor([0.8, 0.1, 0.1])
+generator = torch.Generator().manual_seed(42)
+sampled = torch.multinomial(sampling_weights, 100, replacement=True, generator=generator)
+counts = torch.bincount(sampled, minlength=3).tolist()
+assert all(x > 0 for x in counts)
+assert sampling_weights.argmax().item() == 0
+
+tie = torch.tensor([3.0, 3.0, 0.0])
+tie_p = (tie / 0.01).softmax(dim=0)
+assert tie_p.tolist() == [0.5, 0.5, 0.0]
+assert tie.argmax().item() == 0
+tiny_unique = (torch.tensor([3.0, 1.0, 0.0]) / 0.01).softmax(dim=0)
+zero_temperature = (torch.tensor([3.0, 1.0, 0.0]) / 0.0).softmax(dim=0)
+assert torch.isnan(zero_temperature).all().item()
+
+record = {
+    'command': 'OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 CUDA_VISIBLE_DEVICES= HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1 TRANSFORMERS_OFFLINE=1 .venv/bin/python docs/technical-reviews/artifacts/1.15-cpu-checks.txt',
+    'environment': {'python': platform.python_version(), 'torch': torch.__version__,
+                    'torch_git_version': torch.version.git_version, 'device': 'cpu',
+                    'dtype': 'torch.float32', 'threads': str(torch.get_num_threads())},
+    'exercise': {'exact_change': 'z=[3.0,1.0,0.0] -> [3.0,1.0,2.0]',
+                 'stdout': exercise_stdout,
+                 'executed_code_sha256': hashlib.sha256(exercise.encode()).hexdigest()},
+    'temperature_rows': temperature_rows,
+    'prerequisite_1.14_relevant_seed_runs': seed_runs,
+    'sampling_0.8_0.1_0.1': {'draws': 100, 'seed': 42, 'replacement': True, 'counts': counts,
+                            'scope': 'Only demonstrates these finite CPU draws; exact 0.8/0.1/0.1 probabilities come from the supplied distribution.'},
+    'tie': {'z': tie.tolist(), 'temperature': 0.01, 'p': tie_p.tolist(), 'argmax': tie.argmax().item()},
+    'tiny_unique': {'temperature': 0.01, 'p': tiny_unique.tolist(),
+                    'scope': 'float32 may underflow; mathematical T -> 0+ limit is derived separately.'},
+    'zero_temperature': {'all_nan': True,
+                         'scope': 'PyTorch tensor division does not raise Python ZeroDivisionError here; this does not define a probability distribution.'},
+    'result': 'All assertions passed; CPU only, no parameter updates, cloud calls, downloads or subprocesses.',
+}
+print(json.dumps(record, ensure_ascii=False, indent=2))

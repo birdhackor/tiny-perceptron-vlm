@@ -1,0 +1,55 @@
+from pathlib import Path
+from contextlib import redirect_stdout
+import io,json,sys,hashlib,os
+import torch
+from collections import Counter
+root=Path(__file__).resolve().parents[3]
+raw=(root/'course/chapters/01.md').read_bytes()
+start=raw.index('## 1.5 '.encode());end=raw.index(b'\n## ',start+1)+1
+body=raw[start:end]
+fence=body.decode().split('```python\n',1)[1].split('```',1)[0]
+expected_chars=['。','吃','狗','看','貓','魚','鳥']
+def run(code):
+ stream=io.StringIO();namespace={}
+ with redirect_stdout(stream):exec(compile(code,'course/chapters/01.md#1.5','exec'),namespace)
+ return namespace,stream.getvalue()
+def inspect(namespace):
+ chars=namespace['chars'];counts=namespace['counts'];p=namespace['probability'];row=namespace['row']
+ text=namespace['text'];pairs=list(zip(text[:-1],text[1:]));raw_counts=Counter(pairs)
+ denominators=counts.sum(dim=1,keepdim=True)
+ return {'stdout_not_used_as_only_check':True,'text':text,'vocabulary':chars,'ids':namespace['ids'],'pairs':['→'.join(pair) for pair in pairs],
+ 'pair_counts':{'→'.join(pair):count for pair,count in sorted(raw_counts.items())},'counts_shape':list(counts.shape),'counts_dtype':str(counts.dtype),'device':str(counts.device),
+ 'denominator_shape':list(denominators.shape),'row_denominators':denominators.squeeze(1).tolist(),'counts_matrix':counts.tolist(),
+ 'cat_row':counts[row].tolist(),'cat_total':float(denominators[row,0]),'cat_probabilities':p[row].tolist(),
+ 'row_sums':p.sum(dim=1).tolist(),'max_row_sum_error':float((p.sum(dim=1)-1).abs().max()),'allclose_to_one':torch.allclose(p.sum(dim=1),torch.ones(len(chars))),
+ 'pointwise_manual_equals_broadcast':all(torch.isclose(p[i,j],counts[i,j]/denominators[i,0]).item() for i in range(len(chars)) for j in range(len(chars))),
+ 'dividing_whole_table_total_row_sums':(counts/counts.sum()).sum(dim=1).tolist()}
+original,stdout=run(fence);o=inspect(original)
+assert o['vocabulary']==expected_chars
+assert len(o['pairs'])==len(o['text'])-1==11
+assert o['pair_counts']['貓→看']==2 and o['pair_counts']['狗→。']==1 and o['pair_counts']['狗→吃']==1
+assert o['cat_row']==[1.,1.,1.,3.,1.,1.,1.] and o['cat_total']==9
+expected=torch.tensor([1/9,1/9,1/9,3/9,1/9,1/9,1/9])
+assert torch.allclose(original['probability'][original['row']],expected,rtol=0,atol=1e-7)
+assert o['allclose_to_one'] and o['pointwise_manual_equals_broadcast']
+assert o['max_row_sum_error']<1.01e-5
+old='counts = torch.ones(len(chars), len(chars))'
+new='counts = torch.full((len(chars), len(chars)), 0.1)'
+assert fence.count(old)==1
+exercise,exercise_stdout=run(fence.replace(old,new));e=inspect(exercise)
+expected_exercise=torch.tensor([1/27,1/27,1/27,7/9,1/27,1/27,1/27])
+assert torch.allclose(exercise['probability'][exercise['row']],expected_exercise,rtol=0,atol=1e-7)
+assert abs(e['cat_total']-2.7)<1e-6
+assert e['allclose_to_one'] and e['pointwise_manual_equals_broadcast']
+assert e['cat_probabilities'][3]>o['cat_probabilities'][3] and min(e['cat_probabilities'])>0
+assert not hasattr(__import__('builtins'),'V')
+source=Path(torch.__file__).parent/'_torch_docs.py'
+result={'reviewed_on':'2026-10-03','command':'OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 CUDA_VISIBLE_DEVICES= HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1 TRANSFORMERS_OFFLINE=1 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python docs/technical-reviews/artifacts/1.5-fresh-cpu-code.txt',
+'environment':{'python':sys.version,'torch':str(torch.__version__),'torch_commit':str(torch.version.git_version),'device':'cpu','cuda_build':str(torch.version.cuda),'cuda_available':str(torch.cuda.is_available()),'OMP_NUM_THREADS':os.environ['OMP_NUM_THREADS'],'MKL_NUM_THREADS':os.environ['MKL_NUM_THREADS']},
+'section_sha256':hashlib.sha256(body).hexdigest(),'fence_sha256':hashlib.sha256(fence.encode()).hexdigest(),'installed_torch_docs_sha256':hashlib.sha256(source.read_bytes()).hexdigest(),
+'original':o,'original_stdout':stdout,'exercise_single_replacement':{'old':old,'new':new},'exercise':e,'exercise_stdout':exercise_stdout,
+'expected_cat_probability_exact':'add-one: 看=1/3, each other=1/9; add-0.1: 看=7/9, each other=1/27',
+'numeric_tolerance':'float32 probabilities: absolute error <=1e-7; exercise denominator <=1e-6; default allclose row sum tolerance =1e-8+1e-5',
+'result':'PASS: original fence and exact exercise replacement executed on CPU; all explicit value, shape, pairing, row-normalization and nonzero checks passed.',
+'limitations':'This is a deterministic twelve-character toy corpus and eleven adjacent transitions, no sentence-boundary handling or empirical quality claim; no GPU, training, downloads or sampling.'}
+print(json.dumps(result,ensure_ascii=False,indent=2,allow_nan=False))
