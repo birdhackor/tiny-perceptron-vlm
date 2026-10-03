@@ -1,0 +1,123 @@
+import hashlib
+import json
+import os
+from pathlib import Path
+import platform
+import re
+import sys
+
+ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(ROOT))
+import torch
+from tiny_perceptron.data import ByteTokenizer, render_chat
+from tiny_perceptron.model import loss_sum, masked_loss
+from scripts.prepare_data import generate_records
+from scripts.course_experiments.common import split_records, records_sha256
+
+assert os.environ['OMP_NUM_THREADS'] == '1'
+assert os.environ['MKL_NUM_THREADS'] == '1'
+assert torch.get_num_threads() == 1
+print(json.dumps({'python': platform.python_version(), 'torch': torch.__version__, 'torch_commit': torch.version.git_version, 'device': 'cpu', 'torch_threads': str(torch.get_num_threads()), 'OMP_NUM_THREADS': os.environ['OMP_NUM_THREADS'], 'MKL_NUM_THREADS': os.environ['MKL_NUM_THREADS']}, ensure_ascii=False))
+raw = (ROOT / 'course/chapters/07.md').read_bytes()
+heads = list(re.finditer(rb'(?m)^## (\d+\.\d+) [^\r\n]+', raw))
+i = next(i for i,h in enumerate(heads) if h[1] == b'7.12')
+body = raw[heads[i].start():heads[i+1].start()]
+print('section_sha256', hashlib.sha256(body).hexdigest())
+blocks = re.findall(r'```python\n(.*?)\n```', body.decode(), re.S)
+assert len(blocks) == 1
+mode = sys.argv[1]
+if mode == 'original':
+    namespace = {}
+    exec(compile(blocks[0], 'course/chapters/07.md#7.12-original', 'exec'), namespace)
+    assert namespace['all_pairs'] == [('紅','圓'),('紅','方'),('藍','圓'),('藍','方')]
+    assert namespace['train'] == [('紅','圓'),('藍','圓'),('藍','方')]
+    print('確認：原例四格、訓練三格，紅／藍／圓／方皆被涵蓋；未建立模型或更新參數。')
+elif mode == 'exercise':
+    changed = blocks[0].replace('held_out = {("紅", "方")}', 'held_out = {("藍", "圓"), ("藍", "方")}')
+    assert changed != blocks[0]
+    namespace = {}
+    exec(compile(changed, 'course/chapters/07.md#7.12-exercise', 'exec'), namespace)
+    assert namespace['train'] == [('紅','圓'),('紅','方')]
+    assert '藍' not in {c for c,s in namespace['train']}
+    print('這次測未見顏色。')
+    exec(compile(blocks[0], 'course/chapters/07.md#7.12-restored', 'exec'), namespace)
+    assert {c for c,s in namespace['train']} == {'紅','藍'}
+    assert {s for c,s in namespace['train']} == {'圓','方'}
+    print('恢復後：紅、藍、圓、方仍各出現至少一次，回到未見組合。')
+elif mode == 'frozen-evidence':
+    p = ROOT / 'docs/course-experiments/results/sft.json'
+    report = json.loads(p.read_bytes())
+    r = report['results']
+    print('sft.json sha256', hashlib.sha256(p.read_bytes()).hexdigest())
+    print('formal_environment', json.dumps({k:report[k] for k in ['revision','seed','device','torch_version','python_version','gpu','step_scale','evidence_status']}, ensure_ascii=False))
+    parts = split_records(generate_records('attributes-sft'), seed=42)
+    assert len({x['family'] for rows in parts.values() for x in rows}) == 12
+    family_sets = [{x['family'] for x in rows} for rows in parts.values()]
+    assert all(not a & b for i,a in enumerate(family_sets) for b in family_sets[i+1:])
+    for name, rows in parts.items():
+        raw_jsonl = ''.join(json.dumps(x, ensure_ascii=False) + '\n' for x in rows).encode()
+        assert hashlib.sha256(raw_jsonl).hexdigest() == r['data'][name]['sha256']
+        assert len(rows) == r['data'][name]['records']
+        assert len({x['family'] for x in rows}) == r['data'][name]['families']
+        counts = [int((render_chat(x['messages'])[1] != -100).sum()) for x in rows]
+        assert all(len([x for x in rows if x['family']==f]) == 5 for f in {x['family'] for x in rows})
+        print('split', name, 'records', len(rows), 'families', sorted({x['family'] for x in rows}), 'target_counts', counts, 'sum', sum(counts), 'jsonl_sha256', hashlib.sha256(raw_jsonl).hexdigest())
+    assert r['training']['records_sha256'] == records_sha256(parts['train'])
+    text_records = [{'text':row['messages'][0]['content'] + row['messages'][1]['content'], 'family':row['family']} for row in parts['train']]
+    assert r['pretrain_then_sft']['pretraining']['records_sha256'] == records_sha256(text_records)
+    assert r['pretrain_then_sft']['sft']['records_sha256'] == records_sha256(parts['train'])
+    tok = ByteTokenizer()
+    assert tok.encode('red') == [122,109,108]
+    x,y = render_chat([{'role':'user','content':'color?'},{'role':'assistant','content':'red'}])
+    assert y[y != -100].tolist() == [122,109,108,2]
+    print('red labels', y[y != -100].tolist())
+    routes = [('scratch',r['after'],[(1,'1.02175'),(5,'0.50580')]), ('pretrain',r['pretrain_then_sft']['before_sft'],[(1,'2.30189'),(1,'2.03647')]), ('pretrain-sft',r['pretrain_then_sft']['after_sft'],[(3,'0.09992'),(7,'0.10462')])]
+    for name, evaluations, expected in routes:
+        for split, (matches,rounded) in zip(['validation','test'], expected, strict=True):
+            m = evaluations[split]
+            target_counts = [int((render_chat(x['messages'])[1] != -100).sum()) for x in parts[split]]
+            assert m['effective_tokens'] == sum(target_counts) == (36 if split=='validation' else 69)
+            assert abs(m['nll_sum']/m['effective_tokens']-m['nll']) < 1e-14
+            assert format(m['nll'],'.5f') == rounded
+            recomputed = 0
+            for sample,row in zip(m['samples'],parts[split], strict=True):
+                assert sample['messages'] == row['messages'][:-1]
+                assert sample['expected'] == row['messages'][-1]['content']
+                ids = sample['generated_ids']
+                eos = tok.eos_id in ids
+                content = ids[:ids.index(tok.eos_id)] if eos else ids
+                exact = content == tok.encode(sample['expected'])
+                assert sample['exact'] == exact
+                assert sample['eos'] == eos
+                assert sample['generated'] == tok.decode(content)
+                assert eos
+                recomputed += int(exact)
+            assert recomputed == m['matches'] == matches
+            assert m['records'] == len(parts[split])
+            assert m['exact_match'] == matches/m['records']
+            assert m['eos_rate'] == 1.0
+            print('route',name,split,'matches',matches,'records',m['records'],'nll',m['nll'],'nll_sum',m['nll_sum'],'effective_tokens',m['effective_tokens'],'EOS',len(m['samples']))
+    assert r['training']['steps'] == 900
+    assert r['pretrain_then_sft']['pretraining']['steps'] == 250
+    assert r['pretrain_then_sft']['sft']['steps'] == 900
+    assert format(r['training']['initial_loss'],'.5f') == '5.77779'
+    assert format(r['training']['final_loss'],'.5f') == '0.00033'
+    wrong = r['after']['test']['samples'][0]
+    assert wrong['messages'][0]['content'] == 'color=blue;shape=circle;pitch=low;describe'
+    assert wrong['expected']=='circle' and wrong['generated']=='square'
+    print('counterexample',json.dumps(wrong,ensure_ascii=False))
+    for file in ['tiny_perceptron/data.py','tiny_perceptron/model.py','scripts/course_experiments/common.py','scripts/course_experiments/text.py']:
+        digest=hashlib.sha256((ROOT/file).read_bytes()).hexdigest()
+        assert digest == report['code_sha256'][file]
+        print('frozen_code_matches',file,digest)
+    # Small CPU loss check: no model, optimizer, checkpoint read, or parameter update.
+    logits=torch.zeros(1,len(y),tok.vocab_size,dtype=torch.float64)
+    summed,count=loss_sum(logits,y.unsqueeze(0))
+    loss=masked_loss(logits,y.unsqueeze(0))
+    expected=torch.log(torch.tensor(float(tok.vocab_size),dtype=torch.float64))
+    assert int(count)==4 and torch.allclose(loss,expected,atol=1e-12,rtol=0)
+    print('uniform_logits', 'effective_count',int(count),'nll_sum',float(summed),'mean_nll',float(loss),'expected_ln264',float(expected))
+    print('確認：僅離線核對凍結結果與小型 loss，沒有重跑正式排程、重訓、GPU或下載資料。')
+else:
+    raise ValueError(mode)
+print('CHECKS PASSED')

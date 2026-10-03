@@ -1,0 +1,104 @@
+import hashlib
+import json
+import platform
+import tempfile
+from pathlib import Path
+import torch
+from scripts.course_experiments.common import split_records, records_sha256, text_examples
+from scripts.prepare_data import generate_records
+from scripts.train import parser
+from tiny_perceptron.data import ByteTokenizer
+from tiny_perceptron.model import ModelConfig, TinyLM
+from tiny_perceptron.training import save_checkpoint, load_checkpoint
+
+torch.set_num_threads(1)
+root = Path.cwd()
+sha = lambda path: hashlib.sha256(Path(path).read_bytes()).hexdigest()
+report_path = Path("docs/course-experiments/results/sft.json")
+report = json.loads(report_path.read_text())
+release = json.loads(Path("docs/course-experiments/public-releases/sft.json").read_text())["release"]
+assert report["status"] == "completed" and report["evidence_status"] == "complete_run"
+assert report["step_scale"] == 1.0 and report["seed"] == 42
+parts = split_records(generate_records("attributes-sft"), seed=42)
+result = report["results"]
+branches = {"direct_sft": (result["training"], result["after"]),
+            "pretrain": (result["pretrain_then_sft"]["pretraining"], result["pretrain_then_sft"]["before_sft"]),
+            "pretrain_sft": (result["pretrain_then_sft"]["sft"], result["pretrain_then_sft"]["after_sft"])}
+text_rows = [{"text": row["messages"][0]["content"] + row["messages"][1]["content"], "family": row["family"]}
+             for row in parts["train"]]
+assert records_sha256(parts["train"]) == result["training"]["records_sha256"]
+assert records_sha256(parts["train"]) == result["pretrain_then_sft"]["sft"]["records_sha256"]
+assert records_sha256(text_rows) == result["pretrain_then_sft"]["pretraining"]["records_sha256"]
+splits = {}
+for split, rows in parts.items():
+    count = sum(int((y != -100).sum()) for _, y in text_examples(rows, mode="sft"))
+    assert len(rows) == result["data"][split]["records"]
+    splits[split] = {"records": len(rows), "families": sorted({row["family"] for row in rows}),
+                     "effective_targets": count, "records_sha256": records_sha256(rows)}
+assert not (set(splits["train"]["families"]) & set(splits["validation"]["families"]))
+assert not (set(splits["train"]["families"]) & set(splits["test"]["families"]))
+audited = {}
+tok = ByteTokenizer()
+for name, (training, evaluations) in branches.items():
+    entry = {"training": training, "evaluations": {}}
+    assert training["records"] == 45 and training["parameters"] == 141568
+    for split, recorded in evaluations.items():
+        matches, eos = 0, 0
+        assert len(recorded["samples"]) == len(parts[split])
+        for sample, row in zip(recorded["samples"], parts[split], strict=True):
+            assert sample["messages"] == row["messages"][:-1]
+            assert sample["expected"] == row["messages"][-1]["content"]
+            generated = sample["generated_ids"]
+            ended = tok.eos_id in generated
+            raw = generated[:generated.index(tok.eos_id)] if ended else generated
+            exact = raw == tok.encode(sample["expected"])
+            assert sample["exact"] == exact and sample["eos"] == ended
+            matches += int(exact)
+            eos += int(ended)
+        assert matches == recorded["matches"] and recorded["records"] == len(parts[split])
+        assert recorded["effective_tokens"] == splits[split]["effective_targets"]
+        assert abs(recorded["nll"] - recorded["nll_sum"] / recorded["effective_tokens"]) < 1e-12
+        assert recorded["exact_match"] == matches / len(parts[split])
+        assert recorded["eos_rate"] == eos / len(parts[split])
+        entry["evaluations"][split] = {k: recorded[k] for k in ("nll", "nll_sum", "effective_tokens", "matches", "records", "eos_rate")}
+    audited[name] = entry
+assert branches["direct_sft"][0]["steps"] == branches["pretrain_sft"][0]["steps"] == 900
+assert branches["pretrain"][0]["steps"] == 250
+assert branches["direct_sft"][0]["effective_tokens"] == branches["pretrain_sft"][0]["effective_tokens"] == 101091
+frozen_files = ["tiny_perceptron/data.py", "tiny_perceptron/model.py", "tiny_perceptron/training.py",
+                "scripts/course_experiments/text.py", "scripts/course_experiments/common.py"]
+frozen_matches = {f: {"sha256": sha(f), "matches_frozen_report": sha(f) == report["code_sha256"][f]} for f in frozen_files}
+assert all(row["matches_frozen_report"] for row in frozen_matches.values())
+checkpoint_configs = {}
+for filename in ("model.pt", "pretrain.pt", "pretrain-sft.pt"):
+    path = Path("checkpoints/course/sft") / filename
+    manifest = next(row for row in release["public_manifest"]["files"] if row["output"] == filename)
+    assert sha(path) == manifest["sha256"]
+    payload = torch.load(path, map_location="cpu", weights_only=True)
+    assert payload["config"]["width"] == 64 and payload["config"]["layers"] == 2
+    assert sum(value.numel() for value in payload["model"].values()) == 141568
+    checkpoint_configs[filename] = {"original_local_path": str(path), "sha256": sha(path), "bytes": path.stat().st_size,
+        "immutable_url": "https://huggingface.co/" + release["repo"] + "/resolve/" + release["weights_revision"] + "/course/course-v1/sft/" + filename,
+        "config": payload["config"], "metadata": payload.get("metadata"), "step": payload.get("step"),
+        "tokenizer": payload.get("tokenizer"), "parameter_count": sum(value.numel() for value in payload["model"].values()),
+        "optimizer_present": payload.get("optimizer") is not None}
+card = Path("checkpoints/course/sft/README.md")
+card_manifest = next(row for row in release["public_manifest"]["files"] if row["output"] == "README.md")
+assert sha(card) == card_manifest["sha256"]
+args = parser().parse_args(["--task", "sft", "--checkpoint", "checkpoints/text.pt", "--train"])
+assert args.task == "sft" and args.train and not args.resume
+with tempfile.TemporaryDirectory(prefix="7.11-checkpoint-") as directory:
+    small = TinyLM(ModelConfig(width=8))
+    path = Path(directory) / "state.pt"
+    save_checkpoint(path, small, step=0, metadata={"test": "no-training"})
+    loaded, data = load_checkpoint(path, device="cpu")
+    assert loaded.config == small.config
+    assert all(torch.equal(v, loaded.state_dict()[k]) for k, v in small.state_dict().items())
+print(json.dumps({"environment": {"python": platform.python_version(), "torch": torch.__version__, "device": "cpu", "threads": "1"},
+    "inspection_only": "未執行fit、optimizer.step、正式訓練或正式排程；僅重建自有合成題、檢查已凍結紀錄與本機權重配置。",
+    "frozen_report": {"path": str(report_path), "sha256": sha(report_path), "revision": report["revision"], "device": report["device"],
+                      "seed": report["seed"], "gpu": report["gpu"], "torch": report["torch_version"], "run_id": report["modal"]["run_id"]},
+    "splits": splits, "branches": audited, "frozen_code": frozen_matches, "checkpoint_configs": checkpoint_configs,
+    "model_card": {"sha256": sha(card), "immutable_url": "https://huggingface.co/" + release["repo"] + "/resolve/" + release["revision"] + "/course/course-v1/sft/README.md"},
+    "cli_parse": {"task": args.task, "train": args.train, "resume": args.resume, "checkpoint": str(args.checkpoint)},
+    "small_checkpoint_roundtrip": True, "new_parameter_updates": 0}, ensure_ascii=False, indent=2))

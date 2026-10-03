@@ -1,0 +1,34 @@
+import json
+import platform
+import torch
+from tiny_perceptron.data import toy_conversations, render_chat, pad_batch
+from tiny_perceptron.model import TinyLM, ModelConfig, masked_loss
+
+torch.set_num_threads(1)
+torch.manual_seed(42)
+messages = toy_conversations()[:2]
+examples = [render_chat(row) for row in messages]
+x, y, valid = pad_batch(examples)
+model = TinyLM(ModelConfig(width=8))
+before = {name: value.detach().clone() for name, value in model.named_parameters()}
+logits = model(x, valid=valid)["logits"]
+loss = masked_loss(logits, y)
+active = y != -100
+manual = -logits.log_softmax(-1)[active].gather(1, y[active, None]).mean()
+loss.backward()
+gradient = {name: {"finite": bool(value.grad.isfinite().all()), "norm": float(value.grad.norm())}
+            for name, value in model.named_parameters() if value.grad is not None}
+unchanged = all(torch.equal(before[name], value) for name, value in model.named_parameters())
+assert x.shape == (2, 10) and y.shape == (2, 10) and valid.shape == (2, 10)
+assert logits.shape == (2, 10, 264)
+assert active.sum().item() == 4 and valid.all()
+assert torch.allclose(loss, manual, atol=1e-7, rtol=1e-7)
+assert loss.item() > 0 and all(row["finite"] for row in gradient.values())
+assert any(row["norm"] > 0 for row in gradient.values()) and unchanged
+print(json.dumps({"environment": {"python": platform.python_version(), "torch": torch.__version__,
+      "torch_git_version": torch.version.git_version, "device": str(logits.device), "threads": str(torch.get_num_threads())},
+      "messages": messages, "x": x.tolist(), "y": y.tolist(), "valid": valid.tolist(),
+      "dtypes": [str(x.dtype), str(y.dtype), str(valid.dtype), str(logits.dtype)],
+      "logits_shape": list(logits.shape), "effective_targets": int(active.sum()),
+      "loss": loss.item(), "manual_loss": manual.item(), "gradient": gradient,
+      "parameters_unchanged_after_backward": unchanged, "optimizer_steps": 0}, ensure_ascii=False, indent=2))
