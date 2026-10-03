@@ -1,0 +1,69 @@
+import sys, json, platform, hashlib, re
+from pathlib import Path
+import torch
+from tiny_perceptron.quantization import pack_int4, unpack_int4, quantize_symmetric
+
+print(json.dumps({'python':platform.python_version(),'torch':torch.__version__,'torch_git':torch.version.git_version,'device':'cpu','threads':torch.get_num_threads(),'platform':platform.platform()},ensure_ascii=False))
+mode=sys.argv[1]
+raw=Path('docs/technical-reviews/artifacts/17.8-primary.txt').read_bytes()
+original=re.search(rb'```python\n(.*?)```',raw,re.S)[1].decode()
+if mode in ('original','exercise'):
+    code=original if mode=='original' else original.replace('[-8, -1, 0, 1, 7, 2, 3]','[-8, -1, 0, 1, 7, 2, 3, 4]')
+    print('mode',mode,'source_code_sha256',hashlib.sha256(code.encode()).hexdigest())
+    namespace={}
+    exec(compile(code,'17.8-'+mode,'exec'),namespace)
+    q=namespace['q'];packed=namespace['packed'];restored=namespace['restored']
+    assert packed.tolist()==([112,152,175,139] if mode=='original' else [112,152,175,203])
+    assert packed.dtype==torch.uint8 and packed.nbytes==4
+    assert q.numel()==(7 if mode=='original' else 8) and torch.equal(q,restored)
+    print(json.dumps({'input_dtype':str(q.dtype),'input_bytes':q.nbytes,'packed_dtype':str(packed.dtype),'packed_bytes':packed.nbytes,'restored_shape':list(restored.shape),'assertion':'passed'},ensure_ascii=False))
+elif mode=='mechanism':
+    pairs=torch.tensor([[a,b] for a in range(-8,8) for b in range(-8,8)],dtype=torch.int8)
+    assert torch.equal(pairs,unpack_int4(pack_int4(pairs),pairs.shape))
+    expected=torch.tensor([(b+8)*16+(a+8) for a,b in pairs.tolist()],dtype=torch.uint8)
+    assert torch.equal(expected,pack_int4(pairs))
+    lengths=[]
+    for n in range(10):
+        q=(torch.arange(n)%16-8).to(torch.int8)
+        p=pack_int4(q);r=unpack_int4(p,q.shape)
+        assert p.nbytes==(n+1)//2 and torch.equal(q,r)
+        lengths.append({'elements':n,'packed_bytes':p.nbytes})
+    failures=[]
+    for x in (-9,8):
+        try:pack_int4(torch.tensor([x],dtype=torch.int8))
+        except ValueError as e:failures.append({'value':x,'error':str(e)})
+        else:raise AssertionError('out-of-range input accepted')
+    q=torch.tensor([-8,-1,0,1,7,2,3],dtype=torch.int8)
+    padding=unpack_int4(pack_int4(q),(8,)).tolist()
+    assert padding==[-8,-1,0,1,7,2,3,0]
+    qs,s=quantize_symmetric(torch.linspace(-1,1,33),4)
+    assert qs.min()==-7 and qs.max()==7 and -8 not in qs.tolist()
+    print(json.dumps({'all_256_signed_pairs':'passed','lengths_0_to_9':lengths,'range_rejection':failures,'untrimmed_padding_example':padding,'symmetric_quantizer':{'minimum':int(qs.min()),'maximum':int(qs.max()),'scale':s.item()},'assertion':'passed'},ensure_ascii=False))
+elif mode=='storage':
+    p=Path('checkpoints/course/quantization/model.pt');raw_weights=p.read_bytes()
+    sha=hashlib.sha256(raw_weights).hexdigest();assert sha=='17e7f0e824b8bebb8396c9384a1887463b30575f337ac88e1072f30177da41cb'
+    payload=torch.load(p,map_location='cpu',weights_only=True)
+    state=payload['model']
+    tensor_records=[{'name':k,'shape':list(v.shape),'dtype':str(v.dtype),'elements':v.numel(),'element_bytes':v.element_size(),'bytes':v.nbytes} for k,v in state.items()]
+    packed_names=[k[:-7] for k in state if k.endswith('.values')]
+    buffer_keys={prefix+'.'+suffix for prefix in packed_names for suffix in ('values','scale','bias')}
+    groups={suffix:sum(v.nbytes for k,v in state.items() if k in buffer_keys and k.endswith('.'+suffix)) for suffix in ('values','scale','bias')}
+    buffer_bytes=sum(groups.values())
+    other=sum(v.nbytes for k,v in state.items() if k not in buffer_keys)
+    assert len(packed_names)==13 and groups=={'values':57600,'scale':5664,'bias':2560} and buffer_bytes==65824 and other==102912 and buffer_bytes+other==168736
+    report=json.loads(Path('docs/course-experiments/results/quantization.json').read_text())
+    reported=report['results']['runs']['packed4']['storage']
+    assert reported['buffers']=={k:v.nbytes for k,v in state.items() if k in buffer_keys}
+    print(json.dumps({'source_path':str(p),'source_sha256':sha,'source_bytes':len(raw_weights),'immutable_weights_revision':'9d9047db801aff32b1b2950ab186021736ba4b4f','config':payload['config'],'bits':payload['bits'],'format_version':payload['format_version'],'groups':groups,'packed_linear_count':len(packed_names),'buffer_bytes':buffer_bytes,'other_float_bytes':other,'total_tensor_bytes':buffer_bytes+other,'reported_buffer_map_matches_loaded_tensors':True,'tensor_records':tensor_records,'assertion':'passed'},ensure_ascii=False,indent=2))
+elif mode=='shape':
+    from tiny_perceptron.training import load_checkpoint
+    from tiny_perceptron.quantization import QuantizedLinear
+    torch.manual_seed(42)
+    model,payload=load_checkpoint('checkpoints/course/quantization/model.pt',device='cpu')
+    layers=[{'name':name,'bits':layer.bits,'shape':layer.shape,'scale_shape':list(layer.scale.shape),'values_shape':list(layer.values.shape)} for name,layer in model.named_modules() if isinstance(layer,QuantizedLinear)]
+    expected={**{f'blocks.{b}.attention.{part}':[64,64] for b in range(2) for part in ('q','k','v','out')},**{f'blocks.{b}.ffn.up':[256,64] for b in range(2)},**{f'blocks.{b}.ffn.down':[64,256] for b in range(2)},'output':[264,64]}
+    assert len(layers)==13 and {item['name']:item['shape'] for item in layers}==expected
+    assert all(item['bits']==4 for item in layers) and payload['bits']==4
+    print(json.dumps({'payload_bits':payload['bits'],'layers':layers,'assertion':'passed','scope':'Existing immutable checkpoint load and metadata reconstruction only; no training or forward-quality measurement.'},ensure_ascii=False,indent=2))
+else:
+    raise ValueError(mode)

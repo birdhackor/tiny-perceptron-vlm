@@ -1,0 +1,57 @@
+import hashlib,json,platform,inspect
+from pathlib import Path
+import torch
+from torch import nn
+import tiny_perceptron.quantization as qmod
+from scripts.course_experiments.compression import _prompt
+
+def sha(path):return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+p='docs/course-experiments/results/quantization.json'
+d=json.loads(Path(p).read_text())
+release=json.loads(Path('docs/course-experiments/public-releases/quantization.json').read_text())
+student=json.loads(Path('docs/course-experiments/student-checks/quantization.json').read_text())
+assert d['gpu']=='NVIDIA L4' and d['seed']==42
+pins={}
+for rel in ['tiny_perceptron/quantization.py','tiny_perceptron/model.py']:
+ pins[rel]={'observed':sha(rel),'run_sha256':d['code_sha256'][rel]};assert pins[rel]['observed']==pins[rel]['run_sha256']
+for rel,local in [('scripts/course_experiments/compression.py','outputs/technical-sources/17.10-own/compression-run.py'),('scripts/course_experiments/run.py','outputs/technical-sources/17.10-own/run-original.py')]:
+ pins[rel]={'current_sha256':sha(rel),'original_download_sha256':sha(local),'run_sha256':d['code_sha256'][rel]};assert pins[rel]['original_download_sha256']==pins[rel]['run_sha256']
+row=d['results']['runs']['fp32']['test']['generated_samples'][0]
+prompt=_prompt({'question':row['question'],'answer':row['expected']},128)
+assert prompt.numel()==46
+measurements={}
+for name,expected_pre,expected_dec,extra in [('fp32',2.405,2.371,335872),('packed4',4.958,4.882,376320),('packed8',2.768,2.814,359936)]:
+ t=d['results']['runs'][name]['timing'];assert t['repetitions']==3 and t['prompt_tokens']==46 and t['decode_tokens']==8
+ assert round(t['prefill_seconds']*1000,3)==expected_pre
+ assert round(t['decode_seconds_per_token']*1000,3)==expected_dec
+ assert abs(t['decode_seconds']/8-t['decode_seconds_per_token'])<1e-15
+ assert t['cuda_allocated_before']==68655616 and t['cuda_peak_allocated']-t['cuda_allocated_before']==extra
+ measurements[name]=t
+card='checkpoints/course/quantization/README.md'
+entry=next(x for x in release['release']['public_manifest']['files'] if x['output']=='README.md')
+assert sha(card)==entry['sha256']
+assert student['public_source']['revision']==release['release']['revision']
+manifest=json.loads(Path('checkpoints/course/quantization/export-manifest.json').read_text())
+assert manifest['provenance']['revision']==d['revision']
+forward_calls=[]
+buffer_records=[]
+original=qmod.F.linear
+def capture(x,w,b):
+ forward_calls.append({'input_shape':list(x.shape),'input_dtype':str(x.dtype),'weight_shape':list(w.shape),'weight_dtype':str(w.dtype),'weight_tensor_bytes':w.numel()*w.element_size(),'bias_tensor_bytes':b.numel()*b.element_size()})
+ return original(x,w,b)
+qmod.F.linear=capture
+try:
+ for bits,total in [(4,1280),(8,2304)]:
+  layer=nn.Linear(64,32);packed=qmod.QuantizedLinear(layer,bits)
+  assert packed.storage_bytes()==total
+  buffers={name:{"shape":list(v.shape),"dtype":str(v.dtype),"bytes":v.numel()*v.element_size()} for name,v in packed.named_buffers()}
+  assert buffers["scale"]["bytes"]==128 and buffers["bias"]["bytes"]==128
+  assert buffers["values"]["bytes"]==(1024 if bits==4 else 2048)
+  buffer_records.append({"bits":bits,"buffers":buffers,"total_bytes":packed.storage_bytes()})
+  for _ in range(2):
+   y=packed(torch.ones(2,64));assert y.shape==(2,32) and y.dtype==torch.float32
+finally:qmod.F.linear=original
+assert len(forward_calls)==4 and all(x['weight_tensor_bytes']==8192 for x in forward_calls)
+mempath='outputs/technical-sources/torch-runtime/source-memory.py'
+assert sha(mempath)==sha(inspect.getsourcefile(torch.cuda.memory))
+print(json.dumps({'environment':{'python':platform.python_version(),'torch':torch.__version__,'torch_git_version':torch.version.git_version,'device':'cpu','threads':str(torch.get_num_threads()),'default_dtype':str(torch.get_default_dtype())},'run_source_pins':pins,'source_result_sha256':sha(p),'historical_measurements':measurements,'prompt_question':row['question'],'prompt_positions_including_format_ids':prompt.numel(),'forward_capture':forward_calls,'buffer_records':buffer_records,'card_provenance':{'original_path':card,'sha256':sha(card),'url':'https://huggingface.co/'+release['release']['repo']+'/resolve/'+release['release']['revision']+'/course/course-v1/quantization/README.md','revision':release['release']['revision'],'weights_revision':release['release']['weights_revision']},'scope':'CPU 僅執行形狀、完整浮點權重 payload 與凍結報告的數字／pin 核對；未重播 CUDA timing，也未載入或下載訓練資料／權重。','cuda_memory_source_sha256':sha(mempath),'checks':'all assertions passed'},ensure_ascii=False,indent=2))

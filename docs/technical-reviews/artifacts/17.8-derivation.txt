@@ -1,0 +1,25 @@
+17.8 本人透明推導；2026-10-03
+
+限定輸入是已量化、範圍[-8,7]的整數，沒有型別溢位。定義儲存碼a=q0+8、b=q1+8，故0≤a,b≤15。兩碼各需四個bits，低四位a與高四位16b無共同置1位置，故(a | (b << 4)) = a + 16b，最大255，正好可放uint8。
+由p=a+16b可得a=p & 15 = p mod 16，b=p >> 4 = floor(p/16)，再各減8；這是對每對signed整數碼的可逆映射，不是對原浮點權重的可逆映射。若浮點權重先除scale再捨入，不同原浮點值可能落入同一整數格，打包不會恢復該偏移。
+
+-8 → 0 → 0000；-1 → 7 → 0111；p=7×16+0=112，二進位01110000。
+0 → 8 → 1000；1 → 9 → 1001；p=9×16+8=152，二進位10011000。
+7 → 15；2 → 10；p=10×16+15=175。
+3 → 11；補格採儲存碼8（拆回8−8=0）；p=8×16+11=139。
+練習追加4：4 → 12，高四位改為12；p=12×16+11=203。
+
+七個int8元素：7×1=7 bytes。兩碼入一uint8，所需bytes=ceil(n/2)=(n+1)//2。n=7或8皆需4 bytes；n=7須裁掉末尾補格，n=8則該格可能是真實的0，不能從packed內容自行判定。
+原形狀的維度乘積給元素數；原形狀還讓攤平資料恢復到正確位置。完整模型可直接保存shape，或保存足以重建各層shape的配置。本專案保存config與bits，載入時依config重建QuantizedLinear.shape，再讀packed values、scale、bias。
+
+正式逐列scale與資料容器（從固定results及本人讀取既存公開weights交叉核對）：
+八個attention矩陣：values=8×2048=16384 bytes；scale=8×256=2048 bytes。
+四個FFN矩陣：values=4×8192=32768 bytes；scale=2×(1024+256)=2560 bytes；bias=2×(1024+256)=2560 bytes。
+一個output矩陣：values=8448 bytes；scale=1056 bytes；沒有bias。
+13個Linear的values=16384+32768+8448=57600 bytes。
+scale=2048+2560+1056=5664 bytes，逐列FP32共1416項。
+bias=2560 bytes，FP32共640項。
+buffer=57600+5664+2560=65824 bytes。
+其他浮點參數=25728×4=102912 bytes；全部tensor=65824+102912=168736 bytes。
+保留的其他float參數包括LayerNorm的bias；不能把所有以.bias結尾的tensor都誤歸入量化Linear的bias buffer。
+以上是實際tensor元素的數值bytes，不包括序列化records／檔案容器，亦不是執行記憶體峰值或低位元kernel速度。
