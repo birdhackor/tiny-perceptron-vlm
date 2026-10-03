@@ -1,0 +1,89 @@
+import copy
+import hashlib
+import json
+import math
+import os
+import platform
+import random
+import sys
+from pathlib import Path
+
+import torch
+import torch.nn.functional as F
+
+sys.path.insert(0, str(Path.cwd()))
+from tiny_perceptron.model import ModelConfig, TinyLM
+from tiny_perceptron.modern import DenseFFN
+
+torch.set_num_threads(1)
+print("environment", json.dumps({"python": platform.python_version(), "torch": str(torch.__version__), "torch_git": torch.version.git_version, "device": "cpu", "threads": torch.get_num_threads(), "OMP_NUM_THREADS": os.environ["OMP_NUM_THREADS"], "MKL_NUM_THREADS": os.environ["MKL_NUM_THREADS"]}))
+
+for x in (1, 2):
+    print("linear_square", x, 3 * (2 * x), 3 * (2 * x) ** 2)
+
+# Transparent matrix-composition witness, without an activation.
+x = torch.tensor([[1.0, 2.0]], dtype=torch.float64)
+w1 = torch.tensor([[1.0, 2.0], [3.0, 4.0]], dtype=torch.float64)
+w2 = torch.tensor([[2.0, 1.0], [0.0, 3.0]], dtype=torch.float64)
+assert torch.equal((x @ w1) @ w2, x @ (w1 @ w2))
+print("matrix_composition", ((x @ w1) @ w2).tolist())
+
+for values in ([-1.0, 0.0, 2.0], [-2.0, -1.0, 0.0, 1.0, 2.0], [-4.0, -2.0, 0.0, 2.0, 4.0]):
+    t = torch.tensor(values, dtype=torch.float64)
+    phi = [0.5 * (1.0 + math.erf(v / math.sqrt(2.0))) for v in values]
+    exact = torch.tensor([v * p for v, p in zip(values, phi)], dtype=torch.float64)
+    actual = F.gelu(t)
+    assert torch.allclose(actual, exact, atol=2e-15, rtol=2e-15)
+    assert actual.shape == F.relu(t).square().shape == t.shape
+    print("formula", json.dumps({"x": values, "Phi": phi, "gelu": actual.tolist(), "relu": F.relu(t).tolist(), "relu2": F.relu(t).square().tolist(), "max_abs_error": (actual-exact).abs().max().item()}))
+
+ints = torch.tensor([-4, -2, 0, 2, 4])
+floats = torch.tensor([-4.0, -2.0, 0.0, 2.0, 4.0])
+print("inferred_dtypes", str(ints.dtype), str(floats.dtype))
+try:
+    F.gelu(ints)
+except (RuntimeError, NotImplementedError) as exc:
+    print("integer_gelu_rejected", type(exc).__name__, str(exc))
+else:
+    raise AssertionError("GELU unexpectedly accepted int64")
+
+torch.manual_seed(42)
+ffn = DenseFFN(4)
+same = torch.ones(1, 2, 4)
+y = ffn(same)
+same[0, 1, 0] = 2
+changed = ffn(same)
+assert torch.allclose(y[:, 0], changed[:, 0])
+assert not torch.allclose(y[:, 1], changed[:, 1])
+print("prerequisite", json.dumps({"up": list(ffn.up.weight.shape), "down": list(ffn.down.weight.shape), "output_shape": list(y.shape), "unchanged_first_position": True, "changed_second_position": True, "activation": ffn.activation}))
+
+torch.manual_seed(42)
+config = ModelConfig(width=64, layers=2, heads=4, max_length=128)
+baseline = TinyLM(config)
+relu2 = copy.deepcopy(baseline)
+for block in relu2.blocks:
+    block.ffn.activation = "relu2"
+counts = [sum(p.numel() for p in m.parameters()) for m in (baseline, relu2)]
+assert counts == [141568, 141568]
+assert all(torch.equal(v, relu2.state_dict()[k]) for k, v in baseline.state_dict().items())
+before = baseline.blocks[0].ffn.up(torch.tensor([[1.0] * 64]))
+print("activation_swap_same_weights", json.dumps({"parameters": counts, "gelu_negative_count": int((F.gelu(before)<0).sum()), "relu2_negative_count": int((F.relu(before).square()<0).sum()), "gelu_max": F.gelu(before).max().item(), "relu2_max": F.relu(before).square().max().item()}))
+samplers = [random.Random(42), random.Random(42)]
+draws = [s.choices(range(2789), k=16) for s in samplers]
+assert draws[0] == draws[1]
+print("equal_seed_draws", draws)
+
+p = Path("docs/course-experiments/results/modern.json")
+report = json.loads(p.read_text())
+print("formal_input_sha256", hashlib.sha256(p.read_bytes()).hexdigest())
+for name in ("baseline", "relu2"):
+    v = report["results"]["variants"][name]
+    for split in ("validation", "test"):
+        h = v["heldout"][split]
+        recalculated = h["nll_sum"] / h["effective_tokens"]
+        assert abs(recalculated-h["nll"]) < 1e-15
+        print("formal_nll", name, split, recalculated, format(recalculated, ".5f"), "targets", h["effective_tokens"], "records", h["records"])
+    tr = v["training"]
+    print("formal_training", name, "params", v["model"]["parameters"], "updates", tr["optimizer_updates"], "targets", tr["effective_tokens"], "median_ms", tr["warm_step_median_seconds"]*1000, "rounded_ms", format(tr["warm_step_median_seconds"]*1000,".3f"))
+print("relu2_test_sample0", repr(report["results"]["variants"]["relu2"]["heldout"]["test"]["samples"][0]["generated"]))
+print("all_checks_passed; no training or GPU execution")

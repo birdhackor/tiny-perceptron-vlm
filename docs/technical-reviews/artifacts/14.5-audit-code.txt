@@ -1,0 +1,35 @@
+import json, math, hashlib, sys
+from pathlib import Path
+import torch
+from tiny_perceptron.model import ModelConfig, TinyLM
+from tiny_perceptron.modern import DenseFFN
+p = Path("docs/course-experiments/results/modern.json")
+j = json.loads(p.read_text())
+r = j["results"]
+output = {"source_path": str(p), "source_sha256": hashlib.sha256(p.read_bytes()).hexdigest(), "revision": j["revision"], "seed": j["seed"], "recorded_environment": {k:j[k] for k in ["device", "torch_version", "python_version", "gpu"]}, "runtime": r["runtime"], "dataset": r["dataset"], "variants": {}}
+for name, expected_params, expected_val, expected_test, expected_ms in [("baseline", 141568, "2.26331", "2.29163", "13.062"), ("swiglu", 174848, "2.25444", "2.28009", "13.336")]:
+    v = r["variants"][name]
+    model = TinyLM(ModelConfig(**v["model"]["config"]))
+    params = sum(x.numel() for x in model.parameters())
+    t = v["training"]
+    held = {side:{k:x for k,x in h.items() if k != "samples"} for side,h in v["heldout"].items()}
+    assert params == expected_params == v["model"]["parameters"]
+    assert t["steps"] == t["optimizer_updates"] == t["requested_steps"] == 240
+    assert t["effective_tokens"] == 452102 and t["skipped_updates"] == 0
+    assert format(held["validation"]["nll"], ".5f") == expected_val
+    assert format(held["test"]["nll"], ".5f") == expected_test
+    for side in ["validation", "test"]:
+        h=held[side]
+        assert abs(h["nll_sum"]/h["effective_tokens"]-h["nll"]) < 1e-12
+    milliseconds=t["warm_step_median_seconds"]*1000
+    assert format(milliseconds, ".3f") == expected_ms
+    output["variants"][name] = {"config":v["model"]["config"], "observed_cpu_parameter_count":params, "ffn_hidden":model.blocks[0].ffn.up.out_features, "ffn_parameter_count_each":sum(p.numel() for p in model.blocks[0].ffn.parameters()), "training": {k:t[k] for k in ["requested_steps", "steps", "optimizer_updates", "skipped_updates", "effective_tokens", "learning_rate", "batch_size", "warm_step_median_seconds"]}, "heldout":held, "rounded":{"validation":expected_val, "test":expected_test, "step_ms":expected_ms}}
+assert output["variants"]["swiglu"]["observed_cpu_parameter_count"]-output["variants"]["baseline"]["observed_cpu_parameter_count"] == 2*(64*256+256)
+for q in ["tiny_perceptron/modern.py", "tiny_perceptron/model.py", "scripts/course_experiments/common.py"]:
+    assert hashlib.sha256(Path(q).read_bytes()).hexdigest() == j["code_sha256"][q]
+output["verified_code_sha256"]={q:j["code_sha256"][q] for q in ["tiny_perceptron/modern.py", "tiny_perceptron/model.py", "scripts/course_experiments/common.py", "scripts/course_experiments/architecture.py"]}
+output["d8_h16_no_bias_count"]={"ordinary":2*8*16, "swiglu":3*8*16}
+output["SiLU_hand_values"]={str(x):{"sigmoid":1/(1+math.exp(-x)), "silu":x/(1+math.exp(-x)), "content_times_silu":2*x/(1+math.exp(-x))} for x in [-2,0,2]}
+output["fixed_budget_limits"]="Only frozen seed-42 TinyStories modern run; no training, weights load, GPU invocation or speed remeasurement during audit. CPU model construction verifies parameter topology only."
+print(json.dumps(output, ensure_ascii=False, indent=2))
+print("all assertions passed")

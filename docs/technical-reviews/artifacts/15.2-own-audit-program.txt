@@ -1,0 +1,100 @@
+import contextlib
+import hashlib
+import io
+import json
+import os
+import sys
+from pathlib import Path
+
+import torch
+from torch import nn
+
+from tiny_perceptron.model import ModelConfig, TinyLM
+
+torch.set_num_threads(1)
+root = Path.cwd()
+art = root / "docs/technical-reviews/artifacts"
+namespace = {}
+captured = io.StringIO()
+with contextlib.redirect_stdout(captured):
+    exec(compile((art / "15.2-own-original-program.txt").read_text(), "15.2 original", "exec"), namespace)
+experts = namespace["experts"]
+tables = namespace["tables"]
+x = namespace["x"]
+repeated = namespace["repeated"]
+assert [e(x).tolist() for e in experts] == [[[1.0, 2.0]], [[2.0, 4.0]], [[2.0, 1.0]]]
+assert len(set(id(e) for e in experts)) == 3
+assert len(set(e.weight.data_ptr() for e in experts)) == 3
+assert list(dict(experts.named_parameters())) == ["0.weight", "1.weight", "2.weight"]
+assert [p.numel() for p in experts.parameters()] == [4, 4, 4]
+assert [p.requires_grad for p in experts.parameters()] == [True, True, True]
+assert list(dict(repeated.named_parameters())) == ["0.weight"]
+assert list(dict(repeated.named_parameters(remove_duplicate=False))) == ["0.weight", "1.weight", "2.weight"]
+assert sum(p.numel() for p in repeated.parameters()) == 4
+try:
+    experts(x)
+except NotImplementedError:
+    no_forward = True
+else:
+    raise AssertionError("ModuleList unexpectedly implemented forward")
+before = [e.weight.detach().clone() for e in experts]
+objects = [id(e.weight) for e in experts]
+with torch.no_grad():
+    assert not torch.is_grad_enabled()
+    experts[0].weight.mul_(3)
+assert torch.is_grad_enabled()
+assert objects == [id(e.weight) for e in experts]
+assert torch.equal(experts[0].weight, before[0] * 3)
+assert all(torch.equal(experts[i].weight, before[i]) for i in (1, 2))
+assert [e(x).tolist() for e in experts] == [[[3.0, 6.0]], [[2.0, 4.0]], [[2.0, 1.0]]]
+copied = nn.Linear(2, 2, bias=False)
+with torch.no_grad():
+    original_object = id(copied.weight)
+    copied.weight.copy_(tables[1])
+    tables[1].mul_(9)
+assert id(copied.weight) == original_object
+assert torch.equal(copied.weight, 2 * torch.eye(2))
+
+frozen_path = root / "docs/course-experiments/results/moe.json"
+raw = frozen_path.read_bytes()
+frozen = json.loads(raw)
+variants = {}
+for name, result in frozen["results"]["variants"].items():
+    if result["model"]["config"]["experts"] == 0:
+        continue
+    config = result["model"]["config"]
+    model = TinyLM(ModelConfig(**config)).cpu()
+    weights = [p for block in model.blocks for p in block.ffn.experts.parameters()]
+    expert_count = sum(len(block.ffn.experts) for block in model.blocks)
+    expert_parameters = sum(p.numel() for p in weights)
+    router_parameters = sum(p.numel() for block in model.blocks for p in block.ffn.router.parameters())
+    total_parameters = sum(p.numel() for p in model.parameters())
+    assert expert_count == 8
+    assert len(set(p.data_ptr() for p in weights)) == len(weights)
+    assert expert_parameters == 264704 == result["budget"]["expert_parameters"]
+    assert router_parameters == 512 == result["budget"]["router_parameters"]
+    assert total_parameters == 340608 == result["model"]["parameters"]
+    assert total_parameters - expert_parameters - router_parameters == 75392
+    assert all(sum(p.numel() for p in e.parameters()) == 33088 for block in model.blocks for e in block.ffn.experts)
+    routing = result["validation_routing"]
+    assert routing["effective_input_tokens"] == 39256
+    assert routing["padding_excluded"] is True
+    assert all(sum(layer["dispatch_counts"]) == 39256 * config["top_k"] for layer in routing["layers"])
+    variants[name] = {
+        "config": config,
+        "budget": result["budget"],
+        "expert_instances": expert_count,
+        "distinct_expert_parameter_storages": len(weights),
+        "training": {k: result["training"][k] for k in ["requested_steps", "steps", "optimizer_updates", "effective_tokens", "auxiliary_weight", "batch_size", "learning_rate"]},
+        "variant_fields": list(result),
+        "validation_routing": routing,
+        "heldout": {split: {k: v for k, v in values.items() if k != "samples"} for split, values in result["heldout"].items()},
+    }
+
+output = {
+    "environment": {"python": sys.version, "torch": torch.__version__, "torch_git_version": torch.version.git_version, "device": "cpu", "OMP_NUM_THREADS": os.environ["OMP_NUM_THREADS"], "MKL_NUM_THREADS": os.environ["MKL_NUM_THREADS"]},
+    "mechanism": {"registered_names": ["0.weight", "1.weight", "2.weight"], "parameter_numels": [4, 4, 4], "distinct_modules": 3, "distinct_weight_storages": 3, "ModuleList_has_no_forward": no_forward, "repeated_unique_parameter_numel": 4, "repeated_names_when_duplicates_enabled": ["0.weight", "1.weight", "2.weight"], "copy_keeps_destination_object_and_independent_storage": True, "exercise_outputs": [e(x).tolist() for e in experts]},
+    "frozen_report": {"path": str(frozen_path.relative_to(root)), "sha256": hashlib.sha256(raw).hexdigest(), "metadata": {k: frozen[k] for k in ["revision", "device", "seed", "torch_version", "python_version", "gpu", "step_scale", "evidence_status"]}, "result_fields": list(frozen["results"]), "dataset": frozen["results"]["dataset"], "limitations": frozen["results"]["limitations"], "variants": variants},
+    "scope": "原例與單次手動乘3；固定報告配置的CPU模型建構與計數。未訓練、未載入或下載權重、未執行GPU、雲端、正式排程。固定報告欄位與run_moe輸出僅有路由/文字品質/訓練統計，沒有語言或學科專長標註。",
+}
+print(json.dumps(output, ensure_ascii=False, indent=2))
