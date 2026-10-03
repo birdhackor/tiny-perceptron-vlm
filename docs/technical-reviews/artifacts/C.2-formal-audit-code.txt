@@ -1,0 +1,178 @@
+import hashlib
+import json
+import platform
+import re
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path.cwd()))
+import torch
+from scripts.course_experiments.applications import _verify_reasoning
+
+root = Path("docs/technical-reviews/artifacts")
+source = Path("docs/course-experiments/results/reasoning.json")
+original_bytes = source.read_bytes()
+report = json.loads(original_bytes)
+pins = {}
+for name in (
+    "scripts/course_experiments/applications.py",
+    "scripts/course_experiments/common.py",
+    "scripts/course_experiments/run.py",
+    "tiny_perceptron/data.py",
+):
+    current = hashlib.sha256(Path(name).read_bytes()).hexdigest()
+    expected = report["code_sha256"][name]
+    assert current == expected, (name, current, expected)
+    pins[name] = {"current_sha256": current, "formal_sha256": expected}
+
+
+def independently_check(candidate, row):
+    ids = candidate["generated_ids"]
+    eos = bool(ids and ids[-1] == 2)
+    content = ids[:-1] if eos else ids
+    illegal = [token for token in content if token < 8]
+    decoded = bytes(token - 8 for token in content if token >= 8).decode("utf-8", errors="replace")
+    assert decoded == candidate["generated"]
+    assert eos == candidate["eos"]
+    assert illegal == candidate["invalid_special_tokens"]
+    assert len(ids) == candidate["generated_tokens"]
+    text = decoded.strip()
+    matched = re.fullmatch(
+        r"(-?[0-9]+)\+(-?[0-9]+)=(-?[0-9]+);(-?[0-9]+)\+(-?[0-9]+)=(-?[0-9]+);answer=(-?[0-9]+)",
+        text,
+    )
+    if matched and not illegal:
+        a, b, subtotal, previous, c, total, final = map(int, matched.groups())
+        first_equation = a + b == subtotal
+        second_equation = previous + c == total
+        equations = first_equation and second_equation
+        linked = previous == subtotal and total == final
+        operands = (a, b, c) == (row["a"], row["b"], row["c"])
+        parsed = True
+        final_answer = final
+    else:
+        tail = re.search(r";answer=(-?[0-9]+)$", text) if not illegal else None
+        final_answer = int(tail[1]) if tail else None
+        parsed = equations = linked = operands = False
+        first_equation = second_equation = None
+    final_correct = final_answer == row["truth"]
+    flags = {
+        "final_answer": final_answer,
+        "parsed": parsed,
+        "equations_valid": equations,
+        "linked": linked,
+        "task_operands_valid": operands,
+        "final_correct": final_correct,
+        "fully_verified": equations and linked and operands and final_correct,
+    }
+    for key, value in flags.items():
+        assert candidate[key] == value, (row["question"], decoded, key, candidate[key], value)
+    replay = _verify_reasoning(candidate, row, "steps")
+    for key, value in flags.items():
+        assert replay[key] == value
+    return flags, eos, illegal, [first_equation, second_equation]
+
+
+budgets = report["results"]["comparison"]["steps"]["budgets"]
+assert [budget["candidate_count"] for budget in budgets] == [1, 2, 4, 8]
+summary = []
+audit_rows = []
+questions = None
+cited_bad_samples = []
+malformed_samples = []
+for budget in budgets:
+    count = budget["candidate_count"]
+    samples = budget["samples"]
+    assert len(samples) == 24
+    current_questions = [sample["question"] for sample in samples]
+    assert len(set(current_questions)) == 24
+    if questions is None:
+        questions = current_questions
+    assert current_questions == questions
+    totals = dict(candidates=0, parsed=0, equations_valid=0, linked=0, task_operands_valid=0,
+                  final_correct=0, fully_verified=0, final_correct_but_steps_invalid=0,
+                  eos=0, illegal_control_candidates=0)
+    for sample_index, row in enumerate(samples):
+        assert row["truth"] == row["a"] + row["b"] + row["c"]
+        assert len(row["candidates"]) == count
+        assert row["generation"]["candidate_count"] == count
+        assert row["generation"]["temperature"] == 0.7
+        assert row["generation"]["max_new_tokens"] == 48
+        for candidate_index, candidate in enumerate(row["candidates"]):
+            flags, eos, illegal, separate_equations = independently_check(candidate, row)
+            totals["candidates"] += 1
+            for key in ("parsed", "equations_valid", "linked", "task_operands_valid", "final_correct", "fully_verified"):
+                totals[key] += int(flags[key])
+            totals["final_correct_but_steps_invalid"] += int(flags["final_correct"] and not flags["fully_verified"])
+            totals["eos"] += int(eos)
+            totals["illegal_control_candidates"] += int(bool(illegal))
+            compact = {
+                "budget": count, "sample_index": sample_index, "candidate_index": candidate_index,
+                "question": row["question"], "original_operands": [row["a"], row["b"], row["c"]],
+                "truth": row["truth"], "generated": candidate["generated"],
+                "generated_ids": candidate["generated_ids"], "eos": eos,
+                "invalid_special_tokens": illegal, "recomputed": flags,
+                "separate_equations": separate_equations,
+            }
+            audit_rows.append(compact)
+            if candidate["generated"] == "5+0=5;5+3=10;answer=10":
+                cited_bad_samples.append(compact)
+            if not flags["parsed"]:
+                malformed_samples.append(compact)
+    for metric, key in (("parsed_candidates", "parsed"), ("candidate_final_accuracy", "final_correct"),
+                        ("fully_verified_candidates", "fully_verified"),
+                        ("final_correct_but_steps_invalid", "final_correct_but_steps_invalid")):
+        assert budget[metric]["numerator"] == totals[key]
+        assert budget[metric]["denominator"] == totals["candidates"]
+    summary.append({"budget": count, "questions": len(samples), **totals})
+
+combined = {key: sum(row[key] for row in summary) for key in totals}
+assert combined["candidates"] == 360
+assert combined["parsed"] == 359
+assert combined["fully_verified"] == 167
+assert combined["final_correct_but_steps_invalid"] == 0
+assert combined["eos"] == 360
+assert combined["illegal_control_candidates"] == 0
+assert len(cited_bad_samples) == 5
+assert len(malformed_samples) == 1
+assert malformed_samples[0]["generated"] == "0+3=3;3+3=we;answer=13"
+one = summary[0]
+assert one["parsed"] == one["linked"] == one["task_operands_valid"] == 24
+assert one["equations_valid"] == one["final_correct"] == 11
+
+row = {"a": 2, "b": 2, "c": 0, "truth": 4}
+synthetic = []
+for text, control, eos in (("2+2=4;4+0=4;answer=4", [], True),
+                           ("2+2=4;4+0=4;answer=4", [3], True),
+                           ("2+2=4;4+0=4;answer=4", [], False),
+                           ("3+1=4;4+0=4;answer=4", [], True),
+                           ("2+2=5;5+-1=4;answer=4", [], True)):
+    sample = {"generated": text, "invalid_special_tokens": control, "eos": eos}
+    answer = _verify_reasoning(sample, row, "steps")
+    synthetic.append({"input": sample, "task": row, "result": answer})
+assert synthetic[0]["result"]["fully_verified"]
+assert not synthetic[1]["result"]["parsed"]
+assert synthetic[1]["result"]["final_answer"] is None
+assert synthetic[2]["result"]["fully_verified"]
+assert synthetic[3]["result"]["equations_valid"] and synthetic[3]["result"]["linked"]
+assert not synthetic[3]["result"]["task_operands_valid"]
+assert synthetic[4]["result"]["final_correct"] and not synthetic[4]["result"]["fully_verified"]
+
+evidence = {
+    "reviewer_task": "/root/technical_round_coordinator/technical_c_2_fresh",
+    "source_path": str(source), "source_sha256": hashlib.sha256(original_bytes).hexdigest(),
+    "formal_environment": {key: report[key] for key in ("revision", "device", "seed", "torch_version", "python_version", "gpu", "step_scale")},
+    "model_config": report["results"]["model_config"], "split": report["results"]["split"],
+    "code_pins": pins, "per_budget": summary, "combined": combined,
+    "unique_questions": questions, "cited_bad_samples": cited_bad_samples,
+    "malformed_samples": malformed_samples, "synthetic_verifier_cases": synthetic,
+    "original_sample_fields_with_independent_recalculation": audit_rows,
+    "scope": "離線 CPU 重讀凍結生成 ID 與內容、重算全部 360 份；未重訓、未重跑生成或 GPU 排程。",
+}
+(root / "C.2-formal-audit.json").write_text(json.dumps(evidence, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+print(json.dumps({"python": sys.version, "torch": torch.__version__, "torch_commit": torch.version.git_version,
+                  "device": "cpu", "platform": platform.platform(), "threads": torch.get_num_threads()}, ensure_ascii=False))
+print(json.dumps({"per_budget": summary, "combined": combined, "unique_questions": len(questions),
+                  "cited_bad_samples": len(cited_bad_samples), "malformed_samples": len(malformed_samples),
+                  "pin_matches": len(pins), "synthetic_cases": synthetic}, ensure_ascii=False, indent=2))
+print("全部 360 份重算與正式欄位相符；原 runner pin 相符；只支持本輪固定生成。")

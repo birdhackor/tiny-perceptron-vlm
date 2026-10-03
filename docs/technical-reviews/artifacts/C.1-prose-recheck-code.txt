@@ -1,0 +1,79 @@
+import hashlib
+import json
+import re
+import sys
+import tarfile
+from datetime import datetime, timezone
+from pathlib import Path
+
+import torch
+
+from scripts.course_experiments.applications import _conversation, _reasoning_records, _reasoning_sft
+from scripts.course_experiments.common import split_records
+
+root = Path.cwd()
+art = root / 'docs/technical-reviews/artifacts'
+sha = lambda raw: hashlib.sha256(raw).hexdigest()
+prior = json.loads((art / 'C.1-before-prose-recheck-report.json').read_text())
+old_snapshot = json.loads((art / 'C.1-source.json').read_text())
+original_formal_probe = json.loads((art / 'C.1-formal-output.json').read_text())
+raw = (root / 'course/chapters/0C.md').read_bytes()
+headings = list(re.finditer(rb'(?m)^## ([A-Z\d]+\.\d+) [^\r\n]+', raw))
+sections = {}
+for i, heading in enumerate(headings):
+    end = headings[i + 1].start() if i + 1 < len(headings) else len(raw)
+    sections[heading[1].decode()] = raw[heading.start():end]
+intro = raw[:headings[0].start()]
+assert sha(sections['C.1']) == '29ddd2c45a23640d8926c25eec3dc974dc67dc46eb8b4dca89e9fec460fbd85f'
+assert sha(sections['C.3']) == '7fee9307665e98ea5fc6dd5c428e886b5d48f3b5b8397c35f693a36c7944dd7b'
+assert sha(intro) == prior['intro_sha256']
+snapshot = {'encoding': 'UTF-8', 'normalization': 'none; raw JSON strings retain EOF blank lines', 'intro': intro.decode(), 'intro_sha256': sha(intro), 'whole_chapter_sha256': sha(raw), 'sections': {id: {'raw': sections[id].decode(), 'sha256': sha(sections[id])} for id in ['C.1', 'C.2', 'C.3', 'C.4', 'C.5', 'C.6', 'C.7']}}
+for item in snapshot['sections'].values():
+    assert sha(item['raw'].encode()) == item['sha256']
+unchanged_fences = {}
+for id in snapshot['sections']:
+    old = old_snapshot['sections'][id]['raw']
+    new = snapshot['sections'][id]['raw']
+    fences = lambda text: re.findall(r'```[^\n]*\n.*?```', text, re.S)
+    unchanged_fences[id] = fences(old) == fences(new)
+assert all(unchanged_fences.values())
+exercise_unchanged = sections['C.1'].decode().split('練習只把', 1)[1] == old_snapshot['sections']['C.1']['raw'].split('練習只把', 1)[1]
+assert exercise_unchanged
+figure_hashes = {p: sha((root / p).read_bytes()) for p in prior['figure_sha256']}
+assert figure_hashes == prior['figure_sha256']
+frozen_path = root / 'docs/course-experiments/results/reasoning.json'
+frozen = json.loads(frozen_path.read_text())
+assert sha(frozen_path.read_bytes()) == original_formal_probe['input_sha256']['docs/course-experiments/results/reasoning.json']
+codepins = {p: sha((root / p).read_bytes()) for p in original_formal_probe['code_pins']}
+assert all(value == frozen['code_sha256'][path] for path, value in codepins.items())
+preserved_artifacts = {}
+for a in prior['artifacts']:
+    assert sha((root / a['path']).read_bytes()) == a['sha256']
+    preserved_artifacts[a['id']] = a['sha256']
+
+# Only reconstruct the newly described data-file bytes and compare frozen
+# artifact hashes. No model construction, forward, optimizer, training schedule,
+# sampling, original/exercise replay, or SVG rendering occurs here.
+splits = split_records(_reasoning_records(), 42)
+data = {'dataset.json': splits}
+for mode in ['direct', 'steps']:
+    data[mode + '-dataset.json'] = {name: _reasoning_sft(rows, mode) for name, rows in splits.items()}
+archive = root / 'assets/training/gsm8k-v1.tar.gz'
+assert sha(archive.read_bytes()) == original_formal_probe['gsm8k']['archive_sha256']
+with tarfile.open(archive, 'r:gz') as tar:
+    subset = tar.extractfile('reasoning-initial/gsm8k-train-first200.jsonl').read()
+assert sha(subset) == original_formal_probe['gsm8k']['raw_subset_sha256']
+original = [json.loads(line) for line in subset.splitlines() if line.strip()]
+records = [{'family': sha(row['question'].encode()), 'source_index': i, 'provenance': 'GSM8K original human-authored training answer; not teacher generation', 'messages': _conversation(row['question'], row['answer'])} for i, row in enumerate(original)]
+data['gsm8k-dataset.json'] = split_records(records, 42)
+file_checks = []
+for filename, value in data.items():
+    encoded = (json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False) + '\n').encode('utf-8')
+    recorded = next(item for item in frozen['artifacts'] if item['path'] == filename)
+    assert len(encoded) == recorded['bytes']
+    assert sha(encoded) == recorded['sha256']
+    file_checks.append({'path': filename, 'recorded': recorded, 'reconstructed_bytes': len(encoded), 'reconstructed_sha256': sha(encoded), 'full_records_per_split': {name: len(rows) for name, rows in value.items()}, 'all_record_contents_in_serialized_dataset': True, 'scope': 'Only hashes and split counts retained publicly; full data bytes were reconstructed in memory and not copied into reviewer artifacts.'})
+output = {'executed_at_utc': datetime.now(timezone.utc).isoformat(), 'environment': {'python': sys.version, 'torch': torch.__version__, 'torch_git': torch.version.git_version, 'device': 'cpu', 'OMP_NUM_THREADS': '1', 'MKL_NUM_THREADS': '1'}, 'scope': '只為新資料保存界定核對原JSON欄位/固定writer及完整data-file byte hash，未重跑既有CPU例/練習/weights forward/生成/SVG或任何正式訓練。', 'whole_chapter_sha256': sha(raw), 'current_source_sha256': sha(sections['C.1']), 'current_intro_sha256': sha(intro), 'intro_unchanged': intro.decode() == old_snapshot['intro'], 'code_fences_unchanged': unchanged_fences, 'exercise_unchanged': exercise_unchanged, 'figures_unchanged': figure_hashes, 'formal_result_sha256': sha(frozen_path.read_bytes()), 'writer_and_necessary_code_pins': codepins, 'preserved_prior_artifact_hashes': preserved_artifacts, 'dataset_file_checks': file_checks, 'formal_original_fields': {'same_base_sha256': {name: m['base_state_sha256'] for name, m in frozen['results']['comparison'].items()}, 'split': frozen['results']['split'], 'all_test_generation_shapes': {name: [{'k': b['candidate_count'], 'questions': len(b['samples']), 'candidates': sum(len(s['candidates']) for s in b['samples'])} for b in m['budgets']] for name, m in frozen['results']['comparison'].items()}, 'dataset_artifact_entries': [item for item in frozen['artifacts'] if item['path'] in data]}, 'all_assertions_passed': True}
+(art / 'C.1-current-source-recheck.json').write_text(json.dumps(snapshot, ensure_ascii=False, indent=2) + '\n')
+(art / 'C.1-prose-recheck-output.json').write_text(json.dumps(output, ensure_ascii=False, indent=2) + '\n')
+print(json.dumps({'all_assertions_passed': True, 'current_source_sha256': output['current_source_sha256'], 'whole_chapter_sha256': output['whole_chapter_sha256'], 'intro_unchanged': output['intro_unchanged'], 'code_fences_unchanged': unchanged_fences, 'exercise_unchanged': exercise_unchanged, 'data_files': file_checks}, ensure_ascii=False, indent=2))

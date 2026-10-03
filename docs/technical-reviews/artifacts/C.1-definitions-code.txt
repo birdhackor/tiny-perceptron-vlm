@@ -1,0 +1,146 @@
+import hashlib
+import json
+import os
+import re
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+import numpy as np
+import torch
+
+root = Path.cwd()
+art = root / 'docs/technical-reviews/artifacts'
+cache = root / 'outputs/technical-sources/C.1-own'
+sha = lambda b: hashlib.sha256(b).hexdigest()
+file_sha = lambda p: sha(Path(p).read_bytes())
+dump = lambda p, x: Path(p).write_text(json.dumps(x, ensure_ascii=False, indent=2) + '\n')
+
+def split(raw):
+    matches = list(re.finditer(r'^## (C\.\d+) ', raw, re.M))
+    sections = {}
+    for i, m in enumerate(matches):
+        text = raw[m.start():matches[i+1].start() if i+1 < len(matches) else len(raw)]
+        sections[m.group(1)] = {'raw': text, 'sha256': sha(text.encode())}
+    return {'encoding':'UTF8', 'normalization':'none; EOF空行保留', 'intro':raw[:matches[0].start()],
+            'intro_sha256':sha(raw[:matches[0].start()].encode()), 'whole_chapter_sha256':sha(raw.encode()),
+            'sections':sections}
+
+previous = json.loads((art / 'C.1-before-definitions-recheck-report.json').read_text())
+assert file_sha(art / 'C.1-before-definitions-recheck-report.json') == '54ff432ec3b6e7a50c1fdae97962f0a240a4b1c18d32b2be0581005e3bb8dbba'
+raw = (root / 'course/chapters/0C.md').read_bytes().decode('utf8')
+current = split(raw)
+assert current['sections']['C.1']['sha256'] == 'e1210b47af2eae6e3389aa7c26d6b8d1e9635a2e16221768f90ce279ec216c93'
+assert current['whole_chapter_sha256'] == 'a0d89a553125b96235c8ae390c9f7840ad6b85f851b608773a8e66bbab1aafcd'
+mid = json.loads((art / 'C.1-current-source-recheck.json').read_text())
+diff = json.loads((art / 'C.1-definitions-full-diff.json').read_text())
+assert diff['old_raw'].encode() == (mid['intro'] + ''.join(s['raw'] for s in mid['sections'].values())).encode()
+assert diff['new_raw'].encode() == raw.encode()
+assert sha(diff['unified_diff'].encode()) == diff['raw_diff_sha256']
+assert all(diff['roundtrip'].values())
+assert current['intro'] == mid['intro']
+assert all(current['sections'][id]['raw'] == mid['sections'][id]['raw'] for id in ['C.2','C.3','C.4','C.5','C.6','C.7'])
+python_fences = lambda text: re.findall(r'```python\n(.*?)```', text, re.S)
+assert python_fences(current['sections']['C.1']['raw']) == python_fences(mid['sections']['C.1']['raw'])
+assert current['sections']['C.1']['raw'].split('練習只把',1)[1] == mid['sections']['C.1']['raw'].split('練習只把',1)[1]
+dump(art / 'C.1-definitions-current-source.json', current)
+
+wraw = (root / 'course/first-steps.md').read_bytes().decode()
+wm = re.search(r'^## W\.1 ', wraw, re.M)
+wn = re.search(r'^## ', wraw[wm.end():], re.M)
+w1 = wraw[wm.start():wm.end()+wn.start() if wn else len(wraw)]
+assert 'source .venv/bin/activate' in w1 and 'Activate.ps1' in w1
+assert '.svg' not in w1
+dump(art / 'C.1-definitions-W.1-source.json', {'source':'course/first-steps.md#W.1','raw':w1,'sha256':sha(w1.encode()),
+     'whole_file_sha256':sha(wraw.encode()),'scope':'完整親讀W.1；只支持C.1環境啟用連結，不對W.1的clone/install/cloud/其他原例作primary判定或執行；無SVG。'})
+
+source_specs = [
+ ('o-fingerprint','cpython-hashlib-v3.13.5.rst','https://raw.githubusercontent.com/python/cpython/v3.13.5/Doc/library/hashlib.rst','CPython v3.13.5','lines1–159；hash介面、SHA256、bytes-like/update/digest/hexdigest','SHA256以輸入bytes計算摘要；可用於核對內容，沒有聲稱數學上不可能碰撞或證明模型能力。'),
+ ('o-venv','cpython-venv-v3.13.5.rst','https://raw.githubusercontent.com/python/cpython/v3.13.5/Doc/library/venv.rst','CPython v3.13.5','lines192–232；activation與平台命令','啟用環境把bin/Scripts放到PATH前端，使python選該環境；POSIX與Windows命令不同，直接指定Python路徑也可。'),
+ ('o-git-revisions','git-revisions-v2.50.0.adoc','https://raw.githubusercontent.com/git/git/v2.50.0/Documentation/revisions.adoc','Git v2.50.0','lines1–94；revision parameter及40hex object name','完整Git object名稱可定位commit版本；這裡固定來源revision，與本實驗數值bytes/整檔SHA256比對的對象不同。Git object ID本身也由雜湊建立，正文沒有否定這點。'),
+ ('o-torch-state','pytorch-module-5c488690.py','https://raw.githubusercontent.com/pytorch/pytorch/5c4886908584029761b579af026dcfb627c84070/torch/nn/modules/module.py','PyTorch commit5c4886908584029761b579af026dcfb627c84070 / installed2.14.1+cpu','lines2148–2173及2199–2285；_save_to_state_dict/state_dict','state_dict依已註冊parameters/buffers/modules順序形成OrderedDict。本実驗取base_state.values()，不把任意模型/任意命名順序當跨平台通用序列化規格。'),
+ ('o-torch-numpy','pytorch-tensor-docs-5c488690.py','https://raw.githubusercontent.com/pytorch/pytorch/5c4886908584029761b579af026dcfb627c84070/torch/_tensor_docs.py','同一PyTorch official commit / installed2.14.1+cpu','lines3632–3657；Tensor.numpy','detach再cpu再numpy符合CPU、無grad與支援dtype條件；所得array保留tensor數值，不是checkpoint整檔內容。'),
+ ('o-numpy-bytes','numpy-add-newdocs-v2.5.3.py','https://raw.githubusercontent.com/numpy/numpy/v2.5.3/numpy/_core/_add_newdocs.py','NumPy v2.5.3 / installed2.5.3','lines4670–4710；ndarray.tobytes','tobytes複製array原始數值bytes，預設C順序；dtype與byte order是既定實驗的條件，沒有跨任意環境相等保證。'),
+ ('o-lfs-site','git-lfs-site-20261003.html','https://git-lfs.com/','2026-10-03實際頁面，installer連結v3.8.0；不假本機安裝版本','完整HTML可見文字；標題、說明、Download/Getting Started/Platforms','Git Large File Storage是Git附加工具，以pointer配合remote大檔；官方頁提供各作業系統安裝選項。不同平台支援/安裝成功需使用者環境條件，不是本輪實際安裝測試。'),
+ ('o-lfs-install','git-lfs-install-v3.7.1.adoc','https://raw.githubusercontent.com/git-lfs/git-lfs/v3.7.1/docs/man/git-lfs-install.adoc','Git LFS v3.7.1','完整manpage；DESCRIPTION/OPTIONS --local','install設定clean/smudge filters與repo pre-push hook；--local把filters設定在目前repo local config。須在repo、工具在PATH；既有hook可造成失敗，需要文件的manual流程。'),
+ ('o-lfs-readme','git-lfs-readme-v3.7.1.md','https://raw.githubusercontent.com/git-lfs/git-lfs/v3.7.1/README.md','Git LFS v3.7.1','lines1–112；Getting Started/Installing/Platforms','官方提供獨立LFS binary；Git for Windows可能隨附，但一般僅Git不能保證LFS可用；git-lfs需在PATH。'),
+ ('o-lfs-version','git-lfs-version-v3.7.1.go','https://raw.githubusercontent.com/git-lfs/git-lfs/v3.7.1/commands/command_version.go','Git LFS v3.7.1','完整467bytes source；versionCommand/RegisterCommand','version子命令輸出lfshttp.UserAgent；沒有下載或初始化repository行為。'),
+ ('o-lfs-agent','git-lfs-client-v3.7.1.go','https://raw.githubusercontent.com/git-lfs/git-lfs/v3.7.1/lfshttp/client.go','Git LFS v3.7.1','lines29–35及606–608','UserAgent在init設為config.VersionDesc；其餘HTTPclient流程不作本輪判定。'),
+ ('o-lfs-version-format','git-lfs-config-version-v3.7.1.go','https://raw.githubusercontent.com/git-lfs/git-lfs/v3.7.1/config/version.go','Git LFS v3.7.1','完整482bytes source；Version/VersionDesc fmt','Version=3.7.1，VersionDesc含git-lfs/版本與OS/arch/Go；證實version命令應顯示版本資訊，不聲稱本機真的已執行Git命令。'),
+ ('o-gsm-commit','openai-gsm-commit-3101c7d5.json','https://api.github.com/repos/openai/grade-school-math/git/commits/3101c7d5072418e28b9008a6636bde82a006892c','OpenAI fixed commit3101c7d5072418e28b9008a6636bde82a006892c','只親讀sha/tree.sha/tree.url原欄位','官方commit元資料證實3101c7d5為commit識別，對應tree565dcdab；未讀author/message等無關欄位，未下載train資料。'),
+ ('o-gsm-tree','openai-gsm-resolved-tree-565dc.json','https://api.github.com/repos/openai/grade-school-math/git/trees/565dcdab3f9c299c758fa5e8974bcde5c1ac98aa?recursive=1','OpenAI commit3101c7d5所指固定tree565dcdab','tree.sha、truncated與精確grade_school_math/data/train.jsonl entry','原tree定位train.jsonl為blob7d97154b、4166206bytes；僅讀原file metadata，不取得完整train blob。既有raw200來源另由前次自身包SHA證據支持。'),
+]
+notes=[]
+for sid,name,url,version,locator,note in source_specs:
+    b=(cache/name).read_bytes()
+    notes.append({'id':sid,'url':url,'version':version,'download_sha256':sha(b),'download_bytes':len(b),'accessed_on':'2026-10-03',
+                  'locator':locator,'own_note':note.replace('実','實'),'english_verbatim_words':0,'ignored_original_cache':str(cache/name)})
+dump(art / 'C.1-definitions-original-notes.json',{'accessed_on':'2026-10-03','english_verbatim_words':0,'sources':notes,
+ 'retrieval_failures':[{'url':'https://numpy.org/doc/2.3/reference/generated/numpy.ndarray.tobytes.html','observed':'HTTP403','used_as_evidence':False,'fallback':'實查installedNumPy2.5.3，以官方同版_add_newdocs原source核對'},
+ {'url':'https://raw.githubusercontent.com/git-lfs/git-lfs/v3.7.1/docs/man/git-lfs-version.adoc','observed':'HTTP404','used_as_evidence':False,'fallback':'versionCommand、UserAgent與VersionDesc三個精確v3.7.1原source'}],
+ 'scope':'官方原source本人親讀上述定位；公開只自己的繁體筆記、公式/必要metadata與SHA，未公開原文長引，ignored cache不是唯一證據。'})
+
+installed={
+ 'o-torch-state':Path(torch.__file__).parent/'nn/modules/module.py',
+ 'o-torch-numpy':Path(torch.__file__).parent/'_tensor_docs.py',
+ 'o-numpy-bytes':Path(np.__file__).parent/'_core/_add_newdocs.py'}
+comparisons=[]
+for sid,p in installed.items():
+    n=next(n for n in notes if n['id']==sid)
+    assert file_sha(p)==n['download_sha256']
+    comparisons.append({'source_id':sid,'installed_path':str(p),'installed_sha256':file_sha(p),'official_sha256':n['download_sha256'],'byte_equal':True})
+assert torch.version.git_version=='5c4886908584029761b579af026dcfb627c84070'
+assert torch.__version__=='2.14.1+cpu' and np.__version__=='2.5.3'
+
+formal=json.loads((root/'docs/course-experiments/results/reasoning.json').read_text())
+assert file_sha(root/'docs/course-experiments/results/reasoning.json')=='8a96e308b1286d55a25ab3db82218b72d05bf905471ed9703f62c183982a6f48'
+base={m:formal['results']['comparison'][m]['base_state_sha256'] for m in ['direct','steps']}
+prior=json.loads((art/'C.1-formal-output.json').read_text())
+assert len(set(base.values()))==1 and base['direct']==prior['synthetic']['same_base_sha256']
+pins={}
+for path,pin in prior['code_pins'].items():
+    assert file_sha(root/path)==pin['current_sha256']==pin['formal_sha256']
+    pins[path]=file_sha(root/path)
+entries=[i for i in formal['artifacts'] if i['path'] in ['dataset.json','direct-dataset.json','steps-dataset.json','gsm8k-dataset.json']]
+old_entries=json.loads((art/'C.1-prose-recheck-output.json').read_text())['formal_original_fields']['dataset_artifact_entries']
+assert entries==old_entries
+app=(root/'scripts/course_experiments/applications.py').read_text()
+runner=(root/'scripts/course_experiments/run.py').read_text()
+assert 'value.detach().cpu().numpy().tobytes() for value in base_state.values()' in app
+assert 'hashlib.sha256(path.read_bytes()).hexdigest()' in runner
+commit=json.loads((cache/'openai-gsm-commit-3101c7d5.json').read_text())
+tree=json.loads((cache/'openai-gsm-resolved-tree-565dc.json').read_text())
+ref_tree=json.loads((cache/'openai-gsm-tree-3101c7d5.json').read_text())
+train=next(e for e in tree['tree'] if e['path']=='grade_school_math/data/train.jsonl')
+assert commit['sha']=='3101c7d5072418e28b9008a6636bde82a006892c'
+assert commit['tree']['sha']==tree['sha']=='565dcdab3f9c299c758fa5e8974bcde5c1ac98aa' and not tree['truncated']
+assert train==next(e for e in ref_tree['tree'] if e['path']==train['path'])
+assert train['sha']=='7d97154b91aef28d01c3301741c81ce90039a4b1' and train['size']==4166206
+meta=json.loads((root/'assets/training/sources/gsm8k.json').read_text())
+assert meta['source']['repository']=='https://github.com/openai/grade-school-math'
+assert meta['source']['revision']==commit['sha'] and meta['source']['source_path']==train['path']
+subset=next(i for i in meta['assets'] if i['kind']=='training_subset')
+assert subset['revision']==commit['sha'] and subset['sha256']=='03a8e89683ff5335dd79e1d8468ede692f263b4de113e59025833eeadc0f05a9'
+
+unchanged_artifacts={}
+for a in previous['artifacts']:
+    assert file_sha(root/a['path'])==a['sha256']
+    unchanged_artifacts[a['id']]=a['sha256']
+for path,s in previous['figure_sha256'].items():assert file_sha(root/path)==s
+
+out={'executed_at_utc':datetime.now(timezone.utc).isoformat(),'environment':{'python':sys.version,'torch':torch.__version__,'torch_git':torch.version.git_version,'numpy':np.__version__,'device':'cpu','OMP_NUM_THREADS':os.environ['OMP_NUM_THREADS'],'MKL_NUM_THREADS':os.environ['MKL_NUM_THREADS']},
+ 'scope':'本輪僅有界CPU原metadata/檔案字節雜湊及官方原source與installed版本核對；沒有模型構造、forward、數值toy重跑、訓練、圖render、Git命令、LFS安裝/下載。',
+ 'current_source_sha256':current['sections']['C.1']['sha256'],'whole_chapter_sha256':current['whole_chapter_sha256'],'intro_sha256':current['intro_sha256'],
+ 'source_identity':{'intro_unchanged':True,'C.2-C.7_unchanged':True,'python_fence_unchanged':True,'exercise_unchanged':True,'bash_changed':'只新增git lfs install --local','figure_sha256':previous['figure_sha256'],'lossless_diff_roundtrip':diff['roundtrip']},
+ 'official_installed_byte_comparisons':comparisons,'necessary_formal_code_pins':pins,'formal_json_sha256':file_sha(root/'docs/course-experiments/results/reasoning.json'),
+ 'base_state_sha256':base,'prior_executed_numeric_base_state_sha256':prior['synthetic']['same_base_sha256'],'dataset_artifact_entries':entries,
+ 'hash_input_scopes':{'initial_state':'依base_state.values()順序，detach/cpu/numpy，再各tobytes預設C-order串接；只tensor數值bytes，不含names/shapes/header或完整checkpoint檔','datafile':'path.read_bytes()完整檔案bytes經hashlib.sha256'},
+ 'source_version_location':{'commit_sha':commit['sha'],'tree_sha':tree['sha'],'train_entry':train,'ref_query_tree_sha':ref_tree['sha'],'ref_query_note':'GitHub tree endpoint以commit ref查詢回傳sha為requestedref；另查commit元資料與真正tree object，勿把兩者混同。','train_blob_downloaded':False},
+ 'archived_subset_provenance':{'source':meta['source'],'subset_sha256':subset['sha256'],'subset_bytes':subset['bytes'],'source_url':subset['source_url'],'scope':'本輪只親讀固定source metadata並比對官方commit/tree定位；原已存在raw200的本人實讀與bytes/SHA核對保留在a-formal，未再讀/下載training rows。'},
+ 'previous_artifact_sha256_unchanged':unchanged_artifacts,
+ 'unexecuted_commands':['git lfs version','git lfs install --local',"git lfs pull --include='assets/training/gsm8k-v1.tar.gz' --exclude=''",'python scripts/course_experiments/run.py --experiment reasoning --device cpu'],
+ 'command_conditions':'須已建立repo、git-lfs在PATH、可寫local config/hook、Git/remote/ref/index/attributes可用、所需網路與Python依賴；existing hook可能阻止install。W.1 OS啟用命令與LFS官方OS安裝選項按官方規則核，未實測任意平台。',
+ 'own_inspection_failure':{'command':'讀自己C.1.json的只讀Python檢視，迴圈錯用claim_id','observed':'KeyError: claim_id / exit1','correction':'下一次改用真正id欄位讀必要自身claims；不是正文或審閱checker failure'},
+ 'all_assertions_passed':True}
+dump(art/'C.1-definitions-output.json',out)
+print(json.dumps({'all_assertions_passed':True,'current_source_sha256':out['current_source_sha256'],'official_installed_byte_equal':len(comparisons),'prior_artifacts_unchanged':len(unchanged_artifacts),'no_training_or_git_commands':True},ensure_ascii=False,indent=2))

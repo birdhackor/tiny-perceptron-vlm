@@ -1,0 +1,142 @@
+import hashlib
+import json
+import random
+import sys
+import tarfile
+from dataclasses import asdict
+from datetime import datetime, timezone
+from pathlib import Path
+
+import torch
+
+from scripts.course_experiments.applications import _conversation, _nll_examples, _reasoning_records, _reasoning_sft, _sft_nll, _verify_reasoning
+from scripts.course_experiments.common import Context, new_lm, records_sha256, split_records, text_examples
+from tiny_perceptron.data import IGNORE, ByteTokenizer, render_chat
+from tiny_perceptron.training import load_checkpoint
+
+torch.set_num_threads(1)
+root = Path.cwd()
+out = root / 'docs/technical-reviews/artifacts'
+sha = lambda value: hashlib.sha256(value).hexdigest()
+paths = ['docs/course-experiments/results/reasoning.json', 'docs/course-experiments/releases/reasoning.json', 'docs/course-experiments/public-releases/reasoning.json']
+frozen = json.loads(Path(paths[0]).read_text())
+release = json.loads(Path(paths[2]).read_text())['release']
+results = frozen['results']
+evidence = {'executed_at_utc': datetime.now(timezone.utc).isoformat(), 'environment': {'python': sys.version, 'torch': torch.__version__, 'torch_git': torch.version.git_version, 'device': 'cpu', 'OMP_NUM_THREADS': '1', 'MKL_NUM_THREADS': '1'}, 'input_sha256': {p: sha(Path(p).read_bytes()) for p in paths}, 'formal_environment': {k: frozen[k] for k in ['revision', 'device', 'seed', 'torch_version', 'python_version', 'gpu', 'step_scale', 'evidence_status', 'unfinished_schedules']}, 'scope': '離線 CPU 的 frozen records 重新計數、既有 pinned 公開 checkpoint 的 teacher-forced NLL，與既有 GSM8K archive 的分段驗證；沒有重跑任何正式訓練排程、下載資料或模型，也沒有重播 CUDA 時間。'}
+necessary = ['scripts/course_experiments/applications.py', 'scripts/course_experiments/common.py', 'scripts/course_experiments/run.py', 'tiny_perceptron/data.py', 'tiny_perceptron/model.py', 'tiny_perceptron/training.py', 'tiny_perceptron/assets.py']
+evidence['code_pins'] = {p: {'current_sha256': sha(Path(p).read_bytes()), 'formal_sha256': frozen['code_sha256'][p]} for p in necessary}
+assert all(v['current_sha256'] == v['formal_sha256'] for v in evidence['code_pins'].values())
+ctx = Context('cpu', Path('/tmp/C.1-no-training-output'), Path('/tmp/C.1-no-dependencies'), root / 'assets/training', seed=42)
+rows = _reasoning_records()
+splits = split_records(rows, 42)
+evidence['synthetic'] = {'records': len(rows), 'split': {}, 'same_base_sha256': None, 'models': {}}
+for name, values in splits.items():
+    actual = {'records': len(values), 'families': len({r['family'] for r in values}), 'sha256': records_sha256(values)}
+    assert actual == results['split'][name]
+    evidence['synthetic']['split'][name] = actual
+assert not any({r['family'] for r in splits[a]} & {r['family'] for r in splits[b]} for a, b in [('train', 'test'), ('train', 'validation'), ('validation', 'test')])
+base = new_lm(ctx, width=64, layers=2, max_length=128, heads=2, backend='sdpa')
+base_sha = sha(b''.join(v.detach().cpu().numpy().tobytes() for v in base.state_dict().values()))
+assert all(m['base_state_sha256'] == base_sha for m in results['comparison'].values())
+evidence['synthetic']['same_base_sha256'] = base_sha
+evidence['synthetic']['model_config'] = asdict(base.config)
+for mode in ['direct', 'steps']:
+    reported = results['comparison'][mode]
+    formatted = {name: _reasoning_sft(values, mode) for name, values in splits.items()}
+    examples = {name: text_examples(values, mode='sft', max_length=128) for name, values in formatted.items()}
+    rng = random.Random(42)
+    used_targets = sum(sum(int((labels != IGNORE).sum()) for _, labels in rng.choices(examples['train'], k=24)) for _ in range(900))
+    assert used_targets == reported['training']['effective_tokens']
+    assert records_sha256(formatted['train']) == reported['training']['records_sha256']
+    b1 = reported['budgets'][0]
+    recount = []
+    for sample in b1['samples']:
+        assert sample['generation']['candidate_count'] == 1
+        assert sample['generation']['temperature'] == 0.7
+        assert sample['generation']['max_new_tokens'] == (8 if mode == 'direct' else 48)
+        candidate = sample['candidates'][0]
+        verification = _verify_reasoning(candidate, sample, mode)
+        assert all(candidate[k] == v for k, v in verification.items())
+        recount.append({'question': sample['question'], 'truth': sample['truth'], 'generated': candidate['generated'], 'generated_ids': candidate['generated_ids'], 'verification': verification})
+    correct = sum(r['verification']['final_correct'] for r in recount)
+    assert correct == b1['candidate_final_accuracy']['numerator']
+    checkpoint = Path('checkpoints/course/reasoning') / (mode + '.pt')
+    weightsha = sha(checkpoint.read_bytes())
+    manifest = next(v for v in release['public_manifest']['files'] if v['output'] == checkpoint.name)
+    assert weightsha == manifest['sha256']
+    model, payload = load_checkpoint(checkpoint, 'cpu')
+    train_nll = _sft_nll(model, formatted['train'], ctx)
+    test_nll = _sft_nll(model, formatted['test'], ctx)
+    assert abs(train_nll['nll'] - reported['training']['final_loss']) < 1e-5
+    assert abs(test_nll['nll'] - reported['test']['nll']) < 1e-5
+    assert test_nll['effective_tokens'] == reported['test']['effective_tokens']
+    evidence['synthetic']['models'][mode] = {'training_record_projection': {k:v for k,v in reported['training'].items() if k != 'history'}, 'used_targets_recount': used_targets, 'test_record': reported['test'], 'teacher_forced_cpu_train_nll': train_nll, 'teacher_forced_cpu_test_nll': test_nll, 'one_candidate_correct': correct, 'one_candidate_denominator': len(recount), 'one_candidate_records': recount, 'checkpoint': {'input_path': str(checkpoint), 'sha256': weightsha, 'bytes': checkpoint.stat().st_size, 'immutable_url': f"https://huggingface.co/{release['repo']}/resolve/{release['weights_revision']}/{manifest['path']}", 'public_revision': release['revision'], 'weights_revision': release['weights_revision'], 'config': payload['config'], 'step': payload['step'], 'metadata': payload['metadata']}}
+evidence['synthetic']['target_ratio'] = results['comparison']['steps']['training']['effective_tokens'] / results['comparison']['direct']['training']['effective_tokens']
+archive = Path('assets/training/gsm8k-v1.tar.gz')
+assert sha(archive.read_bytes()) == frozen['assets'][0]['archive_sha256']
+with tarfile.open(archive, 'r:gz') as tar:
+    raw = tar.extractfile('reasoning-initial/gsm8k-train-first200.jsonl').read()
+    provenance = json.loads(tar.extractfile('reasoning-initial/asset-manifest.json').read())
+original = [json.loads(line) for line in raw.splitlines() if line.strip()]
+assert len(original) == 200
+assert sha(raw) == results['gsm8k_training_pilot']['source_sha256']
+records = [{'family': sha(row['question'].encode()), 'source_index': i, 'provenance': 'GSM8K original human-authored training answer; not teacher generation', 'messages': _conversation(row['question'], row['answer'])} for i, row in enumerate(original)]
+gsm_splits = split_records(records, 42)
+gsm_examples = {}
+packing = {}
+for name, values in gsm_splits.items():
+    assert records_sha256(values) == results['gsm8k_training_pilot']['split'][name]['sha256']
+    segments = []
+    skipped = 0
+    full_targets = 0
+    retained_targets = 0
+    max_length = 0
+    for row in values:
+        x, labels = render_chat(row['messages'])
+        full = labels[labels != IGNORE].tolist()
+        retained = []
+        assert len(full) == len(row['messages'][1]['content'].encode('utf-8')) + 1
+        assert full[-1] == 2
+        for start in range(0, len(x), 128):
+            segment = (x[start:start + 128], labels[start:start + 128])
+            targets = segment[1][segment[1] != IGNORE].tolist()
+            if not targets:
+                skipped += 1
+                continue
+            segments.append(segment)
+            max_length = max(max_length, len(segment[0]))
+            retained += targets
+        assert retained == full
+        full_targets += len(full)
+        retained_targets += len(retained)
+    gsm_examples[name] = segments
+    packing[name] = {'records': len(values), 'families': len({r['family'] for r in values}), 'segments': len(segments), 'question_only_segments_skipped': skipped, 'full_answer_targets_including_eos': full_targets, 'retained_answer_targets': retained_targets, 'max_length': max_length}
+    assert retained_targets == results['gsm8k_training_pilot']['packing'][name]['effective_tokens']
+    assert len(segments) == results['gsm8k_training_pilot']['packing'][name]['segments']
+rng = random.Random(42)
+gsm_used = sum(sum(int((labels != IGNORE).sum()) for _, labels in rng.choices(gsm_examples['train'], k=16)) for _ in range(150))
+assert gsm_used == results['gsm8k_training_pilot']['training']['effective_tokens']
+initial = new_lm(ctx, width=32, layers=1, max_length=128, heads=1, backend='sdpa')
+initial_nll = _nll_examples(initial, gsm_examples['train'], ctx)
+assert abs(initial_nll['nll'] - results['gsm8k_training_pilot']['training']['initial_loss']) < 1e-5
+checkpoint = Path('checkpoints/course/reasoning/gsm8k-pilot.pt')
+manifest = next(v for v in release['public_manifest']['files'] if v['output'] == checkpoint.name)
+assert sha(checkpoint.read_bytes()) == manifest['sha256']
+model, payload = load_checkpoint(checkpoint, 'cpu')
+cpu_gsm_nll = {name: _nll_examples(model, values, ctx) for name, values in gsm_examples.items()}
+assert abs(cpu_gsm_nll['train']['nll'] - results['gsm8k_training_pilot']['training']['final_loss']) < 1e-5
+for name in ['validation', 'test']:
+    assert abs(cpu_gsm_nll[name]['nll'] - results['gsm8k_training_pilot'][name]['nll']) < 1e-5
+continuations = results['gsm8k_training_pilot']['continuations']
+tok = ByteTokenizer()
+prompt_prefix_matches = []
+for row, saved in zip(gsm_splits['test'], continuations, strict=True):
+    prefix = row['messages'][1]['content'].encode()[:40].decode('utf-8', errors='ignore')
+    expected_prompt = 'Continue human answer: ' + prefix
+    assert saved['family'] == row['family']
+    assert saved['generation']['messages'] == [{'role': 'user', 'content': expected_prompt}]
+    prompt_prefix_matches.append({'family': row['family'], 'source_index': row['source_index'], 'prefix_raw_byte_limit': 40, 'matches_human_answer_prefix': True})
+evidence['gsm8k'] = {'archive_sha256': sha(archive.read_bytes()), 'archive_bytes': archive.stat().st_size, 'hydration_scope': '實讀 hydrated tar bytes；沒有以此宣稱 Git index LFS pointer bytes 相同', 'raw_subset_sha256': sha(raw), 'raw_subset_bytes': len(raw), 'source': provenance['source'], 'selection': provenance['selection'], 'training_subset_immutable_url': next(v['source_url'] for v in provenance['assets'] if v['path']=='gsm8k-train-first200.jsonl'), 'packing': packing, 'used_targets_recount': gsm_used, 'reported': {k: ({a:b for a,b in v.items() if a != 'history'} if k == 'training' else v) for k,v in results['gsm8k_training_pilot'].items() if k not in ['continuations', 'limits']}, 'cpu_initial_train_nll': initial_nll, 'cpu_final_nll': cpu_gsm_nll, 'continuation_count': len(continuations), 'continuation_prompt_checks': prompt_prefix_matches, 'checkpoint': {'input_path': str(checkpoint), 'sha256': sha(checkpoint.read_bytes()), 'bytes': checkpoint.stat().st_size, 'immutable_url': f"https://huggingface.co/{release['repo']}/resolve/{release['weights_revision']}/{manifest['path']}", 'weights_revision': release['weights_revision'], 'config': payload['config'], 'step': payload['step'], 'metadata': payload['metadata']}}
+evidence['all_assertions_passed'] = True
+(out / 'C.1-formal-output.json').write_text(json.dumps(evidence, ensure_ascii=False, indent=2) + '\n')
+print(json.dumps({'all_assertions_passed': True, 'synthetic_split': evidence['synthetic']['split'], 'target_ratio': evidence['synthetic']['target_ratio'], 'synthetic_cpu_nll': {k: {'train': v['teacher_forced_cpu_train_nll'], 'test': v['teacher_forced_cpu_test_nll'], 'correct':v['one_candidate_correct']} for k,v in evidence['synthetic']['models'].items()}, 'gsm_packing': packing, 'gsm_used_targets': gsm_used, 'gsm_cpu_initial_nll':initial_nll, 'gsm_cpu_final_nll':cpu_gsm_nll, 'continuation_count':len(continuations)}, ensure_ascii=False, indent=2))

@@ -1,0 +1,52 @@
+import contextlib
+import hashlib
+import io
+import json
+import re
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+import torch
+
+ROOT = Path.cwd()
+OUT = ROOT / 'docs/technical-reviews/artifacts'
+torch.set_num_threads(1)
+environment = {'python': sys.version, 'torch': torch.__version__, 'torch_git': torch.version.git_version, 'device': 'cpu', 'OMP_NUM_THREADS': '1', 'MKL_NUM_THREADS': '1'}
+raw = (ROOT / 'course/chapters/0C.md').read_bytes()
+headings = list(re.finditer(rb'(?m)^## ([A-Z\d]+\.\d+) [^\r\n]+', raw))
+sections = {}
+for i, heading in enumerate(headings):
+    stop = headings[i + 1].start() if i + 1 < len(headings) else len(raw)
+    sections[heading[1].decode()] = raw[heading.start():stop]
+intro = raw[:headings[0].start()]
+snapshot = {'encoding': 'UTF-8', 'normalization': 'none; JSON string round-trip restores all original bytes and trailing blank lines', 'intro': intro.decode(), 'intro_sha256': hashlib.sha256(intro).hexdigest(), 'sections': {key: {'raw': sections[key].decode(), 'sha256': hashlib.sha256(sections[key]).hexdigest()} for key in ['C.1', 'C.2', 'C.3', 'C.4', 'C.5', 'C.6', 'C.7']}}
+for item in snapshot['sections'].values():
+    assert hashlib.sha256(item['raw'].encode()).hexdigest() == item['sha256']
+assert snapshot['sections']['C.1']['sha256'] == '15f6c69c28f508062e1a1b56fa0c08c57bda75a3fed4af018b3f4c6f46caf920'
+assert hashlib.sha256(snapshot['intro'].encode()).hexdigest() == snapshot['intro_sha256']
+(OUT / 'C.1-source.json').write_text(json.dumps(snapshot, ensure_ascii=False, indent=2) + '\n')
+
+def execute(label, code, scope):
+    stdout = io.StringIO()
+    namespace = {}
+    with contextlib.redirect_stdout(stdout):
+        exec(compile(code, label, 'exec'), namespace)
+    value = {'label': label, 'executed_at_utc': datetime.now(timezone.utc).isoformat(), 'environment': environment, 'source_code': code, 'stdout': stdout.getvalue(), 'exit_code': 0, 'scope': scope}
+    (OUT / f'C.1-{label}-output.json').write_text(json.dumps(value, ensure_ascii=False, indent=2) + '\n')
+    print(label, stdout.getvalue(), end='')
+    return namespace
+
+original = re.findall(r'```python\n(.*?)```', sections['C.1'].decode(), re.S)[0]
+ns = execute('original', original, 'C.1 原始 ByteTokenizer 程式；沒有訓練、生成或正誤檢查')
+assert [len(ns['tokenizer'].encode(row['answer'])) for row in ns['examples']] == [1, 47]
+exercise = original.replace('從2開始數三次：3、4、5，所以是5。', '從2開始數三次：3、4、5，所以是6。')
+assert original != exercise
+ns = execute('exercise', exercise, 'C.1 唯一練習，只把第二份 answer 結論的 5 改成 6；前面的 3、4、5 保留')
+assert [len(ns['tokenizer'].encode(row['answer'])) for row in ns['examples']] == [1, 47]
+for key in ['C.2', 'C.3', 'C.4', 'C.5', 'C.6', 'C.7']:
+    codes = re.findall(r'```python\n(.*?)```', sections[key].decode(), re.S)
+    assert len(codes) == 1
+    execute('intro-' + key, codes[0], '僅核對 C 章導言所指流程與數字的必要原例；不對此後節作獨立 technical verdict')
+print('source_sha256', snapshot['sections']['C.1']['sha256'])
+print('intro_sha256', snapshot['intro_sha256'])

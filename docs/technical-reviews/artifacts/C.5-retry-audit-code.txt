@@ -1,0 +1,139 @@
+import hashlib
+import json
+import platform
+import re
+from collections import Counter
+from pathlib import Path
+
+import torch
+
+root = Path.cwd()
+out = root / 'docs/technical-reviews/artifacts'
+source_path = root / 'docs/course-experiments/results/reasoning.json'
+raw_bytes = source_path.read_bytes()
+raw = json.loads(raw_bytes)
+metadata_fields = ['revision', 'device', 'seed', 'torch_version', 'python_version',
+                   'gpu', 'elapsed_seconds', 'timing_scope', 'step_scale']
+selected = {
+    'original_path': str(source_path.relative_to(root)),
+    'original_sha256': hashlib.sha256(raw_bytes).hexdigest(),
+    'metadata': {key: raw[key] for key in metadata_fields},
+    'split': raw['results']['split'],
+    'model_config': raw['results']['model_config'],
+    'code_sha256': {key: raw['code_sha256'][key] for key in [
+        'scripts/course_experiments/applications.py',
+        'scripts/course_experiments/common.py', 'scripts/course_experiments/run.py',
+        'tiny_perceptron/data.py', 'tiny_perceptron/model.py',
+        'tiny_perceptron/attention.py']},
+    'rows': [],
+}
+checks = []
+summary = []
+errors = []
+total_candidates = 0
+for mode, branch in raw['results']['comparison'].items():
+    for budget in branch['budgets']:
+        k = budget['candidate_count']
+        tokens = 0
+        seconds = 0.0
+        coverage = 0
+        majority_correct = 0
+        verified_correct = 0
+        questions = set()
+        for index, row in enumerate(budget['samples']):
+            generation = row['generation']
+            candidate_inputs = [{key: c[key] for key in ['generated', 'generated_ids']}
+                                for c in row['candidates']]
+            selected['rows'].append({'mode': mode, 'k': k, 'index': index,
+                'question': row['question'], 'a': row['a'], 'b': row['b'], 'c': row['c'],
+                'truth': row['truth'], 'generation': generation,
+                'candidates': candidate_inputs})
+            truth = row['a'] + row['b'] + row['c']
+            assert truth == row['truth']
+            assert len(row['candidates']) == k
+            assert generation['candidate_count'] == k
+            assert generation['temperature'] == 0.7
+            assert generation['max_new_tokens'] == (8 if mode == 'direct' else 48)
+            questions.add(row['question'])
+            answers = []
+            verified = []
+            candidate_checks = []
+            row_tokens = 0
+            for ci, candidate in enumerate(row['candidates']):
+                ids = candidate['generated_ids']
+                n = len(ids)
+                total_candidates += 1
+                row_tokens += n
+                eos = bool(ids and ids[-1] == 2)
+                content_ids = ids[:-1] if eos else ids
+                text = bytes(i - 8 for i in content_ids if i >= 8).decode('utf-8', errors='replace')
+                assert text == candidate['generated']
+                assert n == candidate['generated_tokens']
+                assert eos == candidate['eos']
+                assert n <= generation['max_new_tokens']
+                clean = all(i >= 8 for i in content_ids)
+                parsed = None
+                fully = False
+                if mode == 'direct':
+                    if clean and re.fullmatch(r'-?[0-9]+', text.strip()):
+                        parsed = int(text.strip())
+                        fully = parsed == truth
+                else:
+                    match = re.fullmatch(r'(-?[0-9]+)\+(-?[0-9]+)=(-?[0-9]+);(-?[0-9]+)\+(-?[0-9]+)=(-?[0-9]+);answer=(-?[0-9]+)', text.strip())
+                    final = re.search(r';answer=(-?[0-9]+)$', text.strip()) if clean else None
+                    parsed = int(final[1]) if final else None
+                    if match and clean:
+                        a,b,s,p,c,t,f = map(int,match.groups())
+                        fully = (a+b == s and p+c == t and p == s and t == f
+                                 and (a,b,c) == (row['a'],row['b'],row['c']) and f == truth)
+                assert parsed == candidate['final_answer']
+                assert (parsed == truth) == candidate['final_correct']
+                assert fully == candidate['fully_verified']
+                if parsed is not None:
+                    answers.append(parsed)
+                if fully:
+                    verified.append(parsed)
+                candidate_checks.append({'candidate_index': ci, 'id_count_including_eos': n,
+                    'eos': eos, 'final_answer_from_raw': parsed,
+                    'final_correct_recomputed': parsed == truth,
+                    'fully_verified_recomputed': fully})
+            assert row_tokens == generation['generated_tokens']
+            cover = truth in answers
+            majority = Counter(answers).most_common(1)[0][0] if answers else None
+            verifier = verified[0] if verified else None
+            assert cover == row['oracle_coverage']
+            assert majority == row['majority_answer']
+            assert verifier == row['verified_answer']
+            coverage += cover
+            majority_correct += majority == truth
+            verified_correct += verifier == truth
+            tokens += row_tokens
+            seconds += generation['seconds']
+            checks.append({'mode': mode, 'k': k, 'row_index': index,
+                'question': row['question'], 'truth': truth, 'tokens': row_tokens,
+                'measured_batch_seconds': generation['seconds'], 'coverage': cover,
+                'majority': majority, 'verifier': verifier, 'candidates': candidate_checks})
+        assert len(questions) == len(budget['samples']) == 24
+        assert tokens == budget['generated_tokens']
+        assert seconds == budget['generation_seconds']
+        assert coverage == budget['oracle_coverage']['numerator']
+        assert majority_correct == budget['majority_accuracy']['numerator']
+        summary.append({'mode': mode, 'k': k, 'unique_questions': len(questions),
+            'candidates': 24*k, 'generated_tokens_including_eos': tokens,
+            'generation_seconds': seconds, 'generation_seconds_3dp': f'{seconds:.3f}',
+            'coverage_numerator': coverage, 'majority_numerator': majority_correct,
+            'verifier_numerator': verified_correct, 'denominator': 24,
+            'sample0_batch_seconds': budget['samples'][0]['generation']['seconds']})
+assert total_candidates == 720
+for relative, frozen in selected['code_sha256'].items():
+    assert hashlib.sha256((root / relative).read_bytes()).hexdigest() == frozen
+(out / 'C.5-retry-raw-selected.json').write_text(json.dumps(selected, ensure_ascii=False, indent=2)+'\n', encoding='utf-8')
+result = {'raw_original_sha256': selected['original_sha256'],
+    'environment': {'python': platform.python_version(), 'torch': str(torch.__version__),
+        'torch_git': torch.version.git_version, 'device': 'cpu', 'torch_threads': str(torch.get_num_threads())},
+    'candidate_total': total_candidates, 'question_batch_total': len(checks),
+    'summary': summary,
+    'steps_k8_over_k1_token_ratio': next(v['generated_tokens_including_eos'] for v in summary if v['mode']=='steps' and v['k']==8) / next(v['generated_tokens_including_eos'] for v in summary if v['mode']=='steps' and v['k']==1),
+    'row_checks': checks, 'all_assertions_passed': True}
+(out / 'C.5-retry-audit-execution.json').write_text(json.dumps(result, ensure_ascii=False, indent=2)+'\n', encoding='utf-8')
+print(json.dumps({key: value for key,value in result.items() if key != 'row_checks'}, ensure_ascii=False,indent=2))

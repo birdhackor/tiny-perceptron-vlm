@@ -1,0 +1,144 @@
+import hashlib
+import json
+import os
+import platform
+import re
+from collections import Counter
+from pathlib import Path
+
+import torch
+
+ROOT = Path.cwd()
+OUT = ROOT / "docs/technical-reviews/artifacts"
+SOURCE = ROOT / "docs/course-experiments/results/reasoning.json"
+d = json.loads(SOURCE.read_bytes())
+from scripts.course_experiments.applications import _reasoning_records, _verify_reasoning
+from scripts.course_experiments.common import records_sha256, split_records
+
+environment = {
+    "python": platform.python_version(),
+    "torch": str(torch.__version__),
+    "device": "cpu; offline record replay; no training or generation",
+    "OMP_NUM_THREADS": os.environ["OMP_NUM_THREADS"],
+    "MKL_NUM_THREADS": os.environ["MKL_NUM_THREADS"],
+}
+print("ENVIRONMENT", json.dumps(environment, ensure_ascii=False))
+pins = {}
+for name in ["scripts/course_experiments/applications.py", "scripts/course_experiments/common.py", "scripts/course_experiments/run.py", "tiny_perceptron/data.py"]:
+    actual = hashlib.sha256((ROOT / name).read_bytes()).hexdigest()
+    recorded = d["code_sha256"][name]
+    assert actual == recorded, (name, actual, recorded)
+    pins[name] = {"actual_sha256": actual, "formal_sha256": recorded}
+splits = split_records(_reasoning_records(), d["seed"])
+for name, rows in splits.items():
+    assert records_sha256(rows) == d["results"]["split"][name]["sha256"]
+assert len(splits["test"]) == 24
+assert not {r["family"] for r in splits["test"]} & {r["family"] for r in splits["train"]}
+test_keys = [(r["a"], r["b"], r["c"]) for r in splits["test"]]
+
+def independently_score(candidate, row, mode):
+    ids = candidate["generated_ids"]
+    eos = bool(ids and ids[-1] == 2)
+    raw_ids = ids[:-1] if eos else ids
+    invalid = [n for n in raw_ids if n < 8]
+    text = bytes(n - 8 for n in raw_ids if n >= 8).decode("utf-8", errors="replace")
+    assert text == candidate["generated"]
+    assert eos == candidate["eos"]
+    assert invalid == candidate["invalid_special_tokens"]
+    assert len(ids) == candidate["generated_tokens"]
+    truth = row["a"] + row["b"] + row["c"]
+    text = text.strip()
+    clean = not invalid
+    if mode == "direct":
+        final = int(text) if clean and re.fullmatch(r"-?[0-9]+", text) else None
+        result = {"final_answer": final, "parsed": final is not None,
+                  "final_correct": final == truth, "fully_verified": final == truth}
+    else:
+        match = re.fullmatch(r"(-?[0-9]+)\+(-?[0-9]+)=(-?[0-9]+);(-?[0-9]+)\+(-?[0-9]+)=(-?[0-9]+);answer=(-?[0-9]+)", text)
+        if match and clean:
+            a, b, s, previous, c, total, final = map(int, match.groups())
+            equations = a + b == s and previous + c == total
+            linked = previous == s and total == final
+            task = (a, b, c) == (row["a"], row["b"], row["c"])
+            result = {"final_answer": final, "parsed": True, "steps": [[a, b, s], [previous, c, total]],
+                      "final_correct": final == truth, "equations_valid": equations,
+                      "linked": linked, "task_operands_valid": task,
+                      "fully_verified": equations and linked and task and final == truth}
+        else:
+            suffix = re.search(r";answer=(-?[0-9]+)$", text) if clean else None
+            final = int(suffix[1]) if suffix else None
+            result = {"final_answer": final, "parsed": False, "final_correct": final == truth,
+                      "equations_valid": False, "linked": False, "task_operands_valid": False,
+                      "fully_verified": False}
+    assert result == _verify_reasoning(candidate, row, mode)
+    for k, v in result.items():
+        assert v == candidate[k], (mode, row["question"], k, v, candidate[k])
+    return result
+
+replayed = []
+examples = []
+for mode, model in d["results"]["comparison"].items():
+    for budget in model["budgets"]:
+        k = budget["candidate_count"]
+        samples = budget["samples"]
+        assert len(samples) == 24
+        assert [(s["a"], s["b"], s["c"]) for s in samples] == test_keys
+        rows = []
+        correct_majority = correct_verifier = coverage_count = invalid_final = 0
+        for row in samples:
+            truth = row["a"] + row["b"] + row["c"]
+            assert row["truth"] == truth
+            assert row["question"] == f"({row['a']}+{row['b']})+{row['c']}=?"
+            assert len(row["candidates"]) == k == row["generation"]["candidate_count"]
+            assert row["generation"]["temperature"] == 0.7
+            scored = [independently_score(c, row, mode) for c in row["candidates"]]
+            answers = [c["final_answer"] for c in scored if c["final_answer"] is not None]
+            # Independent plurality implementation preserves earliest occurrence on ties.
+            vote_counts = {answer: answers.count(answer) for answer in dict.fromkeys(answers)}
+            majority = max(vote_counts, key=vote_counts.get) if vote_counts else None
+            assert majority == (Counter(answers).most_common(1)[0][0] if answers else None)
+            verifier = next((c["final_answer"] for c in scored if c["fully_verified"]), None)
+            covered = any(c["final_correct"] for c in scored)
+            mc, vc = majority == truth, verifier == truth
+            coverage_count += covered
+            correct_majority += mc
+            correct_verifier += vc
+            invalid_final += sum(c["final_correct"] and not c["fully_verified"] for c in scored)
+            for name, value in {"majority_answer": majority, "verified_answer": verifier,
+                                "oracle_coverage": covered, "majority_correct": mc,
+                                "verifier_correct": vc}.items():
+                assert row[name] == value
+            compact = {"question": row["question"], "operands": [row["a"], row["b"], row["c"]],
+                       "truth": truth, "generated_ids": [c["generated_ids"] for c in row["candidates"]],
+                       "generated": [c["generated"] for c in row["candidates"]],
+                       "decoded_answers": [c["final_answer"] for c in scored],
+                       "fully_verified": [c["fully_verified"] for c in scored],
+                       "majority": majority, "verifier": verifier, "coverage": covered}
+            rows.append(compact)
+            if (mode == "direct" and k == 4 and row["question"] == "(3+3)+0=?") or (mode == "steps" and k == 2 and row["question"] == "(5+0)+3=?"):
+                examples.append({"mode": mode, "k": k, **compact})
+        sums = {"majority_accuracy": [correct_majority, 24], "verifier_accuracy": [correct_verifier, 24],
+                "oracle_coverage": [coverage_count, 24],
+                "majority_accuracy_given_coverage": [correct_majority, coverage_count]}
+        for field, (numerator, denominator) in sums.items():
+            assert budget[field]["numerator"] == numerator
+            assert budget[field]["denominator"] == denominator
+        record = {"mode": mode, "k": k, "question_count": 24, "candidate_count": k * 24,
+                  "sums_recomputed_from_ids": sums,
+                  "final_correct_but_not_fully_verified": invalid_final, "samples": rows}
+        replayed.append(record)
+        print("COUNTS", json.dumps({key: value for key, value in record.items() if key != "samples"}, ensure_ascii=False))
+for example in examples:
+    print("EXAMPLE", json.dumps(example, ensure_ascii=False))
+assert all(r["sums_recomputed_from_ids"]["oracle_coverage"] == r["sums_recomputed_from_ids"]["verifier_accuracy"] for r in replayed)
+assert sum(r["candidate_count"] for r in replayed if r["mode"] == "steps") == 360
+assert sum(r["final_correct_but_not_fully_verified"] for r in replayed if r["mode"] == "steps") == 0
+summary = {"environment": environment,
+           "original_result": {"path": str(SOURCE.relative_to(ROOT)), "sha256": hashlib.sha256(SOURCE.read_bytes()).hexdigest()},
+           "formal_configuration": {key: d[key] for key in ["revision", "device", "seed", "torch_version", "python_version", "gpu", "step_scale"]},
+           "source_pins_checked": pins, "split": d["results"]["split"],
+           "training_scope": {mode: {"base_state_sha256": m["base_state_sha256"], "training": {key: m["training"][key] for key in ["steps", "planned_steps", "records", "effective_tokens", "step_scale"]}} for mode, m in d["results"]["comparison"].items()},
+           "recomputed_budgets": replayed, "examples": examples,
+           "limits": "CPU replays saved candidate IDs only; does not rerun model generation, training, GPU timings, or establish general reasoning/faithfulness."}
+(OUT / "C.4-recomputed-records.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+print("RESULT all independent raw-ID parses, source pins, split hashes, counts, and examples agree")

@@ -1,0 +1,292 @@
+{
+  "reviewer_task": "/root/technical_round_coordinator/technical_c_3_fresh",
+  "inspected_on": "2026-10-03",
+  "started_after": "2026-10-03 14:25:26 UTC",
+  "metadata_scope_clock": "2026-10-03 14:28:14 UTC",
+  "primary_source": "course/chapters/0C.md#C.3",
+  "primary_sha256_unchanged": "7fee9307665e98ea5fc6dd5c428e886b5d48f3b5b8397c35f693a36c7944dd7b",
+  "necessary_source": "course/chapters/0C.md#C.1",
+  "old_necessary_sha256": "29ddd2c45a23640d8926c25eec3dc974dc67dc46eb8b4dca89e9fec460fbd85f",
+  "current_necessary_sha256": "e1210b47af2eae6e3389aa7c26d6b8d1e9635a2e16221768f90ce279ec216c93",
+  "current_C1_raw_utf8": "## C.1 寫出中間步驟能幫忙嗎？\n\n對「2+3=?」，直接答5與寫「從2開始數三次：3、4、5，所以是5」都可能正確。後者把一種解題方法展開，讀者可以看見它怎麼到5；但比較長也會增加生成成本，且步驟本身可能錯。前置是[逐token生成](01.md#1.14)與[對話SFT](07.md#7.11)：模型能被示範資料教成產生不同回答形式，形式與正確率要分開評估。\n\n把問題固定，訓練目標可以是短答案，也可以是含步驟的答案。在SFT中，兩者都是要逐項預測的回答token，只是文字內容和長度不同。為什麼步驟可能有幫助？模型後續生成可以讀取前面已寫出的中間結果，形成可檢查的分段解法；同時，中間結果若錯了，也可能把後面帶錯。這是可能的作用機制，不能光看一份人寫的示例就宣稱模型已獲益。\n\n```python\nfrom tiny_perceptron.data import ByteTokenizer\n\ntokenizer = ByteTokenizer()\nexamples = [\n    {\"question\": \"2+3=?\", \"answer\": \"5\"},\n    {\"question\": \"2+3=?\", \"answer\": \"從2開始數三次：3、4、5，所以是5。\"},\n]\nfor example in examples:\n    ids = tokenizer.encode(example[\"answer\"])\n    print(example[\"question\"], example[\"answer\"], \"回答token數\", len(ids))\n```\n\n輸入是兩筆相同問題、不同回答的人工資料。ByteTokenizer把UTF-8的每個byte變成一個ID，`encode`得到ID清單，`len`數清單長度；這不是用中文字數假裝token數。第一份回答有1個token，第二份有47個。本例未加入對話標記或EOS，所以是回答文字本身的長度；其他tokenizer的切分不同，不能套用47這個數字。\n\n程式只是檢查資料設計，沒有訓練兩個模型或測出推理能力。真正比較時，可以從相同起點出發，分別用短答與步驟資料訓練，保留相同題目分布與最後真值，再評估沒出現在訓練裡的新數字題。除了答案正確率，也要記錄生成token數和時間；若步驟版本多用許多訓練token，還需說明比較是在相同題數還是相同計算預算下做的。\n\n可見的步驟文字也不等於模型內部運算的完整紀錄。文字可能是合理解釋、錯誤推導，甚至與最後答案沒有可靠關係。下一節會用「最後答對、第一步仍錯」的例子實際核對，避免把流暢長文當成正確保證。\n\n課程實測真正建立兩個模型比較`(a+b)+c=?`，a、b、c都在0至5之間。相同三個數字的所有排列共用一個家族，216題整組分成167／25／24題、44／6／6個訓練／驗證／最後檢查家族；測的是沒教過的數字組合，不是新數字範圍。兩支從同一份隨機權重複製，寬64、兩層、兩頭、上下文128位置，沒有載入SFT或預訓練底座。短答只教最後整數，步驟教`1+2=3;3+3=6;answer=6`這類可驗算的格式。\n\n兩支都以seed 42、每批24題、學習率0.003更新900次，抽到同樣數量的訓練例子，但步驟支線的回答長得多。下表的生成成績各是在同一24題、溫度0.7、每題真的抽一份候選後取得。這裡的[溫度](01.md#1.15)是抽樣旋鈕：先把候選分數除以0.7再換成機率，相較於溫度1，機率會更集中於高分候選；它不會改動模型權重。\n\n表中的NLL是負對數似然（negative log-likelihood）。這份報告逐位置給模型正確答案前文，取正確下一token機率的負自然對數，再把這些代價加總、除以有效回答目標數，含EOS；得到的是每個目標的平均代價，計算方法可回看[1.8](01.md#1.8)。表格把平均代價與目標數分成兩列，已經平均過的4.3159不需要再除以51。\n\n| 實際紀錄 | 短答 | 可驗算步驟 |\n| --- | --- | --- |\n| 訓練有效回答目標，含EOS | 48,803 | 466,322 |\n| 更新後完整訓練平均NLL | 0.0268 | 0.000262 |\n| 完整最後檢查平均NLL | 4.3159 | 0.1372 |\n| 最後檢查有效回答目標數，含EOS | 51 | 510 |\n| 單候選最後答對 | 1/24 | 11/24 |\n\n步驟版本本輪答對較多，仍錯13題，而且用了約9.6倍的有效訓練文字目標，生成上限也較長。這支持本次配方的有限觀察，沒有完成相同token預算的比較；兩種回答內容不同，NLL也不能當成同一量尺的通用能力分數。這裡的「指紋」是由內容算出的識別值，方便確認兩份內容是否一致。本實驗用SHA-256這種計算方法，依程式固定順序把初始參數數值轉為bytes，再算出起點指紋；兩支的指紋相同，用來核對它們是否從相同權重出發，並不代表模型已經會答題。這個起點指紋、資料切分數量與全部測試生成保存在[正式報告](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/course-experiments/results/reasoning.json)。報告也列出各資料檔的保存路徑，以及由整個檔案內容算出的SHA-256檔案指紋；它與上述初始參數指紋核對的是不同內容。完整訓練、驗證資料的逐筆內容在這些資料檔裡，沒有逐筆列在報告的JSON中。\n\n同一入口還另外建立寬32、單層的新語言模型，使用GSM8K原始訓練集前200筆完整人類問題與解答。來源是OpenAI的[grade-school-math資料庫](https://github.com/openai/grade-school-math/tree/3101c7d5072418e28b9008a6636bde82a006892c)，其中`grade_school_math/data/train.jsonl`檔案的版本固定在`3101c7d5072418e28b9008a6636bde82a006892c`。這串值是Git保存的版本識別碼，用來固定取得哪一版來源；它與上述SHA-256內容指紋用途不同。它們不是教師模型生成；按完整問題指紋先分成160／20／20筆，再切最多128位置、每段重新開始前文。只含問題的段落不計回答loss，所有人類回答目標與EOS仍在片段資料中各出現一次。150次更新讀到216,776個有效目標，完整訓練NLL由5.6995降至2.5441，驗證2.5977、最後檢查2.6747，分母分別5,477與5,931個回答目標。\n\n這是長紀錄的資料與loss通路試跑；後段片段可能已看不到原問題，不能當GSM8K解題benchmark。保存的20份生成還刻意給了人類解答前40個byte作續寫提示，沒有計入解題正確率。要完整重跑本附錄的兩支SFT、多候選、[有限策略回饋](0C.md#C.7)與這份資料試跑，先依[W.1](../first-steps.md#W.1)在專案根目錄啟用Python環境，再準備資料下載工具。Git LFS的全名是Git Large File Storage，是替Git處理較大檔案的附加工具；只安裝Git不一定已經有它。先在終端機輸入`git lfs version`，應看到版本號；若找不到這個指令，請依[Git LFS官方安裝頁](https://git-lfs.com/)選你的作業系統安裝，再確認一次。工具可用後，在專案根目錄依序執行以下指令：第一行為這份專案啟用LFS，第二行下載本節需要的固定資料包，第三行才開始完整訓練。\n\n```bash\ngit lfs install --local\ngit lfs pull --include='assets/training/gsm8k-v1.tar.gz' --exclude=''\npython scripts/course_experiments/run.py --experiment reasoning --device cpu\n```\n\nCPU會跑完整排程，有自己的CUDA環境才改`--device cuda`；本輪正式數字來自L4。`outputs/course-experiments/course-v1/reasoning/`保存`same-base.pt`、`direct.pt`、`steps.pt`、兩份`policy-*.pt`、`gsm8k-pilot.pt`、中間checkpoint與各支資料／生成紀錄。有限策略檔不是TinyLM權重，不能混用語言模型推論入口。\n\n練習只把第二份answer中的最後5改成6，保留前面數到5的步驟。先預測ByteTokenizer長度仍47，但結論與前文不一致，再執行核對。你應能指出程式只報長度，沒有判正誤；若要比較推理品質，必須另加答案與步驟的檢查。\n\n",
+  "raw_utf8_roundtrip_equal": true,
+  "prior_genuine_current_report": {
+    "path": "docs/technical-reviews/artifacts/C.3-prior-pass-debfa942.json",
+    "sha256": "debfa9420809a42cf8e62f9c3fcccec1fad36d4cacffea8dd5792f903d67df5f",
+    "verdict": "pass",
+    "necessary_C1_sha256_then": "29ddd2c45a23640d8926c25eec3dc974dc67dc46eb8b4dca89e9fec460fbd85f"
+  },
+  "tensor_file_fingerprint": {
+    "source": "scripts/course_experiments/applications.py",
+    "source_sha256": "8fbb7e1c1a5ee33c50884a3cb6658352aacd80d2131ac6561c272e8c75b2ade0",
+    "locator": "run_reasoning lines1087–1094",
+    "tensor_fingerprint_formula": "SHA256(concat(v.detach().cpu().numpy().tobytes() for v in base_state.values()))",
+    "base_state_sha256": "d34b57a18a2051e64735e377620cd73a08bb605ef59199b97957d83b0d7c8a4b",
+    "scope": "固定此架構與state_dict順序，核參數bytes；不含整個.pt封裝的metadata、optimizer/RNG等，不冒稱完整checkpoint文件SHA；單一fingerprint相同不證明模型答題能力。實際同初值還由兩支load_state_dict(base_state)控制流支持。"
+  },
+  "file_fingerprint": {
+    "source": "scripts/course_experiments/run.py",
+    "source_sha256": "e805ef129d535c85cb6c53114bf48c6766d5de7e7865b9b90da84523f06676b3",
+    "locator": "artifacts comprehension lines109–118",
+    "formula": "SHA256(path.read_bytes())",
+    "scope": "完整artifact檔案內容digest；與串接tensorbytes fingerprint核對對象不同。原formal報告包含路徑、bytes與SHA，以及測試candidate records；完整train/validation rows另由dataset/mode-dataset JSON保存。"
+  },
+  "formal_original": {
+    "path": "docs/course-experiments/results/reasoning.json",
+    "sha256": "8a96e308b1286d55a25ab3db82218b72d05bf905471ed9703f62c183982a6f48",
+    "revision": "910aebc6419c9fc6217279a27fde9851c5cfad30",
+    "base_hashes": [
+      "d34b57a18a2051e64735e377620cd73a08bb605ef59199b97957d83b0d7c8a4b",
+      "d34b57a18a2051e64735e377620cd73a08bb605ef59199b97957d83b0d7c8a4b"
+    ],
+    "required_gsm_asset": {
+      "id": "gsm8k",
+      "version": 1,
+      "archive": "assets/training/gsm8k-v1.tar.gz",
+      "archive_bytes": 46443,
+      "archive_sha256": "d1e28b8339fe9fe6f06cf5b15f5d6a6c8c566692816c423c6917fb66ac035dc6",
+      "license": "MIT",
+      "training_records": 200,
+      "source_metadata": "assets/training/sources/gsm8k.json",
+      "target": "reasoning-initial",
+      "files": [
+        {
+          "path": "reasoning-initial/README.md",
+          "bytes": 1911,
+          "sha256": "36cf8d33c4bb4445467d4384a9cee6cf804570cc25540796be8052dd747a1774"
+        },
+        {
+          "path": "reasoning-initial/asset-manifest.json",
+          "bytes": 4846,
+          "sha256": "3ac7fc05b7c4e22cc60b50a6565145b0da2bf8822be4925ce336bb46a1f38a25"
+        },
+        {
+          "path": "reasoning-initial/gsm8k-LICENSE-AND-SOURCE.md",
+          "bytes": 326,
+          "sha256": "a69df87a76cb9002282056395d0eb368e37978880f91192b32a73356f5e5380d"
+        },
+        {
+          "path": "reasoning-initial/gsm8k-train-first200.jsonl",
+          "bytes": 114114,
+          "sha256": "03a8e89683ff5335dd79e1d8468ede692f263b4de113e59025833eeadc0f05a9"
+        },
+        {
+          "path": "reasoning-initial/hf-dataset-README.md",
+          "bytes": 7935,
+          "sha256": "a17e882503578c9e324560630e31017617714ee025c87cf4fea6fd916895f3c1"
+        },
+        {
+          "path": "reasoning-initial/upstream-LICENSE",
+          "bytes": 1062,
+          "sha256": "86bbb73e855821d7c401912fd4bf82e34313e6e3b6fd6f909f2b6cc9e209a53b"
+        },
+        {
+          "path": "reasoning-initial/upstream-README.md",
+          "bytes": 6112,
+          "sha256": "27e1676d572f2289210170ff6dbb8c2ef7d9f6950c0f08c978ea8ee6b39dca29"
+        }
+      ]
+    },
+    "required_openai_version": "3101c7d5072418e28b9008a6636bde82a006892c"
+  },
+  "external_originals": [
+    {
+      "id": "s-openai-pinned-readme",
+      "kind": "official_source",
+      "title": "固定OpenAI GSM8K原始資料說明",
+      "url": "https://raw.githubusercontent.com/openai/grade-school-math/3101c7d5072418e28b9008a6636bde82a006892c/README.md",
+      "version": "Git source revision 3101c7d5072418e28b9008a6636bde82a006892c",
+      "verified": true,
+      "checked_original": true,
+      "accessed_on": "2026-10-03",
+      "authority_reason": "原始資料發布者OpenAI的固定版本原文；支持必要C.1新增來源定位，不作C.3模型品質證據。",
+      "inspection_note": "Dataset Details與raw data files段；原始main資料由human problem writers建立，明列train.jsonl；只親讀README，不下載訓練JSONL。與原assets metadata保存的README SHA相符。；本次下載SHA=27e1676d572f2289210170ff6dbb8c2ef7d9f6950c0f08c978ea8ee6b39dca29",
+      "download_sha256": "27e1676d572f2289210170ff6dbb8c2ef7d9f6950c0f08c978ea8ee6b39dca29",
+      "locator": "Dataset Details與raw data files段",
+      "notes": "原始main資料由human problem writers建立，明列train.jsonl；只親讀README，不下載訓練JSONL。與原assets metadata保存的README SHA相符。"
+    },
+    {
+      "id": "s-openai-pinned-object",
+      "kind": "official_source",
+      "title": "OpenAI固定版本Git物件metadata",
+      "url": "https://api.github.com/repos/openai/grade-school-math/git/commits/3101c7d5072418e28b9008a6636bde82a006892c",
+      "version": "Git object 3101c7d5072418e28b9008a6636bde82a006892c",
+      "verified": true,
+      "checked_original": true,
+      "accessed_on": "2026-10-03",
+      "authority_reason": "OpenAI官方GitHub repository API的原始版本物件metadata。",
+      "inspection_note": "sha與tree.sha fields；親核sha等於正文pin，對應tree=565dcdab3f9c299c758fa5e8974bcde5c1ac98aa；只讀sha/tree定位，不讀Git作者歷史或課程修改論證。；本次下載SHA=b8fb9ba686eea675300d5eb0b195149da6f7c7a0059b51429fb6586c770e7019",
+      "download_sha256": "b8fb9ba686eea675300d5eb0b195149da6f7c7a0059b51429fb6586c770e7019",
+      "locator": "sha與tree.sha fields",
+      "notes": "親核sha等於正文pin，對應tree=565dcdab3f9c299c758fa5e8974bcde5c1ac98aa；只讀sha/tree定位，不讀Git作者歷史或課程修改論證。"
+    },
+    {
+      "id": "s-openai-pinned-tree",
+      "kind": "official_source",
+      "title": "OpenAI固定版本train檔案metadata",
+      "url": "https://api.github.com/repos/openai/grade-school-math/git/trees/565dcdab3f9c299c758fa5e8974bcde5c1ac98aa?recursive=1",
+      "version": "Root tree 565dcdab3f9c299c758fa5e8974bcde5c1ac98aa under 3101c7d5072418e28b9008a6636bde82a006892c",
+      "verified": true,
+      "checked_original": true,
+      "accessed_on": "2026-10-03",
+      "authority_reason": "OpenAI官方repository的固定root tree metadata，直接核對正文source_path。",
+      "inspection_note": "tree entry grade_school_math/data/train.jsonl；原版本包含此path；blob=7d97154b91aef28d01c3301741c81ce90039a4b1，bytes=4166206。這是檔案metadata，不是下載或親讀完整訓練data。；本次下載SHA=6fa3f6554c74a5b01675bf251ead192378bd40e1fc003bf0de42d32ded9a72fb",
+      "download_sha256": "6fa3f6554c74a5b01675bf251ead192378bd40e1fc003bf0de42d32ded9a72fb",
+      "locator": "tree entry grade_school_math/data/train.jsonl",
+      "notes": "原版本包含此path；blob=7d97154b91aef28d01c3301741c81ce90039a4b1，bytes=4166206。這是檔案metadata，不是下載或親讀完整訓練data。"
+    },
+    {
+      "id": "s-git-revisions",
+      "kind": "official_source",
+      "title": "Git版本識別碼官方定義",
+      "url": "https://raw.githubusercontent.com/git/git/v2.50.1/Documentation/revisions.adoc",
+      "version": "Git v2.50.1",
+      "verified": true,
+      "checked_original": true,
+      "accessed_on": "2026-10-03",
+      "authority_reason": "Git官方項目原始手册；支持必要前置的版本固定定義。",
+      "inspection_note": "SPECIFYING REVISIONS lines1–19；revision通常指commit或其他Git物件；40位hex完整SHA-1物件名不同於SHA-256原tensor/rawfile內容指紋。正文只稱Git版本識別碼符合此scope。；本次下載SHA=3835ec561d9f4052783c79541d86d16e644f7d8d0b8fb1bd1d3067ad021c38a7",
+      "download_sha256": "3835ec561d9f4052783c79541d86d16e644f7d8d0b8fb1bd1d3067ad021c38a7",
+      "locator": "SPECIFYING REVISIONS lines1–19",
+      "notes": "revision通常指commit或其他Git物件；40位hex完整SHA-1物件名不同於SHA-256原tensor/rawfile內容指紋。正文只稱Git版本識別碼符合此scope。"
+    },
+    {
+      "id": "s-lfs-home",
+      "kind": "official_source",
+      "title": "Git LFS官方安裝頁",
+      "url": "https://git-lfs.com/",
+      "version": "2026-10-03官方頁；列v3.8.0",
+      "verified": true,
+      "checked_original": true,
+      "accessed_on": "2026-10-03",
+      "authority_reason": "Git LFS官方項目頁，正文直接链接的安裝說明。",
+      "inspection_note": "page title/description、Download OS選項、Getting Started；全名Git Large File Storage，是額外Git extension；以pointer與server分開保存大內容；頁面有不同OS安裝入口，不保證現環境已安裝。；本次下載SHA=96e82a7124027aa5a4d039e570bdff17b1cc54d1d6e1673bc9b1bfff567e7fc6",
+      "download_sha256": "96e82a7124027aa5a4d039e570bdff17b1cc54d1d6e1673bc9b1bfff567e7fc6",
+      "locator": "page title/description、Download OS選項、Getting Started",
+      "notes": "全名Git Large File Storage，是額外Git extension；以pointer與server分開保存大內容；頁面有不同OS安裝入口，不保證現環境已安裝。"
+    },
+    {
+      "id": "s-lfs-main",
+      "kind": "official_source",
+      "title": "Git LFS命令與pointer官方定義",
+      "url": "https://raw.githubusercontent.com/git-lfs/git-lfs/v3.8.0/docs/man/git-lfs.adoc",
+      "version": "Git LFS v3.8.0",
+      "verified": true,
+      "checked_original": true,
+      "accessed_on": "2026-10-03",
+      "authority_reason": "Git LFS官方repository當前官方下載版本的原始手册。",
+      "inspection_note": "DESCRIPTION lines16–28；git-lfs-version lines85–86；Git 內保存 pointer，實體內容在LFSserver；version命令報版本。未執行version或檢查本機安裝；沒把hydratedtar當Gitindex pointer。；本次下載SHA=211c8c639983d540cef10c78b36f6b9de7b65fc4b5c875aca1d930158f7d00af",
+      "download_sha256": "211c8c639983d540cef10c78b36f6b9de7b65fc4b5c875aca1d930158f7d00af",
+      "locator": "DESCRIPTION lines16–28；git-lfs-version lines85–86",
+      "notes": "Git 內保存 pointer，實體內容在LFSserver；version命令報版本。未執行version或檢查本機安裝；沒把hydratedtar當Gitindex pointer。"
+    },
+    {
+      "id": "s-lfs-install",
+      "kind": "official_source",
+      "title": "Git LFS install --local官方契約",
+      "url": "https://raw.githubusercontent.com/git-lfs/git-lfs/v3.8.0/docs/man/git-lfs-install.adoc",
+      "version": "Git LFS v3.8.0",
+      "verified": true,
+      "checked_original": true,
+      "accessed_on": "2026-10-03",
+      "authority_reason": "Git LFS官方原始命令手册。",
+      "inspection_note": "DESCRIPTION、OPTIONS --local；--local把clean/smudge filter設到當前repo config，仍含pre-push hook setup；命令需工具/在repo內可用。只靜態核，沒有實施Git配置或安裝。；本次下載SHA=81c764bf162cfd26043f86c07974939bb41aa3f6f87170a050b450912b7a8c89",
+      "download_sha256": "81c764bf162cfd26043f86c07974939bb41aa3f6f87170a050b450912b7a8c89",
+      "locator": "DESCRIPTION、OPTIONS --local",
+      "notes": "--local把clean/smudge filter設到當前repo config，仍含pre-push hook setup；命令需工具/在repo內可用。只靜態核，沒有實施Git配置或安裝。"
+    },
+    {
+      "id": "s-lfs-pull",
+      "kind": "official_source",
+      "title": "Git LFS pull include/exclude官方契約",
+      "url": "https://raw.githubusercontent.com/git-lfs/git-lfs/v3.8.0/docs/man/git-lfs-pull.adoc",
+      "version": "Git LFS v3.8.0",
+      "verified": true,
+      "checked_original": true,
+      "accessed_on": "2026-10-03",
+      "authority_reason": "Git LFS官方原始命令手册，支持新增bash的靜態語義。",
+      "inspection_note": "DESCRIPTION、OPTIONS、INCLUDE AND EXCLUDE；pull取當前ref的LFS對象並更新working copy；include限定archive path，exclude空字串清除排除設置。可用性仍依目前ref/index attributes及remote訪問；本次沒有下載或調用Git/LFS。；本次下載SHA=a6253ad80c01e7e43a215d0c2ff39cf8e354600e48d6bcdc87f7404a06b5065a",
+      "download_sha256": "a6253ad80c01e7e43a215d0c2ff39cf8e354600e48d6bcdc87f7404a06b5065a",
+      "locator": "DESCRIPTION、OPTIONS、INCLUDE AND EXCLUDE",
+      "notes": "pull取當前ref的LFS對象並更新working copy；include限定archive path，exclude空字串清除排除設置。可用性仍依目前ref/index attributes及remote訪問；本次沒有下載或調用Git/LFS。"
+    }
+  ],
+  "repository_originals": [
+    {
+      "id": "s-gsm-source-metadata",
+      "kind": "repository_code",
+      "title": "原GSM8K來源metadata",
+      "path": "assets/training/sources/gsm8k.json",
+      "sha256": "3ac7fc05b7c4e22cc60b50a6565145b0da2bf8822be4925ce336bb46a1f38a25",
+      "version": "本次親讀raw SHA 3ac7fc05b7c4e22cc60b50a6565145b0da2bf8822be4925ce336bb46a1f38a25",
+      "verified": true,
+      "inspection_note": "親讀source.repository/revision/source_path、selection與必要README originalSHA；原metadata當時readiness不當作今天訓練状態或C.3评判。"
+    },
+    {
+      "id": "s-training-asset-manifest",
+      "kind": "repository_code",
+      "title": "訓練archive固定metadata",
+      "path": "assets/training/manifest.json",
+      "sha256": "7a71a20274375d17a612e4827171da6bdd8ff04c0548de75abeb7b8173a56c96",
+      "version": "本次親讀raw SHA 7a71a20274375d17a612e4827171da6bdd8ff04c0548de75abeb7b8173a56c96",
+      "verified": true,
+      "inspection_note": "只取gsm8k條目；它與原formal results.assets的gsm8k條目全相同；archive/file SHA只是metadata，本次未hydrate或讀訓練tar。"
+    },
+    {
+      "id": "s-lfs-attributes",
+      "kind": "repository_code",
+      "title": "本repo大訓練包LFS规则",
+      "path": ".gitattributes",
+      "sha256": "77c25f6112b66e228d6e5e96d92bfb6898ba65200145709fb4b5df969e2cac47",
+      "version": "本次親讀raw SHA 77c25f6112b66e228d6e5e96d92bfb6898ba65200145709fb4b5df969e2cac47",
+      "verified": true,
+      "inspection_note": "親讀/assets/training/*.tar.gz filter=lfs diff=lfs merge=lfs -text；與pull include匹配。本次不讀取Gitindex，不推斷workingcopy是pointer或hydrated状態。"
+    }
+  ],
+  "C3_support_conclusion": {
+    "affected_claims": [
+      "c26",
+      "c31"
+    ],
+    "finding": "無撤销C.3支持；c26同初值依據仍是原runner直接複用base_state與原記錄相同tensor fingerprint，c31仍是各分支獨立train後立即sample。新C.1只明確fingerprint對象及準備命令；原formal24題/720候选/8格coverage與codepin未改。GSM8K/pin/LFS為同入口另一资料pilot的準備scope，不是C.3算術模型的预訓練底座或候选來源。",
+    "limits": "此回查只給C.3必要支持判定，不給C.1完整技術verdict；沒有複核C.1所有GSM8K實測數值或下載/重訓其數據。"
+  },
+  "no_execution": {
+    "CPU_examples_rerun": false,
+    "reason": "C.3 code/exercise/source和原formal/code/artifact SHA均未變；C.1新增bash只靜態核官方source，不實施安裝/配置/拉取/訓練。",
+    "executed_git_or_lfs_commands": [],
+    "training_data_downloaded": false,
+    "model_or_gpu_run": false,
+    "original_cold_timing_scope": "沿用原未暖机有限記錄與原日期，不重標暖机benchmark、不外推加速或因果。"
+  },
+  "inspection_disclosure": [
+    {
+      "command": "cat assets/training/sources/gsm8k.json",
+      "path": "assets/training/sources/gsm8k.json",
+      "visible_fields": [
+        "source",
+        "selection",
+        "curriculum_mapping",
+        "training_readiness",
+        "retrieval",
+        "assets"
+      ],
+      "time_scope": "原metadata collected_at_utc=2026-10-01T15:04:31.839061+00:00；本次讀取在14:25:26–14:28:14 UTC",
+      "interpretation": "curriculum_mapping/readiness是原资料準備provenance，已见但不用於今日訓練状態或C.3预期判定；未讀任何他人review/作者論證。"
+    }
+  ],
+  "failed_lookup_and_resolution": [
+    {
+      "command": "rg -n pin/gsm8k on assets/manifest.json and scripts/course_experiments/manifest.json",
+      "actual_exit": 2,
+      "reason": "兩個猜測manifest路徑不存在",
+      "resolution": "按common.extract_asset、build_training_assets --output默認值定位精確assets/training/manifest.json；只讀取必要條目。"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/git-lfs/git-lfs/v3.7.1/docs/man/git-lfs-version.adoc",
+      "actual_curl_exit": 22,
+      "reason": "HTTP404",
+      "resolution": "親讀當前官方v3.8.0主manual中的version定義與commands/command_version.go；install/pull仍親讀官方v3.8.0 originals。"
+    }
+  ]
+}
