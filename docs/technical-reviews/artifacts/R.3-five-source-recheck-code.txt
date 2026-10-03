@@ -1,0 +1,158 @@
+import difflib
+import hashlib
+import json
+import os
+import platform
+import re
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+def sha(raw):
+    return hashlib.sha256(raw).hexdigest()
+
+
+def sections(raw):
+    headings = list(re.finditer(rb"(?m)^## ([A-Z\d]+\.\d+) [^\r\n]+", raw))
+    result = {}
+    for index, heading in enumerate(headings):
+        end = headings[index + 1].start() if index + 1 < len(headings) else len(raw)
+        result[heading[1].decode()] = raw[heading.start():end]
+    return raw[:headings[0].start()], result
+
+
+def fences(raw):
+    return re.findall(rb"(?ms)^```[^\n]*\n.*?^```[^\n]*(?:\n|$)", raw)
+
+
+def references(raw):
+    return re.findall(rb"!\[[^\]\n]*\]\(([^)\n]+\.svg)\)", raw)
+
+
+def locate_scope(old, current, scope):
+    old_position = old.find(scope)
+    current_position = current.find(scope)
+    assert old_position >= 0 and current_position >= 0
+    assert old.count(scope) == current.count(scope) == 1
+    return {
+        "old_first_line": old[:old_position].count(b"\n") + 1,
+        "old_last_line": old[:old_position + len(scope)].count(b"\n"),
+        "current_first_line": current[:current_position].count(b"\n") + 1,
+        "current_last_line": current[:current_position + len(scope)].count(b"\n"),
+        "scope_raw_sha256": sha(scope),
+        "same_raw_bytes": True,
+        "scope_raw_utf8": scope.decode(),
+        "code_fences": len(fences(scope)),
+        "svg_references": [v.decode() for v in references(scope)],
+    }
+
+
+assert os.environ["OMP_NUM_THREADS"] == os.environ["MKL_NUM_THREADS"] == "1"
+artifacts = Path("docs/technical-reviews/artifacts")
+prior_raw = (artifacts / "R.3-before-five-source-recheck-report.json").read_bytes()
+assert sha(prior_raw) == "de3175c46f9bbace828d0919d7c87a62234c59ac38a58f28cef2105f69efadba"
+prior = json.loads(prior_raw)
+snapshot = json.loads((artifacts / "R.3-directory-snapshot.json").read_bytes())
+snapshot_sources = {Path(s["path"]).stem: s for s in snapshot["sources"]}
+previous16 = json.loads((artifacts / "R.3-chapter16-second-recheck-output.json").read_bytes())
+changed_ids = {"s_ch_16", "s_ch_17", "s_ch_18", "s_ch_0B", "s_ch_0C"}
+audit = []
+for source in prior["sources"]:
+    if source["kind"] != "repository_code":
+        continue
+    current_sha = sha(Path(source["path"]).read_bytes())
+    if source["id"] not in changed_ids:
+        assert current_sha == source["sha256"]
+    audit.append({"source_id": source["id"], "path": source["path"],
+                  "prior_declared_sha256": source["sha256"], "current_sha256": current_sha,
+                  "unchanged": current_sha == source["sha256"]})
+assert {v["source_id"] for v in audit if not v["unchanged"]} == changed_ids
+prior_artifacts = []
+for artifact in prior["artifacts"]:
+    actual = sha(Path(artifact["path"]).read_bytes())
+    assert actual == artifact["sha256"]
+    prior_artifacts.append({"artifact_id": artifact["id"], "sha256": actual})
+figure_audit = []
+for path, expected in prior["figure_sha256"].items():
+    actual = sha(Path(path).read_bytes())
+    assert actual == expected
+    figure_audit.append({"path": path, "sha256": actual, "unchanged": True})
+readme = Path("course/README.md").read_bytes()
+_, readme_sections = sections(readme)
+primary = readme_sections["R.3"]
+assert sha(primary) == prior["source_sha256"] == "395bfdbe0b0779817511c9d7b435a05c670a2c9e772904ae2d4aac0d7e434405"
+assert primary == (artifacts / "R.3-source.txt").read_bytes()
+chapter_results = []
+for chapter in ["16", "17", "18", "0B", "0C"]:
+    difference = json.loads((artifacts / f"R.3-five-source-{chapter}-full-diff.json").read_bytes())
+    old = Path(difference["old_full_raw_path"]).read_bytes()
+    current = Path(difference["current_full_raw_path"]).read_bytes()
+    source = next(s for s in prior["sources"] if s["id"] == f"s_ch_{chapter}")
+    assert sha(old) == source["sha256"] == difference["old_full_sha256"]
+    assert sha(current) == difference["current_full_sha256"]
+    assert old == Path(difference["old_cache_path"]).read_bytes()
+    assert current == Path(source["path"]).read_bytes()
+    old_intro, old_sections = sections(old)
+    current_intro, current_sections = sections(current)
+    assert old_intro == current_intro
+    assert current_intro.decode() == snapshot_sources[chapter]["chapter_heading_and_introduction"]
+    assert list(old_sections) == list(current_sections)
+    original_diff = "".join(difflib.unified_diff(
+        old.decode().splitlines(keepends=True), current.decode().splitlines(keepends=True),
+        fromfile=f"{source['path']}@{sha(old)}", tofile=f"{source['path']}@{sha(current)}"))
+    encoded_diff = difference["unified_diff"].encode()
+    assert encoded_diff == original_diff.encode()
+    assert sha(encoded_diff) == difference["raw_diff_utf8_sha256"]
+    assert len(encoded_diff) == difference["raw_diff_utf8_bytes"]
+    needed = []
+    for opening in snapshot_sources[chapter]["inspected_heading_and_opening_prose"]:
+        item = locate_scope(old, current, opening["text"].encode())
+        item["section"] = opening["section"]
+        item["original_receipt_lines"] = [opening["first_line"], opening["last_line"]]
+        needed.append(item)
+    full_needed = []
+    if chapter == "16":
+        for section_id in ["16.3", "16.9"]:
+            assert old_sections[section_id] == current_sections[section_id]
+            item = locate_scope(old, current, old_sections[section_id])
+            item.pop("scope_raw_utf8")
+            item["section"] = section_id
+            item["comparison_scope"] = (
+                "支持段落所在整節只做bytes比較；16.3本人原實讀scope只有開頭82–84，沒有聲稱親讀全節或看cache.svg"
+                if section_id == "16.3" else
+                "16.9原本人已親讀339–399全部必要方法／限制範圍，本次亦親讀；兩張必要圖已先前實render+view，本次原bytes未變"
+            )
+            full_needed.append(item)
+        assert sha(current_sections["16.3"]) == previous16["section16_3_whole_raw_sha256_unchanged"]
+        assert sha(current_sections["16.9"]) == previous16["section16_9_whole_raw_sha256_unchanged"]
+    changed_fences = [k for k in old_sections if fences(old_sections[k]) != fences(current_sections[k])]
+    assert changed_fences == (["C.1"] if chapter == "0C" else [])
+    assert references(old) == references(current)
+    exercise_old = [v for v in old.splitlines(keepends=True) if v.startswith("練習".encode())]
+    exercise_current = [v for v in current.splitlines(keepends=True) if v.startswith("練習".encode())]
+    assert exercise_old == exercise_current
+    chapter_results.append({
+        "chapter": chapter, "old_full_sha256": sha(old), "current_full_sha256": sha(current),
+        "old_bytes": len(old), "current_bytes": len(current),
+        "raw_diff_utf8_sha256": sha(encoded_diff), "raw_diff_utf8_bytes": len(encoded_diff),
+        "json_diff_roundtrip_bytes_identical": True,
+        "title_and_intro_raw_sha256_unchanged": sha(current_intro),
+        "changed_sections": [k for k in old_sections if old_sections[k] != current_sections[k]],
+        "required_opening_scopes": needed, "whole_support_section_byte_comparisons": full_needed,
+        "all_svg_reference_bytes_unchanged": True,
+        "changed_code_fence_sections": changed_fences,
+        "all_exercise_opening_line_bytes_unchanged": True,
+        "necessary_support_fences_and_figures_unchanged": True,
+    })
+print(json.dumps({
+    "reviewer_task": prior["reviewer_task"], "executed_at_utc": datetime.now(timezone.utc).isoformat(),
+    "environment": {"python": platform.python_version(), "torch": "未使用；原文身份讀取",
+                    "device": "cpu", "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"},
+    "prior_report_sha256": sha(prior_raw), "primary_raw_sha256_unchanged": sha(primary),
+    "chapter_identity_and_required_scope_checks": chapter_results,
+    "all_declared_repository_source_identity_audit": audit,
+    "all48_prior_artifacts_preserved": len(prior_artifacts) == 48,
+    "prior_artifact_identities": prior_artifacts,
+    "all4_necessary_figures_unchanged": figure_audit,
+    "scope": "實際有界CPU只核身份、完整diff roundtrip及必要支持bytes；語義／影響判斷另由本人親讀記錄支持。未重跑未變教學例／練習／SVG；C.1新增bash位於非必要支持，不執行Git或正式training。",
+}, ensure_ascii=False, indent=2))
