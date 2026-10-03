@@ -1,0 +1,69 @@
+import contextlib
+import hashlib
+import io
+import json
+import os
+import platform
+import runpy
+import sys
+from pathlib import Path
+import torch
+
+code_path = Path(sys.argv[1])
+log_path = Path(sys.argv[2])
+case = sys.argv[3]
+assert case in ('original', 'exercise')
+assert torch.get_num_threads() == 1
+assert torch.version.git_version == '5c4886908584029761b579af026dcfb627c84070'
+assert not torch.cuda.is_available()
+
+def offline_guard(event, arguments):
+    if event in ('socket.connect', 'socket.getaddrinfo', 'socket.bind', 'socket.sendto', 'subprocess.Popen', 'os.system'):
+        raise RuntimeError('Offline bounded CPU review blocks ' + event)
+
+sys.addaudithook(offline_guard)
+stdout = io.StringIO()
+with contextlib.redirect_stdout(stdout):
+    namespace = runpy.run_path(str(code_path))
+cal = namespace['calibration']
+evaluation = namespace['evaluation']
+assert cal.device.type == evaluation.device.type == 'cpu'
+assert cal.dtype == evaluation.dtype == torch.float32
+assert evaluation.tolist() == torch.tensor([-0.2, 0.4, 3.0]).tolist()
+expected_cal = [-0.5, 0.2, 0.8, 1.0] + ([3.0] if case == 'exercise' else [])
+assert torch.equal(cal, torch.tensor(expected_cal))
+fixed = namespace['simulate'](evaluation, namespace['fixed_max'])
+dynamic = namespace['simulate'](evaluation, namespace['dynamic_max'])
+expected_fixed = torch.tensor([-1.0 / 7.0, 3.0 / 7.0, 1.0]) if case == 'original' else torch.tensor([0.0, 3.0 / 7.0, 3.0])
+expected_dynamic = torch.tensor([0.0, 3.0 / 7.0, 3.0])
+assert torch.allclose(fixed, expected_fixed, atol=1e-7, rtol=0)
+assert torch.allclose(dynamic, expected_dynamic, atol=1e-7, rtol=0)
+if case == 'exercise':
+    assert torch.equal(fixed, dynamic)
+record = {
+    'case': case,
+    'command': 'OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1 TRANSFORMERS_OFFLINE=1 CUDA_VISIBLE_DEVICES= .venv/bin/python docs/technical-reviews/artifacts/17.12-runner.txt ' + str(code_path) + ' ' + str(log_path) + ' ' + case,
+    'environment': {'python': platform.python_version(), 'torch': str(torch.__version__), 'torch_git_version': str(torch.version.git_version), 'device': 'cpu', 'threads': str(torch.get_num_threads()), 'OMP_NUM_THREADS': os.environ['OMP_NUM_THREADS'], 'MKL_NUM_THREADS': os.environ['MKL_NUM_THREADS'], 'default_dtype': str(torch.get_default_dtype()), 'offline_guard': 'network and subprocess blocked'},
+    'code_sha256': hashlib.sha256(code_path.read_bytes()).hexdigest(),
+    'stdout': stdout.getvalue(),
+    'stderr': '',
+    'exit_code': 0,
+    'calibration': cal.tolist(),
+    'evaluation': evaluation.tolist(),
+    'calibration_shape': list(cal.shape),
+    'evaluation_shape': list(evaluation.shape),
+    'fixed_max': namespace['fixed_max'].item(),
+    'dynamic_max': namespace['dynamic_max'].item(),
+    'fixed_scale': (namespace['fixed_max'] / 7).item(),
+    'dynamic_scale': (namespace['dynamic_max'] / 7).item(),
+    'fixed_overflow': (evaluation.abs() > namespace['fixed_max']).sum().item(),
+    'dynamic_overflow': (evaluation.abs() > namespace['dynamic_max']).sum().item(),
+    'fixed_restored': fixed.tolist(),
+    'dynamic_restored': dynamic.tolist(),
+    'fixed_dtype': str(fixed.dtype),
+    'dynamic_dtype': str(dynamic.dtype),
+    'assertions': 'CPU/FP32; evaluation unchanged; calibration edit only; restored values match exact-rational expectations within 1e-7 absolute; exercise paths tensor-equal',
+    'scope': '一次固定向量數值模擬；未進行訓練、低位元打包、專用量化kernel、任務品質或速度量測。',
+}
+log_path.write_text(json.dumps(record, ensure_ascii=False, indent=2, allow_nan=False) + '\n', encoding='utf-8')
+print(json.dumps(record, ensure_ascii=False, indent=2, allow_nan=False))
