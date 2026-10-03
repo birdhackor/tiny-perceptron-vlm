@@ -1,0 +1,37 @@
+{
+  "primary": "course/chapters/18.md#18.3",
+  "non_first_section": true,
+  "intro_required": false,
+  "necessary_prerequisites": [
+    {
+      "source": "course/chapters/07.md#7.11",
+      "raw_sha256": "4622ff4e08f4756beaba1cd2efd5ad46ec0c477f65f49a6a31c17a37de98a168",
+      "raw_utf8": "## 7.11 預訓練模型怎麼學會對話？\n\n預訓練讓模型從一般文字學續寫，SFT則繼續用正確對話示範，讓assistant邊界後出現合適回答。架構仍是 [4.6](04.md#4.6) 的TinyLM，目標仍是交叉熵；改變的是資料分佈、角色前文與哪些答案計入代價。只把prompt加一句「請回答」，沒有更新參數，不屬於這個訓練過程。\n\n[7.1](#7.1) 已建立對話表示，[7.3](#7.3) 已選有效回答目標，現在將兩筆問答組batch，按 [7.7](#7.7) 的valid提供讀取許可，再把代價傳回參數。本節先確認數據到梯度的接口；研究微調時，要明確載入已保存的基模。也可以刻意從隨機起點只用對話示範訓練，作為另一條基準，兩種起點應分開記錄。\n\n```python\nimport torch\nfrom tiny_perceptron.data import toy_conversations, render_chat, pad_batch\nfrom tiny_perceptron.model import TinyLM, ModelConfig, masked_loss\n\ntorch.manual_seed(42)\nexamples = [render_chat(messages) for messages in toy_conversations()[:2]]\nx, y, valid = pad_batch(examples)\nmodel = TinyLM(ModelConfig(width=8))\nloss = masked_loss(model(x, valid=valid)[\"logits\"], y)\nloss.backward()\nprint(\"batch形狀\", x.shape, \"有效答案\", (y != -100).sum().item())\nprint(\"問答接口代價\", loss.item())\n```\n\n`toy_conversations` 是專案的合成加法小世界，前兩筆問題0+0與0+1、回答0與1，ASCII答案各一byte加EOS，所以有效目標共4。`pad_batch` 回傳X、Y與有效輸入表，模型處理兩筆每筆10位置，輸出每位置264個byte/結構候選。最後loss為正，backward有梯度，說明串接成功；這段沒有optimizer.step，尚未進行新訓練。\n\n真正微調要加載基模checkpoint與匹配tokenizer，恢復需要的訓練狀態，再用問答資料更新。checkpoint契約見 [5.7](05.md#5.7)，腳本操作見[訓練配方](../training.md)。例如以 `--task sft --checkpoint checkpoints/text.pt --train` 選擇問答任務並啓用更新，步數與資料來源需按預算記錄。不是隻更換任務名字就自動擁有問答能力。\n\n微調前後要用固定題與生成設置，分別記錄回答內容、格式與舊能力，不能拿初始隨機模型的一次loss和新模型不同問題的回答直接比較。SFT可能讓已有知識更容易被調動，也會把錯誤示範學進去；[7.14](#7.14) 將檢查錯答案如何影響代價。\n\n本例不要求GPU或下載預訓練權重，先把小CPU的資料接口練好。進一步長訓練是同一路線上的更多更新，不需要重新定義shift、mask或字表。若舊模型tokenizer與當前數據ID不同，應先解決映射，不能靠訓練希望它自己理解新編號。\n\n我們已實跑兩條獨立路線。第一條從隨機模型開始，只用45筆屬性問答更新900次；第二條先把這45筆的問題與答案接成文字、練250次續寫，保存後再以對話角色與回答遮罩微調900次。第二條並沒有沿用前章的故事模型，也沒有先得到廣泛知識；它只在同一批小世界材料上多做了一個文字階段。兩條對話階段都用同樣寬度64、兩層、種子42、每批16筆與學習率0.003，最後用同一組留出題比較，見[7.12](#7.12)。因為第二條多了250次文字更新，成績差異不能全當成「預訓練形式本身」的因果效果；要隔離它，還需另外匹配總訓練預算。\n\n練習複製其中一筆消息，把assistant答案0改成3，再render並印有效目標ID。先預測原0的byte48加8=56變成3的51加8=59，EOS仍2；其他角色與問題不變。核對後恢復正確答案，避免把演示錯誤當正式訓練資料。\n\n",
+      "SVG": []
+    },
+    {
+      "source": "course/chapters/07.md#7.3",
+      "raw_sha256": "169853b46c7ffaa3daaadd1b96fc992bb24f0c06db64b053e54150d7221d5a13",
+      "raw_utf8": "## 7.3 哪些位置應該學？\n\n整理好的對話同時含問題與答案。若我們想訓練一個回答者，就常只要求它學assistant的內容，而不要求它自己寫出user會提什麼。[7.1](#7.1) 已把問題留在輸入X，現在要明確哪些Y位置可以參與代價。這份監督選擇與能讀哪些前文是不同的表。\n\n本課label用-100表示忽略直接loss。有效監督條件是 `label!=-100`，不是查看輸入token是否屬於user。因為 [1.3](01.md#1.3) 的shift，第t位置輸入預測原序列t+1，標籤也要對到下一項；不能用當前字所屬角色直接當作該格答案角色。下一節會專門追首答案位置。\n\n```python\nfrom tiny_perceptron.data import render_chat\n\nmessages = [\n    {\"role\": \"user\", \"content\": \"問\"},\n    {\"role\": \"assistant\", \"content\": \"答\"},\n]\nx, y = render_chat(messages)\nfor position, (token, label) in enumerate(zip(x.tolist(), y.tolist(), strict=True)):\n    status = \"學下一項\" if label != -100 else \"忽略直接loss\"\n    print(position, \"輸入ID\", token, \"目標\", label, status)\nprint(\"有效目標數\", (y != -100).sum().item())\nassert (y != -100).sum().item() > 0\n```\n\n輸入一字中文問題與一字中文答案。ByteTokenizer以byte表示，問與答各三token，因此不能按一字就數一個有效目標，見 [6.7](06.md#6.7)。程序逐位置列出當前輸入ID、右移後label與是否計代價，最後有效數應4：答的三個byte與回答EOS。user內容、user段EOS與角色標記本身不作為要模仿的答案。\n\n迴圈中的 `status = ... if ... else ...` 是條件表達式：label不是-100時選左側文字，否則選右側。`(y!=-100)` 得真/假tensor，sum把True當1數有效目標，item取成普通整數。\n\n模型讀的是輸入X：它拿X中的合法ID，到一張數值表查出起始特徵。這個動作叫嵌入查表，英文embedding，見[4.1](04.md#4.1)。目標Y則交給交叉熵計算代價，其中的-100只表示「這個位置不計分」。-100不會拿去查輸入表，也不是合法文字ID；X中對應的問題文字仍會正常送進模型。\n\n不算某位置loss，表示不直接讓該位置的logits承擔答案代價；這段輸入仍可供後面回答讀取。我們還要用 [3.6](03.md#3.6) 因果遮罩限制未來，不因為user不計loss就刪除問題。若刪除問題，模型反而沒有問答關聯的條件，只能學常見回答。\n\n不同訓練目標可以監督全部對話或只部分角色，但必須說清楚目標與分母。這裡只學assistant，通常使訓練資源集中在回答內容與結束方式；它不能自動篩掉錯標答案，品質控制仍是資料工作。\n\n練習只把assistant內容改成 `\"答案\"`，先預測兩中文共六byte，加EOS共七有效目標，再執行核對。輸入也會變長，而忽略的user問題仍存在。再試英文 `\"OK\"`，應兩byte加EOS，共三；計數單位隨編碼規則，不隨肉眼字數。\n\n",
+      "SVG": []
+    },
+    {
+      "source": "course/chapters/18.md#18.1",
+      "raw_sha256": "b1a20f5fbee7a83cd3c95b7cd52777f24d3fcb1075b17cf4c432f7cae6434d87",
+      "raw_utf8": "## 18.1 教師能提供什麼學習訊號？\n\n想讓較小模型學會較大模型的做法，教師究竟要交給學生什麼？最容易取得的是完整回答文字；若能取得模型每個位置的候選機率，還能提供「最終沒選的候選有多接近」。這兩種訊號包含的資訊不同，不能只因它們都來自教師就使用同一個誤差公式。蒸餾（distillation）指讓學生透過教師提供的訊號學習，教師本身不一定是真值。\n\n前置是[下一字分數與機率](04.md#4.6)與[對話訓練](07.md#7.11)。logits是候選分數，softmax把它們轉成總和為一的機率分布；普通SFT則用回答文字作目標，讓模型增加每個標準答案token的機率。只能看到教師生成文字的方式常叫黑盒蒸餾；可讀取教師分布的方式常叫白盒蒸餾。這些名字描述能拿到的訊號，不表示教師是不是可靠。\n\n[MiniLLM原文的導論](https://arxiv.org/abs/2306.08543v6)也按可取得的文字或分布區分這兩類訊號。本章的正式對照使用普通CE與固定前文上的forward KL，沒有採用該論文的reverse KL或policy-gradient方法。教師來源則是[直接SFT](../training.md#T.4)、[條件式風格](../training.md#T.5)與[MoE的固定top-2支線](../training.md#T.8)，都載入實際訓練權重。它們的完整檔案SHA、架構與步數保存在[蒸餾實報的`teacher_provenance`](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/course-experiments/results/distillation.json)。屬性教師留出題只有5/10，風格教師內容只有3/27；「已訓練」沒有保證能教對新題。\n\n對問題「2+2=?」，教師可能回答「4」。假設候選是 `[4,3,5]`，分布 `[0.8,0.15,0.05]`的第一名是4，`[0.4,0.35,0.25]`的第一名也相同。只取得「4」無法分辨這兩種情況：它沒有記錄第二名與第一名的差距，也沒有記錄5的相對位置。\n\n```python\nimport torch\n\ncandidates = [\"4\", \"3\", \"5\"]\nprobabilities = [torch.tensor([0.8, 0.15, 0.05]), torch.tensor([0.4, 0.35, 0.25])]\nfor prob in probabilities:\n    answer = candidates[prob.argmax().item()]\n    print(\"回答\", answer, \"分布\", prob.tolist())\n```\n\n輸入是人工指定的兩個分布，用來隔離資訊差別，不是呼叫真的教師。`argmax`選最大機率索引，再查候選文字，兩行回答都應為4；分布欄卻不同。實際回答是一串token，黑盒資料保存整串文字；白盒通常要保存或即時讀取每個有效回答位置的一整列詞表分布，資料量和計算需求可能更大。\n\n取得文字後，可由學生自己的tokenizer重新切分，所以黑盒方式能搭配不同詞表。逐欄對機率則必須確保兩邊同一欄代表同一個token，這是[詞表對齊](18.md#18.6)會處理的問題。白盒能提供更多候選關係，也可能把教師的錯誤偏好一起交給學生；多一份資訊不等於保證更好。\n\n練習將程式只改成 `print(\"回答\", answer)`，先預測兩行完全相同，再執行核對。接著問自己：還能從留下的文字還原0.15、0.35這些數字嗎？答案不能，因為不同分布映成了同一個最大候選。這會決定後續哪些蒸餾方法有足夠輸入，哪些只能使用文字答案。\n\n",
+      "SVG": []
+    }
+  ],
+  "primary_SVG": [],
+  "metadata_exposure": {
+    "command": "rg --files docs/course-experiments/results docs/course-experiments/model-cards docs/course-experiments/student-checks docs/course-experiments/public-releases",
+    "observed_paths": [
+      "docs/course-experiments/public-releases/history/model-index.pre-task-repair.json",
+      "docs/course-experiments/public-releases/history/multimodal_distillation.pre-task-repair.json"
+    ],
+    "scope": "僅所見檔名；未讀內容、未作證據或預期答案。model-cards不存在；之後只讀精確distillation材料。已通知協調者並獲指示可續獨立審核。",
+    "other_reviewer_contents_read": false
+  },
+  "runtime_scope": "原例與單一練習分開真跑；補充CPU只做遮罩梯度、既有參數比對、一题日期教師重播、零token生成機制；沒有正式排程重跑或教師/學生重訓。",
+  "fixed_source_note": "現行compression.py SHA ede22f6c4b9c01d2dc5be149f20cf84b01b9591c925c270d510a81678ce0d444不同於實驗pin；親取5af615e5原始檔SHA28d8ce258369672d71a24f7efbcbf68f3e5e8114e073620aba91c4d807043a44，本節相關hard-ID/EOS/zero機制逐行相同，正式結果只以實驗pin解釋。"
+}

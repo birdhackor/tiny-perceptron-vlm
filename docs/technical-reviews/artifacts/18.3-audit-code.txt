@@ -1,0 +1,143 @@
+import hashlib
+import json
+import math
+import os
+import platform
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+import torch
+from torch.nn import functional as F
+
+from tiny_perceptron.data import ByteTokenizer, CharTokenizer, render_chat
+from tiny_perceptron.model import TinyLM, ModelConfig, generate
+from tiny_perceptron.training import load_checkpoint
+from scripts.course_experiments.compression import _example, _hard_targets, _prompt
+
+root = Path.cwd()
+out = root / 'docs/technical-reviews/artifacts'
+def sha(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+def persist(name, value):
+    (out / name).write_text(json.dumps(value, ensure_ascii=False, indent=2) + '\n')
+def parameter_hash(state):
+    h = hashlib.sha256()
+    for name, tensor in state.items():
+        h.update(name.encode())
+        h.update(tensor.detach().cpu().contiguous().numpy().tobytes())
+    return h.hexdigest()
+
+result_path = Path('docs/course-experiments/results/distillation.json')
+result = json.loads(result_path.read_text())
+public_path = Path('docs/course-experiments/public-releases/distillation.json')
+public = json.loads(public_path.read_text())['release']
+manifest = {row['output']: row for row in public['public_manifest']['files']}
+directory = Path('checkpoints/course/distillation')
+proof = {'original_result_sha256': sha(result_path), 'result_revision': result['revision'],
+         'public_manifest_sha256': sha(public_path), 'public_revision': public['revision'],
+         'weights_revision': public['weights_revision'], 'tasks': {}, 'weights': {}}
+for task, count, correct in [('attributes', 45, 45), ('style_transfer', 185, 180)]:
+    data = result['results']['tasks'][task]
+    hard = data['hard_target_generation']
+    audit = hard['audit']
+    assert len(audit) == hard['records'] == count
+    assert sum(row['teacher_correct'] for row in audit) == hard['correct'] == correct
+    assert all(row['teacher_ids'] and row['teacher_ids'][-1] == 2 and row['eos'] for row in audit)
+    assert all(not row['invalid_special_tokens'] and row['valid_answer_tokens'] for row in audit)
+    for row in audit:
+        assert row['valid_target_tokens'] == len(row['teacher_ids'])
+        expected = ByteTokenizer().encode(row['gold_answer']) + [2]
+        assert (row['teacher_ids'] == expected) == row['teacher_correct']
+        assert ByteTokenizer().decode(row['teacher_ids']) == row['teacher_answer']
+    proof['tasks'][task] = {'denominators': data['data'], 'teacher_provenance': data['teacher_provenance'],
+        'hard_generation': {k: v for k, v in hard.items() if k != 'audit'},
+        'actual_eos_count': sum(row['eos'] for row in audit), 'audit': audit}
+    print(task, 'count', count, 'correct', correct, 'wrong', count - correct,
+          'EOS', sum(row['eos'] for row in audit), 'invalid', 0, 'zero_length', 0)
+for width in [16, 32]:
+    task = result['results']['tasks']['attributes']
+    ce, hard = [task['runs'][f'w{width}_{method}'] for method in ['ce', 'teacher_hard']]
+    compared = {}
+    for field in ['initialization_sha256', 'batch_plan_sha256', 'final_sha256', 'steps', 'effective_supervised_tokens']:
+        assert ce['training'][field] == hard['training'][field]
+        compared[field] = ce['training'][field]
+    states = []
+    for method in ['ce', 'teacher_hard']:
+        filename = f'sft-w{width}-{method}.pt'
+        path = directory / filename
+        assert sha(path) == manifest[filename]['sha256']
+        payload = torch.load(path, map_location='cpu', weights_only=True)
+        states.append(payload['model'])
+        h = parameter_hash(payload['model'])
+        assert h == compared['final_sha256']
+        proof['weights'][filename] = {'sha256': sha(path), 'parameter_hash': h,
+            'tensor_count': len(payload['model']), 'config': payload['config'],
+            'url': f"https://huggingface.co/{public['repo']}/resolve/{public['weights_revision']}/course/course-v1/distillation/{filename}"}
+    assert states[0].keys() == states[1].keys()
+    assert all(torch.equal(states[0][key], states[1][key]) for key in states[0])
+    scores = {}
+    for split in ['validation', 'test']:
+        fields = ['correct', 'examples', 'nll_sum', 'supervised_tokens', 'answer_nll', 'eos_count', 'generated_samples']
+        assert all(ce[split][field] == hard[split][field] for field in fields)
+        scores[split] = {field: ce[split][field] for field in fields}
+    proof['tasks']['attributes'][f'width{width}_CE_hard_equality'] = {'training': compared, 'scores': scores}
+    print('CE_hard_parameter_and_score_equality', width, 'all_tensors', len(states[0]), compared)
+
+card_path = directory / 'README.md'
+assert sha(card_path) == manifest['README.md']['sha256']
+evaluation_path = directory / 'evaluation.json'
+assert sha(evaluation_path) == manifest['evaluation.json']['sha256']
+card_eval = json.loads(evaluation_path.read_text())
+assert card_eval['tasks']['attributes']['hard_target_generation']['correct'] == 45
+assert card_eval['tasks']['style_transfer']['hard_target_generation']['correct'] == 180
+proof['public_card'] = {'url': f"https://huggingface.co/{public['repo']}/resolve/{public['revision']}/course/course-v1/distillation/README.md",
+    'sha256': sha(card_path), 'evaluation_sha256': sha(evaluation_path),
+    'inspection_note': '親讀卡第17–18行、公開評估的hard_target_generation，以及checkpoint_training的教師來源、45筆資料與400次更新；公開卡與既有本地檔案完全符合固定發佈SHA。此卡限制通用能力外推，原始target cache未公開；原始audit可在凍結results追查。'}
+
+messages = [{'role': 'user', 'content': '2+2=?'}, {'role': 'assistant', 'content': '4'}]
+x, y = render_chat(messages)
+logits = torch.zeros((1, len(y), 264), requires_grad=True)
+loss = F.cross_entropy(logits.reshape(-1, 264), y, ignore_index=-100, reduction='sum') / (y != -100).sum()
+loss.backward()
+assert y[y != -100].tolist() == [60, 2]
+assert logits.grad[0, y == -100].abs().sum() == 0
+assert math.isclose(loss.item(), math.log(264), abs_tol=2e-6)
+print('assistant_mask', 'x', x.tolist(), 'y', y.tolist(), 'supervised_ids', y[y != -100].tolist(),
+      'loss', loss.item(), 'masked_direct_gradient', logits.grad[0, y == -100].abs().sum().item())
+print('different_vocabulary_text_targets', ByteTokenizer().encode('4'), CharTokenizer('4').encode('4'))
+print('text_decoder_hides_control_ids', ByteTokenizer().decode([0, 60, 2]))
+no_eos = {'messages': messages, '_hard_ids': [60], '_hard_eos': False}
+_, labels = _example(no_eos, 128)
+assert labels[labels != -100].tolist() == [60]
+print('raw_hard_ids_without_EOS', labels[labels != -100].tolist())
+try:
+    _example({'messages': messages, '_hard_ids': [], '_hard_eos': False}, 128)
+except ValueError as error:
+    print('empty_hard_target_rejected', str(error))
+else:
+    raise AssertionError('empty target accepted')
+teacher = TinyLM(ModelConfig(width=8, max_length=128))
+_, zero = _hard_targets(SimpleNamespace(device='cpu', output=str(out)), teacher,
+    [{'family': 'review-only-zero', 'messages': messages}], '18.3-zero', 0)
+assert zero['records'] == zero['zero_target_records'] == 1
+assert zero['audit'][0]['teacher_ids'] == [] and not zero['audit'][0]['eos']
+print('zero_generation_audit', {key: zero[key] for key in ['records', 'usable_target_records', 'zero_target_records']})
+
+filename = 'style-teacher.pt'
+assert sha(directory / filename) == manifest[filename]['sha256']
+teacher, payload = load_checkpoint(directory / filename, 'cpu')
+wrong = proof['tasks']['style_transfer']['hard_generation']
+row = next(row for row in proof['tasks']['style_transfer']['audit'] if row['family'] == 'date-2026-10-06')
+record = {'messages': [{'role': 'user', 'content': row['question']}, {'role': 'assistant', 'content': row['gold_answer']}]}
+prefix = _prompt(record, teacher.config.max_length)
+ids = generate(teacher, prefix[None], max_new_tokens=96)[0, len(prefix):].tolist()
+assert ids == row['teacher_ids']
+print('one_pinned_teacher_CPU_replay', row['question'], ByteTokenizer().decode(ids), 'ids', ids)
+proof['weights'][filename] = {'sha256': sha(directory / filename), 'url': f"https://huggingface.co/{public['repo']}/resolve/{public['weights_revision']}/course/course-v1/distillation/{filename}",
+    'config': payload['config'], 'replay_question': row['question'], 'observed_teacher_ids': ids,
+    'scope': '只有一題短CPU重播；230筆分母來自凍結audit，沒有重訓、沒有重跑正式排程。'}
+persist('18.3-formal-proof.json', proof)
+print('environment', json.dumps({'python': sys.version, 'torch': torch.__version__,
+      'torch_git_version': torch.version.git_version, 'device': 'cpu', 'platform': platform.platform(),
+      'OMP_NUM_THREADS': os.environ.get('OMP_NUM_THREADS'), 'MKL_NUM_THREADS': os.environ.get('MKL_NUM_THREADS')}, ensure_ascii=False))
