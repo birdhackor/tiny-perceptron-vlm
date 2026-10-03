@@ -1,0 +1,34 @@
+from pathlib import Path
+import json, hashlib, statistics, sys, torch
+A = Path('docs/technical-reviews/artifacts')
+def sha(p): return hashlib.sha256(Path(p).read_bytes()).hexdigest()
+def write(p, d): p.write_text(json.dumps(d, ensure_ascii=False, indent=2, allow_nan=False) + '\n')
+R = 'docs/course-experiments/results/efficiency.json'
+r = json.loads(Path(R).read_bytes())
+c = r['results']['compile']
+run_code = Path('outputs/technical-sources/16.11-own/architecture-at-run.txt')
+assert sha(run_code) == r['code_sha256']['scripts/course_experiments/architecture.py']
+release_path = 'docs/course-experiments/public-releases/efficiency.json'
+release = json.loads(Path(release_path).read_bytes())
+student_path = 'docs/course-experiments/student-checks/efficiency.20261002T221048778760Z.json'
+student = json.loads(Path(student_path).read_bytes())
+card_path = 'checkpoints/course/efficiency/README.md'
+card_raw = Path(card_path).read_bytes()
+card_json = json.loads(card_raw.decode().split('```json\n', 1)[1].split('\n```', 1)[0])
+card_entry = next(f for f in release['release']['public_manifest']['files'] if f['output'] == 'README.md')
+assert sha(card_path) == card_entry['sha256']
+assert card_json['compile']['first_compiled_call_seconds'] == c['first_compiled_call_seconds']
+assert card_json['compile']['eager']['median_seconds'] == c['eager']['median_seconds']
+assert card_json['compile']['compiled']['median_seconds'] == c['compiled']['median_seconds']
+assert release['release']['revision'] == student['public_source']['revision']
+medians = {}
+for branch in ('eager', 'compiled'):
+    vals = c[branch]['samples_seconds']
+    medians[branch] = {'samples_seconds': vals, 'sorted_seconds': sorted(vals), 'fifth_seconds': sorted(vals)[4], 'recomputed_median_seconds': statistics.median(vals), 'reported_median_seconds': c[branch]['median_seconds'], 'median_ms': statistics.median(vals)*1000, 'mean_seconds': statistics.mean(vals)}
+    assert len(vals) == 9 and statistics.median(vals) == c[branch]['median_seconds']
+saving = c['eager']['median_seconds'] - c['compiled']['median_seconds']
+assert saving < 0 and c['estimated_calls_to_amortize_first_call'] is None
+payload = {'environment': {'python': sys.version, 'torch': str(torch.__version__), 'device': 'cpu', 'OMP_NUM_THREADS': '1', 'MKL_NUM_THREADS': '1'}, 'historical_gpu_run': {k:r[k] for k in ['experiment_id','revision','device','seed','torch_version','python_version','gpu']}, 'result_path': R, 'result_sha256': sha(R), 'original_compile_result': c, 'medians': medians, 'per_call_saving_seconds': saving, 'amortization': None, 'recorded_source_sha256': r['code_sha256']['scripts/course_experiments/architecture.py'], 'read_fixed_source_sha256': sha(run_code), 'current_source_sha256': sha('scripts/course_experiments/architecture.py'), 'source_model': r['results']['models']['mha']['model'], 'source_training': {k:r['results']['models']['mha']['training'][k] for k in ['requested_steps','steps','optimizer_updates','effective_tokens','status']}, 'run_provenance': {'artifact_sha256': {f['path']:f['sha256'] for f in r['artifacts'] if f['path'] in ['compile-input.pt','compile-result.json','mha.pt']}, 'hf':r['hf']}, 'scope': '本次只親讀已凍結L4測試原結果，CPU重算中位數/分母/版本SHA，不重跑正式GPU編譯、模型訓練或下載權重；GPU時間支持當次形狀，不支持跨裝置加速。'}
+write(A/'16.11-formal-audit-result.json', payload)
+write(A/'16.11-card-provenance.json', {'original_ignored_path':card_path, 'original_sha256':sha(card_path), 'original_bytes':len(card_raw), 'url':'https://huggingface.co/birdhackor/tiny-perceptron-course-models/raw/'+release['release']['revision']+'/course/course-v1/efficiency/README.md', 'immutable_public_revision':release['release']['revision'], 'weights_revision':release['release']['weights_revision'], 'card_compile_object':card_json['compile'], 'card_read_locator':'README.md L13、L16、L746-781；原JSON完整compile物件', 'card_check_note':'原卡SHA與公開manifest相同；編譯結果與正式結果相同。卡只記單FFN固定shape不加速，沒有提供新量測。', 'public_release':{'path':release_path,'sha256':sha(release_path),'private_source':release['approval']['private_source'],'release_revision':release['release']['revision'],'card_manifest_entry':card_entry}, 'student_check':{'path':student_path,'sha256':sha(student_path),'checked_at':student['checked_at'],'public_source':student['public_source'],'environment':student['environment'],'scope':student['scope'],'status':student['status'],'card_verified_entry':next(f for f in student['verified_files'] if f['output']=='README.md')}, 'export_manifest':{'path':'checkpoints/course/efficiency/export-manifest.json','sha256':sha('checkpoints/course/efficiency/export-manifest.json'),'value':json.loads(Path('checkpoints/course/efficiency/export-manifest.json').read_bytes())['provenance']}, 'scope':'公開持久卡片必要原數字/URL/pin/SHA與自己的核對筆記；不把ignored原卡列作Git index repository_code；student check只是CPU載入/推論，不是GPU編譯速度證据。'})
+print(json.dumps({'medians_ms':{k:v['median_ms'] for k,v in medians.items()},'saving_seconds':saving,'first_call_seconds':c['first_compiled_call_seconds'],'worker_wall_seconds':c['worker_wall_seconds'],'frozen_code_matches':True,'card_matches_release':True,'exit_code':0},ensure_ascii=False))
