@@ -1,0 +1,61 @@
+import hashlib
+import json
+import platform
+from pathlib import Path
+import torch
+
+assert torch.version.cuda is None
+assert torch.get_num_threads() == 1
+
+def sha(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+path = Path('docs/course-experiments/results/tokenizer.json')
+record = json.loads(path.read_text())
+data = record['results']
+report = {'environment': {'python': platform.python_version(), 'torch': str(torch.__version__), 'torch_git_version': torch.version.git_version, 'device': 'cpu', 'OMP_NUM_THREADS': '1', 'MKL_NUM_THREADS': '1'},
+          'action': '只讀凍結 JSON、checkpoint config 與 tensor 形狀；不做前向、梯度、更新或正式排程。',
+          'formal_source': {'path': str(path), 'sha256': sha(path), 'revision': record['revision'], 'seed': record['seed'], 'device': record['device'], 'torch': record['torch_version']},
+          'data': data['data'], 'raw_document_schedule_sha256': data['raw_document_schedule_sha256'], 'matched_budget': data['matched_budget'], 'runs': {}}
+for name, expected_vocab, expected_total in [('byte256', 264, 41824), ('bpe512', 512, 57696)]:
+    run = data['runs'][name]
+    lengths = run['validation_text_token_lengths']
+    validation = run['after']['validation']
+    assert len(lengths) == validation['records'] == 19
+    total = sum(lengths)
+    assert validation['effective_tokens'] == total + len(lengths)
+    ckpath = Path('checkpoints/course/tokenizer') / run['checkpoint']
+    ckpt = torch.load(ckpath, map_location='cpu', weights_only=True)
+    config = ckpt['config']
+    state = ckpt['model'] if 'model' in ckpt else ckpt['state_dict']
+    count = sum(value.numel() for value in state.values())
+    assert config['width'] == 32 and config['layers'] == 1
+    assert config['max_length'] == 384 and config['tied'] is False
+    assert config['vocab_size'] == expected_vocab
+    assert count == expected_total == run['parameters']
+    assert list(state['embedding.weight'].shape) == [expected_vocab, 32]
+    assert list(state['output.weight'].shape) == [expected_vocab, 32]
+    assert run['input_embedding_parameters'] == expected_vocab * 32
+    assert sum(value.numel() for key,value in state.items() if key.startswith('blocks.0.attention.')) == 4096
+    assert sum(value.numel() for key,value in state.items() if key.startswith('blocks.0.ffn.')) == 8352
+    tokpath = ckpath.parent / run['tokenizer_file']
+    definition = json.loads(tokpath.read_text())
+    if name == 'bpe512':
+        assert len(definition['model']['vocab']) == expected_vocab
+        assert len(definition['added_tokens']) == 8
+        assert definition['normalizer'] is None
+        assert definition['pre_tokenizer']['add_prefix_space'] is False
+    else:
+        assert len(definition['specials']) == 8
+    report['runs'][name] = {'parameters': run['parameters'], 'input_embedding_parameters': run['input_embedding_parameters'], 'vocab_size_including_8_specials': run['vocab_size_including_8_specials'], 'validation_text_token_lengths': lengths,
+           'ordinary_text_token_total': total, 'ordinary_mean_per_record': total/len(lengths), 'rounded_mean': round(total/len(lengths)),
+           'validation': {key:validation[key] for key in ['records','effective_tokens','raw_utf8_bytes','note']},
+           'steps': run['training']['steps'], 'training_raw_utf8_bytes_exposed': run['training_raw_utf8_bytes_exposed'],
+           'checkpoint': {'path': str(ckpath), 'sha256': sha(ckpath), 'config': config, 'count_from_frozen_tensor_shapes': count, 'embedding_shape': list(state['embedding.weight'].shape), 'output_shape': list(state['output.weight'].shape)},
+           'tokenizer': {'path': str(tokpath), 'sha256': sha(tokpath), 'checkpoint_binding': ckpt.get('tokenizer',{})}}
+assert report['runs']['byte256']['ordinary_text_token_total'] == 3894
+assert report['runs']['bpe512']['ordinary_text_token_total'] == 2112
+assert report['runs']['byte256']['training_raw_utf8_bytes_exposed'] == report['runs']['bpe512']['training_raw_utf8_bytes_exposed']
+report['delta_parameters'] = report['runs']['bpe512']['parameters'] - report['runs']['byte256']['parameters']
+assert report['delta_parameters'] == 2 * (512 - 264) * 32 == 15872
+print(json.dumps(report, ensure_ascii=False, indent=2))
