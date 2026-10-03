@@ -1,0 +1,180 @@
+"""T.10 reviewer: frozen receipts and exercises only; no training or network."""
+import hashlib
+import json
+import platform
+from datetime import datetime, timezone
+from pathlib import Path
+
+import torch
+
+ROOT = Path(__file__).resolve().parents[3]
+OUT = ROOT / "docs/technical-reviews/artifacts"
+
+
+def read(name):
+    path = ROOT / f"docs/course-experiments/results/{name}.json"
+    raw = path.read_bytes()
+    data = json.loads(raw)
+    assert data["evidence_status"] == "complete_run"
+    return data, {"path": str(path.relative_to(ROOT)), "sha256": hashlib.sha256(raw).hexdigest(),
+                  "revision": data["revision"], "device": data["device"], "gpu": data["gpu"],
+                  "torch": data["torch_version"], "python": data["python_version"], "seed": data["seed"],
+                  "elapsed_seconds": data["elapsed_seconds"], "timing_scope": data["timing_scope"]}
+
+
+def compact(value):
+    if isinstance(value, dict):
+        return {k:compact(v) for k,v in value.items() if k not in ("history","loss_trace")}
+    if isinstance(value, list):
+        return [compact(v) for v in value]
+    return value
+
+
+def text_eval(e, samples=False):
+    rows = e["generated_samples"]
+    assert len(rows) == e["examples"]
+    assert sum(r["exact"] for r in rows) == e["correct"]
+    assert sum(r["ended_with_eos"] for r in rows) == e["eos_count"]
+    assert abs(e["nll_sum"] / e["supervised_tokens"] - e["answer_nll"]) < 1e-12
+    for r in rows:
+        ids = r["generated_ids"]
+        raw = ids[:ids.index(2)] if 2 in ids else ids
+        assert raw == [b + 8 for b in r["expected"].encode()] if r["exact"] else raw != [b + 8 for b in r["expected"].encode()]
+    keep = {k: v for k, v in e.items() if k != "generated_samples"}
+    keep["invalid_control_tokens_recounted"] = sum(sum(i < 8 for i in r["generated_ids"] if i != 2) for r in rows)
+    if samples:
+        keep["generated_samples"] = rows
+    return keep
+
+
+def modal_eval(e, samples=False):
+    rows = e["samples"]
+    assert len(rows) == e["examples"]
+    assert sum(r["exact_match"] for r in rows) == e["correct"]
+    assert sum(r["eos"] for r in rows) / len(rows) == e["eos_rate"]
+    assert sum(r["invalid_special_tokens"] for r in rows) == e["invalid_special_tokens"]
+    keep = {k: v for k, v in e.items() if k != "samples"}
+    if samples:
+        keep["samples"] = rows
+    return keep
+
+
+report = {"executed_at_utc": datetime.now(timezone.utc).isoformat(), "environment": {
+    "python": platform.python_version(), "torch": str(torch.__version__), "device": "cpu",
+    "scope": "offline JSON receipt recomputation; no original L4 experiment rerun"}, "receipts": {}, "tasks": {}}
+d, report["receipts"]["distillation"] = read("distillation")
+total_steps = 0
+for name, t in d["results"]["tasks"].items():
+    saved = {k: compact(t[k]) for k in ("teacher_provenance", "teacher_storage", "data", "teacher_cache", "teacher_frozen_and_unchanged")}
+    saved["teacher_test"] = text_eval(t["teacher_test"], name == "attributes")
+    saved["teacher_validation"] = text_eval(t["teacher_validation"])
+    saved["runs"] = {}
+    for key, r in t["runs"].items():
+        saved["runs"][key] = {"storage": r["storage"], "test": text_eval(r["test"], name == "attributes"),
+                                "validation": text_eval(r["validation"])}
+        if "training" in r:
+            tr = {k: v for k, v in r["training"].items() if k != "loss_trace"}
+            saved["runs"][key]["training"] = tr
+            total_steps += tr["steps"]
+        for k in ("teacher_agreement", "style", "out_of_domain_gsm8k"):
+            if k in r:
+                saved["runs"][key][k] = r[k] if k == "teacher_agreement" else (
+                    text_eval(r[k], True) if k == "out_of_domain_gsm8k" else {a:b for a,b in r[k].items() if a != "samples"})
+    if t["hard_target_generation"]:
+        h = t["hard_target_generation"]
+        saved["hard_target_generation"] = {k:v for k,v in h.items() if k != "audit"}
+        saved["hard_target_generation"]["wrong_rows"] = [r for r in h["audit"] if not r["teacher_correct"]]
+        assert sum(r["teacher_correct"] for r in h["audit"]) == h["correct"]
+        assert len(h["audit"]) == h["records"]
+    if t["teacher_style"]:
+        saved["teacher_style"] = {k:v for k,v in t["teacher_style"].items() if k != "samples"}
+    if t["out_of_domain_gsm8k"]:
+        saved["out_of_domain_gsm8k"] = t["out_of_domain_gsm8k"]
+    if name != "attributes":
+        def representative(e):
+            rows = e["generated_samples"]
+            return [r for r in rows if "2+2=?" in r["question"]] if name == "style_transfer" else rows[:2]
+        saved["representative_samples"] = {"teacher":representative(t["teacher_test"]),
+            **{k:representative(v["test"]) for k,v in t["runs"].items()}}
+    report["tasks"][name] = saved
+assert total_steps == 3900
+report["text_student_update_sum"] = total_steps
+a = report["tasks"]["attributes"]
+ce = {(r["family"], r["question"]): r for r in a["runs"]["w32_ce"]["test"]["generated_samples"]}
+kl = {(r["family"], r["question"]): r for r in a["runs"]["w32_ce_kl"]["test"]["generated_samples"]}
+packed = {(r["family"], r["question"]): r for r in a["runs"]["w32_ce_kl_packed4"]["test"]["generated_samples"]}
+assert ce.keys() == kl.keys() == packed.keys()
+report["exercise"] = {"matched_by": ["family", "question"], "ten_rows": [], "new_correct": 0, "new_wrong": 0}
+for key, row in ce.items():
+    other, pack = kl[key], packed[key]
+    report["exercise"]["new_correct"] += int(other["exact"] and not row["exact"])
+    report["exercise"]["new_wrong"] += int(row["exact"] and not other["exact"])
+    report["exercise"]["ten_rows"].append({"family":key[0],"question":key[1],"truth":row["expected"],
+        "ce":row["generated"],"ce_ids":row["generated_ids"],"ce_correct":row["exact"],
+        "kl":other["generated"],"kl_ids":other["generated_ids"],"kl_correct":other["exact"],
+        "packed":pack["generated"],"packed_ids":pack["generated_ids"],"packed_correct":pack["exact"]})
+assert report["exercise"]["new_correct"] == report["exercise"]["new_wrong"] == 1
+assert sum(x["exact"] for x in ce.values()) == sum(x["exact"] for x in kl.values()) == 4
+blue = [r for r in report["exercise"]["ten_rows"] if r["truth"] == "blue" and r["kl"] == "blue" and r["packed"] == "ble"]
+assert len(blue) == 1
+report["exercise"]["packed_blue_regression"] = blue
+for width in (16,32):
+    methods = [a["runs"][f"w{width}_{m}"]["training"] for m in ("ce","teacher_hard","ce_kl")]
+    assert len({m["initialization_sha256"] for m in methods}) == len({m["batch_plan_sha256"] for m in methods}) == 1
+    assert all(m["effective_supervised_tokens"] == 44985 for m in methods)
+    assert methods[0]["final_sha256"] == methods[1]["final_sha256"]
+assert a["hard_target_generation"]["correct"] == 45
+assert a["out_of_domain_gsm8k"]["selection"]["selected_source_rows"] == [14,94]
+assert a["out_of_domain_gsm8k"]["selection"]["skipped_rows"] == 198
+gsm_path = ROOT / "data/training/reasoning-initial/gsm8k-train-first200.jsonl"
+gsm_raw = gsm_path.read_bytes()
+gsm = [json.loads(line) for line in gsm_raw.decode().splitlines() if line.strip()]
+assert hashlib.sha256(gsm_raw).hexdigest() == a["out_of_domain_gsm8k"]["selection"]["source_file_sha256"]
+selected = []
+for index,row in enumerate(gsm):
+    truth = row["answer"].split("####")[-1].strip().replace(",", "")
+    prefix = len(row["question"].encode()) + 4
+    target = len(truth.encode()) + 1
+    if prefix + 24 <= 128 and target <= 24:
+        selected.append({"source_row":index,"question":row["question"],"truth":truth,"prefix_tokens":prefix,"answer_tokens_with_eos":target})
+assert len(gsm) == 200 and [s["source_row"] for s in selected] == [14,94]
+report["gsm8k_selection_recomputed"] = {"input_path":str(gsm_path.relative_to(ROOT)),"input_sha256":hashlib.sha256(gsm_raw).hexdigest(),
+    "selected":selected,"scanned":200,"skipped":198,"downloaded":False,"writes_to_data":False,
+    "calculations":{"hours":"120 pages / (8 pages / 20 minutes) / 60 = 5 hours","days":"3 * 400 pages / (20 pages/day) = 60 days"}}
+s = report["tasks"]["style_transfer"]
+assert s["hard_target_generation"]["wrong"] == 5
+assert all("date" in r["question"] or "日期" in r["question"] for r in s["hard_target_generation"]["wrong_rows"])
+m, report["receipts"]["multimodal_distillation"] = read("multimodal_distillation")
+report["modal_tasks"] = {}
+for name, t in m["results"]["tasks"].items():
+    saved = {k:compact(t[k]) for k in ("teacher_provenance","teacher_storage","data","teacher_cache","visual_tokens","language_widths")}
+    saved["teacher_test"] = modal_eval(t["teacher_test"], True)
+    saved["teacher_validation"] = modal_eval(t["teacher_validation"])
+    saved["runs"] = {}
+    for method,r in t["runs"].items():
+        saved["runs"][method] = {"storage":r["storage"],"training":{k:v for k,v in r["training"].items() if k != "loss_trace"}}
+        for k in ("validation","test","blank_image_test","blank_audio_test"):
+            if k in r:
+                saved["runs"][method][k] = modal_eval(r[k], k != "validation")
+    left,right = (saved["runs"][method]["training"] for method in ("ce","ce_kl"))
+    assert left["initialization_sha256"] == right["initialization_sha256"]
+    assert left["batch_plan_sha256"] == right["batch_plan_sha256"]
+    assert left["steps"] == right["steps"] == 350
+    report["modal_tasks"][name] = saved
+j = report["modal_tasks"]["joint"]["runs"]["ce_kl"]
+assert all(x["generated_ids"] == y["generated_ids"] for x,y in zip(j["test"]["samples"],j["blank_image_test"]["samples"],strict=True))
+assert j["test"]["correct"] == 6 and j["blank_audio_test"]["correct"] == 3
+vqa, report["receipts"]["vqa"] = read("vqa")
+joint, report["receipts"]["joint"] = read("joint")
+report["source_teachers"] = {
+    "vqa_all": {"steps":vqa["results"]["variants"]["all"]["training"]["steps"],
+                "test":modal_eval(vqa["results"]["variants"]["all"]["test"])},
+    "joint": {"steps":joint["results"]["training"]["steps"], "test":modal_eval(joint["results"]["evaluations"]["none"]),
+              "validation":modal_eval(joint["results"]["validation"])}
+}
+assert report["source_teachers"]["vqa_all"]["steps"] == 160
+assert report["source_teachers"]["joint"]["steps"] == 400
+assert report["source_teachers"]["joint"]["validation"]["correct"] == 8
+report["assertions"] = "passed: original receipt arithmetic, raw IDs, denominators, matched plans, all ten exercise rows, five wrong dates, joint mask equality"
+(OUT / "T.10-receipt-audit.json").write_text(json.dumps(report,ensure_ascii=False,separators=(",",":"))+"\n")
+print(json.dumps({"assertions":report["assertions"],"exercise":report["exercise"],"receipt_sha256":{k:v["sha256"] for k,v in report["receipts"].items()}},ensure_ascii=False,indent=2))

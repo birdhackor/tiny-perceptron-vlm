@@ -1,0 +1,117 @@
+"""T.10 genuine reviewer recheck: raw source/diff and frozen scope; no training."""
+import difflib
+import hashlib
+import json
+import platform
+import re
+from datetime import datetime, timezone
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[3]
+OUT = ROOT / "docs/technical-reviews/artifacts"
+OLD = "9fccda758b1e2c8ba0bbd541ccdfcdeb61c0367d0669713fdd95f1a601faf885"
+NEW = "2b0b6c7b2e9b31055107a73c3369a89066370232622bbc480bdea671475f7308"
+
+
+def sha(raw):
+    return hashlib.sha256(raw).hexdigest()
+
+
+def section(path, identifier):
+    raw = path.read_bytes()
+    headings = list(re.finditer(rb"^## .*$", raw, re.M))
+    index = next(i for i,h in enumerate(headings) if h[0].startswith(("## "+identifier+" ").encode()))
+    return raw[headings[index].start():headings[index+1].start() if index+1 < len(headings) else len(raw)]
+
+
+def preserve(path, raw):
+    if path.exists():
+        assert path.read_bytes() == raw, "不得覆寫既有原始版本"
+    else:
+        path.write_bytes(raw)
+
+
+old = (OUT / "T.10-source.txt").read_bytes()
+new = section(ROOT / "course/training.md", "T.10")
+assert sha(old) == OLD and sha(new) == NEW
+report_raw = (ROOT / "docs/technical-reviews/T.10.json").read_bytes()
+report = json.loads(report_raw)
+assert report["verdict"] == "revise" and report["source_sha256"] == OLD
+preserve(OUT / "T.10-first-revise-report.json", report_raw)
+preserve(OUT / "T.10-source-2b0b6c7b.txt", new)
+diff = "".join(difflib.unified_diff(old.decode().splitlines(keepends=True), new.decode().splitlines(keepends=True),
+    fromfile="T.10-source.txt@"+OLD, tofile="T.10-source-2b0b6c7b.txt@"+NEW, n=3))
+diff_raw = diff.encode("utf-8")
+change_pairs = [(tag,old.decode().splitlines()[i:j],new.decode().splitlines()[a:b])
+    for tag,i,j,a,b in difflib.SequenceMatcher(None,old.decode().splitlines(),new.decode().splitlines()).get_opcodes() if tag != "equal"]
+assert len(change_pairs) == 2
+changed_old = [line for line in old.decode().splitlines() if line not in new.decode().splitlines()]
+changed_new = [line for line in new.decode().splitlines() if line not in old.decode().splitlines()]
+assert len(changed_old) == len(changed_new) == 2
+assert "41,862個文字byte，加52篇故事各自末尾的EOS" in new.decode()
+assert "屬性任務的教師與本診斷的八支屬性學生均0/2、EOS2/2" in new.decode()
+assert re.findall(r"```.*?```",old.decode(),re.S) == re.findall(r"```.*?```",new.decode(),re.S)
+diff_container = {"encoding":"UTF-8", "original_diff_sha256":sha(diff_raw), "original_diff_bytes":len(diff_raw),
+    "old_raw_path":"docs/technical-reviews/artifacts/T.10-source.txt", "old_raw_sha256":OLD,
+    "new_raw_path":"docs/technical-reviews/artifacts/T.10-source-2b0b6c7b.txt", "new_raw_sha256":NEW,
+    "context_lines":3, "complete_unified_diff":diff,
+    "preservation_note":"完整diff文字用JSON字串保存，literal空白context及末尾換行不trim；容器SHA與原diff bytes SHA分開。"}
+(OUT / "T.10-recheck-2b0b6c7b-diff.json").write_text(json.dumps(diff_container,ensure_ascii=False,indent=2)+"\n")
+inspection = {"reviewer_task":report["reviewer_task"],"inspected_at_utc":datetime.now(timezone.utc).isoformat(),
+    "old_source_sha256":OLD,"current_source_sha256":NEW,"old_revise_report_sha256":sha(report_raw),
+    "complete_primary_read":True,"complete_diff_read":True,"changed_old_paragraphs":changed_old,"changed_new_paragraphs":changed_new,
+    "fences_unchanged":True,"primary_svg_references":[],"local_source_versions":[],"prerequisite_versions":[],
+    "unchanged_execution_reuse":"本人前次CPU原例/全部十題/四模態學生/遮蔽、原圖render/view_image已執行且本次輸入/程式/圖/完整fences未變；不重跑正式或未變CPU。"}
+for s in report["sources"]:
+    if s["kind"] == "repository_code":
+        current = sha((ROOT / s["path"]).read_bytes())
+        assert current == s["sha256"]
+        inspection["local_source_versions"].append({"id":s["id"],"path":s["path"],"sha256":current,"unchanged":True})
+notes = json.loads((OUT / "T.10-original-source-notes.json").read_text())
+for p in notes["prerequisites"]:
+    path,identifier = p["source"].split("#")
+    current = sha(section(ROOT / path,identifier))
+    assert current == p["sha256"]
+    inspection["prerequisite_versions"].append({"source":p["source"],"sha256":current,"unchanged":True})
+inspection["figure_versions"] = []
+for path,expected in report["figure_sha256"].items():
+    current = sha((ROOT / path).read_bytes())
+    assert current == expected
+    inspection["figure_versions"].append({"path":path,"sha256":current,"unchanged":True,"reuse":"本人前次真render+view_image"})
+for a in report["artifacts"]:
+    assert sha((ROOT / a["path"]).read_bytes()) == a["sha256"]
+cpu = json.loads((OUT / "T.10-cpu-results.json").read_text())
+for p in cpu["public_inputs"]:
+    assert sha((ROOT / p["local_input"]).read_bytes()) == p["sha256"]
+inspection["public_checkpoint_pins_unchanged"] = [{"url":p["immutable_url"],"sha256":p["sha256"]} for p in cpu["public_inputs"]]
+original_path = ROOT / "docs/course-experiments/results/distillation.json"
+frozen_raw = original_path.read_bytes()
+frozen = json.loads(frozen_raw)
+moe = frozen["results"]["tasks"]["moe_to_dense"]
+inspection["frozen_receipt_sha256"] = sha(frozen_raw)
+inspection["moe_recheck"] = {"model_metrics":{}}
+for name,e in [("teacher",moe["teacher_test"]),("ce",moe["runs"]["w32_ce"]["test"]),("ce_kl",moe["runs"]["w32_ce_kl"]["test"])]:
+    assert e["answer_bytes"] == 41862 and e["supervised_tokens"] == 41914
+    assert e["examples"] == 52 and e["nll_sequence_chunks"] == 352
+    assert e["supervised_tokens"] - e["answer_bytes"] == e["examples"]
+    inspection["moe_recheck"]["model_metrics"][name] = {k:e[k] for k in ("answer_bytes","supervised_tokens","examples","nll_sequence_chunks","nll_sum","answer_nll")}
+inspection["moe_recheck"]["own_inspection_note"] = "親回查common.text_examples：每篇先[BOS]+原byte+[EOS]，再分窗，每個下一目標只一次；52個篇末EOS不等於352個片段各一EOS。41914=41862+52，新文描述準確。"
+attrs = frozen["results"]["tasks"]["attributes"]
+inspection["gsm_recheck"] = {"teacher":{k:attrs["out_of_domain_gsm8k"]["teacher"][k] for k in ("correct","examples","eos_count")},"student_versions":{}}
+assert inspection["gsm_recheck"]["teacher"] == {"correct":0,"examples":2,"eos_count":2}
+assert len(attrs["runs"]) == 8
+for name,r in attrs["runs"].items():
+    g = r["out_of_domain_gsm8k"]
+    row = {k:g[k] for k in ("correct","examples","eos_count")}
+    assert row == {"correct":0,"examples":2,"eos_count":2}
+    inspection["gsm_recheck"]["student_versions"][name] = row
+for task in ("style_transfer","moe_to_dense"):
+    t = frozen["results"]["tasks"][task]
+    assert t["out_of_domain_gsm8k"] is None
+    assert all("out_of_domain_gsm8k" not in r for r in t["runs"].values())
+inspection["gsm_recheck"]["own_inspection_note"] = "親回查compression._distill_case：只有identifier=sft建立challenge並在正常/packed分支評估；兩寬各CE、teacher_hard、ce_kl及其packed4共8版本，非8支另訓練模型。教師與8版本都是0/2、EOS2/2，style/MoE未列此測試。新文已限定本診斷的屬性任務。"
+inspection["environment"] = {"python":platform.python_version(),"device":"cpu","torch_inference":"本次未重跑；前次2.14.1+cpu","operation":"raw bytes/diff和JSON數值scope重新核算"}
+inspection["result"] = "通過：新版全節已親讀；只有兩段範圍修正；41914/41862/52/352及屬性教師+八學生0/2、EOS2/2均與原始凍結證據一致，未變動fences/來源/圖/公開輸入。"
+(OUT / "T.10-recheck-2b0b6c7b-inspection.json").write_text(json.dumps(inspection,ensure_ascii=False,indent=2)+"\n")
+print(json.dumps({"current_source_sha256":NEW,"original_diff_sha256":sha(diff_raw),"changed_old_paragraphs":changed_old,
+    "changed_new_paragraphs":changed_new,"moe_recheck":inspection["moe_recheck"],"gsm_recheck":inspection["gsm_recheck"],"result":inspection["result"]},ensure_ascii=False,indent=2))

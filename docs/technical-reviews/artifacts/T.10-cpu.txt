@@ -1,0 +1,175 @@
+"""Bounded offline T.10 CLI, public checkpoint inference, and alignment checks."""
+import hashlib
+import json
+import os
+import platform
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from types import SimpleNamespace
+
+import torch
+
+ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(ROOT))
+from scripts.course_experiments.compression import _dataset, _evaluate, _steps, _storage
+from scripts.course_experiments.common import Context
+from scripts.course_experiments.modalities import evaluate_modal, modal_inputs
+from scripts.course_experiments.run import experiment_spec
+from tiny_perceptron.alignment import distillation_kl
+from tiny_perceptron.model import ModelConfig, TinyLM
+from tiny_perceptron.multimodal import MultiModalLM, VisionEncoder
+from tiny_perceptron.training import load_checkpoint
+
+OUT = ROOT / "docs/technical-reviews/artifacts"
+torch.set_num_threads(1)
+report = {"executed_at_utc":datetime.now(timezone.utc).isoformat(),"environment":{
+    "python":platform.python_version(),"torch":str(torch.__version__),"device":"cpu",
+    "OMP_NUM_THREADS":os.environ.get("OMP_NUM_THREADS","unset"),"MKL_NUM_THREADS":os.environ.get("MKL_NUM_THREADS","unset"),
+    "training":"no optimizer updates; only existing public checkpoints and untrained shape probes"},
+    "cli":[],"public_inputs":[],"attribute_replay":{},"modal_replay":{},"api_conditions":{}}
+
+
+def cli(args):
+    command = [sys.executable] + args
+    completed = subprocess.run(command,cwd=ROOT,capture_output=True,text=True,timeout=30,check=True)
+    report["cli"].append({"command":command,"exit_code":completed.returncode,"stdout":completed.stdout,"stderr":completed.stderr})
+    return completed.stdout
+
+
+def public_model(group,name):
+    folder = ROOT / "checkpoints/course" / group
+    manifest = json.loads((folder/"download-manifest.json").read_text())
+    expected = next(x for x in manifest["files"] if x["output"] == name)
+    path = folder/name
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    assert digest == expected["sha256"] and path.stat().st_size == expected["bytes"]
+    model,payload = load_checkpoint(path,"cpu")
+    report["public_inputs"].append({"local_input":str(path.relative_to(ROOT)),"sha256":digest,"bytes":path.stat().st_size,
+        "immutable_url":f"https://huggingface.co/{manifest['repo']}/resolve/{manifest['revision']}/{expected['path']}",
+        "revision":manifest["revision"],"format_version":payload["format_version"],"config":payload["config"],
+        "payload_keys":sorted(payload),"optimizer_or_rng_present":any("rng" in k or k == "optimizer" for k in payload),
+        "modal_config":payload.get("modal_config"),"storage":_storage(model,path),
+        "evidence_class":"ignored public input inspected directly; this own persistent metadata records pin/config, not tracked repository code"})
+    return model
+
+
+for args in (["scripts/fetch_training_assets.py","--help"],["scripts/fetch_training_assets.py","--list"],
+             ["-m","scripts.course_experiments.run","--help"],
+             ["-m","scripts.course_experiments.run","--list-assets","distillation"],
+             ["-m","scripts.course_experiments.run","--list-assets","multimodal_distillation"],
+             ["scripts/infer.py","--help"]):
+    cli(args)
+for experiment in ("distillation","multimodal_distillation","encoders","projector","vqa","joint"):
+    report["api_conditions"][experiment] = experiment_spec(experiment)
+assert _steps(SimpleNamespace(device="cpu",step_scale=1),400) == 400
+for width,layers,expected in ((64,2,141568),(16,1,13744),(32,1,33632)):
+    model = TinyLM(ModelConfig(width=width,layers=layers,heads=2,max_length=128))
+    count = sum(p.numel() for p in model.parameters())
+    assert count == expected
+    report["api_conditions"][f"parameter_count_{width}"] = count
+from scripts.course_experiments.modalities import _steps as modal_steps
+assert modal_steps(SimpleNamespace(device="cpu",step_scale=1),400,16) == 16
+assert modal_steps(SimpleNamespace(device="cuda",step_scale=1),400,16) == 400
+report["api_conditions"]["schedule"] = "compression CPU preserves 400/300/350; modality CPU preparation uses smoke schedules (joint 16 vs CUDA 400)"
+tmp = Path("/tmp/T.10-negative-dependencies")
+tmp.mkdir(exist_ok=True)
+ctx = Context("cpu",tmp,tmp,ROOT/"assets/training")
+try:
+    ctx.dependency("sft")
+except FileNotFoundError as error:
+    report["api_conditions"]["missing_weight"] = str(error)
+else:
+    raise AssertionError("missing dependency did not fail")
+(tmp/"sft").mkdir(exist_ok=True)
+leaked = {split:[{"family":"same"}] for split in ("train","validation","test")}
+(tmp/"sft/dataset.json").write_text(json.dumps(leaked))
+try:
+    _dataset(ctx,"sft")
+except ValueError as error:
+    report["api_conditions"]["family_leak"] = str(error)
+else:
+    raise AssertionError("family leakage did not fail")
+
+frozen = json.loads((ROOT/"docs/course-experiments/results/distillation.json").read_text())
+a = frozen["results"]["tasks"]["attributes"]
+rows = [{"family":r["family"],"question":r["question"],"answer":r["expected"]} for r in a["teacher_test"]["generated_samples"]]
+for method in ("ce","ce_kl","ce_kl-packed4"):
+    model = public_model("distillation",f"sft-w32-{method}.pt")
+    e = _evaluate(model,rows,"cpu",24)
+    key = "w32_"+method.replace("-","_")
+    expected = a["runs"][key]["test"]
+    assert [r["generated_ids"] for r in e["generated_samples"]] == [r["generated_ids"] for r in expected["generated_samples"]]
+    assert abs(e["answer_nll"]-expected["answer_nll"]) < 1e-5
+    report["attribute_replay"][method] = e
+for width in (16,32):
+    left = public_model("distillation",f"sft-w{width}-ce.pt")
+    right = public_model("distillation",f"sft-w{width}-teacher_hard.pt")
+    assert left.state_dict().keys() == right.state_dict().keys()
+    assert all(torch.equal(v,right.state_dict()[k]) for k,v in left.state_dict().items())
+    report["api_conditions"][f"w{width}_ce_hard_equal"] = True
+for method,answer in (("ce","square,low"),("ce_kl","square,high")):
+    raw = cli(["scripts/infer.py",f"checkpoints/course/distillation/sft-w32-{method}.pt","--chat","--prompt",
+        "color=red;shape=square;pitch=high;joint?","--tokens","24","--json","--device","cpu"])
+    result = json.loads(raw)
+    assert result["answer"] == answer and result["eos"] and not result["invalid_special_tokens"]
+
+mf = json.loads((ROOT/"docs/course-experiments/results/multimodal_distillation.json").read_text())
+ctx = SimpleNamespace(device="cpu",seed=42)
+for task,t in mf["results"]["tasks"].items():
+    rows=[]
+    for s in t["teacher_test"]["samples"]:
+        components = s["family"].split(":")
+        row = {"modality":"vision" if task=="vqa" else "joint","color":components[0],"shape":components[1],
+               "offset":int(components[2]),"family":s["family"],"question":s["question"],"answer":s["target"]}
+        if task=="joint":
+            row["frequency"]=int(components[3])
+        rows.append(row)
+    for method in ("ce","ce_kl"):
+        model = public_model("multimodal_distillation",f"{task}-{method}.pt")
+        for ablation in (["none","blank_image","blank_audio"] if task=="joint" and method=="ce_kl" else ["none"]):
+            e = evaluate_modal(model,rows,ctx,ablation)
+            expected = t["runs"][method]["test" if ablation=="none" else f"{ablation}_test"]
+            assert [s["generated_ids"] for s in e["samples"]] == [s["generated_ids"] for s in expected["samples"]]
+            assert abs(e["mean_token_nll"]-expected["mean_token_nll"]) < 1e-5
+            report["modal_replay"][f"{task}-{method}-{ablation}"] = e
+    teacher = public_model("multimodal_distillation",f"{task}-teacher.pt")
+    student = public_model("multimodal_distillation",f"{task}-ce_kl.pt")
+    probe = {"modality":"vision","color":"red","shape":"square","offset":0,"question":"color?","answer":"red","family":"probe"} if task=="vqa" else {
+        "modality":"joint","color":"blue","shape":"square","offset":0,"frequency":180,"question":"joint?","answer":"square,low","family":"probe"}
+    ids,labels,image,waveform,_ = modal_inputs(probe,ctx)
+    with torch.no_grad():
+        outputs = [m(ids,labels,image=image,waveform=waveform) for m in (teacher,student)]
+    selected = [o["labels"][0]!=-100 for o in outputs]
+    target_ids = [o["labels"][0,s].tolist() for o,s in zip(outputs,selected,strict=True)]
+    assert target_ids[0] == target_ids[1]
+    prediction_rows = [s.nonzero().flatten().tolist() for s in selected]
+    expected_rows = [list(range(25,29)),list(range(13,17))] if task=="vqa" else [list(range(36,47)),list(range(24,35))]
+    assert prediction_rows == expected_rows
+    report["api_conditions"][f"{task}_alignment"] = {"rows":prediction_rows,"answer_ids":target_ids[0]}
+
+teacher = torch.tensor([[[2.,0.,-1.],[0.,1.,2.]]])
+student = torch.tensor([[[0.,1.,2.],[2.,1.,0.]]],requires_grad=True)
+labels = torch.tensor([[1,-100]])
+loss = distillation_kl(student,teacher,labels,temperature=2)
+p = (teacher[0,0]/2).softmax(-1)
+q = (student[0,0]/2).softmax(-1)
+manual = 4*(p*(p.log()-q.log())).sum()
+assert torch.allclose(loss,manual,atol=1e-6)
+loss.backward()
+assert not student.grad[0,1].any()
+report["api_conditions"]["temperature_mask_probe"] = {"actual":loss.item(),"manual_T_squared_once":manual.item(),"ignored_row_gradient":student.grad[0,1].tolist()}
+for args in ((torch.zeros(1,1,264),torch.zeros(1,1,265),torch.zeros(1,1,dtype=torch.long),2),
+             (torch.zeros(1,1,264),torch.zeros(1,1,264),torch.full((1,1),-100),2)):
+    try:
+        distillation_kl(*args)
+    except ValueError as e:
+        report["api_conditions"].setdefault("kl_rejections",[]).append(str(e))
+    else:
+        raise AssertionError("invalid KL input was accepted")
+report["result"] = "passed: no training; both CLI examples, all ten attribute exercise outputs, four modal students, joint masks, pins, storage, alignment and API preconditions"
+(OUT/"T.10-cpu-results.json").write_text(json.dumps(report,ensure_ascii=False,indent=2)+"\n")
+print(json.dumps({"result":report["result"],"attribute_counts":{k:[v["correct"],v["examples"],v["supervised_tokens"],v["answer_nll"]] for k,v in report["attribute_replay"].items()},
+    "modal_counts":{k:[v["correct"],v["examples"],v["effective_tokens"],v["mean_token_nll"]] for k,v in report["modal_replay"].items()},
+    "environment":report["environment"]},ensure_ascii=False,indent=2))
