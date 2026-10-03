@@ -1,0 +1,50 @@
+from pathlib import Path
+import contextlib
+import hashlib
+import io
+import json
+import platform
+import sys
+import torch
+
+mode = sys.argv[1]
+assert mode in ("original", "exercise", "missing")
+base = Path("docs/technical-reviews/artifacts")
+source = base / f"10.8-{mode}-code.txt"
+namespace = {}
+stdout = io.StringIO()
+with contextlib.redirect_stdout(stdout):
+    exec(compile(source.read_text(), str(source), "exec"), namespace)
+a, b = namespace["a"], namespace["b"]
+assert tuple(a.shape) == (1, 3, 264)
+assert torch.equal(a, b)
+command = f"OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 timeout 40 .venv/bin/python docs/technical-reviews/artifacts/10.8-cpu-driver.txt {mode}"
+result = {
+    "mode": mode,
+    "command": command,
+    "source_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+    "environment": {
+        "python": platform.python_version(),
+        "torch": torch.__version__,
+        "torch_git_version": torch.version.git_version,
+        "device": str(a.device),
+        "omp_num_threads": "1",
+        "mkl_num_threads": "1",
+    },
+    "stdout": stdout.getvalue(),
+    "result": {
+        "shape": list(a.shape),
+        "torch_equal": torch.equal(a, b),
+        "max_abs_difference": float((a - b).detach().abs().max()),
+        "language_is_same_object": namespace["multimodal"].language is namespace["lm"],
+        "lm_training": namespace["lm"].training,
+        "multimodal_training": namespace["multimodal"].training,
+        "ids": namespace["ids"].tolist(),
+        "finite": bool(torch.isfinite(a).all()),
+        "dtype_a": str(a.dtype),
+        "dtype_b": str(b.dtype),
+    },
+    "exit_code": 0,
+}
+(base / f"10.8-{mode}-execution.json").write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n")
+print(json.dumps(result, ensure_ascii=False))

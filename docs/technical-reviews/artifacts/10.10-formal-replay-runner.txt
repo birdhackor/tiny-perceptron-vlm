@@ -1,0 +1,96 @@
+import sys, json, hashlib, platform, random, inspect
+from pathlib import Path
+import torch
+from torch.nn import functional as F
+sys.path.insert(0, str(Path.cwd()))
+from scripts.course_experiments.modalities import _Contrastive, _vision_records, _fit
+from tiny_perceptron.multimodal import scene
+
+torch.set_num_threads(1)
+def audit(event, args):
+    if event.startswith("socket.") or event in ("subprocess.Popen", "os.system"):
+        raise RuntimeError("offline bounded CPU audit: " + event)
+sys.addaudithook(audit)
+def sha(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+def tensor_sha(t):
+    return hashlib.sha256(t.detach().contiguous().numpy().tobytes()).hexdigest()
+source_path = "docs/course-experiments/results/contrastive.json"
+frozen = json.loads(Path(source_path).read_text())
+assert sha(source_path) == "a0a0fa092aac7bb4747c418603e40f70366e504d805f7d854cb70ac2dee130da"
+for p in ("scripts/course_experiments/modalities.py", "tiny_perceptron/multimodal.py", "tiny_perceptron/data.py", "tiny_perceptron/training.py"):
+    assert sha(p) == frozen["code_sha256"][p]
+result = frozen["results"]
+variant = result["variants"]["one_way"]
+t = variant["training"]
+splits = _vision_records()
+for split, rows in splits.items():
+    assert rows == result["data"]["splits"][split]["records"]
+labels = [f"{c} {s}" for c in ("red", "green", "blue") for s in ("circle", "square")]
+selection = []
+for step in range(250):
+    rng = random.Random(42 + step)
+    rows = [rng.choice([r for r in splits["train"] if r["answer"] == label]) for label in labels]
+    assert len(rows) == 6 and len({r["answer"] for r in rows}) == 6
+    selection.extend(r["family"] for r in rows)
+assert len(selection) == 1500 and len(set(selection)) == 18
+assert len(t["history"]) == 250
+assert [h["step"] for h in t["history"]] == list(range(1,251))
+assert {h["effective_targets"] for h in t["history"]} == {6}
+assert sum(h["effective_targets"] for h in t["history"]) == t["effective_targets"] == 1500
+assert inspect.signature(_fit).parameters["lr"].default == 0.003
+random.seed(42)
+torch.manual_seed(42)
+model = _Contrastive().cpu().eval()
+initial = {k: v.detach().clone() for k,v in model.state_dict().items()}
+assert sum(p.numel() for p in model.parameters()) == 5568
+
+def images(rows):
+    return torch.stack([scene(r["color"], r["shape"], offset=r["offset"]) for r in rows])
+def evaluate(rows):
+    with torch.no_grad():
+        scores = model.scores(images(rows), labels)
+    pred = scores.argmax(-1).tolist()
+    correct = sum(labels[j] == r["answer"] for r,j in zip(rows,pred,strict=True))
+    return {"count":len(rows), "correct":correct, "predicted": [labels[j] for j in pred], "scores":scores.tolist()}
+def probe():
+    rng = random.Random(41)
+    rows = [rng.choice([r for r in splits["train"] if r["answer"] == label]) for label in labels]
+    return rows, F.cross_entropy(model.scores(images(rows), labels), torch.arange(6))
+before = evaluate(splits["test"])
+probe_rows, initial_loss = probe()
+initial_loss_value = initial_loss.item()
+initial_loss.backward()
+gradients = {group:sum(float(p.grad.square().sum()) for n,p in model.named_parameters() if n.startswith(group) and p.grad is not None)**0.5 for group in ("vision.", "text.")}
+assert all(v > 0 for v in gradients.values())
+weights_path = "checkpoints/course/contrastive/one_way.pt"
+weights_sha = sha(weights_path)
+assert weights_sha == "6ab3643d6a0f041982db2cf3103896d198644f1c11429adbb09e052b854c7691"
+saved = torch.load(weights_path, map_location="cpu", weights_only=True)
+assert saved["format_version"] == "contrastive-v1"
+model.load_state_dict(saved["model"], strict=True)
+model.eval()
+with torch.no_grad():
+    _, final_loss = probe()
+    final_loss_value = final_loss.item()
+after_test = evaluate(splits["test"])
+after_validation = evaluate(splits["validation"])
+assert before["correct"] == 1 and after_test["correct"] == 6 and after_validation["correct"] == 5
+assert abs(initial_loss_value - t["initial_loss"]) < 2e-6
+assert abs(final_loss_value - t["final_loss"]) < 2e-6
+tensor_evidence = []
+for k,v in saved["model"].items():
+    tensor_evidence.append({"name":k,"shape":list(v.shape),"dtype":str(v.dtype),"numel":v.numel(),"initial_sha256":tensor_sha(initial[k]),"saved_sha256":tensor_sha(v),"changed":not torch.equal(initial[k],v),"max_abs_change":float((initial[k]-v).abs().max())})
+assert any(x["changed"] for x in tensor_evidence if x["name"].startswith("vision."))
+assert any(x["changed"] for x in tensor_evidence if x["name"].startswith("text."))
+metadata = {k:v for k,v in saved.items() if k != "model"}
+output = {
+ "environment":{"python":platform.python_version(),"torch":str(torch.__version__),"torch_git_version":torch.version.git_version,"device":"cpu","OMP_NUM_THREADS":"1","MKL_NUM_THREADS":"1","threads":"1"},
+ "scope":"親自離線讀取凍結配置／分母／公開權重，僅執行原始初始化、一次求導及推論；沒有 optimizer 更新，沒有重跑正式訓練。GPU 正式結果與 CPU 重播分開記錄。",
+ "frozen_result":{"path":source_path,"sha256":sha(source_path),"revision":frozen["revision"],"environment":{k:frozen[k] for k in ("python_version","torch_version","device","gpu","seed","step_scale","evidence_status","unfinished_schedules")},"config":result["config"],"one_way_training":{k:v for k,v in t.items() if k not in ("history","seconds","elapsed")},"history_summary":{"rows":250,"first_step":1,"last_step":250,"effective_targets_per_step":6,"effective_targets_total":1500,"initial_record":t["history"][0],"final_record":t["history"][-1]},"data":result["data"],"one_way_before":variant["before"],"one_way_validation":variant["validation"],"one_way_test":variant["test"]},
+ "selection":{"pairs":len(selection),"unique_image_families":len(set(selection)),"batch_unique_descriptions":6,"lr_from_fixed_source":0.003,"probe_families":[r["family"] for r in probe_rows]},
+ "cpu_replay":{"parameters":sum(p.numel() for p in model.parameters()),"initial_probe_loss":initial_loss_value,"final_probe_loss":final_loss_value,"one_way_initial_backward_encoder_grad_norms":gradients,"before_test":before,"after_test":after_test,"after_validation":after_validation},
+ "public_weight":{"local_input_path":weights_path,"source_kind":"official_source; ignored 權重不是 tracked repository_code","url":"https://huggingface.co/birdhackor/tiny-perceptron-course-models/resolve/7bfb5134d34901fbf715d945f0268f4ca302170a/course/course-v1/contrastive/one_way.pt","revision":"7bfb5134d34901fbf715d945f0268f4ca302170a","file_sha256":weights_sha,"bytes":Path(weights_path).stat().st_size,"metadata":metadata,"tensor_evidence":tensor_evidence},
+ "assertions":"all passed"
+}
+print(json.dumps(output,ensure_ascii=False,indent=2))

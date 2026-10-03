@@ -1,0 +1,98 @@
+import hashlib
+import json
+import platform
+import sys
+from pathlib import Path
+
+import torch
+
+ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(ROOT))
+from scripts.course_experiments.modalities import _Contrastive, _vision_records
+from tiny_perceptron.training import seed_everything
+
+torch.set_num_threads(1)
+torch.set_default_device("cpu")
+ARTIFACTS = ROOT / "docs/technical-reviews/artifacts"
+path = ROOT / "docs/course-experiments/results/contrastive.json"
+raw = path.read_bytes()
+frozen = json.loads(raw)
+results = frozen["results"]
+sources = [
+    "scripts/course_experiments/modalities.py",
+    "tiny_perceptron/training.py",
+    "tiny_perceptron/multimodal.py",
+]
+checked_hashes = {}
+for name in sources:
+    actual = hashlib.sha256((ROOT / name).read_bytes()).hexdigest()
+    assert actual == frozen["code_sha256"][name]
+    checked_hashes[name] = actual
+
+generated = _vision_records()
+for split, expected_count in (("train", 18), ("validation", 6), ("test", 6)):
+    saved = results["data"]["splits"][split]
+    assert saved["records"] == generated[split]
+    assert saved["count"] == expected_count
+    actual = hashlib.sha256(json.dumps(generated[split], ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+    assert actual == saved["sha256"]
+
+variants = {}
+for name, variant in results["variants"].items():
+    training = variant["training"]
+    history = training["history"]
+    assert len(history) == training["steps"] == 250
+    assert [row["step"] for row in history] == list(range(1, 251))
+    assert all(row["effective_targets"] == 6 for row in history)
+    assert sum(row["effective_targets"] for row in history) == training["effective_targets"] == 1500
+    counts = {}
+    for phase in ("before", "validation", "test"):
+        phase_result = variant[phase]
+        counts[phase] = {}
+        for direction, sample_key, query_key in (
+            ("image_to_text", "image_samples", "image_queries"),
+            ("text_to_image", "text_samples", "text_queries"),
+        ):
+            samples = phase_result[sample_key]
+            assert len(samples) == phase_result[query_key] == 6
+            for sample in samples:
+                predicted_key = "predicted" if direction == "image_to_text" else "retrieved"
+                assert sample["correct"] == (sample[predicted_key] == sample["target"])
+            correct = sum(sample["correct"] for sample in samples)
+            assert correct / len(samples) == phase_result[f"{direction}_accuracy"]
+            expected = 1 if phase == "before" else 5 if phase == "validation" and direction == "image_to_text" else 6
+            assert correct == expected
+            counts[phase][direction] = {"correct": correct, "queries": len(samples)}
+    variants[name] = {
+        "training": {key: value for key, value in training.items() if key != "history"},
+        "history_rows": len(history),
+        "every_history_batch_targets": 6,
+        "history_total_targets": sum(row["effective_targets"] for row in history),
+        "recomputed_counts": counts,
+        "samples": {phase: variant[phase] for phase in ("before", "validation", "test")},
+    }
+
+seed_everything(42)
+first = _Contrastive()
+seed_everything(42)
+second = _Contrastive()
+assert all(torch.equal(v, second.state_dict()[key]) for key, v in first.state_dict().items())
+assert sum(p.numel() for p in first.parameters()) == 5568
+
+record = {
+    "command": "OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 timeout 45 .venv/bin/python docs/technical-reviews/artifacts/10.11-fixed-result-audit.txt",
+    "environment": {"python": platform.python_version(), "torch": str(torch.__version__), "device": "cpu", "threads": "1"},
+    "frozen_result_path": str(path.relative_to(ROOT)),
+    "frozen_result_sha256": hashlib.sha256(raw).hexdigest(),
+    "frozen_run": {key: frozen[key] for key in ("revision", "device", "seed", "torch_version", "python_version", "gpu", "step_scale", "evidence_status", "status", "modal", "hf")},
+    "matching_code_sha256": checked_hashes,
+    "config": results["config"],
+    "data": results["data"],
+    "variants": variants,
+    "same_seed_cpu_initialization_equal": True,
+    "cpu_initialization_parameter_count": 5568,
+    "scope": "親讀固定正式結果後，以 CPU 重算樣本分母、配對判斷與紀錄一致性；只建立兩份未訓練模型核對相同 seed 的初始化，沒有重跑正式訓練、沒有下載或載入模型。GPU 正式結果仍屬原固定紀錄。",
+    "exit_code": 0,
+}
+(ARTIFACTS / "10.11-fixed-result-execution.json").write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n")
+print(json.dumps({"frozen_result_sha256": record["frozen_result_sha256"], "variants": {name: variant["recomputed_counts"] for name, variant in variants.items()}, "initialization_equal": True, "exit_code": 0}, ensure_ascii=False))

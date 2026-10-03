@@ -1,0 +1,52 @@
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+root = Path('/workspace/tiny-perceptron-vlm')
+sys.path.insert(0, str(root))
+import torch
+from torch import nn
+from tiny_perceptron.data import ByteTokenizer, SPECIALS
+
+torch.set_num_threads(1)
+torch.set_default_device('cpu')
+assert torch.version.cuda is None
+
+def audit(event, args):
+    if event in ('socket.connect', 'socket.getaddrinfo', 'subprocess.Popen', 'os.system'):
+        raise RuntimeError('bounded offline byte-route recheck: ' + event)
+
+sys.addaudithook(audit)
+tok = ByteTokenizer()
+ids = tok.encode('r ')
+assert list('r '.encode('utf-8')) == [114, 32]
+assert ids == [122, 40]
+assert len(SPECIALS) == 8 and tok.vocab_size == 264
+table = nn.Embedding.from_pretrained(torch.arange(264 * 16, dtype=torch.float32).reshape(264, 16))
+looked_up = table(torch.tensor(ids))
+assert torch.equal(looked_up[0], table.weight[122])
+assert torch.equal(looked_up[1], table.weight[40])
+assert not torch.equal(looked_up[0], table.weight[114])
+all_ids = [byte + len(SPECIALS) for byte in range(256)]
+assert min(all_ids) == 8 and max(all_ids) == 263
+fixed = json.loads((root / 'docs/course-experiments/results/contrastive.json').read_text())
+tokenizer_sha = hashlib.sha256((root / 'tiny_perceptron/data.py').read_bytes()).hexdigest()
+assert tokenizer_sha == fixed['code_sha256']['tiny_perceptron/data.py']
+record = {
+    'environment': {'python': sys.version, 'torch': str(torch.__version__), 'torch_git_version': str(torch.version.git_version), 'device': str(table.weight.device), 'threads': str(torch.get_num_threads())},
+    'text': 'r ',
+    'raw_utf8_bytes': [114, 32],
+    'model_ids': ids,
+    'special_count': len(SPECIALS),
+    'regular_id_bounds': [min(all_ids), max(all_ids)],
+    'embedding_table_shape': list(table.weight.shape),
+    'selected_vector_shape': list(looked_up.shape),
+    'r_looked_up_row': 122,
+    'space_looked_up_row': 40,
+    'raw_byte_row_is_not_selected': True,
+    'byte_tokenizer_sha256': tokenizer_sha,
+    'fixed_run_tokenizer_binding_matches': True,
+    'scope': '只為10.1導言配對路線重新核對10.9文字來源的byte→ID鏈；人工表只核索引，不訓練模型或重跑正式圖文配對。'
+}
+print(json.dumps(record, ensure_ascii=False, indent=2))

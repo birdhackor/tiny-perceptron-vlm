@@ -1,0 +1,73 @@
+import contextlib
+import io
+import json
+import math
+import os
+import platform
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path.cwd()))
+import torch
+from torch.nn import functional as F
+torch.set_num_threads(1)
+mode = sys.argv[1]
+env = {"python": platform.python_version(), "torch": torch.__version__, "torch_git_version": str(torch.version.git_version), "device": "cpu", "OMP_NUM_THREADS": os.environ.get("OMP_NUM_THREADS", ""), "MKL_NUM_THREADS": os.environ.get("MKL_NUM_THREADS", ""), "threads": str(torch.get_num_threads())}
+raw=Path("docs/technical-reviews/artifacts/10.9-source-raw.txt").read_text()
+code=raw.split("```python\n",1)[1].split("```",1)[0]
+if mode in {"baseline", "exercise"}:
+    if mode == "exercise":
+        code=code.replace("text = torch.tensor([[2.0, 0.0], [0.0, 3.0]])", "text = torch.tensor([[0.0, 3.0], [2.0, 0.0]])")
+    ns={}; out=io.StringIO()
+    with contextlib.redirect_stdout(out):
+        exec(compile(code,"10.9-original-fence" if mode=="baseline" else "10.9-exercise", "exec"),ns)
+    expected=[[1.,0.],[0.,1.]] if mode=="baseline" else [[0.,1.],[1.,0.]]
+    ids=[0,1] if mode=="baseline" else [1,0]
+    assert ns["similarity"].tolist()==expected
+    assert ns["similarity"].argmax(-1).tolist()==ids
+    result={"source_code":code,"stdout":out.getvalue(),"image_dtype":str(ns["image"].dtype),"text_dtype":str(ns["text"].dtype),"normalized_image":F.normalize(ns["image"],dim=-1).tolist(),"normalized_text":F.normalize(ns["text"],dim=-1).tolist(),"similarity":ns["similarity"].tolist(),"selected_text_columns":ids}
+elif mode=="api":
+    v=torch.tensor([3.,4.]); n=F.normalize(v,dim=-1)
+    w=F.normalize(torch.tensor([1.,1.]),dim=-1)
+    e=torch.tensor([1.,0.]); paired=torch.stack([w,w]); sims=e@paired.T
+    i=torch.tensor([[0,3],[2,0]])
+    try:
+        F.normalize(i,dim=-1)
+    except RuntimeError as ex:
+        int_result={"dtype":str(i.dtype),"error_type":type(ex).__name__,"message":str(ex)}
+    else:
+        raise AssertionError("integer normalization unexpectedly accepted")
+    assert abs(float(v.norm())-5)<1e-7
+    assert torch.allclose(n,torch.tensor([.6,.8]),atol=1e-7)
+    assert abs(float(w@e)-1/math.sqrt(2))<1e-7
+    z=torch.tensor([1.,0.]); probs={str(t):F.softmax(z/t,dim=-1).tolist() for t in [.1,1.,2.]}
+    result={"norm_3_4":float(v.norm()),"normalized_3_4":n.tolist(),"norm_1_1":float(torch.tensor([1.,1.]).norm()),"normalized_1_1":w.tolist(),"dot_1_1_with_1_0":float(w@e),"same_orthogonal_opposite":[float(e@e),float(e@torch.tensor([0.,1.])),float(e@(-e))],"duplicate_candidates_similarities":sims.tolist(),"similarity_row_sum":float(sims.sum()),"softmax_row_sum":float(sims.softmax(-1).sum()),"temperature_softmax":probs,"zero_normalization":F.normalize(torch.zeros(2),dim=-1).tolist(),"integer_normalization":int_result,"floating_default_dtype":str(torch.tensor([[0.0,3.0],[2.0,0.0]]).dtype)}
+elif mode=="formal_forward":
+    from scripts.course_experiments.modalities import _Contrastive, _vision_records
+    from tiny_perceptron.multimodal import VisionEncoder, patchify, scene
+    from tiny_perceptron.data import ByteTokenizer
+    labels=[f"{c} {s}" for c in ("red","green","blue") for s in ("circle","square")]
+    images=torch.stack([scene(c,s) for c in ("red","green","blue") for s in ("circle","square")])
+    torch.manual_seed(42); m=_Contrastive()
+    torch.manual_seed(42); m2=_Contrastive()
+    torch.manual_seed(42); classification_initial=VisionEncoder()
+    state_equal=all(torch.equal(m.state_dict()[k],m2.state_dict()[k]) for k in m.state_dict())
+    vision_equal=all(torch.equal(m.vision.state_dict()[k],classification_initial.state_dict()[k]) for k in m.vision.state_dict())
+    captured=[]
+    handle=m.text.register_forward_pre_hook(lambda module,args:captured.append(args[0].tolist()))
+    with torch.no_grad():
+        output=m.scores(images,labels)
+    handle.remove()
+    tok=ByteTokenizer(); byte_values=[list(t.encode("utf-8")) for t in labels]; ids=[tok.encode(t) for t in labels]
+    assert captured==ids
+    assert all(a==[b+8 for b in c] for a,c in zip(ids,byte_values))
+    with torch.no_grad():
+        vf=m.vision(images); im=F.normalize(vf.mean(1),dim=-1)
+        tx=torch.stack([m.text(torch.tensor(i)).mean(0) for i in ids]); nt=F.normalize(tx,dim=-1)
+        manual=im@nt.T/.1
+        raw_tx=torch.stack([m.text(torch.tensor(b)).mean(0) for b in byte_values]); wrong=im@F.normalize(raw_tx,dim=-1).T/.1
+    assert torch.equal(output,manual)
+    assert state_equal and vision_equal
+    result={"labels":labels,"image_shape":list(images.shape),"patch_shape":list(patchify(images).shape),"vision_feature_shape":list(vf.shape),"pooled_image_shape":list(vf.mean(1).shape),"text_table_shape":list(m.text.weight.shape),"text_feature_shape":list(tx.shape),"raw_utf8_values":byte_values,"tokenizer_ids":ids,"captured_actual_lookup_ids":captured,"temperature":.1,"score_shape":list(output.shape),"manual_score_max_abs_difference":float((output-manual).abs().max()),"direct_raw_byte_lookup_max_abs_difference":float((output-wrong).abs().max()),"image_normalized_norms":im.norm(dim=-1).tolist(),"text_normalized_norms":nt.norm(dim=-1).tolist(),"repeat_random_seed_same_full_state":state_equal,"classification_random_seed_same_initial_vision":vision_equal,"all_parameters_trainable":all(p.requires_grad for p in m.parameters()),"parameters":sum(p.numel() for p in m.parameters()),"splits":{k:{"count":len(rows),"offsets":sorted(set(r["offset"] for r in rows))} for k,rows in _vision_records().items()},"training_steps_executed":0,"checkpoint_loads":0,"limitations":"只執行新建隨機模型 CPU forward；不驗證正式 GPU 訓練品質。"}
+else:
+    raise ValueError(mode)
+print(json.dumps({"mode":mode,"environment":env,"result":result},ensure_ascii=False,indent=2))

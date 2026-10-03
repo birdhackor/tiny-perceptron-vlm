@@ -1,0 +1,28 @@
+import hashlib
+import json
+import platform
+import sys
+from pathlib import Path
+sys.path.insert(0,str(Path.cwd()))
+import torch
+from tiny_perceptron.data import ByteTokenizer, SPECIALS, render_chat
+from scripts.course_experiments.modalities import _Contrastive
+torch.set_num_threads(1)
+tok=ByteTokenizer()
+attrs=["pad_id","bos_id","eos_id","user_id","assistant_id","image_id","audio_id","system_id"]
+specials=dict(zip(SPECIALS,[getattr(tok,a) for a in attrs],strict=True))
+assert list(specials.values())==list(range(8))
+chat_ids,chat_targets=render_chat([{"role":"assistant","content":"r"}],tok)
+assert chat_ids.tolist()==[1,4,122] and chat_targets.tolist()==[-100,122,2]
+assert tok.encode("r")==[122] and tok.encode(" ")==[40]
+torch.manual_seed(42)
+m=_Contrastive()
+assert tuple(m.text.weight.shape)==(264,16)
+captured=[]
+hook=m.text.register_forward_pre_hook(lambda module,args:captured.append(args[0].tolist()))
+from tiny_perceptron.multimodal import scene
+with torch.no_grad():
+    m.scores(scene()[None],["red circle"])
+hook.remove()
+assert captured==[[122,109,108,40,107,113,122,107,116,109]]
+print(json.dumps({"environment":{"python":platform.python_version(),"torch":torch.__version__,"torch_git_version":str(torch.version.git_version),"device":"cpu","threads":str(torch.get_num_threads())},"specials_and_ids":specials,"start_end_usage_probe":{"input_ids":chat_ids.tolist(),"target_ids":chat_targets.tolist(),"note":"chat formatting起點BOS1，最後回答目標EOS2；這不是contrastive描述插入特殊ID。"},"r":{"raw_utf8":list("r".encode("utf-8")),"tokenizer_ids":tok.encode("r")},"space":{"raw_utf8":list(" ".encode("utf-8")),"tokenizer_ids":tok.encode(" ")},"raw_byte_domain_offset_derivation":{"offset":len(SPECIALS),"minimum":0+len(SPECIALS),"maximum":255+len(SPECIALS),"note":"此為保留的byte vocabulary範圍；不宣稱每個ID都出現在合法UTF-8字串或六候選。"},"table_shape":list(m.text.weight.shape),"actual_embedding_lookup_red_circle":captured[0],"special_ids_inserted_in_contrastive_description":False,"mean_axis":"mean(0) over IDs of each description","training_updates":0,"original_execution_retained":"10.9-formal_forward-execution.json","current_code_sha256":{p:hashlib.sha256(Path(p).read_bytes()).hexdigest() for p in ["tiny_perceptron/data.py","scripts/course_experiments/modalities.py"]}},ensure_ascii=False,indent=2))

@@ -1,0 +1,109 @@
+import contextlib
+import hashlib
+import io
+import json
+import math
+import platform
+import re
+import socket
+from pathlib import Path
+
+import torch
+from torch.nn import functional as F
+
+ROOT = Path(__file__).resolve().parents[3]
+ARTIFACTS = ROOT / "docs/technical-reviews/artifacts"
+torch.set_num_threads(1)
+torch.set_default_device("cpu")
+
+def deny_network(*args, **kwargs):
+    raise RuntimeError("10.11 offline CPU probe forbids network")
+
+socket.socket = deny_network
+socket.create_connection = deny_network
+
+raw = (ARTIFACTS / "10.11-section-raw.txt").read_bytes()
+code = re.findall(r"```python\n(.*?)```", raw.decode(), re.S)[0]
+environment = {
+    "python": platform.python_version(),
+    "torch": str(torch.__version__),
+    "torch_git_version": str(torch.version.git_version),
+    "device": "cpu",
+    "threads": str(torch.get_num_threads()),
+    "omp_num_threads": "1",
+    "mkl_num_threads": "1",
+}
+
+for name, expression in (
+    ("original", "(image_to_text + text_to_image) / 2"),
+    ("exercise", "(2*image_to_text + text_to_image)/3"),
+):
+    executed_code = code.replace("(image_to_text + text_to_image) / 2", expression)
+    namespace = {}
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        exec(compile(executed_code, f"10.11-{name}", "exec"), namespace)
+    scores = namespace["scores"]
+    record = {
+        "command": "OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 timeout 45 .venv/bin/python docs/technical-reviews/artifacts/10.11-cpu-probe.txt",
+        "environment": environment,
+        "case": name,
+        "executed_code": executed_code,
+        "stdout": output.getvalue(),
+        "labels": namespace["labels"].tolist(),
+        "label_dtype": str(namespace["labels"].dtype),
+        "score_dtype": str(scores.dtype),
+        "score_shape": list(scores.shape),
+        "loss_shape": list(namespace["loss"].shape),
+        "image_to_text": namespace["image_to_text"].item(),
+        "text_to_image": namespace["text_to_image"].item(),
+        "loss": namespace["loss"].item(),
+        "gradient": scores.grad.tolist(),
+        "gradient_sign": torch.sign(scores.grad).tolist(),
+        "exit_code": 0,
+    }
+    (ARTIFACTS / f"10.11-{name}-execution.json").write_text(
+        json.dumps(record, ensure_ascii=False, indent=2) + "\n"
+    )
+    print(json.dumps(record, ensure_ascii=False))
+
+row_gaps = [2.0 - 0.1, 1.8 - 0.4]
+column_gaps = [2.0 - 0.4, 1.8 - 0.1]
+li = sum(math.log1p(math.exp(-gap)) for gap in row_gaps) / 2
+lt = sum(math.log1p(math.exp(-gap)) for gap in column_gaps) / 2
+scores = torch.tensor([[2.0, 0.1], [0.4, 1.8]], dtype=torch.float64, requires_grad=True)
+labels = torch.arange(2)
+image_loss = F.cross_entropy(scores, labels)
+text_loss = F.cross_entropy(scores.T, labels)
+grad_i = torch.autograd.grad(image_loss, scores, retain_graph=True)[0]
+grad_t = torch.autograd.grad(text_loss, scores, retain_graph=True)[0]
+grad_both = torch.autograd.grad((image_loss + text_loss) / 2, scores)[0]
+assert torch.allclose(grad_both, (grad_i + grad_t) / 2, atol=1e-15, rtol=0)
+assert abs(li - image_loss.item()) < 1e-15
+assert abs(lt - text_loss.item()) < 1e-15
+counterexample = torch.tensor([[4.0, 3.0], [5.0, 6.0]])
+assert counterexample.argmax(1).tolist() == [0, 1]
+assert counterexample.argmax(0).tolist() == [1, 1]
+sym = torch.tensor([[2.0, 0.1], [0.1, 1.8]])
+assert F.cross_entropy(sym, labels).item() == F.cross_entropy(sym.T, labels).item()
+audit = {
+    "environment": environment,
+    "row_gaps": row_gaps,
+    "column_gaps": column_gaps,
+    "formula": "Li=(log1p(exp(-1.9))+log1p(exp(-1.4)))/2; Lt=(log1p(exp(-1.6))+log1p(exp(-1.7)))/2",
+    "derived_image_loss": li,
+    "derived_text_loss": lt,
+    "derived_mean_loss": (li + lt) / 2,
+    "derived_exercise_loss": (2 * li + lt) / 3,
+    "gradient_i": grad_i.tolist(),
+    "gradient_t": grad_t.tolist(),
+    "gradient_mean": grad_both.tolist(),
+    "gradient_sum_max_error": (grad_both - (grad_i + grad_t) / 2).abs().max().item(),
+    "counterexample_scores": counterexample.tolist(),
+    "counterexample_image_choices": counterexample.argmax(1).tolist(),
+    "counterexample_text_choices": counterexample.argmax(0).tolist(),
+    "symmetric_direction_loss_equal": True,
+    "exit_code": 0,
+}
+(ARTIFACTS / "10.11-math-execution.json").write_text(json.dumps(audit, ensure_ascii=False, indent=2) + "\n")
+print(json.dumps(audit, ensure_ascii=False))

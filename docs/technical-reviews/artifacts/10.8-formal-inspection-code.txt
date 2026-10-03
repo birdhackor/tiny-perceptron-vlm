@@ -1,0 +1,76 @@
+from pathlib import Path
+import hashlib
+import json
+import platform
+import torch
+from tiny_perceptron.data import ByteTokenizer
+
+base = Path("docs/technical-reviews/artifacts")
+tok = ByteTokenizer()
+def digest(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+path = Path("docs/course-experiments/results/projector.json")
+projector = json.loads(path.read_text())
+training = projector["results"]["training"]
+history = training["history"]
+assert len(history) == training["steps"] == 300
+assert sum(row["effective_targets"] for row in history) == training["effective_targets"] == 14408
+assert projector["results"]["language_weights_unchanged"] is True
+for name in ("tiny_perceptron/model.py", "tiny_perceptron/multimodal.py", "scripts/course_experiments/modalities.py", "scripts/course_experiments/common.py"):
+    assert digest(Path(name)) == projector["code_sha256"][name]
+projector_summary = {
+    "path": str(path),
+    "sha256": digest(path),
+    "revision": projector["revision"],
+    "seed": projector["seed"],
+    "device": projector["device"],
+    "torch_version": projector["torch_version"],
+    "config": training["config"],
+    "modal_config": training["modal_config"],
+    "parameters": training["parameters"],
+    "trainable_parameters": training["trainable_parameters"],
+    "steps": training["steps"],
+    "effective_targets": training["effective_targets"],
+    "history_target_counts": [row["effective_targets"] for row in history],
+    "language_weights_unchanged": projector["results"]["language_weights_unchanged"],
+    "result_keys": list(projector["results"]),
+    "data_counts": {name: split["count"] for name, split in projector["results"]["data"]["splits"].items()},
+    "matched_implementation_sha256": {name: projector["code_sha256"][name] for name in ("tiny_perceptron/model.py", "tiny_perceptron/multimodal.py", "scripts/course_experiments/modalities.py", "scripts/course_experiments/common.py")},
+}
+path = Path("docs/course-experiments/results/vqa.json")
+vqa = json.loads(path.read_text())
+variants = {}
+for name in ("projector_only", "partial", "all", "all_replay"):
+    variant = vqa["results"]["variants"][name]
+    summary = {
+        "steps": variant["training"]["steps"],
+        "effective_targets": variant["training"]["effective_targets"],
+        "freeze_scope": variant["freeze_scope"],
+        "replay_probability_per_example": variant["replay_probability_per_example"],
+    }
+    for category, correctness, expected_key in (("test", "exact_match", "target"), ("text_before", "exact", "expected"), ("text_after", "exact", "expected")):
+        evaluation = variant[category]
+        samples = []
+        for sample in evaluation["samples"]:
+            ids = sample["generated_ids"]
+            raw = ids[:ids.index(tok.eos_id)] if tok.eos_id in ids else ids
+            calculated = raw == tok.encode(sample[expected_key])
+            assert calculated == sample[correctness]
+            samples.append({"expected": sample[expected_key], "generated_ids": ids, "recalculated_exact": calculated})
+        count, correct = len(samples), sum(sample["recalculated_exact"] for sample in samples)
+        assert evaluation["examples"] == count
+        assert correct == evaluation["correct" if category == "test" else "matches"]
+        assert correct / count == evaluation["exact_match"]
+        summary[category] = {"examples": count, "correct": correct, "exact_match": correct / count, "samples": samples}
+    variants[name] = summary
+result = {
+    "command": "OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 timeout 40 .venv/bin/python docs/technical-reviews/artifacts/10.8-formal-inspection-code.txt",
+    "environment": {"python": platform.python_version(), "torch": torch.__version__, "device": "cpu", "omp_num_threads": "1", "mkl_num_threads": "1"},
+    "scope": "離線核對凍結的正式 JSON、原始逐題生成 ID、實作 SHA 與分母；未載入權重、未重跑訓練、未以 CPU 速度或玩具輸出替代 CUDA 正式結果。",
+    "projector": projector_summary,
+    "vqa": {"path": str(path), "sha256": digest(path), "revision": vqa["revision"], "seed": vqa["seed"], "device": vqa["device"], "variants": variants, "text_data": vqa["results"]["text_data"]},
+    "exit_code": 0,
+}
+(base / "10.8-formal-inspection.json").write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n")
+print(json.dumps({"projector_language_weights_unchanged": projector_summary["language_weights_unchanged"], "steps": training["steps"], "effective_targets": training["effective_targets"], "vqa_text_before_after": {name: [variant["text_before"]["correct"], variant["text_after"]["correct"]] for name, variant in variants.items()}, "exit_code": 0}, ensure_ascii=False))
