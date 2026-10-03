@@ -1,0 +1,55 @@
+import ast, hashlib, json, sys
+from pathlib import Path
+import torch
+from tiny_perceptron.model import TinyLM, ModelConfig
+from tiny_perceptron.multimodal import MultiModalLM, scene
+
+torch.manual_seed(0)
+torch.set_num_threads(1)
+root=Path('/workspace/tiny-perceptron-vlm')
+raw=(root/'docs/technical-reviews/artifacts/11.2-original-code.txt').read_text()
+ns={};exec(compile(raw,'11.2-original-code.txt','exec'),ns)
+m=ns['model'];o=ns['optimizer'];ps=ns['parameters_to_update'];names=dict(m.named_parameters())
+original={'trainable':ns['trainable'],'optimizer_total':sum(p.numel() for g in o.param_groups for p in g['params']),'identity':all(p is names[n] for (n,_),p in zip(ns['trainable'],ps,strict=True)),'optimizer_identity':all(x is y for x,y in zip(ps,o.param_groups[0]['params'],strict=True)),'all_grad_none':all(p.grad is None for p in m.parameters()),'optimizer_state_empty':not o.state,'blocks':len(m.language.blocks),'last_is_0':m.language.blocks[-1] is m.language.blocks[0],'step_or_backward_calls':[ast.unparse(n) for n in ast.walk(ast.parse(raw)) if isinstance(n,ast.Call) and isinstance(n.func,ast.Attribute) and n.func.attr in ['step','backward']]}
+assert original['identity'] and original['optimizer_identity'] and original['all_grad_none'] and original['optimizer_state_empty'] and not original['step_or_backward_calls']
+
+# No parameter updates: frozen language still differentiates its trainable input.
+m.eval();before={n:p.detach().clone() for n,p in m.named_parameters()};ids=torch.tensor([1,4,2])
+from tiny_perceptron.data import ByteTokenizer
+ids[1]=ByteTokenizer().image_id
+out=m(ids,image=scene());loss=out['logits'].square().mean();loss.backward()
+flow={'eval_requires_grad':bool(out['logits'].requires_grad),'projector_gradient_norms':{n:float(p.grad.norm()) for n,p in m.image_projector.named_parameters()},'language_grad_all_none':all(p.grad is None for p in m.language.parameters()),'all_weights_unchanged_without_step':all(torch.equal(before[n],p.detach()) for n,p in m.named_parameters())}
+assert flow['eval_requires_grad'] and all(x>0 for x in flow['projector_gradient_norms'].values()) and flow['language_grad_all_none'] and flow['all_weights_unchanged_without_step']
+m.zero_grad(set_to_none=True)
+features=m.image_projector(m.vision(scene().unsqueeze(0)))
+with torch.no_grad(): blocked=m.language(embeddings=features)['logits']
+flow.update(no_grad_language_requires_grad=bool(blocked.requires_grad),no_grad_language_grad_fn_none=blocked.grad_fn is None)
+assert not blocked.requires_grad and blocked.grad_fn is None
+
+# Existing optimizer membership does not follow later unfreezing.
+m.language.blocks[-1].requires_grad_(True)
+old_ids={id(p) for g in o.param_groups for p in g['params']}
+out=m(ids,image=scene());out['logits'].square().mean().backward()
+new=[(n,p) for n,p in m.named_parameters() if p.requires_grad and id(p) not in old_ids]
+late={'old_optimizer_total':sum(p.numel() for g in o.param_groups for p in g['params']),'trainable_total':sum(p.numel() for p in m.parameters() if p.requires_grad),'new_parameters_total':sum(p.numel() for _,p in new),'new_names':[n for n,_ in new],'new_gradients_received':all(p.grad is not None for _,p in new),'new_parameters_absent_from_optimizer':all(id(p) not in old_ids for _,p in new)}
+assert late['old_optimizer_total']==136 and late['trainable_total']==976 and late['new_parameters_total']==840 and late['new_gradients_received']
+all_model=MultiModalLM(TinyLM(ModelConfig(width=8)));all_optimizer=torch.optim.AdamW(all_model.parameters(),lr=.001);all_model.requires_grad_(False)
+late['all_optimizer_retains_frozen']=all(not p.requires_grad for g in all_optimizer.param_groups for p in g['params'])
+late['all_optimizer_member_tensors']=sum(len(g['params']) for g in all_optimizer.param_groups)
+assert late['all_optimizer_retains_frozen']
+a=torch.tensor(1.,requires_grad=True);unused=torch.tensor(2.,requires_grad=True);(a-1).square().backward();zero_none={'connected_zero_gradient':float(a.grad),'unused_gradient_is_none':unused.grad is None};assert a.grad.item()==0 and unused.grad is None
+
+# Frozen formal evidence audit only; no original schedule or pretrained weights are run.
+p=root/'docs/course-experiments/results/projector.json';d=json.loads(p.read_text());r=d['results'];t=r['training'];h=t['history'];cfg=t['config'];formal=MultiModalLM(TinyLM(ModelConfig(**cfg)),vision_width=t['modal_config']['vision_width'],audio_width=t['modal_config']['audio_width']);formal.requires_grad_(False);formal.image_projector.requires_grad_(True)
+actual_counts={'parameters':sum(p.numel() for p in formal.parameters()),'trainable_parameters':sum(p.numel() for p in formal.parameters() if p.requires_grad)}
+assert actual_counts=={'parameters':145664,'trainable_parameters':1088}
+assert len(h)==t['steps']==300 and [x['step'] for x in h]==list(range(1,301))
+assert sum(x['effective_targets'] for x in h)==t['effective_targets']==14408
+assert any(x['grad_norm']>0 for x in h)==t['nonzero_gradient_seen']==True
+assert r['language_weights_unchanged'] is True and t['weights_changed'] is True
+assert sum(s['exact_match'] for s in r['test']['samples'])==r['test']['correct']==0 and len(r['test']['samples'])==r['test']['examples']==6
+source_hashes={p:hashlib.sha256((root/p).read_bytes()).hexdigest() for p in ['tiny_perceptron/model.py','tiny_perceptron/multimodal.py','tiny_perceptron/attention.py','tiny_perceptron/modern.py','scripts/course_experiments/modalities.py']}
+assert all(d['code_sha256'][p]==sha for p,sha in source_hashes.items())
+frozen={'source_path':str(p.relative_to(root)),'source_sha256':hashlib.sha256(p.read_bytes()).hexdigest(),'run_revision':d['revision'],'seed':d['seed'],'device':d['device'],'torch':d['torch_version'],'gpu':d['gpu'],'training':{k:v for k,v in t.items() if k!='history'},'independent_instance_counts':actual_counts,'history_audit':{'rows':len(h),'nonzero_grad_rows':sum(x['grad_norm']>0 for x in h),'min_grad_norm':min(x['grad_norm'] for x in h),'max_grad_norm':max(x['grad_norm'] for x in h),'summed_effective_targets':sum(x['effective_targets'] for x in h),'first':h[0],'last':h[-1]},'language_weights_unchanged':r['language_weights_unchanged'],'split_counts':{k:v['count'] for k,v in r['data']['splits'].items()},'split_offsets':{k:sorted({x['offset'] for x in v['records']}) for k,v in r['data']['splits'].items()},'test':r['test'],'code_hash_match':source_hashes,'scope':'正式結果原檔之配置、梯度紀錄、分母與結果重算；語言權重逐項相等與接頭有改變是原實验紀錄，不冒稱本次重跑正式訓練。'}
+result={'environment':{'python':sys.version,'torch':str(torch.__version__),'torch_git_version':torch.version.git_version,'device':'cpu','threads':'1'},'original_inspection':original,'frozen_flow':flow,'late_unfreeze':late,'zero_vs_none':zero_none,'frozen_results':frozen,'scope':'離線短 CPU；原例、機制與已凍結 JSON 算術核對；未呼叫 optimizer.step、未載入或下載權重、未重跑正式訓練。'}
+print(json.dumps(result,ensure_ascii=False,indent=2))
