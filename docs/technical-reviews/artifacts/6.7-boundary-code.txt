@@ -1,0 +1,41 @@
+import codecs, contextlib, io, json, re, sys
+from pathlib import Path
+import tokenizers
+raw = "貓🙂".encode()
+try:
+    raw[:1].decode("utf-8")
+except UnicodeDecodeError as exc:
+    strict_error = {"type":type(exc).__name__, "start":exc.start, "end":exc.end, "reason":exc.reason}
+else:
+    raise AssertionError("strict decoding should reject incomplete UTF-8")
+reencoded = raw[:1].decode("utf-8", errors="replace").encode("utf-8")
+assert reencoded == bytes([239,191,189])
+independent = "".join(bytes([b]).decode("utf-8", errors="replace") for b in raw)
+assert independent != "貓🙂"
+decoder = codecs.getincrementaldecoder("utf-8")()
+chunks = [decoder.decode(bytes([b]), final=False) for b in raw]
+final_chunk = decoder.decode(b"", final=True)
+assert "".join(chunks) + final_chunk == "貓🙂"
+chapter = Path("course/chapters/06.md").read_text()
+section = re.search(r"^## 6\.3 .*?(?=^## |\Z)", chapter, re.M|re.S)[0]
+original = re.search(r"```python\n(.*?)```", section, re.S)[1]
+namespace = {}; capture = io.StringIO()
+with contextlib.redirect_stdout(capture):
+    exec(compile(original,"6.3-direct-prerequisite-code","exec"),namespace)
+tok=namespace["tok"]; encoded=namespace["encoded"]
+per_token=[tok.decode([token_id]) for token_id in encoded.ids]
+joined="".join(per_token)
+assert joined != namespace["text"]
+assert tok.decode(encoded.ids) == namespace["text"]
+examples=[]
+for text in ["貓看狗。", "a cat sees a dog.", "小鳥🙂new"]:
+    item=tok.encode(text)
+    examples.append({"text":text,"tokens":item.tokens,"ids":item.ids,"single_decodes":[tok.decode([token_id]) for token_id in item.ids],"full_decode":tok.decode(item.ids)})
+result={
+ "environment":{"python":sys.version,"tokenizers":tokenizers.__version__,"device":"cpu","OMP_NUM_THREADS":"1","MKL_NUM_THREADS":"1","offline":"HF_HUB_OFFLINE=1, HF_DATASETS_OFFLINE=1, TRANSFORMERS_OFFLINE=1, CUDA_VISIBLE_DEVICES empty"},
+ "raw":[int(b) for b in raw], "raw_unchanged":raw == "貓🙂".encode(), "strict_error":strict_error,
+ "replacement_reencoded_bytes":list(reencoded), "original_first_byte":[raw[0]], "reencoded_plus_tail_decoded":(reencoded+raw[1:]).decode("utf-8",errors="replace"),
+ "independent_byte_decode_join":independent, "incremental_chunks":chunks,"incremental_final":final_chunk,"incremental_joined":"".join(chunks)+final_chunk,
+ "6.3_original_stdout":capture.getvalue(),"6.3_test_text":namespace["text"],"6.3_single_decodes":per_token,"6.3_independently_joined":joined,"6.3_full_decoded":tok.decode(encoded.ids), "6.3_examples":examples,"assertions":"all passed", "scope":"只驗證正文所說的可發生邊界現象；本次兩句教學 tokenizer 表不能推論正式模型品質。"
+}
+print(json.dumps(result,ensure_ascii=False,indent=2))

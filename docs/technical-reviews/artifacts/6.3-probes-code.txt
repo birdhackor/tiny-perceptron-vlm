@@ -1,0 +1,160 @@
+import contextlib
+import hashlib
+import io
+import json
+import os
+import platform
+from collections import Counter
+from pathlib import Path
+
+import tokenizers
+import torch
+from tokenizers import Tokenizer, decoders, models, pre_tokenizers, trainers
+
+from tiny_perceptron.tokenization import ByteLevelBPE, load_tokenizer
+
+root = Path('/workspace/tiny-perceptron-vlm')
+artifacts = root / 'docs/technical-reviews/artifacts'
+original = (artifacts / '6.3-original-code.txt').read_bytes()
+
+exercise = original.replace('text = "小鳥🙂new"'.encode(), 'text = "未見字🦊"'.encode())
+assert exercise != original
+(artifacts / '6.3-exercise-code.txt').write_bytes(exercise)
+stream = io.StringIO()
+namespace = {}
+with contextlib.redirect_stdout(stream):
+    exec(compile(exercise, '6.3-exercise-code.txt', 'exec'), namespace)
+tok = namespace['tok']
+definition = json.loads(tok.to_str())
+saved = artifacts / '6.3-save-tokenizer.json'
+tok.save(str(saved))
+reloaded = Tokenizer.from_file(str(saved))
+
+def train(corpus, target):
+    candidate = Tokenizer(models.BPE())
+    candidate.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
+    candidate.decoder = decoders.ByteLevel()
+    candidate.train_from_iterator(corpus, trainers.BpeTrainer(
+        vocab_size=target,
+        initial_alphabet=pre_tokenizers.ByteLevel.alphabet(),
+        show_progress=False,
+    ))
+    return candidate
+
+alphabet = pre_tokenizers.ByteLevel.alphabet()
+small = train(['貓看狗。', 'a cat sees a dog.'], 10)
+large_target = train(['貓看狗。', 'a cat sees a dog.'], 1000)
+alternate = train(['貓看兔。', 'a cat sees a dog.'], 280)
+base = train(['貓看狗。', 'a cat sees a dog.'], 280)
+common = sorted(set(base.get_vocab()) & set(alternate.get_vocab()))
+changed = [{'token': t, 'base_id': base.token_to_id(t), 'alternate_id': alternate.token_to_id(t)}
+           for t in common if base.token_to_id(t) != alternate.token_to_id(t)]
+assert base.get_vocab_size() == alternate.get_vocab_size()
+changed_by_id = [{'id': i, 'base_token': base.id_to_token(i), 'alternate_token': alternate.id_to_token(i)}
+                 for i in range(base.get_vocab_size()) if base.id_to_token(i) != alternate.id_to_token(i)]
+assert changed_by_id
+roundtrip_texts = ['小鳥🙂new', '未見字🦊', ' 小鳥🙂\nnew ']
+demo_roundtrip = []
+for text in roundtrip_texts:
+    encoded = tok.encode(text)
+    restored = tok.decode(encoded.ids)
+    assert restored == text
+    assert reloaded.encode(text).ids == encoded.ids
+    demo_roundtrip.append({'text': text, 'ids': encoded.ids, 'tokens': encoded.tokens,
+                           'restored': restored, 'same': restored == text})
+
+result_path = root / 'docs/course-experiments/results/tokenizer.json'
+formal = json.loads(result_path.read_bytes())
+data_root = root / 'outputs/text-behavior-interface-check/tokenizer/data'
+parts = {}
+data_checks = {}
+for split in ['train', 'validation', 'test']:
+    raw = (data_root / f'{split}.jsonl').read_bytes()
+    digest = hashlib.sha256(raw).hexdigest()
+    assert digest == formal['results']['data'][split]['sha256']
+    rows = [json.loads(line) for line in raw.splitlines()]
+    parts[split] = rows
+    lengths = [len(row['text'].encode('utf-8')) for row in rows]
+    assert all(size <= 256 for size in lengths)
+    data_checks[split] = {'sha256': digest, 'records': len(rows),
+                         'families': len({row['family'] for row in rows}),
+                         'raw_utf8_bytes': sum(lengths), 'max_utf8_bytes': max(lengths),
+                         'source_counts': dict(Counter(row['source'] for row in rows)),
+                         'all_valid_utf8': all(row['text'].encode().decode() == row['text'] for row in rows)}
+family_sets = {s: {r['family'] for r in rows} for s, rows in parts.items()}
+complete_sets = {s: {r['complete_text_sha256'] for r in rows} for s, rows in parts.items()}
+for left, right in [('train', 'validation'), ('train', 'test'), ('validation', 'test')]:
+    assert not family_sets[left] & family_sets[right]
+    assert not complete_sets[left] & complete_sets[right]
+
+frozen_path = root / 'checkpoints/course/tokenizer/tokenizer-bpe512.json'
+frozen_sha = hashlib.sha256(frozen_path.read_bytes()).hexdigest()
+formal_artifact = next(a for a in formal['artifacts'] if a['path'] == 'tokenizer-bpe512.json')
+assert frozen_sha == formal_artifact['sha256']
+frozen = ByteLevelBPE(frozen_path)
+frozen_roundtrips = []
+for reference in formal['results']['roundtrip']:
+    ids = frozen.encode(reference['text'])
+    restored = frozen.decode(ids)
+    assert ids == reference['ids']
+    assert restored == reference['text']
+    frozen_roundtrips.append({'text': reference['text'], 'ids': ids,
+                             'restored': restored, 'same': restored == reference['text'],
+                             'matches_frozen_ids': ids == reference['ids'],
+                             'contains_control_id': any(i in frozen.special_ids for i in ids)})
+frozen_definition = json.loads(frozen_path.read_bytes())
+frozen_coverage = all(c in frozen.tokenizer.get_vocab() for c in alphabet)
+assert frozen_coverage and frozen.vocab_size == 512
+loaded = load_tokenizer(frozen_path, 512, {'metadata': {'tokenizer_sha256': frozen_sha}})
+assert loaded.encode('未見字🦊 new') == frozen.encode('未見字🦊 new')
+binding_errors = {}
+for label, size, binding in [('wrong_size', 513, {}),
+                             ('wrong_hash_same_size', 512, {'metadata': {'tokenizer_sha256': '0' * 64}})]:
+    try:
+        load_tokenizer(frozen_path, size, binding)
+    except ValueError as error:
+        binding_errors[label] = str(error)
+    else:
+        raise AssertionError(label)
+
+output = {
+    'environment': {'python': platform.python_version(), 'torch': str(torch.__version__),
+                    'torch_git_version': str(torch.version.git_version),
+                    'tokenizers': tokenizers.__version__, 'device': 'cpu',
+                    'OMP_NUM_THREADS': os.environ['OMP_NUM_THREADS'],
+                    'MKL_NUM_THREADS': os.environ['MKL_NUM_THREADS'],
+                    'HF_HUB_OFFLINE': os.environ['HF_HUB_OFFLINE'],
+                    'HF_DATASETS_OFFLINE': os.environ['HF_DATASETS_OFFLINE']},
+    'exercise': {'only_edit': 'text = "未見字🦊"', 'stdout': stream.getvalue(),
+                 'text_bytes': len('未見字🦊'.encode()),
+                 'token_count': len(namespace['encoded'].ids),
+                 'roundtrip_assert': True},
+    'demo': {'alphabet_count': len(alphabet), 'unique_alphabet': len(set(alphabet)),
+             'actual_vocab_size': tok.get_vocab_size(), 'merge_count': len(definition['model']['merges']),
+             'contains_all_256': all(c in tok.get_vocab() for c in alphabet),
+             'normalizer': definition['normalizer'], 'pre_tokenizer': definition['pre_tokenizer'],
+             'roundtrips': demo_roundtrip},
+    'save_reload': {'saved_path': str(saved.relative_to(root)),
+                    'saved_sha256': hashlib.sha256(saved.read_bytes()).hexdigest(),
+                    'vocab_size': reloaded.get_vocab_size(), 'same_ids_on_three_texts': True},
+    'budget_probes': {'requested_10_actual': small.get_vocab_size(),
+                      'requested_1000_actual': large_target.get_vocab_size(),
+                      'same_target_280_sizes': [base.get_vocab_size(), alternate.get_vocab_size()],
+                      'common_tokens_with_changed_id': changed[:10],
+                      'changed_id_count': len(changed),
+                      'same_size_id_to_token_changes': changed_by_id},
+    'frozen': {'result_sha256': hashlib.sha256(result_path.read_bytes()).hexdigest(),
+               'training_revision': formal['revision'], 'training_device': formal['device'],
+               'seed': formal['seed'], 'step_scale': formal['step_scale'],
+               'evidence_status': formal['evidence_status'],
+               'data': data_checks, 'source_counts_total': dict(Counter(r['source'] for rows in parts.values() for r in rows)),
+               'family_and_complete_text_hashes_disjoint': True,
+               'tokenizer_sha256': frozen_sha, 'vocab_size': frozen.vocab_size,
+               'special_ids': sorted(frozen.special_ids), 'contains_all_256': frozen_coverage,
+               'normalizer': frozen_definition['normalizer'],
+               'pre_tokenizer': frozen_definition['pre_tokenizer'],
+               'roundtrips': frozen_roundtrips,
+               'matching_binding_loads': True, 'binding_errors': binding_errors},
+    'scope': '僅重跑正文 tokenizer 原例／練習和小型預算探查；正式部分只讀凍結配置、資料指紋與已保存 tokenizer，沒有重訓語言模型或重跑正式排程。'
+}
+print(json.dumps(output, ensure_ascii=False, indent=2))
