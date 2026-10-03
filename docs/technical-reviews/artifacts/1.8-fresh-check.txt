@@ -1,0 +1,124 @@
+"""Bounded CPU review evidence for course/chapters/01.md#1.8, not training."""
+import contextlib
+import hashlib
+import io
+import json
+import math
+import os
+import platform
+import re
+import socket
+from pathlib import Path
+
+os.environ.update(CUDA_VISIBLE_DEVICES="", HF_HUB_OFFLINE="1", HF_DATASETS_OFFLINE="1", TRANSFORMERS_OFFLINE="1", OMP_NUM_THREADS="1", MKL_NUM_THREADS="1")
+import torch
+from torch.nn import functional as F
+
+torch.set_num_threads(1)
+root = Path(__file__).resolve().parents[3]
+artifact_dir = root / "docs/technical-reviews/artifacts"
+raw = (root / "course/chapters/01.md").read_bytes()
+headings = list(re.finditer(rb"(?m)^## ([A-Z\d]+\.\d+) [^\r\n]+", raw))
+position = next(i for i, h in enumerate(headings) if h[1] == b"1.8")
+end = headings[position + 1].start() if position + 1 < len(headings) else len(raw)
+body = raw[headings[position].start():end]
+code = re.search(rb"```python\n(.*?)```", body, re.S)[1].decode()
+exercise = code.replace("target = torch.tensor([1])", "target = torch.tensor([0])").replace("manual = -probabilities[0, 1].log()", "manual = -probabilities[0, 0].log()")
+
+def offline_guard(event, args):
+    if event.startswith("socket.") or event in {"subprocess.Popen", "os.system", "os.exec", "os.spawn"}:
+        raise RuntimeError("review CPU process is offline and cannot launch child processes")
+
+import sys
+sys.addaudithook(offline_guard)
+
+def execute_snippet(source):
+    capture = io.StringIO()
+    namespace = {}
+    with contextlib.redirect_stdout(capture):
+        exec(compile(source, "course/chapters/01.md#1.8", "exec"), namespace)
+    return {
+        "code": source,
+        "stdout": capture.getvalue(),
+        "stderr": "",
+        "result": "completed; original allclose assertion passed",
+        "logits": namespace["logits"].tolist(),
+        "logits_shape": list(namespace["logits"].shape),
+        "logits_dtype": str(namespace["logits"].dtype),
+        "target": namespace["target"].tolist(),
+        "target_shape": list(namespace["target"].shape),
+        "target_dtype": str(namespace["target"].dtype),
+        "correct_probabilities": namespace["p"].tolist(),
+        "negative_logs": (-namespace["p"].log()).tolist(),
+        "distribution": namespace["probabilities"].tolist(),
+        "manual": namespace["manual"].item(),
+        "cross_entropy": namespace["loss"].item(),
+        "manual_builtin_absolute_difference": abs(namespace["manual"].item() - namespace["loss"].item()),
+        "device": str(namespace["logits"].device),
+    }
+
+original = execute_snippet(code)
+changed_target = execute_snippet(exercise)
+logits = torch.tensor([[0.0, 2.0, 0.0]])
+target = torch.tensor([1])
+distribution = logits.softmax(dim=-1)
+double_softmax_loss = F.cross_entropy(distribution, target)
+double_softmax_manual = -distribution.softmax(dim=-1)[0, 1].log()
+batch_logits = torch.tensor([[0.0, 2.0, 0.0], [0.0, 2.0, 0.0]])
+batch_target = torch.tensor([1, 0])
+batch_losses = F.cross_entropy(batch_logits, batch_target, reduction="none")
+batch_mean = F.cross_entropy(batch_logits, batch_target)
+extreme_logits = torch.tensor([[-1000.0, 1000.0, 0.0]])
+extreme_target = torch.tensor([0])
+extreme_stable = F.cross_entropy(extreme_logits, extreme_target)
+extreme_separate = -extreme_logits.softmax(dim=-1)[0, 0].log()
+confidence = torch.tensor([[0.25, 0.5, 0.25], [0.05, 0.9, 0.05]], dtype=torch.float64)
+assert F is torch.nn.functional
+assert original["target"] == [1] and changed_target["target"] == [0]
+assert original["logits"] == changed_target["logits"]
+assert abs(original["cross_entropy"] - 0.2395) < 0.00005
+assert abs(changed_target["cross_entropy"] - 2.2395) < 0.00005
+assert not torch.allclose(F.cross_entropy(logits, target), double_softmax_loss)
+assert torch.allclose(double_softmax_loss, double_softmax_manual)
+assert torch.allclose(batch_mean, batch_losses.mean())
+assert extreme_stable.item() == 2000.0 and torch.isinf(extreme_separate)
+assert confidence.argmax(dim=-1).tolist() == [1, 1]
+probes = {
+    "F_alias_identity": F is torch.nn.functional,
+    "double_softmax": {
+        "input": distribution.tolist(),
+        "renormalized": distribution.softmax(dim=-1).tolist(),
+        "cross_entropy_of_probabilities": double_softmax_loss.item(),
+        "manual_second_softmax_negative_log": double_softmax_manual.item(),
+        "different_from_original": True,
+    },
+    "unweighted_hard_label_mean": {
+        "logits": batch_logits.tolist(), "targets": batch_target.tolist(),
+        "unreduced": batch_losses.tolist(), "builtin_mean": batch_mean.item(),
+        "manual_mean": batch_losses.mean().item(), "denominator": 2,
+        "weight": None, "label_smoothing": 0.0, "ignored_targets": 0,
+    },
+    "numerical_stability_probe": {
+        "logits": extreme_logits.tolist(), "target": extreme_target.tolist(),
+        "fused_cross_entropy": extreme_stable.item(),
+        "separate_softmax_then_log": "inf" if torch.isinf(extreme_separate) else extreme_separate.item(),
+        "scope": "one finite float32 CPU input; not a guarantee against all overflow or nonfinite input",
+    },
+    "top1_vs_confidence": {
+        "probabilities": confidence.tolist(), "answer": 1,
+        "top1_indices": confidence.argmax(dim=-1).tolist(),
+        "negative_log_answer_probabilities": (-confidence[:, 1].log()).tolist(),
+    },
+    "units": [{"p": p, "nats": -math.log(p), "bits": -math.log(p) / math.log(2)} for p in [0.1, 0.5, 0.9]],
+}
+result = {
+    "reviewed_at_utc": "2026-10-03",
+    "source": "course/chapters/01.md#1.8", "source_sha256": hashlib.sha256(body).hexdigest(),
+    "command": "OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 CUDA_VISIBLE_DEVICES='' HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1 TRANSFORMERS_OFFLINE=1 .venv/bin/python docs/technical-reviews/artifacts/1.8-fresh-check.txt",
+    "environment": {"python": platform.python_version(), "torch": torch.__version__, "torch_git_version": torch.version.git_version, "device": "cpu", "dtype": "torch.float32 (original and exercise)", "omp_threads": "1", "mkl_threads": "1", "torch_threads": str(torch.get_num_threads()), "network": "Python audit guard rejects socket events", "cuda_build": str(torch.version.cuda)},
+    "original": original, "exercise": changed_target, "probes": probes,
+    "result": "Original fence and specified exercise executed on CPU; all targeted assertions passed; no parameter updates.",
+}
+destination = artifact_dir / "1.8-fresh-execution.json"
+destination.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n")
+print(json.dumps(result, ensure_ascii=False, indent=2))

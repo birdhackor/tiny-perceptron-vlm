@@ -1,0 +1,131 @@
+import contextlib
+import hashlib
+import io
+import json
+import math
+import os
+from pathlib import Path
+import re
+import sys
+
+import torch
+
+torch.set_num_threads(1)
+
+def audit(event, args):
+    if event.startswith('socket.') or event in {'subprocess.Popen', 'os.system'}:
+        raise RuntimeError('Offline review forbids network and subprocesses')
+
+sys.addaudithook(audit)
+root = Path.cwd()
+
+def section(path, identifier):
+    raw = (root / path).read_bytes()
+    headings = list(re.finditer(rb'(?m)^## [^\r\n]+', raw))
+    i = next(i for i, h in enumerate(headings) if h[0].startswith(('## ' + identifier + ' ').encode()))
+    return raw[headings[i].start():headings[i+1].start() if i+1 < len(headings) else len(raw)]
+
+raw = section('course/chapters/01.md', '1.7')
+code = re.findall(r'```python\n(.*?)\n```', raw.decode(), re.S)[0]
+
+def run(source):
+    namespace = {}
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        exec(compile(source, '<original-or-exercise-fence>', 'exec'), namespace)
+    return namespace, output.getvalue()
+
+base, base_stdout = run(code)
+exercise, exercise_stdout = run(code.replace('[1.0, 2.0, -1.0]', '[3.0, 2.0, -1.0]'))
+z = base['z']
+before = z.clone()
+batch = torch.stack([z, exercise['z']])
+row_p = batch.softmax(dim=1)
+col_p = batch.softmax(dim=0)
+stable_large = torch.tensor([1000.0, 999.0, -1000.0])
+stable_weights = (stable_large - stable_large.max()).exp()
+false_allclose = torch.allclose(torch.tensor([1.0]), torch.tensor([1.1]))
+assertion_result = None
+assert_namespace = {'after_assert_reached': False}
+try:
+    exec('assert False\nafter_assert_reached = True', assert_namespace)
+except AssertionError:
+    assertion_result = 'AssertionError'
+
+precursor_data = {}
+for path, identifier in [('course/chapters/01.md', '1.6'), ('course/first-steps.md', 'W.3'), ('course/first-steps.md', 'W.4')]:
+    precursor = section(path, identifier)
+    precursor_code = re.findall(r'```python\n(.*?)\n```', precursor.decode(), re.S)[0]
+    namespace, output = run(precursor_code)
+    precursor_data[identifier] = {'source_sha256': hashlib.sha256(precursor).hexdigest(), 'stdout': output}
+
+report = {
+    'accessed_on': '2026-10-03',
+    'environment': {
+        'python': sys.version,
+        'torch': torch.__version__,
+        'torch_git_version': torch.version.git_version,
+        'device': str(z.device),
+        'dtype': str(z.dtype),
+        'threads': str(torch.get_num_threads()),
+        'OMP_NUM_THREADS': os.environ['OMP_NUM_THREADS'],
+        'MKL_NUM_THREADS': os.environ['MKL_NUM_THREADS'],
+        'python_optimization': str(sys.flags.optimize),
+        'network': 'socket audit guard; no network call attempted',
+    },
+    'source_sha256': hashlib.sha256(raw).hexdigest(),
+    'exact_original_stdout': base_stdout,
+    'exercise_only_change': 'first score 1.0 -> 3.0',
+    'exact_exercise_stdout': exercise_stdout,
+    'direct_math': {
+        'e': math.e,
+        'weights': [math.exp(i) for i in [1, 2, -1]],
+        'sum': sum(math.exp(i) for i in [1, 2, -1]),
+        'probabilities': [math.exp(i)/sum(math.exp(j) for j in [1, 2, -1]) for i in [1, 2, -1]],
+        'shifted_weights': [math.exp(i) for i in [-1, 0, -3]],
+        'ratio_p1_p2': (base['p'][0]/base['p'][1]).item(),
+        'ratio_exp_difference': math.exp(1-2),
+    },
+    'original': {
+        'scores': z.tolist(),
+        'score_sum': z.sum().item(),
+        'maximum_score': z.max().item(),
+        'shifted_scores': (z-z.max()).tolist(),
+        'maximum_probability_index': z.softmax(dim=0).argmax().item(),
+        'scores_after': before.tolist(),
+        'scores_unchanged': bool(torch.equal(z, before)),
+        'weights': base['weights'].tolist(),
+        'probabilities': base['p'].tolist(),
+        'sum': base['p'].sum().item(),
+        'shift_100': (z+100).softmax(dim=0).tolist(),
+        'builtin_allclose': torch.allclose(base['p'], z.softmax(dim=0)),
+    },
+    'exercise': {
+        'scores': exercise['z'].tolist(),
+        'probabilities': exercise['p'].tolist(),
+        'other_probabilities_decreased': bool(torch.all(exercise['p'][1:] < base['p'][1:])),
+    },
+    'batch': {
+        'shape': list(batch.shape),
+        'input': batch.tolist(),
+        'dim1_probabilities': row_p.tolist(),
+        'dim1_row_sums': row_p.sum(dim=1).tolist(),
+        'dim_minus1_matches': bool(torch.equal(row_p, batch.softmax(dim=-1))),
+        'dim0_row_sums': col_p.sum(dim=1).tolist(),
+    },
+    'overflow_scope': {
+        'input': stable_large.tolist(),
+        'naive_exp_has_inf': bool(torch.isinf(stable_large.exp()).any()),
+        'shifted_exp': stable_weights.tolist(),
+        'shifted_probabilities': (stable_weights/stable_weights.sum()).tolist(),
+        'note': 'Subtract-max avoids positive exponential overflow for finite logits; small terms may underflow to zero.',
+    },
+    'allclose_assert': {
+        'distinct_tensors_allclose': false_allclose,
+        'false_assert_exception': assertion_result,
+        'after_false_assert_reached': assert_namespace['after_assert_reached'],
+        'original_stdout_line_count': len(base_stdout.splitlines()),
+    },
+    'precursor_exact_fences': precursor_data,
+}
+print(json.dumps(report, ensure_ascii=False, indent=2))

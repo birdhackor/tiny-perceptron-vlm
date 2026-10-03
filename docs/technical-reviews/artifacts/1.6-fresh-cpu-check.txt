@@ -1,0 +1,75 @@
+import sys, json, hashlib
+from pathlib import Path
+import torch
+from torch import nn
+
+torch.set_num_threads(1)
+
+# Exact original and exercise: only the requested line is added to the setting block.
+def example(exercise=False):
+    scores = nn.Embedding(3, 3)
+    with torch.no_grad():
+        scores.weight.zero_()
+        scores.weight[0, 1] = 2.0
+        if exercise:
+            scores.weight[2, 0] = 3.0
+    inputs = torch.tensor([0, 2])
+    before = scores.weight.detach().clone()
+    output = scores(inputs)
+    expected_weight = [[0.,2.,0.],[0.,0.,0.],[3. if exercise else 0.,0.,0.]]
+    expected_output = [expected_weight[0],expected_weight[2]]
+    assert scores.weight.tolist() == expected_weight
+    assert output.tolist() == expected_output
+    assert tuple(output.shape) == (2,3)
+    assert inputs.dtype == torch.int64
+    assert scores.weight.dtype == torch.float32
+    assert scores.weight.requires_grad and output.requires_grad
+    assert torch.is_grad_enabled()
+    assert type(output.grad_fn).__name__ == 'EmbeddingBackward0'
+    assert isinstance(output.grad_fn, torch.autograd.graph.Node)
+    assert dict(scores.named_parameters())['weight'] is scores.weight
+    assert scores.weight.grad is None
+    assert torch.equal(before, scores.weight)
+    # One backward pass checks the lookup derivative; it makes no parameter update.
+    output.sum().backward()
+    assert scores.weight.grad.tolist() == [[1.,1.,1.],[0.,0.,0.],[1.,1.,1.]]
+    assert torch.equal(before,scores.weight)
+    return {'weight':expected_weight,'output':output.tolist(),'input_dtype':str(inputs.dtype),'weight_dtype':str(scores.weight.dtype),'shape':list(output.shape),'parameter_count':sum(p.numel() for p in scores.parameters()),'weight_requires_grad':scores.weight.requires_grad,'output_requires_grad':output.requires_grad,'grad_enabled_after_setting':torch.is_grad_enabled(),'grad_fn':type(output.grad_fn).__name__,'gradient_of_output_sum':scores.weight.grad.tolist(),'parameter_unchanged_by_forward_and_backward':True}
+
+base=example()
+practice=example(True)
+assert base['output'][0] == practice['output'][0]
+assert nn.Embedding(100,100).weight.numel() == 10000
+signed=nn.Embedding(3,3)
+with torch.no_grad():
+    ret=signed.weight.zero_()
+    assert ret is signed.weight
+    signed.weight[0]=torch.tensor([-1.,2.,-3.])
+assert signed(torch.tensor([0])).tolist() == [[-1.,2.,-3.]]
+
+# Read prerequisites directly again, then run each Python fence in a fresh namespace.
+import re
+prerequisites={}
+for file,lesson in [('course/chapters/01.md','1.5'),('course/first-steps.md','W.3'),('course/chapters/01.md','1.9')]:
+    raw=Path(file).read_bytes()
+    heads=list(re.finditer(rb'(?m)^## ([A-Z\d]+\.\d+) [^\r\n]+',raw))
+    pos=next(i for i,h in enumerate(heads) if h[1].decode()==lesson)
+    body=raw[heads[pos].start():heads[pos+1].start() if pos+1<len(heads) else len(raw)]
+    ns={}
+    for fence in re.findall(r'```python\n(.*?)```',body.decode(),re.S):
+        exec(compile(fence,file+'#'+lesson,'exec'),ns)
+    prerequisites[lesson]={'source':file+'#'+lesson,'section_sha256':hashlib.sha256(body).hexdigest()}
+    if lesson=='1.5':
+        row=ns['row']; assert ns['counts'][row].tolist()==[1.,1.,1.,3.,1.,1.,1.]
+        prerequisites[lesson]['cat_counts']=ns['counts'][row].tolist()
+        prerequisites[lesson]['cat_probability']=ns['probability'][row].tolist()
+    elif lesson=='W.3':
+        table=ns['scores']; assert table.mean(1).tolist()==[70.,90.] and table.mean(0).tolist()==[70.,80.,90.]
+        prerequisites[lesson].update({'scores':table.tolist(),'mean_dim1':table.mean(1).tolist(),'mean_dim0':table.mean(0).tolist()})
+    else:
+        assert abs(ns['gradient']+4)<1e-10
+        prerequisites[lesson]['gradient']=ns['gradient']
+
+result={'reviewer_task':'/root/technical_round_coordinator/technical_1_6_fresh','accessed_on':'2026-10-03','command':"OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1 TRANSFORMERS_OFFLINE=1 CUDA_VISIBLE_DEVICES='' PYTHONDONTWRITEBYTECODE=1 .venv/bin/python docs/technical-reviews/artifacts/1.6-fresh-cpu-check.txt",'environment':{'python':sys.version,'torch':torch.__version__,'torch_git_version':torch.version.git_version,'device':'cpu','threads':str(torch.get_num_threads()),'input_dtype':'torch.int64','parameter_dtype':'torch.float32'},'original':base,'exercise':practice,'signed_scores_allowed':signed(torch.tensor([0])).tolist(),'V100_parameter_count':10000,'prerequisites':prerequisites,'result':'所有數值、形狀、dtype、參數註冊、梯度節點、練習的兩列獨立性與前置圖數字核對均通過；只有短CPU運算，沒有參數更新或訓練。'}
+Path('docs/technical-reviews/artifacts/1.6-fresh-cpu-result.json').write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\n')
+print(json.dumps(result,ensure_ascii=False,indent=2))

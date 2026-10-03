@@ -1,0 +1,142 @@
+"""Bounded, offline CPU replay of 1.9 and the directly read prerequisites."""
+from pathlib import Path
+import contextlib
+import hashlib
+import io
+import json
+import math
+import os
+import re
+import sys
+from datetime import datetime, UTC
+import torch
+
+ROOT = Path(__file__).resolve().parents[3]
+torch.set_num_threads(1)
+assert os.environ.get("OMP_NUM_THREADS") == "1"
+assert os.environ.get("MKL_NUM_THREADS") == "1"
+assert os.environ.get("CUDA_VISIBLE_DEVICES") == ""
+assert os.environ.get("HF_HUB_OFFLINE") == "1"
+assert torch.ones(1).device.type == "cpu"
+
+def section(path, identifier):
+    raw = (ROOT / path).read_bytes()
+    match = re.search(rb"(?m)^## " + re.escape(identifier.encode()) + rb" [^\n]*\n", raw)
+    assert match is not None
+    next_header = re.search(rb"(?m)^## ", raw[match.end():])
+    end = match.end() + next_header.start() if next_header else len(raw)
+    body = raw[match.start():end]
+    code = re.findall(rb"(?ms)^```python\n(.*?)^```", body)
+    assert len(code) == 1
+    return body, code[0].decode()
+
+def replay(path, identifier, replacements):
+    body, original = section(path, identifier)
+    code = original
+    for before, after in replacements:
+        assert code.count(before) == 1
+        code = code.replace(before, after)
+    namespace = {}
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        exec(compile(code, path + "#" + identifier, "exec"), namespace)
+    values = {}
+    for name in ("w", "h", "left", "right", "gradient", "manual", "loss"):
+        value = namespace.get(name)
+        if isinstance(value, (int, float)):
+            values[name] = value
+        elif isinstance(value, torch.Tensor) and value.numel() == 1:
+            values[name] = value.item()
+    if isinstance(namespace.get("w"), torch.Tensor):
+        values["grad"] = namespace["w"].grad.item()
+        values["new_loss"] = (namespace["w"] - 3).square().item()
+    if "probabilities" in namespace:
+        values["probabilities"] = namespace["probabilities"].tolist()
+        values["target"] = namespace["target"].tolist()
+    return {
+        "source": path + "#" + identifier,
+        "source_sha256": hashlib.sha256(body).hexdigest(),
+        "original_fence_sha256": hashlib.sha256(original.encode()).hexdigest(),
+        "replacements": replacements,
+        "stdout": output.getvalue(),
+        "values": values,
+    }
+
+runs = []
+for w in (1.0, 5.0, 3.0):
+    replacements = [] if w == 1.0 else [("w = 1.0", "w = " + repr(w))]
+    run = replay("course/chapters/01.md", "1.9", replacements)
+    vals = run["values"]
+    assert math.isclose(vals["left"], (w - .001 - 3) ** 2, abs_tol=1e-14)
+    assert math.isclose(vals["right"], (w + .001 - 3) ** 2, abs_tol=1e-14)
+    assert math.isclose(vals["gradient"], 2 * (w - 3), abs_tol=1e-10)
+    assert vals["w"] == w
+    if w == 5:
+        assert vals["left"] < vals["right"]
+    if w == 3:
+        assert vals["left"] == vals["right"]
+        assert vals["gradient"] == 0
+        assert "0.0 公式計算 0.0" in run["stdout"]
+    runs.append(run)
+
+for rate, expected_w, expected_loss in ((.1, 1.4, 2.56), (.6, 3.4, .16), (1.1, 5.4, 5.76)):
+    replacements = [] if rate == .1 else [("0.1 * w.grad", repr(rate) + " * w.grad")]
+    run = replay("course/first-steps.md", "W.6", replacements)
+    vals = run["values"]
+    assert vals["loss"] == 4 and vals["grad"] == -4
+    assert math.isclose(vals["w"], expected_w, abs_tol=1e-6)
+    assert math.isclose(vals["new_loss"], expected_loss, abs_tol=2e-6)
+    runs.append(run)
+
+for target, expected_loss in ((1, .239544838666), (0, 2.239544838666)):
+    replacements = [] if target == 1 else [("target = torch.tensor([1])", "target = torch.tensor([0])"), ("probabilities[0, 1]", "probabilities[0, 0]")]
+    run = replay("course/chapters/01.md", "1.8", replacements)
+    vals = run["values"]
+    assert math.isclose(vals["loss"], expected_loss, abs_tol=1e-6)
+    assert math.isclose(vals["loss"], vals["manual"], abs_tol=1e-6)
+    runs.append(run)
+
+loss = lambda w: (w - 3) ** 2
+auxiliary = {
+    "forward_0.1": {"loss": loss(1.1), "ratio": (loss(1.1) - loss(1)) / .1},
+    "forward_0.01": {"loss": loss(1.01), "ratio": (loss(1.01) - loss(1)) / .01},
+    "central_quadratic_h": [
+        {"h": h, "gradient": (loss(1 + h) - loss(1 - h)) / (2 * h)}
+        for h in (.001, 1e-12, 1e-16)
+    ],
+    "central_cubic_w1_h2": ((1 + 2) ** 3 - (1 - 2) ** 3) / 4,
+    "cubic_exact_derivative_w1": 3,
+    "scientific_literal": 9.999999999997797e-07,
+    "scientific_expanded": 9.999999999997797 * .0000001,
+    "one_large_step_w1_to6_loss": loss(6),
+    "autograd_gradcheck_quadratic_double": torch.autograd.gradcheck(
+        lambda w: (w - 3).square(), (torch.tensor(1., dtype=torch.float64, requires_grad=True),)
+    ),
+}
+assert math.isclose(auxiliary["forward_0.1"]["ratio"], -3.9, abs_tol=1e-12)
+assert math.isclose(auxiliary["forward_0.01"]["ratio"], -3.99, abs_tol=1e-12)
+assert auxiliary["scientific_literal"] == auxiliary["scientific_expanded"]
+assert auxiliary["autograd_gradcheck_quadratic_double"]
+
+figure_audit = []
+for path, identifier in (("course/chapters/01.md", "1.9"), ("course/chapters/01.md", "1.8"), ("course/first-steps.md", "W.6")):
+    body, _ = section(path, identifier)
+    text = body.decode()
+    refs = re.findall(r"!\[[^\]]*\]\(([^)]+)\)", text) + re.findall(r'(?:src|href)=["\']([^"\']+)["\']', text)
+    svg = [r for r in refs if r.split("?")[0].lower().endswith(".svg")]
+    assert not svg
+    figure_audit.append({"source": path + "#" + identifier, "source_sha256": hashlib.sha256(body).hexdigest(), "svg_references": svg})
+
+result = {
+    "reviewer_task": "/root/technical_round_coordinator/technical_1_9_fresh",
+    "executed_at_utc": datetime.now(UTC).isoformat(),
+    "command": "OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 CUDA_VISIBLE_DEVICES='' HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1 TRANSFORMERS_OFFLINE=1 .venv/bin/python docs/technical-reviews/artifacts/1.9-cpu-replay.txt",
+    "environment": {"python": sys.version, "torch": torch.__version__, "torch_git_commit": torch.version.git_version, "device": "cpu", "default_tensor_dtype": str(torch.get_default_dtype()), "python_float_mantissa_bits": str(sys.float_info.mant_dig), "OMP_NUM_THREADS": os.environ["OMP_NUM_THREADS"], "MKL_NUM_THREADS": os.environ["MKL_NUM_THREADS"], "torch_num_threads": str(torch.get_num_threads()), "network": "offline CPU execution; HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1 TRANSFORMERS_OFFLINE=1; no network calls in runner"},
+    "runs": runs,
+    "auxiliary": auxiliary,
+    "figure_audit": figure_audit,
+    "result": "All assertions passed: original 1.9, w=5/3 exercises, W.6 original and two learning-rate exercises, 1.8 original and target=0 exercise. No parameter updates in 1.9; only three one-step scalar updates in W.6.",
+}
+target = ROOT / "docs/technical-reviews/artifacts/1.9-cpu-results.json"
+target.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n")
+print(json.dumps({"result": result["result"], "main_stdout": [r["stdout"] for r in runs[:3]], "auxiliary": auxiliary}, ensure_ascii=False, indent=2))

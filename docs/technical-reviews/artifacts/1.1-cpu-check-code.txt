@@ -1,0 +1,85 @@
+"""Execute the exact 1.1 fence, one requested exercise edit, and the stated OOV case.
+No training, network, subprocess, tensors, or dataset downloads occur here.
+"""
+import contextlib
+import hashlib
+import io
+import json
+import os
+from pathlib import Path
+import re
+import sys
+import unicodedata
+from datetime import datetime, UTC
+
+root = Path.cwd()
+raw = (root / 'course/chapters/01.md').read_bytes()
+headings = list(re.finditer(rb'(?m)^## [^\r\n]+', raw))
+index = next(i for i, h in enumerate(headings) if h[0].startswith(b'## 1.1 '))
+section = raw[headings[index].start():headings[index+1].start()]
+code = re.search(rb'```python\n(.*?)```', section, re.S)[1].decode()
+expected_chars = ['。', '狗', '看', '貓', '，']
+expected_ids = [3, 2, 1, 4, 1, 2, 3, 0]
+expected_reverse_chars = ['，', '貓', '看', '狗', '。']
+expected_reverse_ids = [1, 2, 3, 0, 3, 2, 1, 4]
+
+runs=[]
+for name,variant in [('original', code), ('exercise_reverse_true', code.replace('chars = sorted(set(text))', 'chars = sorted(set(text), reverse=True)'))]:
+ namespace={'__name__':'__main__'}; capture=io.StringIO()
+ with contextlib.redirect_stdout(capture):
+  exec(compile(variant, f'1.1:{name}', 'exec'), namespace)
+ chars=namespace['chars']; ids=namespace['ids']; restored=namespace['restored']
+ assert chars == (expected_chars if name=='original' else expected_reverse_chars)
+ assert ids == (expected_ids if name=='original' else expected_reverse_ids)
+ assert restored == namespace['text']
+ assert len(namespace['to_id']) == len(chars) == len(set(namespace['text'])) == 5
+ assert all(namespace['to_id'][c]==i for i,c in enumerate(chars))
+ assert len(ids)==len(namespace['text'])==8
+ assert all(chars[i]==c for c,i in zip(namespace['text'],ids,strict=True))
+ enumerate_result=list(enumerate(chars))
+ runs.append({'case':name,'code_sha256':hashlib.sha256(variant.encode()).hexdigest(),'stdout':capture.getvalue(),'chars':chars,'to_id':namespace['to_id'],'ids':ids,'restored':restored,'enumerate':enumerate_result,'all_checks_passed':True})
+ if name=='original':
+  original_namespace=namespace
+  before=namespace['to_id'].copy()
+  try:
+   out_of_vocab_ids=[namespace['to_id'][c] for c in '貓看鳥']
+  except KeyError as error:
+   assert error.args==('鳥',)
+   oov={'input':'貓看鳥','exception_type':type(error).__name__,'exception_args':list(error.args),'dictionary_unchanged':namespace['to_id']==before}
+  else:
+   raise AssertionError('Expected KeyError for 鳥')
+
+# Check the observed sorted order by independent code-point values.
+code_points=[{'char':c,'ord':ord(c),'unicode':f'U+{ord(c):04X}'} for c in expected_chars]
+assert [x['ord'] for x in code_points] == [12290,29399,30475,35987,65292]
+assert all(x['ord']<y['ord'] for x,y in zip(code_points,code_points[1:]))
+loop=[]
+for char in original_namespace['text']:
+ loop.append(original_namespace['to_id'][char])
+assert loop==expected_ids
+# A true assertion produces no output and a false one raises AssertionError under __debug__.
+capture=io.StringIO()
+with contextlib.redirect_stdout(capture):
+ assert True
+assert capture.getvalue()=='' and __debug__
+try:
+ assert False
+except AssertionError:
+ assert_behavior={'true_stdout':'','false_exception':'AssertionError','debug_enabled':__debug__,'optimize':sys.flags.optimize}
+else:
+ raise AssertionError('Assertions unexpectedly disabled')
+
+# Read and run the explicitly linked W.2 example and its stated exercise in isolation.
+wraw=(root/'course/first-steps.md').read_bytes(); wh=list(re.finditer(rb'(?m)^## [^\r\n]+',wraw)); wi=next(i for i,h in enumerate(wh) if h[0].startswith(b'## W.2 '))
+wsection=wraw[wh[wi].start():wh[wi+1].start()]; wcode=re.search(rb'```python\n(.*?)```',wsection,re.S)[1].decode()
+wruns=[]
+for name,variant in [('prerequisite_original',wcode),('prerequisite_exercise',wcode.replace('animals = ["貓", "狗"]','animals = ["鳥", "貓", "狗"]').replace('assert len(animals) == 2','assert len(animals) == 3'))]:
+ namespace={}; output=io.StringIO()
+ with contextlib.redirect_stdout(output): exec(compile(variant,name,'exec'),namespace)
+ wruns.append({'case':name,'stdout':output.getvalue(),'animals':namespace['animals'].copy(),'record':namespace['record'].copy()})
+ assert output.getvalue() == ('貓 2\n貓在睡覺\n看到 貓\n看到 狗\n' if name=='prerequisite_original' else '鳥 3\n貓在睡覺\n看到 鳥\n看到 貓\n看到 狗\n')
+ original_animals=namespace['animals'].copy(); namespace['record']['caption']='狗在走路'; assert namespace['animals']==original_animals
+
+result={'executed_at':datetime.now(UTC).isoformat(),'command':'OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 CUDA_VISIBLE_DEVICES= HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1 TRANSFORMERS_OFFLINE=1 .venv/bin/python docs/technical-reviews/artifacts/1.1-cpu-check-code.txt','environment':{'python':sys.version,'python_executable':sys.executable,'unicode_database':unicodedata.unidata_version,'device':'cpu; Python builtins only, no tensor or accelerator operation','OMP_NUM_THREADS':os.environ['OMP_NUM_THREADS'],'MKL_NUM_THREADS':os.environ['MKL_NUM_THREADS'],'cuda_visible_devices':os.environ['CUDA_VISIBLE_DEVICES'],'optimize':str(sys.flags.optimize)},'source_sha256':hashlib.sha256(section).hexdigest(),'intro_sha256':hashlib.sha256(raw[:headings[0].start()]).hexdigest(),'prerequisite_source_sha256':hashlib.sha256(wsection).hexdigest(),'fence_sha256':hashlib.sha256(code.encode()).hexdigest(),'runs':runs,'oov':oov,'code_points':code_points,'comprehension_equals_explicit_loop':loop==expected_ids,'assert_behavior':assert_behavior,'prerequisite_runs':wruns,'prerequisite_caption_change_preserves_list':True,'exit_code':0}
+Path('docs/technical-reviews/artifacts/1.1-cpu-check-result.json').write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\n')
+print(json.dumps(result,ensure_ascii=False,indent=2))

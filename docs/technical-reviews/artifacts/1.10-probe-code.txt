@@ -1,0 +1,56 @@
+import contextlib
+import hashlib
+import io
+import json
+import os
+from pathlib import Path
+import re
+import sys
+import torch
+from decimal import Decimal
+
+root=Path('/workspace/tiny-perceptron-vlm')
+raw=(root/'course/chapters/01.md').read_bytes()
+heads=list(re.finditer(rb'(?m)^## [^\r\n]+',raw))
+i=next(i for i,h in enumerate(heads) if h[0].startswith(b'## 1.10 '))
+section=raw[heads[i].start():heads[i+1].start()]
+code=re.search(rb'```python\n(.*?)```',section,re.S)[1].decode()
+env={'python':sys.version,'torch':torch.__version__,'torch_git_version':torch.version.git_version,'device':'cpu','dtype':'torch.float32','OMP_NUM_THREADS':os.environ['OMP_NUM_THREADS'],'MKL_NUM_THREADS':os.environ['MKL_NUM_THREADS'],'grad_mode':str(torch.is_grad_enabled()),'__debug__':str(__debug__),'threads':str(torch.get_num_threads())}
+def run(c):
+ ns={};out=io.StringIO()
+ with contextlib.redirect_stdout(out): exec(c,ns)
+ w,u,L=ns['w'],ns['u'],ns['loss']
+ d=u.detach()
+ return {'code':c,'stdout':out.getvalue(),'w':w.item(),'u':u.item(),'loss':L.item(),'w_grad':w.grad.item(),'w_shape':list(w.shape),'w_dtype':str(w.dtype),'w_is_leaf':w.is_leaf,'w_requires_grad':w.requires_grad,'w_grad_fn':str(w.grad_fn),'u_grad_fn':type(u.grad_fn).__name__,'loss_grad_fn':type(L.grad_fn).__name__,'item_type':type(u.item()).__name__,'detached_requires_grad':d.requires_grad,'detached_grad_fn':str(d.grad_fn),'detached_storage_shared':d.data_ptr()==u.data_ptr(),'u_after_detach_read':u.item(),'w_after_backward':w.item()}
+original=run(code)
+exercise_code=code.replace('u = 2 * w','u = 3 * w').replace('2 * u.detach().item(), 2','2 * u.detach().item(), 3').replace('== 24','== 54')
+exercise=run(exercise_code)
+stale_print=run(exercise_code.replace('2 * u.detach().item(), 3','2 * u.detach().item(), 2'))
+assert original['stdout'].splitlines()==['中間值 6.0 代價 36.0','兩段敏感度 12.0 2','合成梯度 24.0']
+assert exercise['stdout'].splitlines()==['中間值 9.0 代價 81.0','兩段敏感度 18.0 3','合成梯度 54.0']
+assert original['w']==exercise['w']==3.0
+w=torch.tensor(3.,requires_grad=True); a=2*w;b=3*w;loss=a.square()+b.square();loss.backward()
+assert w.grad.item()==78
+false_ns={};false_stdout=io.StringIO()
+try:
+ with contextlib.redirect_stdout(false_stdout):exec('assert 24 == 54\nprint("should not run")\n',false_ns)
+ false_assert={'exception':'none'}
+except AssertionError as e:
+ false_assert={'exception':type(e).__name__,'stdout':false_stdout.getvalue(),'subsequent_line_executed':False}
+plain=3.;plain_u=2*plain
+x=Decimal('3');h=Decimal('0.001');u=2*x;delta_u=2*h;delta_loss=(2*(x+h))**2-u**2
+repo_probe={}
+from tiny_perceptron.simple import ContextMLP
+from tiny_perceptron.model import masked_loss
+torch.manual_seed(0)
+model=ContextMLP(5,context=2,width=4);ids=torch.tensor([[1,2]]);logits=model(ids);L=masked_loss(logits[:,None,:],torch.tensor([[3]]));L.backward()
+repo_probe={'config':{'vocab_size':5,'context':2,'width':4},'input_ids':ids.tolist(),'logits_shape':list(logits.shape),'loss_kind':'masked_loss -> F.cross_entropy','loss':L.item(),'embedding_grad_present':model.embedding.weight.grad is not None,'hidden_grad_present':model.hidden.weight.grad is not None,'parameter_updates':0}
+identity={}
+for name in ['_tensor.py','_tensor_docs.py','_torch_docs.py','__init__.py','nn/modules/loss.py','nn/modules/sparse.py']:
+ fetched=Path('/tmp/1.10-sources')/(Path(name).name if '/' in name else name)
+ installed=Path(torch.__file__).parent/name
+ identity[name]={'official_sha256':hashlib.sha256(fetched.read_bytes()).hexdigest(),'installed_sha256':hashlib.sha256(installed.read_bytes()).hexdigest(),'byte_identical':fetched.read_bytes()==installed.read_bytes()}
+assert all(v['byte_identical'] for v in identity.values())
+result={'accessed_on':'2026-10-03','command':'OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 CUDA_VISIBLE_DEVICES="" HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1 TRANSFORMERS_OFFLINE=1 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python /tmp/1.10-run-probes.py','environment':env,'source_sha256':hashlib.sha256(section).hexdigest(),'original':original,'exercise':exercise,'stale_literal_print_probe':stale_print,'branch_probe':{'w':3.,'paths':'(2*w)^2 + (3*w)^2','path_gradients':[24,54],'observed_total_gradient':w.grad.item()},'false_assert_probe':false_assert,'plain_python_number_probe':{'w_type':type(plain).__name__,'u_type':type(plain_u).__name__,'w_has_grad':hasattr(plain,'grad'),'u_has_grad_fn':hasattr(plain_u,'grad_fn')},'decimal_probe':{'delta_w':str(h),'delta_u':str(delta_u),'exact_delta_loss':str(delta_loss),'linear_approximation':str(2*u*delta_u),'finite_ratio':str(delta_loss/h),'derivative':str(8*x),'old_gradient_times_1_5':24*1.5},'repository_tiny_forward_probe':repo_probe,'installed_official_source_identity':identity,'result':'所有精確斷言通過；原例和指定練習各只有三行輸出；無參數更新、無網路、CPU。'}
+(root/'docs/technical-reviews/artifacts/1.10-execution.json').write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\n')
+print(json.dumps(result,ensure_ascii=False,indent=2))
