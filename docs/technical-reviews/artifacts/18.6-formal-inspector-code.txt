@@ -1,0 +1,46 @@
+import hashlib
+import json
+import platform
+import re
+from pathlib import Path
+import torch
+
+base = Path('docs/technical-reviews/artifacts')
+paths = [
+    'docs/course-experiments/results/distillation.json',
+    'docs/course-experiments/releases/distillation.json',
+    'docs/course-experiments/public-releases/distillation.json',
+    'docs/course-experiments/student-checks/distillation.20261002T221133313058Z.json',
+]
+inputs = {p: {'sha256': hashlib.sha256(Path(p).read_bytes()).hexdigest(), 'bytes': len(Path(p).read_bytes())} for p in paths}
+results, release, public, student = [json.loads(Path(p).read_bytes()) for p in paths]
+assert results['revision'] == release['revision'] == '5af615e5d7c9642afee800390fa072257f895d0c'
+assert public['release']['revision'] == student['public_source']['revision'] == 'fa69713c7dece0177b5088e14f49581d8ae97b7f'
+meta = json.loads((base/'18.6-authority-metadata.json').read_text())
+metadata = {row['name']: row for row in meta}
+assert metadata['formal-compression']['sha256'] == results['code_sha256']['scripts/course_experiments/compression.py']
+assert metadata['formal-model']['sha256'] == results['code_sha256']['tiny_perceptron/model.py']
+assert metadata['public-card']['sha256'] == next(row['sha256'] for row in public['release']['public_manifest']['files'] if row['output']=='README.md')
+assert metadata['public-card']['sha256'] == next(row['sha256'] for row in student['verified_files'] if row['output']=='README.md')
+assert hashlib.sha256(Path('tiny_perceptron/data.py').read_bytes()).hexdigest() == results['code_sha256']['tiny_perceptron/data.py']
+assert hashlib.sha256(Path('tiny_perceptron/alignment.py').read_bytes()).hexdigest() == results['code_sha256']['tiny_perceptron/alignment.py']
+tasks = {}
+for name, task in results['results']['tasks'].items():
+    assert task['teacher_provenance']['config']['vocab_size']==264
+    assert task['teacher_provenance']['config']['width']==64
+    runs = {k: {field:run['training'][field] for field in ('steps','training_examples','training_sequence_chunks','effective_supervised_tokens','objective','alpha','temperature')} for k,run in task['runs'].items() if 'training' in run}
+    hard = task['hard_target_generation']
+    tasks[name] = {'teacher_config':task['teacher_provenance']['config'], 'data_counts':task['data']['counts'], 'student_records':task['data']['student_training_records'], 'teacher_cache':task['teacher_cache'], 'runs':runs, 'hard_target_records':None if hard is None else hard['records'], 'hard_target_has_saved_ids':None if hard is None else all(isinstance(row['teacher_ids'],list) for row in hard['audit'])}
+record = {
+    'command':'OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 .venv/bin/python docs/technical-reviews/artifacts/18.6-formal-inspector-code.txt',
+    'environment':{'python':platform.python_version(),'torch':torch.__version__,'device':'cpu','threads':str(torch.get_num_threads())},
+    'inputs':inputs, 'formal_revision':results['revision'], 'original_run_environment':{k:results[k] for k in ('device','seed','torch_version','python_version','gpu','step_scale','evidence_status')},
+    'relevant_formal_code_pins':{k:results['code_sha256'][k] for k in ('scripts/course_experiments/compression.py','tiny_perceptron/data.py','tiny_perceptron/alignment.py','tiny_perceptron/model.py')},
+    'public_revision':student['public_source']['revision'],'weights_revision':public['release']['weights_revision'],
+    'public_card_sha256':metadata['public-card']['sha256'], 'public_card_url':metadata['public-card']['url'],
+    'dated_student_check':{k:student[k] for k in ('checked_at','environment','code_checkout_revision','status')}, 'tasks':tasks,
+    'assertions':'原始正式程式SHA、發布card SHA、dated student-check card SHA及revision一致；264與教師width64成立。',
+    'scope':'親讀固定記錄並執行雜湊/JSON核對；不重跑訓練，不把student-check推成品質實驗。當前compression.py與當次正式pin不同，方法核查使用當次原始程式。自然故事MoE分支按相同原始文字前文與有效next-byte標籤對齊；問答前文描述適用屬性與風格分支。', 'exit_code':0,
+}
+(base/'18.6-formal-inspection-execution.json').write_text(json.dumps(record,ensure_ascii=False,indent=2)+'\n')
+print(json.dumps({'input_hashes':inputs,'formal_pin':results['revision'],'card_pin':student['public_source']['revision'],'tasks':list(tasks),'exit_code':0},ensure_ascii=False,indent=2))

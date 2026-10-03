@@ -1,0 +1,70 @@
+def _sync(device):
+    if str(device).startswith("cuda"):
+        torch.cuda.synchronize(device)
+    elif str(device).startswith("mps"):
+        torch.mps.synchronize()
+
+
+def _chat(record):
+    if "messages" in record:
+        return record["messages"]
+    return [
+        {"role": "user", "content": record["question"]},
+        {"role": "assistant", "content": record["answer"]},
+    ]
+
+
+def _example(record, maximum):
+    if "_hard_ids" in record:
+        prefix = _prompt(record, maximum)
+        hard_ids = record["_hard_ids"]
+        if not hard_ids:
+            raise ValueError("教師沒有生成任何有效 hard target；不可捏造 EOS 標籤")
+        eos = ByteTokenizer().eos_id in hard_ids
+        if record.get("_hard_eos") is not eos:
+            raise ValueError("教師 hard target 的實際 IDs 與 EOS 標記不一致")
+        tail = torch.tensor(hard_ids, dtype=torch.long)
+        full = torch.cat((prefix, tail))
+        labels = torch.cat((torch.full_like(prefix, IGNORE), tail))
+        if len(full) - 1 > maximum:
+            raise ValueError("教師 hard target 超過學生 max_length")
+        return full[:-1], labels[1:]
+    x, y = render_chat(_chat(record))
+    if len(x) > maximum:
+        raise ValueError("壓縮實驗不能默默截斷答案；請提供符合 max_length 的教學紀錄")
+    return x, y
+
+
+def _examples(records, maximum):
+    if "text" in records[0]:
+        return text_examples(records, mode="text", max_length=maximum)
+    return [_example(record, maximum) for record in records]
+
+
+def _prompt(record, maximum=None):
+    tok = ByteTokenizer()
+    messages = _chat(record)
+    ids = [tok.bos_id]
+    roles = {"user": tok.user_id, "assistant": tok.assistant_id, "system": tok.system_id}
+    # 最後一個 assistant 是待生成答案，其餘前文皆保留。
+    for message in messages[:-1]:
+        ids += [roles[message["role"]]] + tok.encode(message["content"]) + [tok.eos_id]
+    ids.append(tok.assistant_id)
+    if maximum is not None and len(ids) >= maximum:
+        raise ValueError("prompt 沒有留下答案空間")
+    return torch.tensor(ids, dtype=torch.long)
+
+
+@torch.no_grad()
+def _cache_text(teacher, records, device):
+    start = time.perf_counter()
+    teacher.eval().requires_grad_(False)
+    cache = []
+    examples = _examples(records, teacher.config.max_length)
+    for offset in range(0, len(examples), 16):
+        x, y, valid = (t.to(device) for t in pad_batch(examples[offset : offset + 16]))
+        logits = teacher(x, valid=valid)["logits"]
+        cache.extend(logits[i, y[i] != IGNORE].detach().cpu() for i in range(len(x)))
+    _sync(device)
+    return cache, time.perf_counter() - start
+

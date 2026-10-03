@@ -1,0 +1,80 @@
+import json
+import platform
+import sys
+import time
+from pathlib import Path
+from types import SimpleNamespace
+import torch
+sys.path.insert(0, str(Path.cwd()))
+from tiny_perceptron.data import ByteTokenizer, IGNORE, SPECIALS, pad_batch, render_chat
+from tiny_perceptron.alignment import distillation_kl
+from scripts.train import prepare_examples
+
+base = Path('docs/technical-reviews/artifacts')
+namespace = {'torch': torch, 'time': time, 'ByteTokenizer': ByteTokenizer, 'IGNORE': IGNORE, 'pad_batch': pad_batch, 'render_chat': render_chat}
+exec(compile((base / '18.6-formal-functions-code.txt').read_text(), '18.6-formal-functions-code.txt', 'exec'), namespace)
+
+class PrefixProbe(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.config = SimpleNamespace(max_length=128)
+    def forward(self, x, valid=None):
+        # 決定性前文訊號，不含可訓練參數；每個候選是同一列的明確函數。
+        prefix = x.cumsum(-1).float().remainder(19) / 19
+        candidates = torch.arange(264).float() / 264
+        return {'logits': prefix[..., None] * candidates}
+
+records = [{'question': 'a?', 'answer': 'x'}, {'question': 'bb?', 'answer': 'yz'}]
+teacher = PrefixProbe()
+cache, seconds = namespace['_cache_text'](teacher, records, 'cpu')
+indices = [1, 0, 1]
+examples = namespace['_examples'](records, 128)
+x, y, valid = pad_batch([examples[i] for i in indices])
+logits = teacher(x, valid=valid)['logits']
+selected = logits[y != IGNORE][None]
+targets = torch.cat([cache[i] for i in indices])[None]
+labels = y[y != IGNORE][None]
+assert torch.equal(selected, targets)
+assert len(cache) == 2 and [v.shape for v in cache] == [torch.Size([2,264]), torch.Size([3,264])]
+assert selected.shape == (1,8,264)
+loss = distillation_kl(selected, targets, labels, temperature=2)
+assert abs(loss.item()) < 1e-6
+mismatch_error = None
+try:
+    distillation_kl(selected, targets[:, :-1], labels, temperature=2)
+except ValueError as e:
+    mismatch_error = str(e)
+assert mismatch_error
+hard_record = {'question': 'a?', 'answer': 'x', '_hard_ids': [ByteTokenizer().encode('y')[0], 2], '_hard_eos': True}
+_, hard_y = namespace['_example'](hard_record,128)
+assert hard_y[hard_y != IGNORE].tolist() == hard_record['_hard_ids']
+entry_examples = prepare_examples(SimpleNamespace(task="distill", data=None), ByteTokenizer())
+assert len(entry_examples) == 16
+assert entry_examples[0][1][entry_examples[0][1] != IGNORE].tolist() == ByteTokenizer().encode("0") + [2]
+byte1, byte2 = ByteTokenizer(), ByteTokenizer()
+assert byte1.state() == byte2.state()
+assert byte1.vocab_size == 256 + len(SPECIALS) == 264
+assert byte1.encode('小貓追') == byte2.encode('小貓追')
+wrong_p = torch.tensor([0.8,0.2]); wrong_q = torch.tensor([0.2,0.8])
+wrong_only_vocab_order = [['貓','狗'].index(t) for t in ['貓','狗']]
+assert wrong_only_vocab_order == [0,1]
+assert round((wrong_p-wrong_q[wrong_only_vocab_order]).abs().mean().item(),4)==0.6
+item_error = None
+try:
+    wrong_q.item()
+except RuntimeError as e:
+    item_error = str(e)
+assert item_error
+result = {
+    'command': 'OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 .venv/bin/python docs/technical-reviews/artifacts/18.6-alignment-probe-code.txt',
+    'environment': {'python': platform.python_version(), 'torch':torch.__version__, 'torch_git':torch.version.git_version, 'device':'cpu', 'threads':str(torch.get_num_threads())},
+    'records': records, 'indices':indices, 'cache_shapes':[list(v.shape) for v in cache], 'selected_shape':list(selected.shape), 'effective_answer_ids':labels.tolist(), 'cache_equals_same_gold_prefix_rows':True,
+    'ignored_rows':int((y==IGNORE).sum()),'pad_rows':int((~valid).sum()), 'same_targets_kl':loss.item(),'mismatch_error':mismatch_error,
+    'entry_prepare_examples': {'task':'distill', 'examples':len(entry_examples), 'first_effective_labels':entry_examples[0][1][entry_examples[0][1] != IGNORE].tolist()},
+    'byte_tokenizer': {'vocab_size':264, 'specials':list(SPECIALS), 'special_ids':list(range(8)), 'encode_小貓追':byte1.encode('小貓追'), 'states_equal':True},
+    'hard_example_ids':hard_record['_hard_ids'], 'hard_example_effective_labels':hard_y[hard_y != IGNORE].tolist(),
+    'only_vocab_changed': {'order':wrong_only_vocab_order,'MAE':round((wrong_p-wrong_q).abs().mean().item(),4)}, 'non_scalar_item_error':item_error,
+    'scope':'以正式版本的純快取/範例函式與兩筆人工短題核對遮罩與順序；無參數、無更新、無權重載入、未重跑正式排程；不代表品質或GPU效能。', 'exit_code':0,
+}
+(base/'18.6-alignment-probe-execution.json').write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\n')
+print(json.dumps(result,ensure_ascii=False,indent=2))

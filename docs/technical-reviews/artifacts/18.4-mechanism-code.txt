@@ -1,0 +1,26 @@
+import json, platform, os, math
+import torch
+print(json.dumps({"python":platform.python_version(),"torch":torch.__version__,"torch_git":torch.version.git_version,"device":"cpu","OMP_NUM_THREADS":os.environ["OMP_NUM_THREADS"],"MKL_NUM_THREADS":os.environ["MKL_NUM_THREADS"]}))
+q=torch.tensor([0.5,0.4,0.1],dtype=torch.float64)
+z=q.log(); detached=z.detach(); leaf=detached.clone().requires_grad_()
+assert not q.requires_grad and not z.requires_grad and leaf.is_leaf and leaf.requires_grad
+assert detached.data_ptr()==z.data_ptr() and leaf.data_ptr()!=z.data_ptr()
+assert torch.allclose(leaf.softmax(0),q,atol=1e-14,rtol=0)
+print("API",{"q_requires_grad":q.requires_grad,"detached_shares_storage":detached.data_ptr()==z.data_ptr(),"clone_independent":leaf.data_ptr()!=z.data_ptr(),"leaf":leaf.is_leaf,"softmax_log_q":leaf.softmax(0).detach().tolist()})
+for target in [[1.,0.,0.],[.7,.2,.1],[.2,.7,.1]]:
+ p=torch.tensor(target,dtype=torch.float64)
+ x=z.clone().requires_grad_(); loss=-(p*x.log_softmax(0)).sum(); loss.backward()
+ expected=q-p
+ assert torch.allclose(x.grad,expected,atol=1e-14,rtol=0)
+ eps=1e-6; differences=[]
+ for k in range(3):
+  hi=z.clone(); lo=z.clone(); hi[k]+=eps; lo[k]-=eps
+  differences.append(float((-(p*hi.log_softmax(0)).sum()+(p*lo.log_softmax(0)).sum())/(2*eps)))
+ assert torch.allclose(torch.tensor(differences,dtype=torch.float64),expected,atol=2e-10,rtol=0)
+ manual=-sum(float(pi)*math.log(float(qi)) for pi,qi in zip(p,q))
+ assert abs(float(loss.detach())-manual)<1e-14
+ print("target",target,"CE",manual,"analytic_grad",expected.tolist(),"autograd",x.grad.tolist(),"central_difference",differences)
+ old=x.grad.clone(); (-(p*x.log_softmax(0)).sum()).backward()
+ assert torch.allclose(x.grad,2*old,atol=1e-14,rtol=0)
+ print("repeat_backward_accumulates",x.grad.tolist())
+print("PASS: three fixed targets, API isolation, manual CE and central difference; no model training")
