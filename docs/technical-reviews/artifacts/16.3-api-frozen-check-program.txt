@@ -1,0 +1,33 @@
+import json
+import torch
+from tiny_perceptron.model import TinyLM, ModelConfig
+from tiny_perceptron.data import ByteTokenizer
+torch.manual_seed(0)
+m=TinyLM(ModelConfig(width=8)).eval()
+torch.manual_seed(0)
+m2=TinyLM(ModelConfig(width=8)).eval()
+assert all(torch.equal(a,b) for a,b in zip(m.parameters(),m2.parameters()))
+print("manual_seed同次CPU初始化可重現",True)
+assert not m.training and all(not x.training for x in m.modules())
+print("eval training",m.training)
+ids=torch.tensor([[1,2,3,4]])
+assert ids[:,:3].tolist()==[[1,2,3]] and ids[:,3:].tolist()==[[4]]
+seen={}
+handles=[m.embedding.register_forward_pre_hook(lambda mod,args:seen.update(ids=args[0].tolist())),m.position.register_forward_pre_hook(lambda mod,args:seen.update(positions=args[0].tolist())),m.blocks[0].ffn.register_forward_pre_hook(lambda mod,args:seen.update(ffn_shape=list(args[0].shape)))]
+with torch.no_grad():
+    prefix=m(ids[:,:3]);step=m(ids[:,3:],cache=prefix["cache"])
+for h in handles:h.remove()
+assert not step["logits"].requires_grad
+assert seen=={"ids":[[4]],"positions":[3],"ffn_shape":[1,1,8]}
+print("decode本次embedding/位置/FFN輸入",seen)
+print("no_grad logits.requires_grad",step["logits"].requires_grad)
+d=json.load(open("docs/course-experiments/results/efficiency.json"))
+tok=ByteTokenizer()
+for name,v in d["results"]["models"].items():
+    c=v["cache"]; full,cached=c["generated_ids_full"],c["generated_ids_cached"]
+    assert len(full)==len(cached)==12 and full==cached
+    maximum=max(c["per_step_logit_max_error"]);decoded=tok.decode(full)
+    assert maximum==1.9073486328125e-6 and maximum<1e-5
+    assert decoded==c["generated_text"]
+    print("凍結資料統計核對",name,"Q/KV頭",v["model"]["config"]["heads"],v["model"]["config"]["kv_heads"],"提示/步數",c["prompt_tokens"],len(full),"最大誤差",maximum,"ID逐一相同",full==cached,"EOS數",full.count(tok.eos_id),"解碼",decoded)
+print("scope", "仅核對既有GPU凍結紀錄，未重播GPU、未讀weights、未訓練")

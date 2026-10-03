@@ -1,0 +1,43 @@
+import ast
+import hashlib
+import json
+import os
+import platform
+from pathlib import Path
+
+import torch
+
+assert os.environ["OMP_NUM_THREADS"] == os.environ["MKL_NUM_THREADS"] == "1"
+assert platform.python_version() == "3.13.5"
+assert torch.get_num_threads() == 1
+path = Path("docs/technical-reviews/artifacts/15.9-original-program.txt")
+raw = path.read_bytes()
+assert hashlib.sha256(raw).hexdigest() == "12bbd568260cc74ed8018619ebb20268ca80b5bd07cd07c5729824bd2b59c374"
+tree = ast.parse(raw.decode("utf-8"))
+definition = next(node for node in tree.body if isinstance(node, ast.Assign)
+                  and any(isinstance(target, ast.Name) and target.id == "cases"
+                          for target in node.targets))
+namespace = {"torch": torch}
+exec(compile(ast.Module(body=[definition], type_ignores=[]), str(path), "exec"), namespace)
+cases = namespace["cases"]
+assert isinstance(cases, dict)
+assert list(cases) == ["較均衡", "集中"]
+items = cases.items()
+assert type(items).__name__ == "dict_items"
+pairs = list(items)
+assert all(isinstance(pair, tuple) and len(pair) == 2 for pair in pairs)
+records = []
+for name, prob in cases.items():
+    assert isinstance(name, str)
+    assert isinstance(prob, torch.Tensor) and tuple(prob.shape) == (3, 3)
+    assert prob is cases[name]
+    records.append({"name": name, "shape": list(prob.shape),
+                    "same_value_object": prob is cases[name], "values": prob.tolist()})
+assert [record["name"] for record in records] == ["較均衡", "集中"]
+print(json.dumps({"python": platform.python_version(), "torch": str(torch.__version__),
+                  "device": "cpu", "threads": torch.get_num_threads(),
+                  "original_cases_source_sha256": hashlib.sha256(raw).hexdigest(),
+                  "mapping_type": type(cases).__name__, "items_view_type": type(items).__name__,
+                  "pair_count": len(pairs), "bound_iterations": records}, ensure_ascii=False))
+print("PASS: dictionary name/value mapping, items pairs, target unpacking and insertion order")
+print("Only executed the unchanged cases definition and a short semantics loop; no loss loop, optimizer, training, data download or GPU")
