@@ -1,0 +1,174 @@
+import ast
+import hashlib
+import json
+import os
+import platform
+import random
+import tarfile
+from dataclasses import asdict
+from pathlib import Path
+
+import torch
+
+from scripts.course_experiments.compression import _evaluate, _example, _examples, _parameter_hash, _prompt
+from tiny_perceptron.data import IGNORE, ByteTokenizer, pad_batch
+from tiny_perceptron.training import load_checkpoint
+
+
+def sha(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+torch.set_num_threads(1)
+torch.manual_seed(42)
+root = Path("docs/technical-reviews/artifacts")
+result_path = Path("docs/course-experiments/results/distillation.json")
+report = json.loads(result_path.read_bytes())
+attributes = report["results"]["tasks"]["attributes"]
+public = json.loads(Path("docs/course-experiments/public-releases/distillation.json").read_bytes())
+publication = public["release"]["public_manifest"]
+pins = {row["output"]: row for row in publication["files"]}
+proof = json.loads((root / "18.10-formal-code.json").read_bytes())
+assert proof["original_full_sha256"] == report["code_sha256"]["scripts/course_experiments/compression.py"]
+current_source = Path("scripts/course_experiments/compression.py").read_text()
+current_lines = current_source.splitlines(keepends=True)
+current_nodes = {n.name: n for n in ast.parse(current_source).body if isinstance(n, ast.FunctionDef)}
+for name, original in proof["checked_scopes"].items():
+    node = current_nodes[name]
+    assert original["raw_source"] == "".join(current_lines[node.lineno - 1 : node.end_lineno])
+
+test_records = [
+    {"family": row["family"], "question": row["question"], "answer": row["expected"]}
+    for row in attributes["teacher_test"]["generated_samples"]
+]
+ood_records = [
+    {"family": row["family"], "question": row["question"], "answer": row["expected"]}
+    for row in attributes["out_of_domain_gsm8k"]["teacher"]["generated_samples"]
+]
+observations = {}
+teacher = None
+with torch.inference_mode():
+    for key, filename in [("teacher", "sft-teacher.pt")] + [
+        (key, "sft-" + key.replace("_", "-", 1) + ".pt")
+        for key in ["w16_ce", "w16_teacher_hard", "w16_ce_kl", "w32_ce", "w32_teacher_hard", "w32_ce_kl"]
+    ]:
+        path = Path("checkpoints/course/distillation") / filename
+        assert sha(path) == pins[filename]["sha256"]
+        model, payload = load_checkpoint(path, "cpu")
+        model.eval().requires_grad_(False)
+        if key == "teacher":
+            teacher = model
+        expected = attributes["teacher_test"] if key == "teacher" else attributes["runs"][key]["test"]
+        observed = _evaluate(model, test_records, "cpu", tokens=24)
+        assert observed["supervised_tokens"] == expected["supervised_tokens"] == 69
+        assert observed["correct"] == expected["correct"]
+        assert observed["eos_count"] == expected["eos_count"] == 10
+        assert [x["generated_ids"] for x in observed["generated_samples"]] == [
+            x["generated_ids"] for x in expected["generated_samples"]
+        ]
+        nll_error = abs(observed["answer_nll"] - expected["answer_nll"])
+        assert nll_error < 0.00003
+        ood = _evaluate(model, ood_records, "cpu", tokens=24)
+        expected_ood = attributes["out_of_domain_gsm8k"]["teacher"] if key == "teacher" else attributes["runs"][key]["out_of_domain_gsm8k"]
+        assert ood["correct"] == expected_ood["correct"] == 0
+        assert ood["eos_count"] == expected_ood["eos_count"] == 2
+        assert [x["generated_ids"] for x in ood["generated_samples"]] == [
+            x["generated_ids"] for x in expected_ood["generated_samples"]
+        ]
+        observations[key] = {
+            "input_file": str(path), "file_sha256": sha(path),
+            "immutable_url": "https://huggingface.co/" + publication["repo"] + "/resolve/" + publication["revision"] + "/course/course-v1/distillation/" + filename,
+            "config": asdict(model.config), "parameter_count": sum(p.numel() for p in model.parameters()),
+            "parameter_tensor_bytes": sum(p.numel() * p.element_size() for p in model.parameters()),
+            "state_sha256": _parameter_hash(model), "formal_answer_nll": expected["answer_nll"],
+            "cpu_answer_nll": observed["answer_nll"], "absolute_nll_error": nll_error,
+            "test_correct": observed["correct"], "test_examples": observed["examples"],
+            "test_eos": observed["eos_count"], "supervised_tokens": observed["supervised_tokens"],
+            "test_samples": observed["generated_samples"], "ood_samples": ood["generated_samples"],
+            "ood_correct": ood["correct"], "ood_examples": ood["examples"], "ood_eos": ood["eos_count"],
+        }
+    for key in ["w32_ce", "w32_ce_kl"]:
+        agreement = sum(
+            a["generated_ids"] == b["generated_ids"]
+            for a, b in zip(observations[key]["test_samples"], observations["teacher"]["test_samples"], strict=True)
+        )
+        observations[key]["teacher_full_id_agreement_count"] = agreement
+        assert agreement / 10 == attributes["runs"][key]["teacher_agreement"]
+
+    private_root = Path("outputs/private-review-artifacts/original-distillation")
+    hard_path = private_root / "sft-hard-targets.json"
+    cache_path = private_root / "sft-teacher-logits.pt"
+    artifact_pins = {x["path"]: x for x in report["artifacts"]}
+    assert sha(hard_path) == artifact_pins[hard_path.name]["sha256"]
+    assert sha(cache_path) == artifact_pins[cache_path.name]["sha256"]
+    hard = json.loads(hard_path.read_bytes())
+    cache = torch.load(cache_path, map_location="cpu", weights_only=True)
+    assert len(hard["records"]) == len(hard["audit"]) == len(cache["logits"]) == 45
+    assert hard["audit"] == attributes["hard_target_generation"]["audit"]
+    assert cache["teacher_sha256"] == attributes["teacher_provenance"]["sha256"]
+    tok = ByteTokenizer()
+    gold_records = [{"family": r["family"], "question": r["question"], "answer": r["gold_answer"]} for r in hard["audit"]]
+    golden = _examples(gold_records, 128)
+    hard_examples = _examples(hard["records"], 128)
+    assert all(torch.equal(x, hx) and torch.equal(y, hy) for (x, y), (hx, hy) in zip(golden, hard_examples, strict=True))
+    cache_rows = []
+    for offset in range(0, 45, 16):
+        x, y, valid = pad_batch(golden[offset : offset + 16])
+        logits = teacher(x, valid=valid)["logits"]
+        for i in range(len(x)):
+            n = offset + i
+            selected = logits[i, y[i] != IGNORE]
+            stored = cache["logits"][n]
+            assert selected.shape == stored.shape
+            error = float((selected - stored).abs().max())
+            assert error < 0.00003
+            cache_rows.append({"row": n, "question_sha256": hashlib.sha256(gold_records[n]["question"].encode()).hexdigest(), "target_rows": len(selected), "vocab_columns": selected.shape[1], "dtype": str(stored.dtype), "cpu_cached_logits_max_abs_difference": error})
+    rng = random.Random(42)
+    plan = [[rng.randrange(45) for _ in range(16)] for _ in range(400)]
+    target_counts = [int((y != IGNORE).sum()) for _, y in golden]
+    effective = sum(target_counts[i] for batch in plan for i in batch)
+    assert effective == 44985
+    plan_hash = hashlib.sha256(json.dumps(plan).encode()).hexdigest()
+    for key in ["w16_ce", "w16_teacher_hard", "w16_ce_kl", "w32_ce", "w32_teacher_hard", "w32_ce_kl"]:
+        train = attributes["runs"][key]["training"]
+        assert train["batch_plan_sha256"] == plan_hash
+        assert train["effective_supervised_tokens"] == effective
+    private_metadata = {"hard_sha256": sha(hard_path), "cache_sha256": sha(cache_path), "original_volume": "course-v1/distillation", "private_revision": report["hf"]["revision"], "private_prefix": report["hf"]["prefix"], "teacher_source_sha256": cache["teacher_sha256"], "cache_alignment": cache["alignment"], "cache_temperature": cache["temperature"], "record_count": 45, "hard_targets_equal_gold_ids_and_eos": True, "hard_examples_equal_gold_inputs_and_labels": True, "batch_plan_sha256": plan_hash, "effective_supervised_tokens": effective, "cache_rows": cache_rows, "raw_private_data_published": False}
+
+asset_manifest = json.loads(Path("assets/training/manifest.json").read_bytes())
+gsm = next(x for x in asset_manifest["assets"] if x["id"] == "gsm8k")
+archive = Path(gsm["archive"])
+assert sha(archive) == gsm["archive_sha256"]
+with tarfile.open(archive, "r:gz") as tar:
+    member = next(x for x in tar.getmembers() if x.name.endswith("/gsm8k-train-first200.jsonl"))
+    raw = tar.extractfile(member).read()
+assert hashlib.sha256(raw).hexdigest() == attributes["out_of_domain_gsm8k"]["selection"]["source_file_sha256"]
+original = [json.loads(line) for line in raw.decode().splitlines() if line.strip()]
+eligible, skipped = [], []
+for i, row in enumerate(original):
+    answer = row["answer"].split("####")[-1].strip().replace(",", "")
+    prompt_record = {"question": row["question"], "answer": answer}
+    prompt_tokens = len(_prompt(prompt_record))
+    answer_tokens = len(ByteTokenizer().encode(answer)) + 1
+    entry = {"source_row": i, "prefix_tokens": prompt_tokens, "answer_tokens_with_eos": answer_tokens}
+    if prompt_tokens + 24 > 128 or answer_tokens > 24:
+        entry["reason"] = "complete prompt plus reserved generation exceeds context" if prompt_tokens + 24 > 128 else "gold answer plus EOS exceeds generation budget"
+        skipped.append(entry)
+    else:
+        eligible.append(entry)
+selection = attributes["out_of_domain_gsm8k"]["selection"]
+assert len(original) == 200 and [r["source_row"] for r in eligible] == [14, 94]
+assert skipped == selection["skipped"] and len(skipped) == 198
+for key in ["w16_ce_kl_packed4", "w32_ce_kl_packed4"]:
+    frozen_ood = attributes["runs"][key]["out_of_domain_gsm8k"]
+    assert (frozen_ood["correct"], frozen_ood["examples"], frozen_ood["eos_count"]) == (0, 2, 2)
+
+output = {
+    "environment": {"python": platform.python_version(), "torch": str(torch.__version__), "torch_git_version": str(torch.version.git_version), "device": "cpu", "OMP_NUM_THREADS": os.environ.get("OMP_NUM_THREADS", ""), "MKL_NUM_THREADS": os.environ.get("MKL_NUM_THREADS", ""), "threads": str(torch.get_num_threads())},
+    "formal_result_sha256": sha(result_path), "formal_device": report["device"], "formal_gpu": report["gpu"], "formal_seed": report["seed"], "formal_torch": report["torch_version"],
+    "public_revision": publication["revision"], "observations": observations, "private_metadata": private_metadata,
+    "gsm8k_archive_input": {"path": str(archive), "bytes": archive.stat().st_size, "sha256": sha(archive), "note": "既有 hydrated tar 的工作區 bytes；不冒稱 Git index bytes。", "member_name": member.name, "member_sha256": hashlib.sha256(raw).hexdigest(), "source_rows": len(original), "selected": eligible, "skipped_rows": len(skipped), "skipped": skipped, "no_download_or_extraction_write": True},
+    "width32_nll_difference": attributes["runs"]["w32_ce_kl"]["test"]["answer_nll"] - attributes["runs"]["w32_ce"]["test"]["answer_nll"],
+    "scope": "既有固定公開權重的短 CPU 推論、原始快取與硬目標的只讀核對、既有資料包的長度篩選；未重訓，未計時 GPU，未發布私人 raw。", "exit_code": 0,
+}
+print(json.dumps(output, ensure_ascii=False, indent=2))

@@ -1,0 +1,155 @@
+from pathlib import Path
+import contextlib
+import copy
+import hashlib
+import io
+import json
+import os
+import platform
+import random
+import re
+import sys
+
+sys.path.insert(0, str(Path.cwd()))
+import torch
+
+from scripts.course_experiments.compression import _evaluate, _parameter_hash, _style_scores
+from tiny_perceptron.data import ByteTokenizer
+from tiny_perceptron.training import load_checkpoint
+
+torch.set_num_threads(1)
+base = Path("docs/technical-reviews/artifacts")
+formal_path = Path("docs/course-experiments/results/distillation.json")
+formal = json.loads(formal_path.read_bytes())
+style = formal["results"]["tasks"]["style_transfer"]
+environment = {
+    "python": platform.python_version(),
+    "torch": str(torch.__version__),
+    "torch_git_version": str(torch.version.git_version),
+    "device": "cpu",
+    "torch_num_threads": str(torch.get_num_threads()),
+    "OMP_NUM_THREADS": os.environ["OMP_NUM_THREADS"],
+    "MKL_NUM_THREADS": os.environ["MKL_NUM_THREADS"],
+    "HF_HUB_OFFLINE": os.environ["HF_HUB_OFFLINE"],
+    "TRANSFORMERS_OFFLINE": os.environ["TRANSFORMERS_OFFLINE"],
+}
+observations = {"environment": environment, "original_and_exercise": []}
+for name in []:  # 原例與練習另以各自的實際命令執行。
+    path = base / ("18.11-" + ("integer-warning" if name == "integer-warning" else name) + "-code.txt")
+    namespace = {}
+    stdout = io.StringIO()
+    error = None
+    try:
+        with contextlib.redirect_stdout(stdout):
+            exec(compile(path.read_text(encoding="utf-8"), str(path), "exec"), namespace)
+    except Exception as exc:
+        error = {"type": type(exc).__name__, "message": str(exc)}
+    row = {"case": name, "code_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+           "stdout": stdout.getvalue(), "error": error}
+    if name != "integer-warning":
+        row.update({"agreement": namespace["agreement"], "checks": namespace["checks"],
+                    "rate": round(sum(namespace["checks"]) / 3, 4),
+                    "distinct_list_copy": namespace["teacher_answers"] is not namespace["student_answers"]})
+    observations["original_and_exercise"].append(row)
+
+audit = style["hard_target_generation"]["audit"]
+rng = random.Random(42)
+plan = [[rng.randrange(len(audit)) for _ in range(16)] for _ in range(300)]
+tokenizer = ByteTokenizer()
+gold_lengths = [len(tokenizer.encode(row["gold_answer"])) + 1 for row in audit]
+hard_lengths = [len(row["teacher_ids"]) for row in audit]
+observations["training_budget_without_training"] = {
+    "audit_rows": len(audit), "updates": len(plan), "batch_size": 16,
+    "gold_effective_targets": sum(gold_lengths[i] for batch in plan for i in batch),
+    "hard_effective_targets": sum(hard_lengths[i] for batch in plan for i in batch),
+    "plan_sha256": hashlib.sha256(json.dumps(plan).encode()).hexdigest(),
+    "scope": "重新計數已保存的目標長度與固定抽樣索引，沒有進行參數更新。",
+}
+
+records = []
+for sample in style["teacher_test"]["generated_samples"]:
+    row = {"family": sample["family"], "question": sample["question"], "answer": sample["expected"]}
+    match = re.fullmatch(r"style=(concise|vivid|json); (\d+)\+(\d+)=\?", row["question"])
+    if match:
+        row.update({"style": match[1], "a": int(match[2]), "b": int(match[3])})
+        assert int(re.search(r"\d+", row["answer"])[0]) == row["a"] + row["b"]
+    else:
+        row["style"] = "clarification"
+        if "date=?" in row["question"]:
+            assert row["answer"] == "請提供日期。"
+        else:
+            date = re.search(r"date=(\d{4}-\d{2}-\d{2})", row["question"])[1]
+            assert row["answer"] == "已確認" + date + "。"
+    records.append(row)
+observations["test_denominators"] = {
+    "records": len(records), "arithmetic_prompts": len({r["question"].split("; ")[1] for r in records if "a" in r}),
+    "arithmetic_families": len({r["family"] for r in records if "a" in r}),
+    "arithmetic_style_rows": sum("a" in r for r in records),
+    "date_rows": sum("a" not in r for r in records),
+    "gold_answer_eos_targets": sum(len(tokenizer.encode(r["answer"])) + 1 for r in records),
+}
+frozen = {"teacher": style["teacher_test"]}
+for key in ["w32_ce", "w32_teacher_hard", "w32_ce_kl"]:
+    frozen[key] = style["runs"][key]["test"]
+observations["frozen_recount"] = {}
+for key, evaluation in frozen.items():
+    scores = _style_scores(copy.deepcopy(evaluation), records)
+    agreement_count = sum(s["generated_ids"] == t["generated_ids"] for s, t in zip(
+        evaluation["generated_samples"], frozen["teacher"]["generated_samples"], strict=True))
+    observations["frozen_recount"][key] = {
+        "rubric": scores["rubric"], "content_correct": scores["content_correct"],
+        "examples": scores["examples"], "teacher_id_agreement_count": agreement_count,
+        "invalid_control_samples": sum(bool(s["invalid_special_tokens"]) for s in scores["samples"]),
+        "eos_count": sum(s["ended_with_eos"] for s in evaluation["generated_samples"]),
+        "nll_sum": evaluation["nll_sum"], "supervised_tokens": evaluation["supervised_tokens"],
+        "recomputed_nll": evaluation["nll_sum"] / evaluation["supervised_tokens"],
+        "json_2_plus_2": scores["samples"][2]["generated"],
+    }
+
+observations["pinned_weight_cpu_replay"] = {}
+files = {"teacher": "style-teacher.pt", "w32_ce": "style-w32-ce.pt",
+         "w32_teacher_hard": "style-w32-teacher_hard.pt", "w32_ce_kl": "style-w32-ce_kl.pt"}
+release = json.loads(Path("docs/course-experiments/public-releases/distillation.json").read_bytes())["release"]
+manifest = {f["output"]: f for f in release["public_manifest"]["files"]}
+for key, name in files.items():
+    path = Path("checkpoints/course/distillation") / name
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    assert digest == manifest[name]["sha256"]
+    model, payload = load_checkpoint(path, "cpu")
+    parameter_digest = _parameter_hash(model)
+    evaluation = _evaluate(model, records, "cpu", tokens=96)
+    scores = _style_scores(copy.deepcopy(evaluation), records)
+    identities = [a["generated_ids"] == b["generated_ids"] for a, b in zip(
+        evaluation["generated_samples"], frozen[key]["generated_samples"], strict=True)]
+    observations["pinned_weight_cpu_replay"][key] = {
+        "file": str(path), "weight_sha256": digest,
+        "immutable_url": "https://huggingface.co/" + release["repo"] + "/resolve/" + release["revision"] +
+                         "/course/course-v1/distillation/" + name,
+        "config": payload["config"], "format_version": payload["format_version"],
+        "parameter_sha256": parameter_digest,
+        "matches_formal_final_parameters": None if key == "teacher" else parameter_digest == style["runs"][key]["training"]["final_sha256"],
+        "supervised_tokens": evaluation["supervised_tokens"], "nll_sum": evaluation["nll_sum"],
+        "answer_nll": evaluation["answer_nll"], "nll_difference_from_gpu_record": evaluation["answer_nll"] - frozen[key]["answer_nll"],
+        "raw_id_replay_matches": sum(identities), "replay_records": len(identities),
+        "content_correct": scores["content_correct"], "rubric": scores["rubric"],
+        "eos_count": evaluation["eos_count"], "samples": evaluation["generated_samples"],
+        "scope": "固定公開既有權重的短 CPU 評估；無訓練、不證明 GPU 時間或一般能力。",
+    }
+
+counter_row = {"family": "counterprobe", "question": "style=json; 1+1=?", "answer": '{"answer": 2}',
+               "style": "json", "a": 1, "b": 1}
+observations["rubric_boundary_checks"] = []
+for label, ids in [
+    ("correct_int", tokenizer.encode('{"answer": 2}') + [tokenizer.eos_id]),
+    ("boolean", tokenizer.encode('{"answer": true}') + [tokenizer.eos_id]),
+    ("invalid_control", [tokenizer.system_id] + tokenizer.encode('{"answer": 2}') + [tokenizer.eos_id]),
+]:
+    raw = ids[:ids.index(tokenizer.eos_id)]
+    evaluation = {"examples": 1, "generated_samples": [{"family": counter_row["family"],
+        "question": counter_row["question"], "expected": counter_row["answer"],
+        "generated": tokenizer.decode(raw), "generated_ids": ids,
+        "exact": raw == tokenizer.encode(counter_row["answer"]), "ended_with_eos": True}]}
+    score = _style_scores(evaluation, [counter_row])
+    observations["rubric_boundary_checks"].append({"case": label, "score": score["rubric"]})
+
+print(json.dumps(observations, ensure_ascii=False, indent=2))

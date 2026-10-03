@@ -1,0 +1,47 @@
+import json,hashlib,random
+from pathlib import Path
+import torch
+from scripts.infer_modal import load_modal_checkpoint
+from scripts.course_experiments.modalities import _vision_records,modal_inputs
+from scripts.course_experiments.common import Context
+from tiny_perceptron.data import ByteTokenizer
+r=json.loads(Path('docs/course-experiments/results/multimodal_distillation.json').read_text())
+tok=ByteTokenizer();ctx=Context('cpu',Path('/tmp/18.13-unused'),Path('/tmp/18.13-unused'),Path('assets/training'))
+models={}
+for name in ['vqa-teacher','vqa-ce','vqa-ce_kl','joint-teacher','joint-ce','joint-ce_kl']:
+    p=Path('checkpoints/course/multimodal_distillation')/(name+'.pt')
+    model,saved,task=load_modal_checkpoint(p,'cpu');models[name]=model
+    print(json.dumps(dict(name=name,file_sha256=hashlib.sha256(p.read_bytes()).hexdigest(),file_bytes=p.stat().st_size,format=saved['format_version'],task=task,config=saved['config'],modal_config=saved['modal_config'],parameters=sum(x.numel() for x in model.parameters()),tensor_bytes=sum(x.numel()*x.element_size() for x in model.state_dict().values()),vision_parameters=sum(x.numel() for x in model.vision.parameters()),vision_projection_shape=list(model.vision.projection.weight.shape),vision_projection_first=model.vision.projection.weight.detach().flatten()[:3].tolist(),rng_keys=[k for k in saved if k.endswith('_rng')]),ensure_ascii=False))
+for name,row in [('vqa',dict(modality='vision',color='red',shape='square',offset=-2,question='color?',answer='red',family='red:square:-2')),('joint',dict(modality='joint',color='blue',shape='square',offset=0,frequency=180,question='joint?',answer='square,low',family='blue:square:0:180'))]:
+    ids,labels,image,wave,n=modal_inputs(row,ctx)
+    aligned=[]
+    with torch.no_grad():
+        for suffix in ['teacher','ce_kl']:
+            out=models[name+'-'+suffix](ids,labels,image=image,waveform=wave)
+            valid=out['labels'][0]!=-100
+            aligned.append(dict(rows=valid.nonzero().flatten().tolist(),answer_ids=out['labels'][0,valid].tolist(),logits_shape=list(out['logits'].shape)))
+    assert aligned[0]['answer_ids']==aligned[1]['answer_ids']
+    print(json.dumps(dict(name=name,aligned=aligned),ensure_ascii=False))
+vision=_vision_records(('shape?','color?'))
+joint={split:[dict(modality='joint',color=c,shape=s,offset=o,frequency=f,question='joint?',answer=f"{s},{'high' if f>300 else 'low'}",family=f'{c}:{s}:{o}:{f}') for c in ['red','green','blue'] for s in ['circle','square'] for f in fs] for split,o,fs in [('train',0,[180,220,380,420]),('validation',1,[200,400]),('test',2,[260,340])]}
+for name,parts in [('vqa',vision),('joint',joint)]:
+    rng=random.Random(42);plan=[[rng.randrange(len(parts['train'])) for _ in range(4)] for _ in range(350)]
+    count=sum(len(tok.encode(parts['train'][i]['answer']))+1 for indices in plan for i in indices)
+    ph=hashlib.sha256(json.dumps(plan).encode()).hexdigest()
+    assert count==r['results']['tasks'][name]['runs']['ce']['training']['effective_answer_tokens']
+    assert ph==r['results']['tasks'][name]['runs']['ce']['training']['batch_plan_sha256']
+    print(json.dumps(dict(task=name,counts={k:len(v) for k,v in parts.items()},families={k:len({x['family'] for x in v}) for k,v in parts.items()},effective_targets=count,batch_plan_sha256=ph,test_targets=sum(len(tok.encode(x['answer']))+1 for x in parts['test'])),ensure_ascii=False))
+print('KL 手算',0.8*__import__('math').log(0.8/0.5)+0.2*__import__('math').log(0.2/0.5))
+from tiny_perceptron.alignment import distillation_kl
+try:
+    distillation_kl(torch.zeros(1,19,2),torch.zeros(1,7,2),torch.zeros(1,3,dtype=torch.long))
+except ValueError as error:
+    print('未對齊19/7整段拒絕:',str(error))
+else:
+    raise AssertionError('shape mismatch was not rejected')
+try:
+    ctx.dependency('vqa')
+except FileNotFoundError as error:
+    print('缺來源依賴明示停止:',str(error))
+else:
+    raise AssertionError('missing prerequisite was not rejected')
