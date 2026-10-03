@@ -1,0 +1,70 @@
+from pathlib import Path
+from collections import Counter
+import hashlib, json, random
+from tiny_perceptron.retrieval import retrieve
+
+def sha(raw):
+    return hashlib.sha256(raw).hexdigest()
+
+result_path = Path("docs/course-experiments/results/rag.json")
+formal = json.loads(result_path.read_text())
+r = formal["results"]
+selected = [row for row in r["samples"] if row["mode"] == "retrieved_context"]
+original_path = Path("outputs/course-experiments/course-v1/rag/retrieval-corpus.json")
+try:
+    original_path.read_bytes()
+    original_status = {"exists": True}
+except FileNotFoundError as error:
+    original_status = {"exists": False, "failure_type": type(error).__name__, "failure": str(error)}
+code_match = {}
+for path in ["tiny_perceptron/retrieval.py", "scripts/course_experiments/applications.py", "scripts/course_experiments/common.py", "scripts/course_experiments/run.py"]:
+    actual = sha(Path(path).read_bytes())
+    expected = formal["code_sha256"][path]
+    code_match[path] = {"current_sha256": actual, "formal_sha256": expected, "match": actual == expected}
+    assert actual == expected
+facts = [row["fact"] for row in selected]
+rng = random.Random(formal["seed"] + 100)
+for fact in facts:
+    source = f"D{rng.randrange(10)}"
+    address = f"{rng.choice('ABCD')}{rng.randrange(10)}"
+    assert fact["source"] == source and fact["address"] == address
+corpus = [{"id": f"doc-{row['key']}", "text": f"{row['key']} address={row['address']}"} for row in facts]
+corpus += [{"id": f"noise-{index}", "text": f"Z{index:03d} address={rng.choice('ABCD')}{rng.randrange(10)}"} for index in range(60)]
+canonical = sha(json.dumps(corpus, sort_keys=True, ensure_ascii=False).encode())
+raw = json.dumps(corpus, ensure_ascii=False, indent=2, allow_nan=False).encode() + b"\n"
+manifest = next(item for item in formal["artifacts"] if item["path"] == "retrieval-corpus.json")
+assert canonical == r["corpus_sha256"]
+assert sha(raw) == manifest["sha256"] and len(raw) == manifest["bytes"]
+rows = []
+for index, saved in enumerate(selected):
+    key = saved["fact"]["key"]
+    query = key if index % 4 else key.replace("K", "shop")
+    assert query == saved["query"]
+    hits = retrieve(query, corpus, k=1)
+    ids = [hit["id"] for hit in hits]
+    hit = any(value == f"doc-{key}" for value in ids)
+    citation_map = {value: saved["fact"]["source"] for value in ids}
+    assert ids == saved["retrieved_ids"] and hit == saved["retrieval_hit"]
+    assert citation_map == saved["citation_id_map"]
+    for doc, actual in zip(saved["documents"], hits, strict=True):
+        assert doc["id"] == saved["fact"]["source"] and doc["text"] == actual["text"]
+    rows.append({"family": key, "query": query, "retrieved_ids": ids, "retrieval_hit": hit, "citation_id_map": citation_map})
+summary = {"numerator": sum(row["retrieval_hit"] for row in rows), "denominator": len(rows)}
+summary["rate"] = summary["numerator"] / summary["denominator"]
+assert summary == r["retrieval_recall_at_1"]
+print(json.dumps({
+    "scope": "本人在記憶體中 reconstructed，只重建 72 份受控檢索輸入並查詢 12 次；沒有原語料 download/read、沒有呼叫 run_rag、沒有訓練或生成。原 corpus bytes 不寫入公開 artifacts。",
+    "formal_result_path": str(result_path), "formal_result_sha256": sha(result_path.read_bytes()),
+    "formal_code_revision": formal["revision"], "seed": formal["seed"], "construction_rng_seed": formal["seed"] + 100,
+    "original_corpus_path": str(original_path), "original_read_attempt": original_status,
+    "private_original_immutable_url": "https://huggingface.co/" + formal["hf"]["repo"] + "/resolve/" + formal["hf"]["revision"] + "/" + formal["hf"]["prefix"] + "/retrieval-corpus.json",
+    "private_original_accessed": False,
+    "construction_source_locator": "scripts/course_experiments/applications.py:308-321; common.py:33-38",
+    "code_sha256_checks": code_match, "corpus_counts": {"facts": len(facts), "noise": 60, "total": len(corpus)},
+    "reconstructed_raw_bytes": len(raw), "reconstructed_raw_sha256": sha(raw), "manifest_expected_raw_sha256": manifest["sha256"],
+    "raw_sha_match": sha(raw) == manifest["sha256"], "reconstructed_canonical_sha256": canonical,
+    "result_expected_canonical_sha256": r["corpus_sha256"], "canonical_sha_match": canonical == r["corpus_sha256"],
+    "rows": rows, "summary": summary, "regular_query_count": sum(row["query"].startswith("K") for row in rows),
+    "alias_query_count": sum(row["query"].startswith("shop") for row in rows),
+    "limits": "9/12 只對當次固定語料與刻意三別名查詢成立；檢索 recall 與生成正確率分開。"
+}, ensure_ascii=False, indent=2))
