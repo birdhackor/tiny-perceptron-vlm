@@ -1,0 +1,50 @@
+"""Execute only bounded Python prerequisites used by T.11, each example/exercise in a fresh CPU process."""
+import hashlib
+import json
+import os
+import re
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+root=Path.cwd()
+records=[]
+bootstrap="import sys; sys.path.insert(0, str(__import__('pathlib').Path.cwd())); import torch; torch.set_num_threads(1); torch.manual_seed(42)\n"
+def section(path,ident):
+    raw=Path(path).read_bytes()
+    match=re.search(rb'^## '+re.escape(ident.encode())+rb' ',raw,re.M)
+    following=re.search(rb'^## ',raw[match.end():],re.M)
+    end=match.end()+following.start() if following else len(raw)
+    return raw[match.start():end]
+tasks=[
+ ('course/chapters/05.md','5.15',[("torch.manual_seed(1)\nb =", "b =")]),
+ ('course/chapters/0A.md','A.2',[("青街8號", "紅街9號")]),
+ ('course/chapters/0B.md','B.1',[("123乘45", "123乘46")]),
+ ('course/chapters/0B.md','B.3',[("\"b\": 45", "\"b\": 46"),("assert result == 5535", "assert result == 5658")]),
+ ('course/chapters/0C.md','C.3',[("candidates = [3, 4, 3, 5]", "candidates = [3, 3, 3, 3]")]),
+ ('course/chapters/0C.md','C.5',[("verify_tokens_each = 5", "verify_tokens_each = 0")]),
+ ('course/chapters/0C.md','C.1',[("所以是5。", "所以是6。")]),
+ ('course/chapters/0C.md','C.7',[("reward, baseline = 1.0, 0.5", "reward, baseline = 0.0, 0.5")]),
+]
+for path,ident,changes in tasks:
+    raw=section(path,ident)
+    code=re.findall(rb'```python\n(.*?)\n```',raw,re.S)[0].decode()
+    variants=[('original',code)]
+    exercise=code
+    for old,new in changes:
+        assert old in exercise
+        exercise=exercise.replace(old,new)
+    variants.append(('exercise',exercise))
+    if ident=='B.1':
+        variants.append(('exercise_parameters_aligned',exercise.replace('"b": 45','"b": 46')))
+    for label,program in variants:
+        result=subprocess.run([sys.executable,'-c',bootstrap+program],text=True,capture_output=True,timeout=30,env={**os.environ,'OMP_NUM_THREADS':'1','MKL_NUM_THREADS':'1','CUDA_VISIBLE_DEVICES':'','HF_HUB_OFFLINE':'1'})
+        records.append({'lesson':ident,'variant':label,'source':path+'#'+ident,'raw_sha256':hashlib.sha256(raw).hexdigest(),'original_program_sha256':hashlib.sha256(code.encode()).hexdigest(),'executed_program':bootstrap+program,'command':[sys.executable,'-c',bootstrap+program],'returncode':result.returncode,'stdout':result.stdout,'stderr':result.stderr})
+raw=section('course/training.md','T.4')
+fences=re.findall(rb'```python\n(.*?)\n```',raw,re.S)
+for index in (0,2):
+    code=fences[index].decode()
+    result=subprocess.run([sys.executable,'-c',bootstrap+code],text=True,capture_output=True,timeout=30,env={**os.environ,'OMP_NUM_THREADS':'1','MKL_NUM_THREADS':'1','CUDA_VISIBLE_DEVICES':'','HF_HUB_OFFLINE':'1'})
+    records.append({'lesson':'T.4','variant':'original_manifest' if index==0 else 'original_compare_saved_files','source':'course/training.md#T.4','raw_sha256':hashlib.sha256(raw).hexdigest(),'executed_program':bootstrap+code,'command':[sys.executable,'-c',bootstrap+code],'returncode':result.returncode,'stdout':result.stdout,'stderr':result.stderr})
+print(json.dumps({'checked_at':datetime.now(timezone.utc).isoformat(),'scope':'Fresh CPU subprocesses, original bounded Python fences and explicitly stated exercises. No training schedule, download, Git command or notebook build. T.4 original file-dependent failure is retained rather than replacing it with invented data.','executions':records},ensure_ascii=False,indent=2))

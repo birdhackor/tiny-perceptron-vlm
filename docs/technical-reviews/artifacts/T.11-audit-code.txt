@@ -1,0 +1,249 @@
+"""T.11 independent offline CPU review. No training or network calls."""
+import contextlib
+import hashlib
+import io
+import json
+import math
+import os
+import platform
+import random
+import re
+import subprocess
+import sys
+import tarfile
+import tempfile
+from collections import Counter
+from datetime import datetime, timezone
+from pathlib import Path
+from types import SimpleNamespace
+
+ROOT = Path.cwd()
+sys.path.insert(0, str(ROOT))
+import torch
+from scripts.course_experiments import applications as app
+from scripts.course_experiments.common import records_sha256, split_records, text_examples
+from scripts.prepare_data import generate_records
+from scripts.evaluate import answer_sample, evaluate
+from tiny_perceptron.data import ByteTokenizer, render_chat, IGNORE
+from tiny_perceptron.model import ModelConfig, TinyLM
+from tiny_perceptron.training import load_checkpoint
+from tiny_perceptron.retrieval import retrieve, call_tool
+
+torch.set_num_threads(1)
+os.environ['HF_HUB_OFFLINE'] = '1'
+tok = ByteTokenizer()
+def digest(p):
+    return hashlib.sha256(Path(p).read_bytes()).hexdigest()
+def emit(value):
+    print(json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False))
+def compact(v):
+    if isinstance(v, dict):
+        return {k: compact(x) for k, x in v.items() if k not in ('samples', 'continuations', 'history', 'reward_history', 'icl_samples_same_model_weights', 'one_step_cap_samples')}
+    if isinstance(v, list):
+        return [compact(x) for x in v]
+    return v
+def token_budget(rows, steps, batch):
+    examples = text_examples(rows, 'sft', 10000)
+    counts = [int((y != IGNORE).sum()) for x, y in examples]
+    sampler = random.Random(42)
+    return sum(sum(sampler.choices(counts, k=batch)) for _ in range(steps))
+
+mode = sys.argv[1]
+base = {'checked_at': datetime.now(timezone.utc).isoformat(), 'reviewer_task': '/root/technical_round_coordinator/technical_t_11_fresh', 'mode': mode, 'environment': {'python': platform.python_version(), 'torch': str(torch.__version__), 'device': 'cpu', 'threads': str(torch.get_num_threads()), 'OMP_NUM_THREADS': os.environ.get('OMP_NUM_THREADS', ''), 'MKL_NUM_THREADS': os.environ.get('MKL_NUM_THREADS', '')}}
+if mode == 'formal':
+    reports = {n: json.loads(Path(f'docs/course-experiments/results/{n}.json').read_text()) for n in ('rag', 'tools', 'reasoning')}
+    out = {}
+    for name, j in reports.items():
+        out[name] = {'report_sha256': digest(f'docs/course-experiments/results/{name}.json'), 'run_receipt': {k: j[k] for k in ('revision', 'gpu', 'torch_version', 'python_version', 'seed', 'elapsed_seconds', 'timing_scope', 'step_scale', 'evidence_status', 'unfinished_schedules', 'status', 'modal', 'hf')}, 'artifacts': j['artifacts'], 'config_and_metrics': compact(j['results']), 'code_hash_match': {p: digest(p) == h for p, h in j['code_sha256'].items()}}
+    r = reports['rag']['results']
+    splits = app._rag_splits(42)
+    icl = split_records(app._icl_records(), 42)
+    assert {s: records_sha256(rows) for s, rows in splits.items()} == {s: v['sha256'] for s, v in r['split'].items()}
+    assert token_budget(splits['train'] + icl['train'], 1000, 24) == r['training']['effective_tokens'] == 157361
+    rows = r['samples']
+    assert len(rows) == 84 and len(r['icl_samples_same_model_weights']) == 4
+    compact_rows = []
+    for row in rows:
+        sample = row['generation']['samples'][0]
+        ids = sample['generated_ids']
+        raw = ids[:-1] if ids and ids[-1] == tok.eos_id else ids
+        assert tok.decode(raw) == sample['generated']
+        score = app._grounding(sample, row['documents'], row['expected'])
+        assert all(row[k] == v for k, v in score.items())
+        expected = row['context_fact']['address'] + '[' + row['context_fact']['source'] + ']'
+        assert row['fact_answer_correct'] == (raw == tok.encode(expected) and not sample['invalid_special_tokens'])
+        if row['mode'].startswith('changed_'):
+            change = 'address' if row['mode'] == 'changed_address_context' else 'source'
+            assert {k: v for k, v in row['fact'].items() if k != change} == {k: v for k, v in row['context_fact'].items() if k != change}
+        compact_rows.append({k: row[k] for k in ('family', 'mode', 'fact', 'context_fact', 'documents', 'expected', 'fact_answer_correct')} | {'generated': sample['generated'], 'generated_ids': ids})
+    original = {x['family']: x for x in rows if x['mode'] == 'correct_context'}
+    pairs = {m: sum(x['fact_answer_correct'] and original[x['family']]['fact_answer_correct'] for x in rows if x['mode'] == m) for m in ('changed_address_context', 'changed_source_context')}
+    assert pairs == {'changed_address_context': 5, 'changed_source_context': 2}
+    out['rag']['independent_recalculation'] = {'actual_rows': len(rows), 'icl_rows': 4, 'mode_counts': dict(Counter(x['mode'] for x in rows)), 'paired_successes': pairs, 'training_target_recount': 157361, 'rows': compact_rows}
+    t = reports['tools']['results']
+    tsplit = split_records(app._tool_records(), 42)
+    assert token_budget(tsplit['train'], 1200, 16) == t['training']['effective_tokens'] == 1296064
+    summary = []
+    for episode in t['samples'] + t['one_step_cap_samples']:
+        events = []
+        for event in episode['trace']:
+            if 'generation' not in event:
+                continue
+            s = event['generation']['samples'][0]
+            raw = s['generated_ids'][:-1] if s['eos'] else s['generated_ids']
+            assert tok.decode(raw) == s['generated']
+            if event.get('executed'):
+                parsed = app._parse_json_action(s['generated'])
+                assert parsed == event['parsed'] and call_tool(parsed) == event['tool_result']
+            events.append({'generated': s['generated'], 'generated_ids': s['generated_ids'], 'executed': event['executed'], 'parsed': event.get('parsed'), 'tool_result': event.get('tool_result'), 'error': event.get('error')})
+        summary.append({k: episode[k] for k in ('question', 'expected', 'status', 'answer', 'correct', 'actual_tool_calls', 'max_steps')} | {'events': events})
+    assert sum(x['correct'] for x in t['samples']) == 19 and len(t['samples']) == 20
+    assert sum(bool(x['trace'] and 'parsed' in x['trace'][0]) for x in t['samples']) == 20
+    calls = [e for x in t['samples'] for e in x['trace'] if e.get('executed')]
+    assert len(calls) == 18 and sum(e['request_matches_question'] for e in calls) == 18
+    assert len(t['one_step_cap_samples']) == 18 and all(x['status'] == 'step_limit' and x['actual_tool_calls'] == 1 for x in t['one_step_cap_samples'])
+    out['tools']['independent_recalculation'] = {'complete': [19,20], 'first_parse': [20,20], 'correct_params_per_executed_call': [18,18], 'cap_count': 18, 'cap_executed_then_stopped': True, 'training_target_recount':1296064, 'episodes': summary, 'injected': t['injected_protocol_checks_not_model_scores']}
+    rr = reports['reasoning']['results']
+    rsplit = split_records(app._reasoning_records(), 42)
+    details = {}
+    total = 0
+    for name, data in rr['comparison'].items():
+        target_count = token_budget(app._reasoning_sft(rsplit['train'], name), 900, 24)
+        assert target_count == data['training']['effective_tokens']
+        budgets = []
+        for b in data['budgets']:
+            assert len(b['samples']) == 24
+            count = b['candidate_count']
+            checked = []
+            for row in b['samples']:
+                assert len(row['candidates']) == count
+                for c in row['candidates']:
+                    assert app._verify_reasoning(c,row,name) == {k:c[k] for k in app._verify_reasoning(c,row,name)}
+                    assert tok.decode(c['generated_ids'][:-1] if c['eos'] else c['generated_ids']) == c['generated']
+                hit = any(c['final_correct'] for c in row['candidates'])
+                answers = [c['final_answer'] for c in row['candidates'] if c['final_answer'] is not None]
+                majority = Counter(answers).most_common(1)[0][0] if answers else None
+                assert hit == row['oracle_coverage'] and majority == row['majority_answer']
+                checked.append({'question':row['question'], 'truth':row['truth'], 'oracle':hit, 'majority_answer':majority, 'majority_correct':majority == row['truth'], 'candidate_ids':[c['generated_ids'] for c in row['candidates']]})
+            assert sum(x['oracle'] for x in checked) == b['oracle_coverage']['numerator']
+            assert sum(x['majority_correct'] for x in checked) == b['majority_accuracy']['numerator']
+            token_count = sum(len(c['generated_ids']) for row in b['samples'] for c in row['candidates'])
+            assert token_count == b['generated_tokens']
+            total += 24*count
+            budgets.append({'k':count,'oracle':b['oracle_coverage'],'majority':b['majority_accuracy'],'generated_tokens':token_count,'generation_seconds':sum(x['generation']['seconds'] for x in b['samples']), 'rechecked_questions':24,'candidate_count':24*count})
+        details[name]={'training_target_recount':target_count,'budgets':budgets}
+    assert total == 720
+    assert rr['comparison']['direct']['base_state_sha256'] == rr['comparison']['steps']['base_state_sha256']
+    policy_counts = {}
+    for name in ('strict','weak_proxy'):
+        p = rr['reinforce'][name]
+        assert p['training']['steps'] == 1200 and p['training']['sampled_actions'] == 1200*64 == 76800
+        for phase in ('before','after'):
+            rows = p[phase]['samples']
+            actions = [c for row in rows for c in row['samples']]
+            strict = sum(app._policy_reward(c['action_id'],row['truth']) for row in rows for c in row['samples'])
+            proxy = sum(app._policy_reward(c['action_id'],row['truth'], True) for row in rows for c in row['samples'])
+            assert len(rows) == 24 and len(actions) == 384
+            assert strict == p[phase]['sample_accuracy']['numerator'] and proxy == p[phase]['sample_proxy_reward']['numerator']
+            greedy = sum(row['greedy_strict_correct'] for row in rows)
+            assert greedy == p[phase]['greedy_accuracy']['numerator']
+            policy_counts[name+'_'+phase]={'greedy':[greedy,24], 'strict_samples':[strict,384], 'proxy_samples':[proxy,384], 'enumeration':sum(c['action_id']==16 for c in actions)}
+    pilot = rr['gsm8k_training_pilot']
+    archive = Path('assets/training/gsm8k-v1.tar.gz')
+    with tarfile.open(archive) as tf:
+        member = next(m for m in tf.getmembers() if m.name.endswith('gsm8k-train-first200.jsonl'))
+        original_bytes = tf.extractfile(member).read()
+    assert hashlib.sha256(original_bytes).hexdigest() == pilot['source_sha256']
+    original_rows = [json.loads(x) for x in original_bytes.splitlines()]
+    original_records = [{'family':hashlib.sha256(x['question'].encode()).hexdigest(),'source_index':i,'provenance':'GSM8K original human-authored training answer; not teacher generation','messages':app._conversation(x['question'],x['answer'])} for i,x in enumerate(original_rows)]
+    gsm_splits = split_records(original_records,42)
+    segment_counts = {}
+    counts_for_training = []
+    for name, records in gsm_splits.items():
+        counts = []
+        skipped = 0
+        for row in records:
+            x,y = render_chat(row['messages'],tok)
+            for start in range(0,len(x),128):
+                amount=int((y[start:start+128] != IGNORE).sum())
+                if amount:counts.append(amount)
+                else:skipped+=1
+        assert sum(counts) == pilot['packing'][name]['effective_tokens']
+        assert len(counts) == pilot['packing'][name]['segments']
+        if name == 'train':counts_for_training=counts
+        segment_counts[name]={'records':len(records),'segments':len(counts),'question_only_skipped':skipped,'target_tokens':sum(counts),'records_sha256':records_sha256(records)}
+    sampler=random.Random(42)
+    assert sum(sum(sampler.choices(counts_for_training,k=16)) for _ in range(150)) == pilot['training']['effective_tokens'] == 216776
+    for row,continuation in zip(gsm_splits['test'],pilot['continuations'],strict=True):
+        prefix=row['messages'][1]['content'].encode()[:40].decode('utf-8',errors='ignore')
+        assert continuation['generation']['messages'][0]['content'] == 'Continue human answer: '+prefix
+    out['reasoning']['independent_recalculation']={'comparison':details,'total_candidates':total,'policy_counts':policy_counts,'gsm8k':{'archive_sha256':digest(archive),'member_sha256':hashlib.sha256(original_bytes).hexdigest(),'original_records':len(original_rows),'packing':segment_counts,'training_target_recount':216776,'human_prefix_continuations':len(pilot['continuations'])}}
+    emit(base | {'result':out,'status':'all frozen metrics and original-ID criteria agree','scope':'Recomputed frozen records and budgets only; no formal schedule or GPU execution.'})
+elif mode in ('rag','tools','reasoning'):
+    manifest=json.loads(Path('docs/course-experiments/public-models.json').read_text())
+    spec=next(x for x in manifest['models'] if x['id']==mode)
+    filename='steps.pt' if mode=='reasoning' else 'model.pt'
+    path=Path('checkpoints/course')/mode/filename
+    file_spec=next(x for x in spec['files'] if x['output']==filename)
+    assert digest(path)==file_spec['sha256'] and path.stat().st_size==file_spec['bytes']
+    model,payload=load_checkpoint(path,'cpu')
+    torch.manual_seed(0)
+    ctx=SimpleNamespace(device='cpu')
+    if mode=='rag':
+        documents=[{'id':'D0','text':'K000 address=A1'},{'id':'D1','text':'K099 address=C8'}]
+        hits=retrieve('K000',documents,k=1)
+        result={'documents':documents,'query':'K000','retrieved':hits,'generation':app._sample(model,[{'role':'user','content':app._rag_question('K000',hits)}],ctx,tokens=16)}
+    elif mode=='tools':
+        record=next(r for r in app._tool_records() if r['operation']=='add' and r['a']==2 and r['b']==3)
+        result=app._tool_episode(model,record,ctx)
+    else:
+        record=next(r for r in app._reasoning_records() if r['question']=='(1+2)+3=?')
+        generation=app._sample(model,[{'role':'user','content':record['question']}],ctx,tokens=48)
+        result={'question':record['question'],'generation':generation,'external_verification':app._verify_reasoning(generation['samples'][0],record,'steps')}
+    emit(base|{'checkpoint':{'path':str(path),'sha256':digest(path),'bytes':path.stat().st_size,'public_repo':spec['repo'],'revision':spec['revision'],'immutable_url':'https://huggingface.co/'+spec['repo']+'/resolve/'+spec['revision']+'/'+file_spec['path'],'format':str(payload['format_version']),'config':payload['config'],'payload_keys':list(payload)},'result':result,'scope':'Existing pinned public inference export, one operation on CPU, threads=1; not a held-out accuracy or training replication.'})
+elif mode in ('table','exercise'):
+    from fractions import Fraction
+    before_bytes=80000
+    after_bytes=50000 if mode=='table' else 60000
+    before=Fraction(4,5)
+    after=Fraction(4,5) if mode=='table' else Fraction(3,5)
+    saved=before_bytes-after_bytes
+    diff=after-before
+    emit(base|{'result':{'before_bytes':before_bytes,'after_bytes':after_bytes,'saved_bytes':saved,'before_accuracy':str(before),'after_accuracy':str(after),'accuracy_difference':str(diff),'float_accuracy_difference':float(diff),'file_smaller':after_bytes<before_bytes,'correct_count_preserved':after>=before,'predeclared_rule_passed':after_bytes<before_bytes and after>=before},'scope':'Hypothetical table arithmetic; no trained-model score.'})
+elif mode=='metrics':
+    rows=generate_records('attributes-sft')
+    families=sorted({r['family'] for r in rows});random.Random(42).shuffle(families)
+    validation=[r for r in rows if r['family'] in families[int(.8*len(families)):int(.9*len(families))]]
+    torch.manual_seed(42);model=TinyLM(ModelConfig(width=32))
+    report=evaluate(model,validation,'sft',max_new_tokens=2)
+    exact_with_eos=answer_sample(tok,tok.encode('circle')+[tok.eos_id],'circle')
+    exact_without_eos=answer_sample(tok,tok.encode('circle'),'circle')
+    with_space=answer_sample(tok,tok.encode(' circle')+[tok.eos_id],'circle')
+    invalid=answer_sample(tok,tok.encode('circle')+[tok.user_id,tok.eos_id],'circle')
+    emit(base|{'result':{'validation_records':len(validation),'validation_families':len({r['family'] for r in validation}),'report':report,'criterion_probes':{'exact_eos':exact_with_eos,'content_without_eos':exact_without_eos,'space':with_space,'invalid_control':invalid}},'scope':'Untrained CPU model, fixed generated validation family and two-token cap. Verifies field semantics and 36 answer/EOS targets; not hypothetical 500-step scores.'})
+elif mode=='quantization':
+    from tiny_perceptron.training import save_checkpoint
+    torch.manual_seed(42)
+    model=TinyLM(ModelConfig(width=8,layers=1,heads=1))
+    with tempfile.TemporaryDirectory(prefix='T.11-quantization-') as folder:
+        source=Path(folder)/'float.pt'
+        save_checkpoint(source,model,metadata={'review_scope':'untrained CPU example'})
+        commands=[]
+        observations={}
+        for bits in (8,4):
+            target=Path(folder)/f'bits{bits}.pt'
+            command=[sys.executable,'scripts/quantize.py',str(source),'--bits',str(bits),'--output',str(target)]
+            completed=subprocess.run(command,capture_output=True,text=True,timeout=30)
+            assert completed.returncode==0,completed.stderr
+            loaded,payload=load_checkpoint(target,'cpu')
+            state=payload['model']
+            assert torch.equal(model.embedding.weight,state['embedding.weight']) and state['embedding.weight'].dtype==torch.float32
+            commands.append({'command':command,'returncode':completed.returncode,'stdout':completed.stdout,'stderr':completed.stderr})
+            observations[str(bits)]={'report':json.loads(completed.stdout),'model_tensor_storage_bytes':sum(v.numel()*v.element_size() for v in state.values()),'embedding_dtype':str(state['embedding.weight'].dtype),'embedding_equal_original':True,'packed_values':{k:{'shape':list(v.shape),'dtype':str(v.dtype),'bytes':v.numel()*v.element_size()} for k,v in state.items() if k.endswith('.values')}}
+        command=[sys.executable,'scripts/quantize.py',str(Path(folder)/'bits8.pt'),'--bits','4','--output',str(Path(folder)/'requantized.pt')]
+        failed=subprocess.run(command,capture_output=True,text=True,timeout=30)
+        assert failed.returncode!=0 and '請從原始浮點 checkpoint 量化' in failed.stderr
+        commands.append({'command':command,'returncode':failed.returncode,'stdout':failed.stdout,'stderr':failed.stderr,'expected_rejection':True})
+        emit(base|{'result':{'original_source_sha256':digest(source),'source_config':model.config.__dict__,'independent_exports':observations,'commands':commands},'scope':'Untrained width8 one-layer CPU checkpoint independently exported twice; quantization API/storage only, no model quality, timing or trained table claim.'})
+else:
+    raise ValueError(mode)
