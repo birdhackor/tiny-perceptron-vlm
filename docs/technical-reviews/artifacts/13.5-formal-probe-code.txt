@@ -1,0 +1,21 @@
+import json,hashlib,torch
+from pathlib import Path
+from dataclasses import asdict
+from tiny_perceptron.training import load_checkpoint
+from tiny_perceptron.data import render_chat,ByteTokenizer
+from tiny_perceptron.alignment import sequence_log_probability
+from tiny_perceptron.model import generate
+path=Path('checkpoints/course/dpo/model.pt')
+model,payload=load_checkpoint(path,'cpu');model.eval()
+print('checkpoint',json.dumps({'sha256':hashlib.sha256(path.read_bytes()).hexdigest(),'config':asdict(model.config),'export_payload_keys':sorted(payload),'step':payload.get('step'),'metadata':payload.get('metadata'),'tokenizer':payload.get('tokenizer'),'parameter_tensors':[{'name':n,'shape':list(v.shape),'dtype':str(v.dtype)} for n,v in model.state_dict().items()]},ensure_ascii=False))
+with torch.no_grad():
+ for answer in ['6','7']:
+  x,y=render_chat([{'role':'user','content':'4+2=?'},{'role':'assistant','content':answer}])
+  logits=model(x[None],valid=torch.ones_like(x,dtype=torch.bool)[None])['logits']
+  s=sequence_log_probability(logits,y[None])
+  print('candidate',json.dumps({'answer':answer,'input_ids':x.tolist(),'labels':y.tolist(),'effective_targets':int((y!=-100).sum()),'logp':s.item()},ensure_ascii=False))
+ tok=ByteTokenizer();prefix=[tok.bos_id,tok.user_id]+tok.encode('4+2=?')+[tok.eos_id,tok.assistant_id]
+ ids=torch.tensor([prefix]);new=generate(model,ids,max_new_tokens=32,temperature=0.0,eos_id=tok.eos_id)[0,len(prefix):].tolist()
+ answer=new[:new.index(tok.eos_id)] if tok.eos_id in new else new
+ print('generation',json.dumps({'prefix_ids':prefix,'generated_ids':new,'generated':tok.decode(answer),'eos':tok.eos_id in new,'exact':answer==tok.encode('6'),'temperature':0.0,'max_new_tokens':32},ensure_ascii=False))
+ assert new==[64,2]

@@ -1,0 +1,10 @@
+import torch
+from tiny_perceptron.alignment import dpo_loss
+
+chosen = torch.tensor([-4.0], requires_grad=True)
+rejected = torch.tensor([-3.0], requires_grad=True)
+loss = dpo_loss(chosen, rejected, torch.tensor([-4.0]), torch.tensor([-3.0]), beta=0.1)
+loss.backward()
+print("代價", round(loss.item(), 4))
+print("較佳梯度", round(chosen.grad.item(), 4))
+print("較差梯度", round(rejected.grad.item(), 4))
