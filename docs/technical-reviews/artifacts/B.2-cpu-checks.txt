@@ -1,0 +1,200 @@
+import contextlib
+import hashlib
+import io
+import json
+import math
+import pathlib
+import platform
+import re
+import sys
+
+import torch
+
+ROOT = pathlib.Path.cwd()
+raw = (ROOT / 'course/chapters/0B.md').read_bytes()
+start = raw.index('## B.2 '.encode())
+stop = raw.find(b'\n## ', start + 1)
+section = raw[start:stop + 1 if stop >= 0 else len(raw)]
+assert hashlib.sha256(section).hexdigest() == 'bd7e300e13a3afe459c96d50e1ff67a2fa1c79f3e42aa5361342f5e2d865d9f8'
+code = re.search(r'```python\n(.*?)```', section.decode(), re.S).group(1)
+environment = {
+    'python': sys.version,
+    'torch': str(torch.__version__),
+    'torch_file': torch.__file__,
+    'device': 'cpu',
+    'platform': platform.platform(),
+    'threads': str(torch.get_num_threads()),
+    'scope': 'offline CPU; no model training, network, GPU, or formal experiment scheduler',
+}
+mode = sys.argv[1]
+print(json.dumps({'mode': mode, 'environment': environment}, ensure_ascii=False))
+if mode in ('original', 'exercise'):
+    if mode == 'exercise':
+        assert code.count('"a":true') == 1
+        code = code.replace('"a":true', '"a":2')
+    print('executed_code_begin')
+    print(code, end='')
+    print('executed_code_end')
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        exec(compile(code, '<B.2 ' + mode + '>', 'exec'), {})
+    print(output.getvalue(), end='')
+    lines = output.getvalue().splitlines()
+    assert len(lines) == 3 and lines[0] == '結果 5' and lines[1].startswith('拒絕 ')
+    if mode == 'original':
+        assert lines[2].startswith('拒絕 ')
+    else:
+        assert lines[2] == '結果 5'
+elif mode == 'boundaries':
+    from scripts.course_experiments import applications as app
+    from tiny_perceptron.retrieval import call_tool
+    requests = [
+        '{"name":"add","arguments":{"a":"2","b":3}}',
+        '{"name":"add","arguments":{"a":2,"b":4}}',
+        '{"name":"add","arguments":{"a":NaN,"b":3}}',
+        '{"name":"add","arguments":{"a":1e999,"b":3}}',
+        '{"name":"add","name":"multiply","arguments":{"a":2,"b":3}}',
+        '{"name":"add","arguments":{"a":2,"a":3,"b":3}}',
+    ]
+    rows = []
+    for raw_request in requests:
+        row = {'raw': raw_request}
+        for name, fn in [('minimal', call_tool), ('formal', lambda x: call_tool(app._parse_json_action(x)))]:
+            try:
+                value = fn(raw_request)
+                row[name] = {'accepted': True, 'type': type(value).__name__, 'result_repr': repr(value)}
+            except (ValueError, TypeError, KeyError) as error:
+                row[name] = {'accepted': False, 'error': str(error)}
+        rows.append(row)
+    facts = {
+        'json_true_type': type(json.loads('true')).__name__,
+        'bool_is_int_subclass': issubclass(bool, int),
+        'loose_isinstance_true_int': isinstance(True, int),
+        'exact_true_is_number': type(True) in (int, float),
+        '1e308_repr': repr(1e308),
+        '1e308_isfinite': math.isfinite(1e308),
+        '1e999_repr': repr(1e999),
+        '1e999_isfinite': math.isfinite(1e999),
+        'nan_isfinite': math.isfinite(float('nan')),
+        'max_float': repr(sys.float_info.max),
+        'finite_operands_product': repr(1e308 * 1e308),
+        'rows': rows,
+    }
+    assert facts['bool_is_int_subclass'] and not facts['exact_true_is_number']
+    assert facts['1e308_isfinite'] and not facts['1e999_isfinite']
+    assert facts['finite_operands_product'] == 'inf'
+    assert not rows[0]['minimal']['accepted']
+    assert rows[1]['minimal']['result_repr'] == '6' and rows[1]['formal']['result_repr'] == '6'
+    assert all(not row['formal']['accepted'] for row in rows[2:])
+    assert all(row['minimal']['accepted'] for row in rows[2:])
+    schema_rows = []
+    for request in (
+        {'name': 'add', 'arguments': {'a': 2, 'b': 3}, 'extra': 0},
+        {'name': 'add'},
+        {'name': 'add', 'arguments': {'a': 2}},
+        {'name': 'add', 'arguments': {'a': 2, 'b': 3, 'c': 4}},
+        {'name': 'add', 'arguments': [2, 3]},
+    ):
+        try:
+            call_tool(request)
+        except ValueError as error:
+            schema_rows.append({'request': request, 'rejected': True, 'error': str(error)})
+        else:
+            raise AssertionError(request)
+    facts['schema_rejections'] = schema_rows
+    facts['multiply_2_3'] = call_tool({'name': 'multiply', 'arguments': {'a': 2, 'b': 3}})
+    assert facts['multiply_2_3'] == 6
+    print(json.dumps(facts, ensure_ascii=False, indent=2, allow_nan=False))
+elif mode == 'protocol-traces':
+    import copy
+    from types import SimpleNamespace
+    from scripts.course_experiments import applications as app
+    from tiny_perceptron.data import ByteTokenizer
+    record = {
+        'family': 'pair:2:3', 'operation': 'multiply', 'a': 2, 'b': 3, 'answer': 6,
+        'messages': [{'role': 'system', 'content': app._TOOLS_SYSTEM}, {'role': 'user', 'content': 'CALC:multiply(2,3)'}],
+    }
+    tokenizer = ByteTokenizer()
+    original_sample = app._sample
+    rows = []
+    for label, outputs in (
+        ('finite_arguments_overflow', [('{"name":"multiply","arguments":{"a":1e308,"b":1e308}}', [])]),
+        ('exponent_overflow_argument', [('{"name":"multiply","arguments":{"a":1e999,"b":3}}', [])]),
+        ('hidden_control_token', [('{"name":"multiply","arguments":{"a":2,"b":3}}', [4])]),
+        ('valid_call_then_done', [('{"name":"multiply","arguments":{"a":2,"b":3}}', []), ('{"done":true,"answer":6}', [])]),
+    ):
+        pending = iter(outputs)
+        def injected(_model, messages, _ctx, **_kwargs):
+            text, invalid = next(pending)
+            return {'fault_injected_not_model_score': True, 'messages': copy.deepcopy(messages),
+                    'generated_tokens': len(tokenizer.encode(text)) + len(invalid) + 1,
+                    'samples': [{'generated': text, 'generated_ids': tokenizer.encode(text) + invalid + [tokenizer.eos_id], 'invalid_special_tokens': invalid, 'eos': True}]}
+        app._sample = injected
+        try:
+            episode = app._tool_episode(None, record, SimpleNamespace())
+        finally:
+            app._sample = original_sample
+        json.dumps(episode, allow_nan=False)
+        if label == 'finite_arguments_overflow':
+            assert episode['status'] == 'invalid_tool_result' and episode['actual_tool_calls'] == 1
+            assert episode['trace'][0]['executed'] is True and episode['trace'][0]['finite_result'] is False
+            assert episode['trace'][0]['tool_result'] == 'inf'
+        elif label == 'valid_call_then_done':
+            assert episode['status'] == 'done' and episode['actual_tool_calls'] == 1 and episode['correct']
+            assert episode['trace'][1]['generation']['messages'][-1] == {'role': 'user', 'content': 'TOOL_RESULT:6'}
+        else:
+            assert episode['status'] == 'invalid_request' and episode['actual_tool_calls'] == 0
+        rows.append({'label': label, 'episode': episode})
+    try:
+        json.dumps({'result': float('inf')}, allow_nan=False)
+    except ValueError:
+        strict_json_rejects_nonfinite = True
+    else:
+        strict_json_rejects_nonfinite = False
+    assert strict_json_rejects_nonfinite
+    print(json.dumps({'strict_json_rejects_nonfinite': strict_json_rejects_nonfinite, 'cases': rows}, ensure_ascii=False, indent=2, allow_nan=False))
+elif mode == 'formal-records':
+    from scripts.course_experiments import applications as app
+    from tiny_perceptron.retrieval import call_tool
+    result_path = ROOT / 'docs/course-experiments/results/tools.json'
+    result = json.loads(result_path.read_bytes())
+    records = result['results']
+    code_pins = {}
+    for name in ('tiny_perceptron/retrieval.py', 'scripts/course_experiments/applications.py', 'scripts/course_experiments/common.py', 'scripts/course_experiments/run.py'):
+        digest = hashlib.sha256((ROOT / name).read_bytes()).hexdigest()
+        assert digest == result['code_sha256'][name]
+        code_pins[name] = digest
+    injected = []
+    for original in records['injected_protocol_checks_not_model_scores']:
+        try:
+            value = call_tool(app._parse_json_action(original['input']))
+            observed = {'input': original['input'], 'rejected': False, 'result': value}
+        except (ValueError, TypeError, KeyError) as error:
+            observed = {'input': original['input'], 'rejected': True, 'error': str(error)}
+        assert observed == original
+        injected.append(observed)
+    samples = records['samples']
+    executions = [t for sample in samples for t in sample['trace'] if t.get('executed')]
+    assert len(injected) == 7 and all(row['rejected'] for row in injected)
+    assert len(samples) == 20 and len(executions) == 18
+    assert not any(sample['status'] == 'invalid_tool_result' for sample in samples)
+    assert all(t['finite_result'] and math.isfinite(t['tool_result']) for t in executions)
+    assert sum(e['correct'] for e in samples) == records['accuracy']['numerator']
+    print(json.dumps({
+        'source_path': str(result_path.relative_to(ROOT)),
+        'source_sha256': hashlib.sha256(result_path.read_bytes()).hexdigest(),
+        'revision': result['revision'],
+        'formal_environment': {k: result[k] for k in ('device', 'seed', 'torch_version', 'python_version', 'gpu', 'step_scale')},
+        'exact_current_code_matches_formal_pins': code_pins,
+        'injected_replay': injected,
+        'model_samples_denominator': len(samples),
+        'actual_calls_denominator': len(executions),
+        'nonfinite_results': sum(not t['finite_result'] for t in executions),
+        'overflow_episodes': sum(e['status'] == 'invalid_tool_result' for e in samples),
+        'model_accuracy_recomputed': {'numerator': sum(e['correct'] for e in samples), 'denominator': len(samples)},
+        'execution_trace': [{'question': e['question'], 'status': e['status'], 'calls': e['actual_tool_calls'], 'executions': [{'parsed': t['parsed'], 'result': t['tool_result'], 'finite_result': t['finite_result']} for t in e['trace'] if t.get('executed')]} for e in samples],
+        'scope': 'frozen original-record inspection and seven controller fault replays; no generation or training replay',
+    }, ensure_ascii=False, indent=2, allow_nan=False))
+else:
+    raise ValueError(mode)
+print('checks_passed')
