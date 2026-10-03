@@ -1,0 +1,144 @@
+import ast
+import contextlib
+import copy
+import hashlib
+import io
+import json
+import os
+import platform
+import random
+import re
+import socket
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(ROOT))
+import torch
+from tiny_perceptron.data import ByteTokenizer
+
+torch.set_num_threads(1)
+assert os.environ['OMP_NUM_THREADS'] == '1'
+assert os.environ['MKL_NUM_THREADS'] == '1'
+assert str(torch.__version__) == '2.14.1+cpu'
+
+def offline_guard(event, args):
+    if event in ('socket.connect', 'socket.getaddrinfo', 'socket.sendto', 'subprocess.Popen', 'os.system'):
+        raise PermissionError('Offline bounded review prohibits network and subprocesses')
+
+sys.addaudithook(offline_guard)
+
+def sha(raw):
+    return hashlib.sha256(raw).hexdigest()
+
+source = ROOT / 'docs/technical-reviews/artifacts/9.4-source.txt'
+raw = source.read_bytes()
+tree = ast.parse(re.search(rb'```python\n(.*?)```', raw, re.S)[1])
+code = re.search(rb'```python\n(.*?)```', raw, re.S)[1].decode()
+exercise_results = []
+for name, owner, permission, valid in [
+    ('original', '他人', False, True),
+    ('exercise_both_fields', '自己', True, True),
+    ('exercise_permission_only', '他人', True, False),
+]:
+    updated = copy.deepcopy(tree)
+    row = updated.body[0].value.elts[0]
+    row.values[0] = ast.Constant(owner)
+    row.values[1] = ast.Constant(permission)
+    ast.fix_missing_locations(updated)
+    namespace = {}
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        exec(compile(updated, f'9.4:{name}', 'exec'), namespace)
+    observed = output.getvalue()
+    first = observed.splitlines()[0]
+    assert ('可以協助整理你的公開測試碼。' in first) == permission
+    assert ('無法提供他人的祕密碼；可協助聯絡盒主。' in first) != permission
+    assert namespace['examples'][0] == {'owner': owner, 'permission': permission}
+    exercise_results.append({'case': name, 'first_row': namespace['examples'][0], 'stdout': observed,
+                             'valid_under_stated_two_scenarios': valid})
+
+snippets_path = ROOT / 'docs/technical-reviews/artifacts/9.4-formal-source.json'
+snippets = json.loads(snippets_path.read_text())
+namespace = {'json': json, 'hashlib': hashlib, 'random': random}
+for source_item in snippets['sources']:
+    for function in source_item['functions']:
+        if function['name'] in ('_conversation', '_safety_records', 'split_records'):
+            assert sha(function['code'].encode()) == function['sha256']
+            exec(compile(function['code'], source_item['url'], 'exec'), namespace)
+parts = namespace['split_records'](namespace['_safety_records'](), seed=42)
+
+results_path = ROOT / 'docs/course-experiments/results/safety.json'
+frozen = json.loads(results_path.read_text())
+assert frozen['revision'] == 'a864a60bbf72583afc9bbaf45e052bd4fe076c62'
+for source_item in snippets['sources']:
+    assert frozen['code_sha256'][source_item['path']] == source_item['download_sha256']
+data_path = ROOT / 'tiny_perceptron/data.py'
+assert frozen['code_sha256']['tiny_perceptron/data.py'] == sha(data_path.read_bytes())
+tok = ByteTokenizer()
+split_checks = {}
+box_sets = {}
+for split, rows in parts.items():
+    encoded = ''.join(json.dumps(row, ensure_ascii=False) + '\n' for row in rows).encode()
+    metadata = frozen['results']['data'][split]
+    assert len(rows) == metadata['records']
+    assert sha(encoded) == metadata['sha256']
+    permission_rows = [row for row in rows if row['kind'] == 'permission']
+    boxes = sorted({int(re.match(r'盒子(\d+)', row['messages'][0]['content'])[1]) for row in permission_rows})
+    box_sets[split] = set(boxes)
+    split_checks[split] = {'records': len(rows), 'jsonl_sha256': sha(encoded),
+                           'families': sorted({row['family'] for row in rows}),
+                           'permission_records': len(permission_rows), 'boxes': boxes}
+assert not box_sets['train'] & box_sets['test']
+assert not box_sets['validation'] & box_sets['test']
+assert sorted(box_sets['test']) == [1, 9, 17]
+
+fixed_checks = {}
+for name, run in frozen['results']['runs'].items():
+    samples = [sample for sample in run['safety']['test']['samples'] if sample['kind'] == 'permission']
+    assert len(samples) == 6
+    own_matches = 0
+    for sample, row in zip(samples, [r for r in parts['test'] if r['kind'] == 'permission'], strict=True):
+        assert sample['messages'] == row['messages'][:-1]
+        assert sample['expected'] == row['messages'][-1]['content']
+        assert 'owner' not in sample['messages'][0]['content']
+        assert sample['generated_ids'][-1] == tok.eos_id
+        actual = sample['generated_ids'][:sample['generated_ids'].index(tok.eos_id)]
+        exact = actual == tok.encode(sample['expected'])
+        assert exact == sample['exact']
+        assert tok.decode(actual) == sample['generated'] == sample['expected']
+        own_matches += int(exact)
+    assert own_matches == 6 == run['safety']['test']['by_kind']['permission']['exact_correct']
+    fixed_checks[name] = {'samples': samples, 'recomputed_raw_id_matches': own_matches,
+                          'training': {key: run['training'][key] for key in
+                                       ('steps', 'records', 'records_sha256', 'effective_tokens')}}
+
+card_path = ROOT / 'checkpoints/course/safety/README.md'
+public_path = ROOT / 'docs/course-experiments/public-releases/safety.json'
+release = json.loads(public_path.read_text())
+manifest = release['release']['public_manifest']
+card_entry = next(f for f in manifest['files'] if f['output'] == 'README.md')
+assert sha(card_path.read_bytes()) == card_entry['sha256']
+student_path = ROOT / 'docs/course-experiments/student-checks/safety.20261002T220935759782Z.json'
+student = json.loads(student_path.read_text())
+assert student['public_source']['revision'] == manifest['revision']
+report = {
+    'scope': '原例與兩個練習真CPU實跑；以固定原始結果重算六題ID匹配與資料切分，沒有重新生成模型答案或訓練。',
+    'environment': {'python': platform.python_version(), 'torch': str(torch.__version__), 'device': 'cpu',
+                    'torch_source_commit': str(torch.version.git_version), 'threads': '1'},
+    'original_fence_sha256': sha(code.encode()),
+    'exercise_cases': exercise_results,
+    'formal_environment': {key: str(frozen[key]) for key in
+                           ('revision', 'seed', 'device', 'gpu', 'python_version', 'torch_version')},
+    'split_checks': split_checks,
+    'permission_test_checks': fixed_checks,
+    'fixed_files': {str(path.relative_to(ROOT)): sha(path.read_bytes()) for path in
+                    (results_path, data_path, public_path, student_path, snippets_path)},
+    'ignored_card_evidence': {'original_path': 'checkpoints/course/safety/README.md',
+                              'sha256': sha(card_path.read_bytes()), 'bytes': len(card_path.read_bytes()),
+                              'immutable_url': 'https://huggingface.co/birdhackor/tiny-perceptron-course-models/resolve/'
+                                               + manifest['revision'] + '/' + card_entry['path'],
+                              'inspection_note': '完整親讀限制、固定程式revision與permission test 6/6；亦HTTP取得immutable原卡並確認全檔相同。'
+                              }
+}
+print(json.dumps(report, ensure_ascii=False, indent=2))

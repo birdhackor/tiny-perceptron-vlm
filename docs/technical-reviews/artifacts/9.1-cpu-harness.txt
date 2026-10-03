@@ -1,0 +1,60 @@
+from pathlib import Path
+import contextlib,io,json,hashlib,re,sys,tarfile,platform
+import torch
+from scripts.course_experiments.common import split_records
+from scripts.course_experiments.text import _utf8_prefix,_digest
+from scripts.course_experiments.behavior import _conversation
+root=Path.cwd()
+art=root/'docs/technical-reviews/artifacts'
+sha=lambda b:hashlib.sha256(b).hexdigest()
+def section(path,lesson):
+    raw=(root/path).read_bytes()
+    hs=list(re.finditer(rb'(?m)^## ([A-Z\d]+\.\d+) [^\r\n]+',raw))
+    n=next(i for i,h in enumerate(hs) if h[1].decode()==lesson)
+    return raw[hs[n].start():hs[n+1].start() if n+1<len(hs) else len(raw)]
+def run(path,lesson,variant='original',transform=lambda x:x):
+    raw=section(path,lesson)
+    blocks=re.findall(r'```python\n(.*?)```',raw.decode(),re.S)
+    src=transform('\n\n'.join(blocks));ns={};stdout=io.StringIO()
+    with contextlib.redirect_stdout(stdout):exec(compile(src,f'{path}#{lesson}:{variant}','exec'),ns)
+    return {'source':path+'#'+lesson,'variant':variant,'raw_source_sha256':sha(raw),'executed_code':src,'stdout':stdout.getvalue(),'result':'exit 0; code completed'},ns
+results=[]
+r,ns=run('course/chapters/09.md','9.1');results.append(r)
+assert ns['pair'][f"回答{ns['pair']['相對較安全']}安全"] is False
+r,ns=run('course/chapters/09.md','9.1','exercise',lambda s:s.replace('"回答0安全": False','"回答0安全": True'));results.append(r)
+assert ns['pair']['回答0安全'] is True
+assert '有用' not in ns['pair'] and '誠實' not in ns['pair']
+for path,lesson in [('course/chapters/09.md','9.2'),('course/chapters/09.md','9.3'),('course/chapters/09.md','9.4'),('course/chapters/09.md','9.5'),('course/chapters/09.md','9.9'),('course/chapters/09.md','9.10'),('course/chapters/08.md','8.1'),('course/first-steps.md','W.2'),('course/chapters/06.md','6.1'),('course/chapters/01.md','1.8'),('course/chapters/06.md','6.6')]:
+    r,_=run(path,lesson);results.append(r)
+archive=root/'assets/training/pku-safe-rlhf-v1.tar.gz'
+with tarfile.open(archive) as tf:
+    names=[n for n in tf.getnames() if n.endswith('/train-first-100.jsonl')]
+    assert len(names)==1
+    raw=tf.extractfile(names[0]).read()
+rows=[json.loads(x) for x in raw.splitlines()]
+selected=[];counts={'both_safe':0,'both_unsafe':0,'mixed':0}
+for index,row in enumerate(rows):
+    a,b=row['is_response_0_safe'],row['is_response_1_safe']
+    counts['both_safe' if a and b else 'both_unsafe' if not a and not b else 'mixed']+=1
+    safer=int(row['safer_response_id'])
+    if not row[f'is_response_{safer}_safe']:continue
+    selected.append(_conversation(_utf8_prefix(row['prompt'],120),_utf8_prefix(row[f'response_{safer}'],120),_digest(row['prompt']),source_row=index,source_record_sha256=_digest(row),safer_response_id=safer,better_response_id=int(row['better_response_id'])))
+parts=split_records(selected,seed=42)
+fixed=json.loads((root/'docs/course-experiments/results/safety.json').read_text())['results']['pku_pilot']
+checks={}
+for split,records in parts.items():
+    data=''.join(json.dumps(row,ensure_ascii=False)+'\n' for row in records).encode()
+    hashes={row['family'] for row in records}
+    checks[split]={'records':len(records),'families':len(hashes),'sha256':sha(data),'max_prompt_bytes':max(len(r['messages'][0]['content'].encode()) for r in records),'max_answer_bytes':max(len(r['messages'][1]['content'].encode()) for r in records),'all_legal_utf8':all(r['messages'][0]['content'].encode().decode()==r['messages'][0]['content'] for r in records)}
+    assert checks[split]['records']==fixed['data'][split]['records']
+    assert sha(data)==fixed['data'][split]['sha256']
+assert not ({r['family'] for r in parts['train']} & {r['family'] for r in parts['validation']})
+assert not ({r['family'] for r in parts['train']} & {r['family'] for r in parts['test']})
+assert not ({r['family'] for r in parts['validation']} & {r['family'] for r in parts['test']})
+for text,cap,expected in [('貓🙂',4,'貓'),('cat🙂',6,'cat'),('小小貓',8,'小小')]:
+    assert _utf8_prefix(text,cap)==expected
+output={'environment':{'python':platform.python_version(),'torch':torch.__version__,'device':'cpu','OMP_NUM_THREADS':'1','MKL_NUM_THREADS':'1'},'runs':results,'pku_offline_no_training':{'archive_sha256':sha(archive.read_bytes()),'member':names[0],'member_sha256':sha(raw),'source_revision':'9421ffafec3fa40a1f1a7d567b4d525079477ecb','source_records':len(rows),'selected_records':len(selected),'pair_counts':counts,'splits':checks,'no_family_crosses_splits':True,'truncation_boundary_probes':'貓🙂/4→貓; cat🙂/6→cat; 小小貓/8→小小','scope':'只讀既有100筆原始資料，重做選樣/分组雜湊；沒有更新參數或重跑正式訓練'},'result':'all assertions passed'}
+(art/'9.1-cpu-output.json').write_text(json.dumps(output,ensure_ascii=False,indent=2)+'\n')
+primary=section('course/chapters/09.md','9.1');(art/'9.1-source.txt').write_bytes(primary)
+raw=(root/'course/chapters/09.md').read_bytes();intro=raw[:re.search(rb'(?m)^## ',raw).start()];(art/'9.1-intro.txt').write_bytes(intro)
+print(json.dumps({'result':output['result'],'primary_stdout':results[:2],'pku_offline_no_training':output['pku_offline_no_training']},ensure_ascii=False,indent=2))

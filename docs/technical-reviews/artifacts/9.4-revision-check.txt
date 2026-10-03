@@ -1,0 +1,63 @@
+import hashlib
+import json
+import os
+import platform
+import re
+import sys
+from pathlib import Path
+
+import torch
+
+assert os.environ['OMP_NUM_THREADS'] == '1'
+assert os.environ['MKL_NUM_THREADS'] == '1'
+assert str(torch.__version__) == '2.14.1+cpu'
+root = Path(__file__).resolve().parents[3]
+art = root / 'docs/technical-reviews/artifacts'
+sha = lambda raw: hashlib.sha256(raw).hexdigest()
+old = (art / '9.4-source.txt').read_bytes()
+new = (art / '9.4-revised-source.txt').read_bytes()
+prior = json.loads((art / '9.4-prior-revise-report.json').read_text())
+diff = json.loads((art / '9.4-revision-diff.json').read_text())
+assert sha(old) == diff['old_raw_sha256'] == prior['source_sha256']
+assert sha(new) == diff['new_raw_sha256'] == 'aff666ca2c636bf30426a1d91bdb309450fd84329288a4e0b93e2c2c3873ed11'
+assert sha(''.join(diff['diff_lines']).encode()) == diff['raw_diff_sha256']
+old_paragraph = '成對題目的好處是主題詞保持接近，卻有不同應答方式。讓模型同時見到這些例子，才能避免「盒子」「祕密」「碼」等詞與拒絕機械綁定；這也為[9.6過度拒絕的檢查](09.md#9.6)準備了明確對照。'
+new_paragraph = '成對題目的好處是主題詞保持接近，卻有不同應答方式。讓模型同時見到這些例子，有助於降低只憑「盒子」「祕密」「碼」等詞就拒絕的風險；是否能處理新的問法，仍需另外測試。這也為[9.6過度拒絕的檢查](09.md#9.6)準備了明確對照。'
+assert old.count(old_paragraph.encode()) == 1
+assert new.count(new_paragraph.encode()) == 1
+assert old.replace(old_paragraph.encode(), new_paragraph.encode()) == new
+assert re.findall(rb'```python\n(.*?)```', old, re.S) == re.findall(rb'```python\n(.*?)```', new, re.S)
+assert b'.svg' not in old and b'.svg' not in new
+current_raw = (root / 'course/chapters/09.md').read_bytes()
+headings = list(re.finditer(rb'(?m)^## [^\r\n]+', current_raw))
+index = next(i for i, h in enumerate(headings) if h[0].startswith(b'## 9.4 '))
+assert current_raw[headings[index].start():headings[index + 1].start()] == new
+checked_artifacts = []
+for artifact in prior['artifacts']:
+    assert sha((root / artifact['path']).read_bytes()) == artifact['sha256']
+    checked_artifacts.append(artifact['path'])
+checked_local_sources = []
+for source in prior['sources']:
+    if source['kind'] == 'repository_code':
+        assert sha((root / source['path']).read_bytes()) == source['sha256']
+        checked_local_sources.append(source['path'])
+prerequisites = json.loads((art / '9.4-prerequisite-reading.json').read_text())['sections']
+for receipt in prerequisites:
+    path, lesson = receipt['source'].split('#')
+    raw = (root / path).read_bytes()
+    heads = list(re.finditer(rb'(?m)^## [^\r\n]+', raw))
+    index = next(i for i, h in enumerate(heads) if h[0].startswith(('## ' + lesson + ' ').encode()))
+    end = heads[index + 1].start() if index + 1 < len(heads) else len(raw)
+    assert sha(raw[heads[index].start():end]) == receipt['section_sha256']
+print(json.dumps({
+    'scope': '只核對修訂範圍與未變證據完整性；未重跑原例、練習、模型或訓練；研究判斷另見自有回查筆記。',
+    'environment': {'python': platform.python_version(), 'torch': str(torch.__version__),
+                    'device': 'cpu', 'threads': '1'},
+    'old_raw_sha256': sha(old), 'new_raw_sha256': sha(new),
+    'diff_bytes_sha256': diff['raw_diff_sha256'],
+    'changed_scope': '只有成對訓練段落，必要性改為降低風險，並新增新問法需另測。',
+    'python_fences_unchanged': True, 'exercises_unchanged': True,
+    'svg_references': [], 'prior_artifacts_hash_checked': checked_artifacts,
+    'fixed_repository_sources_hash_checked': checked_local_sources,
+    'prerequisite_sections_hash_checked': [r['source'] for r in prerequisites]
+}, ensure_ascii=False, indent=2))
