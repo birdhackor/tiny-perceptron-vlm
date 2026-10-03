@@ -1,0 +1,86 @@
+import contextlib
+import io
+import json
+import os
+from pathlib import Path
+import sys
+
+def guard(event, args):
+    if event.startswith("socket.") or event in {"subprocess.Popen", "os.system", "os.exec", "os.posix_spawn"}:
+        raise PermissionError("W.2 bounded offline CPU audit guard")
+    if event == "open" and isinstance(args[2], int) and args[2] & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_APPEND | os.O_TRUNC):
+        raise PermissionError("W.2 read-only CPU audit guard")
+
+sys.addaudithook(guard)
+original = Path(__file__).with_name("W.2-original-code.txt").read_text(encoding="utf-8")
+
+def execute(code):
+    stream = io.StringIO()
+    namespace = {"__name__": "__main__"}
+    with contextlib.redirect_stdout(stream):
+        exec(compile(code, "W.2 exact fence or documented exercise", "exec"), namespace)
+    return stream.getvalue(), namespace
+
+mode = sys.argv[1]
+record = {
+    "mode": mode,
+    "environment": {
+        "python": sys.version,
+        "executable": sys.executable,
+        "device": "CPU; Python builtins only; -I -S; no third party packages",
+        "optimize": str(sys.flags.optimize),
+        "OMP_NUM_THREADS": os.environ.get("OMP_NUM_THREADS", ""),
+        "MKL_NUM_THREADS": os.environ.get("MKL_NUM_THREADS", ""),
+        "guard": "reject socket events, child processes, and writable open",
+    },
+    "argv": sys.argv,
+}
+if mode == "original":
+    observed, namespace = execute(original)
+    expected = "貓 2\n貓在睡覺\n看到 貓\n看到 狗\n"
+    assert observed == expected
+    assert namespace["animals"] == ["貓", "狗"]
+    assert namespace["record"] == {"animal": "貓", "caption": "貓在睡覺"}
+    record.update(expected_stdout=expected, observed_stdout=observed, checks="exact original fence; len=2; zero-based lookup; ordered for loop; successful assert emits no output")
+elif mode == "exercise":
+    changed_list = original.replace('animals = ["貓", "狗"]', 'animals = ["鳥", "貓", "狗"]').replace("assert len(animals) == 2", "assert len(animals) == 3")
+    observed, namespace = execute(changed_list)
+    expected = "鳥 3\n貓在睡覺\n看到 鳥\n看到 貓\n看到 狗\n"
+    assert observed == expected
+    changed_caption = changed_list.replace('"caption": "貓在睡覺"', '"caption": "貓正在看窗外"')
+    caption_observed, caption_namespace = execute(changed_caption)
+    caption_expected = "鳥 3\n貓正在看窗外\n看到 鳥\n看到 貓\n看到 狗\n"
+    assert caption_observed == caption_expected
+    assert namespace["animals"] == caption_namespace["animals"]
+    assert observed.splitlines()[0] == caption_observed.splitlines()[0]
+    assert observed.splitlines()[2:] == caption_observed.splitlines()[2:]
+    record.update(list_exercise={"expected_stdout": expected, "observed_stdout": observed, "list_length": len(namespace["animals"]), "loop_lines": 3}, caption_exercise={"expected_stdout": caption_expected, "observed_stdout": caption_observed, "animal_output_unchanged": True}, checks="documented list/assert edits and then caption-only edit, in separate namespaces")
+elif mode == "semantics":
+    output, namespace = execute(original + '\ndef first(items):\n    return items[0]\nresult = first(animals)\n')
+    assert namespace["animals"][0] == "貓" and namespace["animals"][1] == "狗"
+    assert namespace["result"] == "貓"
+    assert isinstance(namespace["animals"], list)
+    assert isinstance(namespace["record"], dict)
+    assert isinstance(namespace["animals"][0], str)
+    duplicate = {"caption": "舊", "caption": "新"}
+    assert duplicate == {"caption": "新"}
+    number_keys = {1: "數字鍵", "1": 7}
+    assert number_keys[1] == "數字鍵" and number_keys["1"] == 7
+    assert (2 == 2) is True and (2 == 3) is False
+    failed_assert = None
+    try:
+        execute("assert 2 == 3\n")
+    except AssertionError as error:
+        failed_assert = type(error).__name__
+    assert failed_assert == "AssertionError"
+    invalid_indent = None
+    try:
+        compile('for animal in ["貓"]:\nprint(animal)\n', "indentation check", "exec")
+    except IndentationError as error:
+        invalid_indent = type(error).__name__
+    assert invalid_indent == "IndentationError"
+    record.update(first_function_result=namespace["result"], dictionary_keys=list(number_keys), duplicate_key_result=duplicate, equality_true=True, equality_false=False, false_assert_exception=failed_assert, missing_indent_exception=invalid_indent, stdout=output, checks="list/string/dict types, indexing, unique mapping keys, number/string keys and values, equality, assertion, function return, required block indentation")
+else:
+    raise ValueError(mode)
+record["result"] = "PASS"
+print(json.dumps(record, ensure_ascii=False, indent=2))

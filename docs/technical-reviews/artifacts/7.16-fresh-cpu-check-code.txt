@@ -1,0 +1,210 @@
+"""7.16 的有界 CPU 配方及凍結報告核對；不建立模型或執行訓練。"""
+
+import argparse
+import contextlib
+import hashlib
+import io
+import json
+import os
+import platform
+import random
+from pathlib import Path
+
+import torch
+
+from scripts.course_experiments.common import records_sha256, split_records, text_examples
+from scripts.course_experiments.text import arithmetic_records
+from scripts.prepare_data import generate_records
+from tiny_perceptron.data import ByteTokenizer, IGNORE
+
+
+def digest(raw):
+    return hashlib.sha256(raw).hexdigest()
+
+
+def exercise():
+    namespace = {}
+    original_stdout = io.StringIO()
+    original_path = Path("docs/technical-reviews/artifacts/7.16-fresh-original-code.txt")
+    with contextlib.redirect_stdout(original_stdout):
+        exec(compile(original_path.read_bytes(), str(original_path), "exec"), namespace)
+    a, b = namespace["a"], namespace["b"]
+    original = namespace["recipe"]
+    assert [r["source"] for r in original] == ["A", "A", "B", "B"]
+    assert sum(r["answer_tokens"] for r in original) == 8
+    b_only = [b[0], b[1], b[0], b[1]]
+    assert sum(r["answer_tokens"] for r in b_only) == 8
+    modified = [a[0], b[0], b[1], b[0]]
+
+    def stats(records):
+        counts = {s: sum(r["source"] == s for r in records) for s in ("A", "B")}
+        tokens = {s: sum(r["answer_tokens"] for r in records if r["source"] == s) for s in ("A", "B")}
+        total = sum(tokens.values())
+        return {
+            "sources": [r["source"] for r in records],
+            "record_counts": counts,
+            "record_fractions": {s: c / len(records) for s, c in counts.items()},
+            "answer_tokens": tokens,
+            "total_answer_tokens": total,
+            "token_fractions": {s: c / total for s, c in tokens.items()},
+            "unique_source_text_pairs": len({(r["source"], r["text"]) for r in records}),
+        }
+
+    first = stats(modified)
+    assert first["record_fractions"] == {"A": 0.25, "B": 0.75}
+    assert first["answer_tokens"] == {"A": 2, "B": 6}
+    assert first["total_answer_tokens"] == 8
+    assert first["unique_source_text_pairs"] == 3
+    for r in b:
+        r["answer_tokens"] = 4
+    second = stats(modified)
+    assert second["record_fractions"] == {"A": 0.25, "B": 0.75}
+    assert second["answer_tokens"] == {"A": 2, "B": 12}
+    assert second["total_answer_tokens"] == 14
+    assert second["token_fractions"] == {"A": 1 / 7, "B": 6 / 7}
+    return {
+        "original_stdout": original_stdout.getvalue(),
+        "original_and_b_only_total_tokens": 8,
+        "exercise_1": first,
+        "exercise_2_B_answer_length_4": second,
+        "training_executed": False,
+    }
+
+
+def ablation():
+    report_path = Path("docs/course-experiments/results/sft_ablation.json")
+    raw_report = report_path.read_bytes()
+    report = json.loads(raw_report)
+    results = report["results"]
+    assert report["seed"] == 42 and report["step_scale"] == 1.0
+    assert report["evidence_status"] == "complete_run" and report["status"] == "completed"
+    tokenizer = ByteTokenizer()
+    states = {"before": results["before"]}
+    states.update({name: results["runs"][name] for name in ("b-only", "replay")})
+    expected = {
+        "before": {"A_attributes": [1, 5], "B_arithmetic": [0, 0]},
+        "b-only": {"A_attributes": [0, 0], "B_arithmetic": [0, 0]},
+        "replay": {"A_attributes": [4, 6], "B_arithmetic": [0, 0]},
+    }
+    recomputed = {}
+    for name, state in states.items():
+        recomputed[name] = {}
+        for task in ("A_attributes", "B_arithmetic"):
+            recomputed[name][task] = {}
+            for split, expected_matches in zip(("validation", "test"), expected[name][task], strict=True):
+                metric = state[task][split]
+                samples = metric["samples"]
+                baseline_samples = states["before"][task][split]["samples"]
+                assert [(s["messages"], s["expected"]) for s in samples] == [
+                    (s["messages"], s["expected"]) for s in baseline_samples
+                ]
+                tokens, matches, ended = 0, 0, 0
+                for s in samples:
+                    ids = s["generated_ids"]
+                    eos = tokenizer.eos_id in ids
+                    assert len(ids) <= 32
+                    assert eos and ids[-1] == tokenizer.eos_id
+                    content = ids[: ids.index(tokenizer.eos_id)] if eos else ids
+                    exact = content == tokenizer.encode(s["expected"])
+                    assert exact == s["exact"] and eos == s["eos"]
+                    assert tokenizer.decode(content) == s["generated"]
+                    matches += int(exact)
+                    ended += int(eos)
+                    tokens += len(tokenizer.encode(s["expected"])) + 1
+                assert metric["examples"] == metric["records"] == len(samples)
+                assert metric["matches"] == matches == expected_matches
+                assert metric["effective_tokens"] == tokens
+                assert metric["exact_match"] == matches / len(samples)
+                assert metric["eos_rate"] == ended / len(samples) == 1.0
+                assert abs(metric["nll"] - metric["nll_sum"] / tokens) < 1e-12
+                recomputed[name][task][split] = {
+                    "matches": matches,
+                    "records": len(samples),
+                    "effective_tokens_including_EOS": tokens,
+                    "EOS_ended": ended,
+                    "nll": metric["nll"],
+                    "raw_ID_scored_samples": len(samples),
+                }
+    assert recomputed["before"]["A_attributes"]["validation"]["effective_tokens_including_EOS"] == 36
+    assert recomputed["before"]["A_attributes"]["test"]["effective_tokens_including_EOS"] == 69
+    assert recomputed["before"]["B_arithmetic"]["validation"]["effective_tokens_including_EOS"] == 16
+    assert recomputed["before"]["B_arithmetic"]["test"]["effective_tokens_including_EOS"] == 14
+
+    attributes = split_records(generate_records("attributes-sft"), seed=42)
+    arithmetic = split_records(arithmetic_records(), seed=42)
+    data_checks = {}
+    for task, parts in (("attributes", attributes), ("arithmetic", arithmetic)):
+        data_checks[task] = {}
+        seen = set()
+        for split, records in parts.items():
+            families = {r["family"] for r in records}
+            assert not seen.intersection(families)
+            seen.update(families)
+            raw = "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in records).encode()
+            frozen = results["data"][task][split]
+            assert frozen["records"] == len(records) and frozen["families"] == len(families)
+            assert frozen["sha256"] == digest(raw)
+            data_checks[task][split] = {"records": len(records), "families": len(families), "jsonl_sha256": digest(raw)}
+
+    sampling_counts = {}
+    for name, records in (("b-only", arithmetic["train"]), ("replay", attributes["train"] + arithmetic["train"])):
+        training = results["runs"][name]["training"]
+        examples = text_examples(records, mode="sft", max_length=128)
+        lengths = [(len(x), int((y != IGNORE).sum())) for x, y in examples]
+        sampler = random.Random(42)
+        total, padded_input_cells = 0, 0
+        for _ in range(500):
+            batch = sampler.choices(lengths, k=16)
+            total += sum(effective for _, effective in batch)
+            padded_input_cells += 16 * max(length for length, _ in batch)
+        assert training["records"] == len(records)
+        assert training["records_sha256"] == records_sha256(records)
+        assert training["steps"] == 500
+        assert total == training["effective_tokens"]
+        sampling_counts[name] = {
+            "updates_in_frozen_configuration": 500,
+            "batch_records": 16,
+            "sampled_records": 8000,
+            "computed_supervised_tokens": total,
+            "computed_padded_input_cells": padded_input_cells,
+            "min_input_length": min(x for x, _ in lengths),
+            "max_input_length": max(x for x, _ in lengths),
+            "source_pool_records": results["runs"][name]["source_records"],
+        }
+    assert sampling_counts["b-only"]["computed_supervised_tokens"] == 18453
+    assert sampling_counts["replay"]["computed_supervised_tokens"] == 36384
+    assert sampling_counts["replay"]["computed_padded_input_cells"] > sampling_counts["b-only"]["computed_padded_input_cells"]
+    code_checks = {}
+    for f in ("scripts/course_experiments/text.py", "scripts/course_experiments/common.py", "tiny_perceptron/data.py"):
+        actual = digest(Path(f).read_bytes())
+        assert actual == report["code_sha256"][f]
+        code_checks[f] = actual
+    return {
+        "frozen_report_path": str(report_path),
+        "frozen_report_sha256": digest(raw_report),
+        "frozen_revision": report["revision"],
+        "frozen_run_environment": {k: report[k] for k in ("device", "seed", "torch_version", "python_version", "gpu")},
+        "frozen_result_revision": report["hf"]["result_revision"],
+        "recomputed_complete_held_out_metrics": recomputed,
+        "deterministic_toy_data_manifest_checks": data_checks,
+        "counter_only_sampling_reconstruction": sampling_counts,
+        "replay_to_B_only_supervised_token_ratio": 36384 / 18453,
+        "matching_code_hashes": code_checks,
+        "training_executed": False,
+        "model_created_or_loaded": False,
+        "scope": "僅重算既有凍結生成和小型抽樣計數；沒有重跑實驗排程、前向生成或訓練。",
+    }
+
+
+parser = argparse.ArgumentParser()
+parser.add_argument("mode", choices=("exercise", "ablation"))
+args = parser.parse_args()
+assert os.environ["OMP_NUM_THREADS"] == os.environ["MKL_NUM_THREADS"] == "1"
+result = exercise() if args.mode == "exercise" else ablation()
+output = {
+    "mode": args.mode,
+    "environment": {"python": platform.python_version(), "torch": str(torch.__version__), "device": "cpu", "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"},
+    "result": result,
+    "assertions": "全部通過",
+}
+print(json.dumps(output, ensure_ascii=False, indent=2, allow_nan=False))

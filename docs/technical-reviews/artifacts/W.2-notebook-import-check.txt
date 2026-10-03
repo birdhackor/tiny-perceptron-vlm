@@ -1,0 +1,69 @@
+import json
+import os
+from pathlib import Path
+import sys
+import tempfile
+import time
+
+import ipykernel
+import jupyter_client
+import jupyterlab
+from jupyter_client import KernelManager
+
+def collect(client, code):
+    msg_id = client.execute(code, store_history=False)
+    streams = []
+    errors = []
+    deadline = time.monotonic() + 20
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("W.2 local CPU kernel cell timeout")
+        msg = client.get_iopub_msg(timeout=remaining)
+        if msg.get("parent_header", {}).get("msg_id") != msg_id:
+            continue
+        kind = msg["header"]["msg_type"]
+        if kind == "stream":
+            streams.append(msg["content"]["text"])
+        elif kind == "error":
+            errors.append({k: msg["content"][k] for k in ("ename", "evalue")})
+        elif kind == "status" and msg["content"]["execution_state"] == "idle":
+            break
+    while True:
+        reply = client.get_shell_msg(timeout=20)
+        if reply.get("parent_header", {}).get("msg_id") == msg_id:
+            break
+    assert not errors, errors
+    assert reply["content"]["status"] == "ok", reply["content"]
+    return {"stdout": "".join(streams), "errors": errors, "execute_reply_status": reply["content"]["status"]}
+
+with tempfile.TemporaryDirectory(prefix="W.2-local-cpu-kernel-") as directory:
+    manager = KernelManager(kernel_name="python3", connection_file=str(Path(directory) / "connection.json"))
+    manager.kernel_spec.argv = [sys.executable, "-m", "ipykernel_launcher", "-f", "{connection_file}"]
+    kernel_env = dict(os.environ)
+    kernel_env.update(CUDA_VISIBLE_DEVICES="", HF_HUB_OFFLINE="1", HF_DATASETS_OFFLINE="1", TRANSFORMERS_OFFLINE="1", OMP_NUM_THREADS="1", MKL_NUM_THREADS="1", PYTHONDONTWRITEBYTECODE="1")
+    manager.start_kernel(cwd=str(Path.cwd()), env=kernel_env)
+    client = manager.blocking_client()
+    client.start_channels()
+    try:
+        client.wait_for_ready(timeout=20)
+        original = Path(__file__).with_name("W.2-original-code.txt").read_text(encoding="utf-8")
+        first = collect(client, original)
+        expected = "貓 2\n貓在睡覺\n看到 貓\n看到 狗\n"
+        assert first["stdout"] == expected
+        import_check = collect(client, '''import json, sys
+def offline_guard(event, args):
+    if event in {"socket.connect", "socket.getaddrinfo", "socket.sendto"}:
+        raise PermissionError("W.2 no external networking")
+sys.addaudithook(offline_guard)
+import torch
+assert torch.__name__ == "torch"
+assert hasattr(torch, "tensor")
+assert torch.version.cuda is None
+print(json.dumps({"python": sys.version, "optimize": str(sys.flags.optimize), "torch": str(torch.__version__), "torch_git_version": str(torch.version.git_version), "device": "CPU-only wheel; no tensor allocation or model training", "torch_module_name": torch.__name__, "tensor_function_available": str(callable(torch.tensor)), "external_networking": "audit blocked"}))
+''')
+        torch_environment = json.loads(import_check["stdout"])
+        print(json.dumps({"result": "PASS", "environment": {"python": sys.version, "jupyterlab": str(jupyterlab.__version__), "jupyter_client": str(jupyter_client.__version__), "ipykernel": str(ipykernel.__version__), "device": "CPU; local ZeroMQ loopback kernel only; no Colab/cloud/browser", "OMP_NUM_THREADS": os.environ.get("OMP_NUM_THREADS", ""), "MKL_NUM_THREADS": os.environ.get("MKL_NUM_THREADS", "")}, "original_cell": first, "expected_stdout": expected, "import_cell": import_check, "torch_environment": torch_environment, "limits": "Executed the local Python kernel backend and inspected pinned JupyterLab keyboard/layout source. Did not click a browser shortcut or contact Colab; no kernel registration, dependency install, cloud call, or notebook regeneration."}, ensure_ascii=False, indent=2))
+    finally:
+        client.stop_channels()
+        manager.shutdown_kernel(now=True)

@@ -1,0 +1,35 @@
+import hashlib
+import json
+import platform
+import re
+from pathlib import Path
+import torch
+
+repo=Path.cwd();ad=repo/'docs/technical-reviews/artifacts'
+report=json.loads((repo/'docs/technical-reviews/7.13.json').read_text())
+def h(path):return hashlib.sha256(path.read_bytes()).hexdigest()
+unchanged_sources=[]
+for source in report['sources']:
+    if source['kind']=='repository_code':
+        observed=h(repo/source['path'])
+        assert observed==source['sha256']
+        unchanged_sources.append({'source_id':source['id'],'path':source['path'],'observed_sha256':observed,'previous_review_sha256':source['sha256'],'unchanged':True})
+prerequisites=[]
+for f,id in [('course/first-steps.md','W.2'),('course/chapters/05.md','5.10'),('course/training.md','T.4'),('course/chapters/07.md','7.12')]:
+    raw=(repo/f).read_bytes();hs=list(re.finditer(rb'(?m)^## ([A-Z\d]+\.\d+) [^\r\n]+',raw));i=next(i for i,head in enumerate(hs) if head[1].decode()==id);piece=raw[hs[i].start():hs[i+1].start() if i+1<len(hs) else len(raw)]
+    old=ad/f'7.13-prerequisite-{id}-raw.txt'
+    assert piece==old.read_bytes() and b'.svg' not in piece
+    prerequisites.append({'source':f+'#'+id,'unchanged':True,'sha256':hashlib.sha256(piece).hexdigest(),'svg_references':0})
+frozen=json.loads((ad/'7.13-software-and-frozen-audit.json').read_text())['frozen_evidence']
+local=[]
+for path,expected in [('docs/course-experiments/results/sft.json',frozen['report_sha256']),('checkpoints/course/sft/README.md',frozen['public_source']['card_sha256']),('checkpoints/course/sft/model.pt',frozen['public_source']['weight_sha256'])]:
+    assert h(repo/path)==expected
+    local.append({'path':path,'sha256':expected,'unchanged':True})
+raw=json.loads((repo/'docs/course-experiments/results/sft.json').read_text())
+r=raw['results']; assert r['training']['steps']==900 and r['training']['checkpoint']=='model.pt'
+assert r['after']['test']['matches']==sum(s['exact'] for s in r['after']['test']['samples'])==5
+assert r['after']['test']['records']==len(r['after']['test']['samples'])==10
+assert r['after']['test']['effective_tokens']==69
+assert sum(s['eos'] for s in r['after']['test']['samples'])==10
+assert r['pretrain_then_sft']['after_sft']['test']['matches']==7
+print(json.dumps({'environment':{'python':platform.python_version(),'torch':torch.__version__,'device':'cpu','threads':str(torch.get_num_threads())},'unchanged_repository_sources':unchanged_sources,'unchanged_prerequisites':prerequisites,'unchanged_frozen_report_card_weights':local,'frozen_scope_confirmed':{'direct_sft_updates':900,'test_matches':5,'test_records':10,'test_effective_tokens':69,'test_eos_count':10,'pretrain_sft_test_matches':7,'seed':raw['seed'],'formal_device':raw['device'],'formal_gpu':raw['gpu'],'formal_revision':raw['revision'],'public_source':frozen['public_source'],'scope':'維持原先單seed42、固定2個留出家族十題的正式L4記錄；本次只唯讀核未變，不把CPU稽核當正式重訓或新的性能實測。'}},ensure_ascii=False,indent=2))

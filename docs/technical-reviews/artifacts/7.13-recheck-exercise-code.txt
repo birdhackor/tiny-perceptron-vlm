@@ -1,0 +1,58 @@
+import contextlib
+import hashlib
+import io
+import json
+import platform
+from pathlib import Path
+import torch
+
+ad = Path('docs/technical-reviews/artifacts')
+fence = (ad / '7.13-recheck-original-code.txt').read_text()
+old_assert = 'assert scores["格式符合"] and not scores["1+1內容正確"]'
+new_assert = 'assert scores["格式符合"] and scores["1+1內容正確"]'
+assert 'type(parsed["answer"]) is int' in fence
+assert old_assert in fence
+
+def execute(source):
+    namespace = {}
+    stream = io.StringIO()
+    failed = False
+    with contextlib.redirect_stdout(stream):
+        try:
+            exec(compile(source, '<7.13-current-fence>', 'exec'), namespace)
+        except AssertionError:
+            failed = True
+    return {'parsed': namespace['parsed'], 'value_type': type(next(iter(namespace['parsed'].values()))).__name__, 'scores':namespace['scores'], 'assert_failed':failed, 'stdout':stream.getvalue()}
+
+reply3 = "reply = '{\"answer\": 3}'"
+reply2 = "reply = '{\"answer\": 2}'"
+code2 = fence.replace(reply3, reply2)
+code2_corrected = code2.replace(old_assert, new_assert)
+code_result = code2_corrected.replace(reply2, "reply = '{\"result\": 2}'")
+rows = {'current_original':execute(fence), 'exercise_2_old_assert':execute(code2), 'exercise_2_corrected_assert':execute(code2_corrected), 'exercise_result_2':execute(code_result)}
+assert rows['current_original']['scores'] == {'格式符合':True, '1+1內容正確':False}
+assert not rows['current_original']['assert_failed']
+assert rows['exercise_2_old_assert']['scores'] == {'格式符合':True, '1+1內容正確':True}
+assert rows['exercise_2_old_assert']['assert_failed']
+assert not rows['exercise_2_corrected_assert']['assert_failed']
+assert rows['exercise_result_2']['scores'] == {'格式符合':False, '1+1內容正確':False}
+assert rows['exercise_result_2']['assert_failed']
+assert rows['exercise_result_2']['parsed'].get('answer') is None
+
+# Re-execute the current exact predicate on the original boolean counterexamples.
+for name, value in [('true','true'),('false','false'),('float','2.0')]:
+    code = fence.replace(reply3, "reply = '{\"answer\": " + value + "}'")
+    row = execute(code)
+    row['legacy_isinstance_int'] = isinstance(row['parsed']['answer'], int)
+    row['exact_type_int'] = type(row['parsed']['answer']) is int
+    assert not row['scores']['格式符合']
+    assert not row['exact_type_int']
+    if name in ('true','false'):
+        assert row['value_type'] == 'bool' and row['legacy_isinstance_int']
+    rows['boundary_'+name] = row
+class IntegerSubclass(int):
+    pass
+subclass = IntegerSubclass(2)
+assert isinstance(subclass, int) and type(subclass) is not int
+assert type(2) is int and type(True) is bool and type(False) is bool
+print(json.dumps({'environment':{'python':platform.python_version(),'torch':torch.__version__,'device':'cpu','threads':str(torch.get_num_threads())},'current_fence_sha256':hashlib.sha256((ad/'7.13-recheck-original-code.txt').read_bytes()).hexdigest(),'results':rows,'type_scope':{'integer_type_exact':type(2) is int,'true_type_bool':type(True) is bool,'false_type_bool':type(False) is bool,'int_subclass_isinstance':isinstance(subclass,int),'int_subclass_exact_type':type(subclass) is int},'scope':'原例及兩練習從修訂後fence逐項替換指定reply／assert；布林與浮點邊界用現行原判詞，沒有模型生成或訓練。'},ensure_ascii=False,indent=2))

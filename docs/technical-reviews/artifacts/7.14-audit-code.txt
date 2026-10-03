@@ -1,0 +1,140 @@
+from pathlib import Path
+import copy
+import hashlib
+import json
+import math
+import platform
+import random
+import re
+from collections import Counter
+
+import torch
+from torch.nn import functional as F
+from scripts.prepare_data import generate_records
+from scripts.course_experiments.common import records_sha256, split_records, text_examples
+from tiny_perceptron.data import ByteTokenizer, IGNORE
+
+root = Path('.')
+report_path = root / 'docs/course-experiments/results/sft_ablation.json'
+report = json.loads(report_path.read_text())
+result = report['results']
+parts = split_records(generate_records('attributes-sft'), seed=42)
+assert len(parts['train']) == 45
+families = {side: sorted({row['family'] for row in rows}) for side, rows in parts.items()}
+assert all(not (set(families[a]) & set(families[b])) for a, b in [('train', 'validation'), ('train', 'test'), ('validation', 'test')])
+for side, rows in parts.items():
+    content = ''.join(json.dumps(row, ensure_ascii=False) + '\n' for row in rows).encode()
+    assert hashlib.sha256(content).hexdigest() == result['data']['attributes'][side]['sha256']
+
+noisy = copy.deepcopy(parts['train'])
+changes = []
+for index, row in enumerate(noisy):
+    answer = row['messages'][-1]['content']
+    if answer in ('circle', 'square') and len(changes) < max(1, len(noisy) // 10):
+        wrong = 'square' if answer == 'circle' else 'circle'
+        row['messages'][-1]['content'] = wrong
+        changes.append({'row': index, 'family': row['family'], 'correct': answer, 'wrong': wrong})
+assert changes == result['corruptions']
+assert len(changes) == 4
+assert len({change['family'] for change in changes}) == 2
+
+budgets = {}
+for name, rows in [('clean', parts['train']), ('noisy', noisy)]:
+    training = result['runs'][name]['training']
+    assert records_sha256(rows) == training['records_sha256']
+    examples = text_examples(rows, mode='sft', max_length=128)
+    lengths = [int((y != IGNORE).sum()) for x, y in examples]
+    sampler = random.Random(42)
+    indices = sampler.choices(range(len(rows)), k=16 * 300)
+    # choices() draws the same independent uniform stream whether grouped into 300 calls or one call.
+    total = sum(lengths[i] for i in indices)
+    assert total == training['effective_tokens'] == 33733
+    assert training['steps'] == 300
+    budgets[name] = {'records': len(rows), 'updates_archived': training['steps'], 'batch_size_from_source': 16,
+                     'draws_reconstructed': len(indices), 'effective_tokens_reconstructed': total,
+                     'answer_length_histogram_including_eos': dict(Counter(lengths)),
+                     'records_sha256': training['records_sha256']}
+
+tok = ByteTokenizer()
+evaluation = {}
+for name in ['clean', 'noisy']:
+    evaluation[name] = {}
+    for side in ['validation', 'test']:
+        rows = parts[side]
+        saved = result['runs'][name]['attributes'][side]
+        matches = ended = 0
+        per_sample = []
+        for row, sample in zip(rows, saved['samples'], strict=True):
+            prompt = row['messages'][0]['content']
+            fields = dict(piece.split('=', 1) for piece in prompt.split(';')[:3])
+            question = prompt.split(';')[-1]
+            correct = {'describe': fields['shape'], 'shape?': fields['shape'], 'color?': fields['color'],
+                       'pitch?': fields['pitch'], 'joint?': fields['shape'] + ',' + fields['pitch']}[question]
+            assert correct == row['messages'][-1]['content'] == sample['expected']
+            assert sample['messages'] == row['messages'][:-1]
+            ids = sample['generated_ids']
+            eos = tok.eos_id in ids
+            raw = ids[:ids.index(tok.eos_id)] if eos else ids
+            exact = raw == tok.encode(correct)
+            assert eos == sample['eos']
+            assert exact == sample['exact']
+            matches += int(exact)
+            ended += int(eos)
+            per_sample.append({'family': row['family'], 'question': question, 'independent_answer': correct,
+                               'generated_ids': ids, 'exact_recomputed': exact, 'eos_recomputed': eos})
+        effective = sum(len(tok.encode(row['messages'][-1]['content'])) + 1 for row in rows)
+        assert effective == saved['effective_tokens']
+        assert len(rows) == saved['records'] == saved['examples']
+        assert matches == saved['matches']
+        assert matches / len(rows) == saved['exact_match']
+        assert ended / len(rows) == saved['eos_rate'] == 1.0
+        recomputed_nll = saved['nll_sum'] / effective
+        assert math.isclose(recomputed_nll, saved['nll'], abs_tol=1e-12)
+        evaluation[name][side] = {'records': len(rows), 'matches_recomputed': matches,
+                                'effective_tokens_recomputed': effective, 'nll_sum_archived': saved['nll_sum'],
+                                'nll_recomputed': recomputed_nll, 'eos_count_recomputed': ended,
+                                'samples_checked': per_sample}
+
+sft_path = root / 'docs/course-experiments/results/sft.json'
+sft = json.loads(sft_path.read_text())
+assert result['before']['A_attributes'] == sft['results']['after']
+assert result['runs']['clean']['training']['initial_loss'] == sft['results']['training']['final_loss']
+math_cases = []
+for logits in [[0., 0., 3., 1.], [0., 0., 3., 5.], [0., 0., 3., 8.]]:
+    z = sum(math.exp(x) for x in logits)
+    probabilities = [math.exp(x) / z for x in logits]
+    math_cases.append({'logits': logits, 'normalizer': z, 'probabilities': probabilities,
+                       'loss_label2': math.log(z) - logits[2], 'loss_label3': math.log(z) - logits[3]})
+
+x = torch.tensor([[0., 0., 3., 1.]], dtype=torch.float64, requires_grad=True)
+loss = F.cross_entropy(x, torch.tensor([3]))
+loss.backward()
+analytic = x.detach().softmax(-1)
+analytic[0, 3] -= 1
+assert torch.allclose(x.grad, analytic, atol=1e-12, rtol=0)
+source_hashes = {}
+for path in ['scripts/course_experiments/common.py', 'scripts/course_experiments/text.py',
+             'tiny_perceptron/data.py', 'tiny_perceptron/model.py']:
+    digest = hashlib.sha256((root/path).read_bytes()).hexdigest()
+    assert digest == report['code_sha256'][path]
+    source_hashes[path] = digest
+source_hashes['scripts/prepare_data.py'] = hashlib.sha256((root/'scripts/prepare_data.py').read_bytes()).hexdigest()
+source_hashes['scripts/course_experiments/run.py (current CLI, not frozen run)'] = hashlib.sha256((root/'scripts/course_experiments/run.py').read_bytes()).hexdigest()
+output = {'reviewed_on': '2026-10-03', 'scope': '只重建本地合成配置、分母與凍結報告計數；未訓練或重跑正式實驗、未讀取權重',
+          'environment': {'python': platform.python_version(), 'torch': torch.__version__,
+                          'torch_git_version': torch.version.git_version, 'device': 'cpu',
+                          'OMP_NUM_THREADS': '1', 'MKL_NUM_THREADS': '1'},
+          'frozen_source': {'path': str(report_path), 'sha256': hashlib.sha256(report_path.read_bytes()).hexdigest(),
+                            'revision': report['revision'], 'seed': report['seed'], 'gpu': report['gpu'],
+                            'python_version': report['python_version'], 'torch_version': report['torch_version'],
+                            'hf_revision': report['hf']['revision'], 'step_scale': report['step_scale']},
+          'dependency': {'path': str(sft_path), 'sha256': hashlib.sha256(sft_path.read_bytes()).hexdigest(),
+                         'base_before_equals_sft_direct_after': True,
+                         'clean_initial_loss_equals_sft_final_loss': True},
+          'source_hashes_checked': source_hashes, 'families': families,
+          'corruptions_recomputed': changes, 'corruption_record_percent': 100 * 4 / 45,
+          'budgets_reconstructed': budgets, 'evaluation_recomputed': evaluation,
+          'math_cases_float64': math_cases, 'wrong_label_gradient_float64': x.grad.tolist(),
+          'gradient_formula_matches_autograd': True, 'byte_digit_ids': {s: tok.encode(s) for s in ['0', '1', '2', '3']},
+          'assertions': '全部通過；凍結實測值只表示該單 seed L4 run，CPU 沒有重測品質'}
+print(json.dumps(output, ensure_ascii=False, indent=2))

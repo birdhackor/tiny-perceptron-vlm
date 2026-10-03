@@ -1,0 +1,95 @@
+import hashlib
+import json
+import platform
+import tempfile
+from pathlib import Path
+from types import SimpleNamespace
+import torch
+from scripts.course_experiments.common import Context
+from tiny_perceptron.data import ByteTokenizer
+from tiny_perceptron.model import ModelConfig, TinyLM, generate
+from tiny_perceptron.training import load_checkpoint, save_checkpoint
+
+torch.set_num_threads(1)
+repo = Path.cwd()
+def sha(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+tok = ByteTokenizer()
+text = '甲A'
+encoded = tok.encode(text)
+assert tok.decode(encoded) == text
+assert encoded == [b + 8 for b in text.encode('utf-8')]
+class FixedScores(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.config = SimpleNamespace(max_length=16)
+    def forward(self, ids, cache=None):
+        scores = torch.tensor([0., -1., -2., 1., 2., 3.])
+        return {'logits': scores.expand(ids.shape[0], ids.shape[1], -1), 'cache': None}
+model = FixedScores()
+output = generate(model, torch.tensor([[1]]), max_new_tokens=3, temperature=0)
+assert output.tolist() == [[1, 5, 5, 5]]
+probabilities = {str(t): (torch.tensor([0., 1., 2.], dtype=torch.float64) / t).softmax(-1).tolist() for t in (0.5, 1., 2.)}
+assert probabilities['0.5'][-1] > probabilities['1.0'][-1] > probabilities['2.0'][-1]
+with tempfile.TemporaryDirectory(prefix='7.13-checkpoint-') as work:
+    torch.manual_seed(7)
+    small = TinyLM(ModelConfig(width=8, layers=1, heads=1, max_length=16))
+    path = Path(work) / 'test.pt'
+    save_checkpoint(path, small, step=0, metadata={'review_scope': 'untrained save/load only'})
+    loaded, payload = load_checkpoint(path, 'cpu')
+    states_equal = all(torch.equal(value, loaded.state_dict()[key]) for key,value in small.state_dict().items())
+    assert states_equal and payload['step'] == 0
+
+report_path = repo/'docs/course-experiments/results/sft.json'
+report = json.loads(report_path.read_text())
+result = report['results']
+release_path = repo/'docs/course-experiments/public-releases/sft.json'
+release = json.loads(release_path.read_text())
+public = release['release']['public_manifest']
+files = {entry['output']: entry for entry in public['files']}
+card_path = repo/'checkpoints/course/sft/README.md'
+card_hash = sha(card_path)
+assert card_hash == files['README.md']['sha256']
+local_model = repo/'checkpoints/course/sft/model.pt'
+model_hash = sha(local_model)
+assert model_hash == files['model.pt']['sha256']
+weights = torch.load(local_model, map_location='cpu', weights_only=True)
+assert weights['config']['width'] == 64 and weights['config']['layers'] == 2 and weights['config']['heads'] == 1
+assert Context('cpu', Path('/tmp'), repo/'checkpoints/course', Path('/tmp')).dependency('sft') == local_model
+assert result['training']['steps'] == 900 and result['training']['checkpoint'] == 'model.pt'
+rows = []
+for row,sample in enumerate(result['after']['test']['samples']):
+    ids = sample['generated_ids']
+    content = ids[:ids.index(tok.eos_id)] if tok.eos_id in ids else ids
+    expected_ids = tok.encode(sample['expected'])
+    exact = content == expected_ids
+    eos = tok.eos_id in ids
+    assert exact == sample['exact'] and eos == sample['eos']
+    rows.append({'row':row, 'question':sample['messages'], 'expected':sample['expected'], 'expected_ids':expected_ids, 'generated':sample['generated'], 'generated_ids':ids, 'recomputed_exact':exact, 'recomputed_eos':eos})
+correct = sum(row['recomputed_exact'] for row in rows)
+assert correct == result['after']['test']['matches'] == 5
+assert len(rows) == result['after']['test']['records'] == 10
+assert result['after']['test']['effective_tokens'] == sum(len(tok.encode(s['expected'])) + 1 for s in result['after']['test']['samples']) == 69
+assert correct / len(rows) == result['after']['test']['exact_match'] == 0.5
+pretrained = result['pretrain_then_sft']
+assert pretrained['pretraining']['steps'] == 250 and pretrained['sft']['steps'] == 900
+assert pretrained['sft']['checkpoint'] == 'pretrain-sft.pt'
+assert sum(s['exact'] for s in pretrained['after_sft']['test']['samples']) == 7
+artifact_model = next(a for a in report['artifacts'] if a['path']=='model.pt')
+record = {
+ 'environment':{'python':platform.python_version(),'torch':torch.__version__,'torch_git_version':torch.version.git_version,'device':'cpu','threads':str(torch.get_num_threads())},
+ 'software':{'byte_tokenizer_input':text,'byte_tokenizer_ids':encoded,'roundtrip':tok.decode(encoded),'temperature_zero_ids':output.tolist(),'softmax_probabilities':probabilities,'untrained_checkpoint_save_load_equal':states_equal,'checkpoint_updates':0},
+ 'frozen_evidence':{
+  'report_path':str(report_path.relative_to(repo)),'report_sha256':sha(report_path),'formal_revision':report['revision'],'formal_environment':{k:report[k] for k in ('device','seed','torch_version','python_version','gpu','step_scale','evidence_status')},
+  'training':result['training'],'data':result['data'],'test_recomputed_matches':correct,'test_records':len(rows),'test_effective_tokens':69,'test_nll':result['after']['test']['nll'],'test_eos_count':sum(row['recomputed_eos'] for row in rows),'test_samples':rows,
+  'pretrain_then_sft':{'pretrain_steps':pretrained['pretraining']['steps'],'sft_steps':pretrained['sft']['steps'],'checkpoint':pretrained['sft']['checkpoint'],'test_matches':pretrained['after_sft']['test']['matches'],'test_records':pretrained['after_sft']['test']['records']},
+  'formal_native_model_sha256':artifact_model['sha256'],
+  'formal_code_identity':{p:{'read_sha256':sha(repo/p),'formal_recorded_sha256':report['code_sha256'][p],'equal':sha(repo/p)==report['code_sha256'][p]} for p in ('tiny_perceptron/data.py','tiny_perceptron/model.py','tiny_perceptron/training.py','scripts/course_experiments/common.py','scripts/course_experiments/text.py')},
+  'default_dependency_existing_file':str(Context('cpu',Path('/tmp'),repo/'checkpoints/course',Path('/tmp')).dependency('sft').relative_to(repo)),
+  'public_source':{'repo':public['repo'],'revision':public['revision'],'weights_revision':release['release']['weights_revision'],'card_url':f"https://huggingface.co/{public['repo']}/resolve/{public['revision']}/course/course-v1/sft/README.md",'card_sha256':card_hash,'weight_url':f"https://huggingface.co/{public['repo']}/resolve/{release['release']['weights_revision']}/course/course-v1/sft/model.pt",'weight_sha256':model_hash},
+  'read_existing_exported_weight_config':weights['config'],'read_existing_exported_weight_payload_keys':list(weights),
+  'scope':'唯讀原有公開權重配置、重算凍結JSON各題匹配，不重訓、不下載模型、不把CPU重算宣稱正式GPU重跑。'
+ }
+}
+print(json.dumps(record,ensure_ascii=False,indent=2))

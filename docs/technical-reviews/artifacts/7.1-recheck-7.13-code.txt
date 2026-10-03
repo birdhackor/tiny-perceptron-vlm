@@ -1,0 +1,118 @@
+import json
+import re
+import hashlib
+import difflib
+import io
+import contextlib
+import sys
+import os
+from pathlib import Path
+import nbclient
+import inspect
+
+root = Path.cwd()
+artifacts = root / "docs/technical-reviews/artifacts"
+digest = lambda b: hashlib.sha256(b).hexdigest()
+old_raw = (artifacts / "7.1-fresh-kernel-audit.json").read_bytes()
+old = json.loads(old_raw)
+receipt_path = root / "docs/validation-artifacts/technical-revision-7.13-kernel.json"
+receipt_raw = receipt_path.read_bytes()
+receipt = json.loads(receipt_raw)
+report = json.loads((root / "docs/technical-reviews/7.1.json").read_text())
+chapter_raw = (root / "course/chapters/07.md").read_bytes()
+heads = list(re.finditer(rb"(?m)^## ([A-Z\d]+\.\d+) [^\r\n]+", chapter_raw))
+sections = {h[1].decode(): chapter_raw[h.start():heads[i + 1].start() if i + 1 < len(heads) else len(chapter_raw)] for i, h in enumerate(heads)}
+assert digest(sections["7.1"]) == report["source_sha256"]
+assert digest(chapter_raw[:heads[0].start()]) == report["intro_sha256"]
+unchanged = []
+for record in old["kernel_records"]:
+    previous = record["original_receipt_record"]
+    path = root / previous["notebook"]
+    if path.stem == "7.13":
+        old_713 = record
+        continue
+    output_path = root / "outputs/notebooks-reader-round/07" / path.name
+    assert digest(sections[path.stem]) == record["current_section_sha256"]
+    assert digest(path.read_bytes()) == previous["input_sha256"]
+    assert digest(output_path.read_bytes()) == previous["executed_sha256"]
+    unchanged.append({"lesson_id": path.stem, "source_sha256": record["current_section_sha256"], "input_sha256": previous["input_sha256"], "executed_sha256": previous["executed_sha256"], "all_three_current_hashes_still_match": True})
+assert len(unchanged) == 15
+assert digest(sections["7.13"]) == "d7eb464069f4bcd611e67a735cae0ddcae7657ee8d0d8385a0fd619ac2d0abd6"
+path = root / receipt["notebook"]
+output_path = root / "outputs/notebooks-reader-round/07" / path.name
+input_raw, output_raw = path.read_bytes(), output_path.read_bytes()
+assert digest(input_raw) == receipt["input_sha256"]
+assert digest(output_raw) == receipt["executed_sha256"]
+nb, executed = json.loads(input_raw), json.loads(output_raw)
+assert len(nb["cells"]) == len(executed["cells"])
+assert all(a["cell_type"] == b["cell_type"] and a["source"] == b["source"] for a, b in zip(nb["cells"], executed["cells"]))
+code = [c for c in nb["cells"] if c["cell_type"] == "code"]
+executed_code = [c for c in executed["cells"] if c["cell_type"] == "code"]
+assert len(code) == len(executed_code) == receipt["code_cells"] == 2
+assert [c["execution_count"] for c in executed_code] == [1, 2]
+assert not any(o["output_type"] == "error" for c in executed_code for o in c.get("outputs", []))
+assert sum(len(c.get("outputs", [])) for c in executed_code) == receipt["output_blocks"] == 2
+assert executed["metadata"]["language_info"]["version"] == receipt["environment"]["python"] == "3.13.5"
+fences = re.findall(r"```python\n(.*?)```", sections["7.13"].decode(), re.S)
+actual_code = ["".join(c["source"]) for c in code if not c.get("metadata", {}).get("course_setup")]
+assert [f.strip() for f in fences] == [c.strip() for c in actual_code]
+assert len(actual_code) == 1
+assert "".join(code[0]["source"]).encode() == (artifacts / "7.1-fresh-kernel-bootstrap.txt").read_bytes()
+for source_id, path_text in [("s_runner", "scripts/check_notebooks.py"), ("s_build", "scripts/build_course.py")]:
+    previous = next(s for s in report["sources"] if s["id"] == source_id)
+    assert digest((root / path_text).read_bytes()) == previous["sha256"]
+assert nbclient.__version__ == "0.11.0"
+assert digest(Path(inspect.getfile(nbclient.NotebookClient)).read_bytes()) == old["audit_environment"]["official_nbclient_sha256"]
+old_code = next(c["source"] for c in old_713["code_cells"] if not c["bootstrap"])
+diff = "".join(difflib.unified_diff(old_code.splitlines(keepends=True), actual_code[0].splitlines(keepends=True), fromfile="自身初審7.13程式證據", tofile="目前7.13程式"))
+
+def offline_guard(event, args):
+    if event in ("socket.connect", "socket.connect_ex", "socket.getaddrinfo", "subprocess.Popen", "os.system", "os.posix_spawn"):
+        raise RuntimeError("bounded offline recheck blocked: " + event)
+
+sys.addaudithook(offline_guard)
+namespace = {}
+stdout = io.StringIO()
+with contextlib.redirect_stdout(stdout):
+    exec(compile(actual_code[0], "7.13-current-exact-fence", "exec"), namespace)
+assert namespace["scores"] == {"格式符合": True, "1+1內容正確": False}
+exercise_namespace = {}
+try:
+    with contextlib.redirect_stdout(io.StringIO()):
+        exec(compile(actual_code[0].replace("'{\"answer\": 3}'", "'{\"answer\": 2}'"), "7.13-exercise-old-assert", "exec"), exercise_namespace)
+except AssertionError:
+    assert exercise_namespace["scores"] == {"格式符合": True, "1+1內容正確": True}
+else:
+    raise AssertionError("原練習的舊斷言必須按預期失敗")
+assert exercise_namespace["scores"]["格式符合"] and exercise_namespace["scores"]["1+1內容正確"]
+def score(text):
+    obj = json.loads(text)
+    return {"格式符合": isinstance(obj, dict) and set(obj) == {"answer"} and type(obj["answer"]) is int, "1+1內容正確": obj.get("answer") == 2}
+assert score('{"result": 2}') == {"格式符合": False, "1+1內容正確": False}
+assert type(json.loads('true')) is bool and type(json.loads('false')) is bool
+assert isinstance(True, int) and isinstance(False, int)
+assert not score('{"answer": true}')["格式符合"] and not score('{"answer": false}')["格式符合"]
+
+(artifacts / "7.1-recheck-7.13-source.txt").write_bytes(sections["7.13"])
+(artifacts / "7.1-recheck-7.13-receipt.json").write_bytes(receipt_raw)
+result = {
+    "reviewer_task": "/root/technical_round_coordinator/technical_7_1_fresh",
+    "reviewed_on": "2026-10-03",
+    "source_7_1_and_intro_unchanged": True,
+    "source_7_1_sha256": report["source_sha256"], "intro_sha256": report["intro_sha256"],
+    "historical_16_notebook_audit_sha256": digest(old_raw),
+    "unchanged_15_records": unchanged,
+    "old_7_13_record": old_713,
+    "new_7_13_source_sha256": digest(sections["7.13"]),
+    "new_receipt_path": receipt_path.relative_to(root).as_posix(), "new_receipt_raw_sha256": digest(receipt_raw),
+    "new_input_sha256": digest(input_raw), "new_executed_sha256": digest(output_raw),
+    "new_executed_metadata": executed["metadata"],
+    "new_code_cells": [{"source": "".join(a["source"]), "execution_count": b["execution_count"], "outputs": b.get("outputs", [])} for a, b in zip(code, executed_code)],
+    "code_diff": diff,
+    "original_kernel_command": receipt["command"], "original_kernel_environment": receipt["environment"], "original_kernel_result": receipt["result"],
+    "own_bounded_execution": {"original_stdout": stdout.getvalue(), "exercise_answer_2": exercise_namespace["scores"], "old_assertion_expected_failure": True, "updated_both_true_assertion_passed": True, "renamed_result": score('{"result": 2}'), "boolean_answers_strictly_rejected": True},
+    "audit_environment": {"python": sys.version, "device": "cpu", "nbclient": nbclient.__version__, "OMP_NUM_THREADS": os.environ.get("OMP_NUM_THREADS"), "MKL_NUM_THREADS": os.environ.get("MKL_NUM_THREADS")},
+    "scope": "15份沿用本人初審固定執行證據並核目前source/input/executed rawSHA仍相符；只有7.13以本次新receipt取代當前支持。本人另離線執行新7.13精確程式框與有界JSON練習/API probes，沒有重跑整章或執行模型訓練。runner每份新client且未共享km，kernel內按序執行；依賴已安裝repo/bootstrap，7.13資料為自身reply字串，無跨節state/checkpoint依賴。",
+}
+(artifacts / "7.1-recheck-7.13-audit.json").write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n")
+print(json.dumps({"unchanged_notebooks": len(unchanged), "revised_notebooks": 1, "revised_code_cells": 2, "all_hashes_and_sources_match": True, "error_outputs": 0, "own_api_and_exercise_probes": "passed"}, ensure_ascii=False))

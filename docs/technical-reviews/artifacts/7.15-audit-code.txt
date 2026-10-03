@@ -1,0 +1,88 @@
+import ast
+import hashlib
+import json
+import random
+from pathlib import Path
+
+import torch
+
+from tiny_perceptron.data import ByteTokenizer, render_chat
+from tiny_perceptron.model import generate
+from tiny_perceptron.training import load_checkpoint
+
+root = Path(__file__).resolve().parents[3]
+artifacts = root / "docs/technical-reviews/artifacts"
+evidence = json.loads((artifacts / "7.15-frozen-results.json").read_text())
+namespace = {"hashlib": hashlib, "json": json, "random": random}
+
+# Only these pure functions are extracted. No experiment entrypoint is called.
+for filename, names in [
+    ("prepare", {"conversation", "generate_records"}),
+    ("text", {"arithmetic_records"}),
+    ("common", {"split_records"}),
+]:
+    source = (artifacts / f"7.15-frozen-{filename}-source.txt").read_text()
+    parsed = ast.parse(source)
+    selected = [n for n in parsed.body if isinstance(n, ast.FunctionDef) and n.name in names]
+    assert len(selected) == len(names)
+    exec(compile(ast.Module(body=selected, type_ignores=[]), filename, "exec"), namespace)
+
+attributes = namespace["split_records"](namespace["generate_records"]("attributes-sft"), seed=42)
+arithmetic = namespace["split_records"](namespace["arithmetic_records"](), seed=42)
+for task, parts in [("attributes", attributes), ("arithmetic", arithmetic)]:
+    families = {split: {row["family"] for row in rows} for split, rows in parts.items()}
+    assert not families["train"] & families["validation"]
+    assert not families["train"] & families["test"]
+    assert not families["validation"] & families["test"]
+    for split, rows in parts.items():
+        raw = "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows).encode()
+        expected = evidence["data"][task][split]
+        assert hashlib.sha256(raw).hexdigest() == expected["sha256"]
+        assert len(rows) == expected["records"]
+        assert len(families[split]) == expected["families"]
+    print(task, {split: {"records": len(rows), "families": len(families[split])} for split, rows in parts.items()})
+
+assert arithmetic["train"] and all(0 <= row["a"] <= 7 and 0 <= row["b"] <= 7 for rows in arithmetic.values() for row in rows)
+assert all(row["family"] == f'{min(row["a"], row["b"])}+{max(row["a"], row["b"])}' for rows in arithmetic.values() for row in rows)
+assert evidence["before"]["A_attributes"] == evidence["sft_after"]
+assert evidence["b_only"]["source_records"] == {"A": 0, "B": 49}
+assert evidence["b_only"]["training"]["steps"] == 500
+assert evidence["b_only"]["training"]["initial_loss"] > evidence["b_only"]["training"]["final_loss"]
+tok = ByteTokenizer()
+for task, parts in [("A_attributes", attributes), ("B_arithmetic", arithmetic)]:
+    for split in ["validation", "test"]:
+        for label, report in [("before", evidence["before"][task][split]), ("after", evidence["b_only"][task][split])]:
+            rows = parts[split]
+            assert len(rows) == report["records"] == len(report["samples"])
+            count = sum(int((render_chat(row["messages"])[1] != -100).sum()) for row in rows)
+            assert count == report["effective_tokens"]
+            matches = 0
+            for row, sample in zip(rows, report["samples"], strict=True):
+                assert row["messages"][:-1] == sample["messages"]
+                assert row["messages"][-1]["content"] == sample["expected"]
+                ids = sample["generated_ids"]
+                raw = ids[:ids.index(tok.eos_id)] if tok.eos_id in ids else ids
+                exact = raw == tok.encode(sample["expected"])
+                assert exact == sample["exact"]
+                assert (tok.eos_id in ids) == sample["eos"]
+                matches += int(exact)
+            assert matches == report["matches"]
+            assert abs(report["nll_sum"] / count - report["nll"]) < 1e-12
+            print(task, split, label, {"matches": matches, "records": len(rows), "effective_tokens": count, "nll": report["nll"]})
+
+b_before = evidence["before"]["B_arithmetic"]["test"]
+b_after = evidence["b_only"]["B_arithmetic"]["test"]
+assert f'{b_before["nll"]:.5f}' == "7.05820"
+assert f'{b_after["nll"]:.5f}' == "4.57756"
+print("B test NLL", b_before["nll_sum"], "/14 =", b_before["nll"], "then", b_after["nll_sum"], "/14 =", b_after["nll"])
+print("B train NLL", evidence["b_only"]["training"]["initial_loss"], "then", evidence["b_only"]["training"]["final_loss"])
+print("Illustrative deltas", {"A": 0.6 - 0.9, "B": 0.8 - 0.4, "A_stable": 0.9 - 0.9})
+
+# A single fixed CPU inference corroborates the persisted sample, with no updates.
+model, _ = load_checkpoint(root / "checkpoints/course/sft_ablation/b-only.pt", device="cpu")
+question = "color=blue;shape=circle;pitch=low;describe"
+prompt = [tok.bos_id, tok.user_id] + tok.encode(question) + [tok.eos_id, tok.assistant_id]
+generated = generate(model, torch.tensor([prompt], device="cpu"), max_new_tokens=32, temperature=0.0, eos_id=tok.eos_id)[0, len(prompt):].tolist()
+assert generated == [65, 2]
+print("CPU single probe", {"question": question, "expected": "circle", "generated_ids": generated, "decoded": tok.decode(generated), "eos": tok.eos_id in generated})
+print("All bounded checks passed; no training, formal experiment entrypoint, network, GPU, or upload.")
