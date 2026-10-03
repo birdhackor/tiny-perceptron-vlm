@@ -1,0 +1,313 @@
+{
+  "schema_version": 1,
+  "status": "passed",
+  "checked_at": "2026-10-03T14:50:22.816Z",
+  "scope": "Actual Chromium interaction on desktop and mobile emulation: default figure sizing, diagram zoom/reset, direct prerequisite jump, fetching the lesson notebook, pinned Colab link inspection and typed Shadow DOM search. It does not execute Colab remotely or establish that tiny models answer correctly.",
+  "browser": "Chrome/151.0.7922.173",
+  "build_info": {
+    "revision": "58f3c57453af64595830a543f75db6aef1dd6ffc",
+    "lessons": 222,
+    "executed_cpu_outputs": true,
+    "builder": "zensical",
+    "builder_version": "0.0.67"
+  },
+  "verification_program": "import fs from 'node:fs/promises';\nimport path from 'node:path';\nconst [base='http://127.0.0.1:9471',siteDir='outputs/site',output='outputs/browser-layout/interactions.json']=process.argv.slice(2);\nconst info=JSON.parse(await fs.readFile(path.join(siteDir,'build-info.json'),'utf8'));\nconst source=await fs.readFile(new URL(import.meta.url),'utf8');\nconst version=await (await fetch('http://127.0.0.1:9233/json/version')).json();\nconst socket=new WebSocket(version.webSocketDebuggerUrl);\nawait new Promise((r,j)=>{socket.onopen=r;socket.onerror=j});let id=0;const waiting=new Map();\nsocket.onmessage=e=>{const x=JSON.parse(e.data);if(x.id){const p=waiting.get(x.id);waiting.delete(x.id);x.error?p.reject(new Error(JSON.stringify(x.error))):p.resolve(x.result)}};\nfunction call(method,params={},sessionId){const n=++id;return new Promise((resolve,reject)=>{waiting.set(n,{resolve,reject});socket.send(JSON.stringify({id:n,method,params,...(sessionId?{sessionId}:{})}))})}\nconst {targetId}=await call('Target.createTarget',{url:'about:blank'});\nconst records=[];\ntry{\n const {sessionId}=await call('Target.attachToTarget',{targetId,flatten:true});\n const page=(method,params={})=>call(method,params,sessionId);\n async function evaluate(expression){const x=await page('Runtime.evaluate',{expression,awaitPromise:true,returnByValue:true});if(x.exceptionDetails)throw new Error(JSON.stringify(x.exceptionDetails));return x.result.value}\n async function until(expression,description){for(let i=0;i<150;i++){if(await evaluate(expression))return;await new Promise(r=>setTimeout(r,100))}throw new Error('Timed out: '+description)}\n async function navigate(name){const r=await page('Page.navigate',{url:base+'/'+name+'?interact='+Date.now()});if(r.errorText)throw new Error(r.errorText);await until(`document.readyState==='complete' && decodeURIComponent(location.pathname).endsWith(${JSON.stringify('/'+name)})`,'page ready');await evaluate('document.fonts.ready.then(()=>true)')}\n await page('Page.enable');await page('Network.enable');await page('Network.setCacheDisabled',{cacheDisabled:true});\n for(const width of [1440,390]){\n  await page('Emulation.setDeviceMetricsOverride',{width,height:1000,deviceScaleFactor:1,mobile:width<600});\n  await navigate('1.1.html');\n  await until(`!!document.querySelector('.diagram-zoom') && !document.querySelector('.diagram-zoom').hidden`,'diagram control initialized');\n  const original=await evaluate(`(()=>{const main=document.querySelector('.md-typeset'),f=document.querySelector('.illustration'),i=f.querySelector('img');return {main_width:main.getBoundingClientRect().width,figure_width:f.getBoundingClientRect().width,image_width:i.getBoundingClientRect().width,body_font:getComputedStyle(main).fontSize,document_width:document.documentElement.scrollWidth,viewport:innerWidth}})()`);\n  if(Math.abs(original.figure_width-original.main_width)>1||Math.abs(original.image_width-original.main_width)>1)throw new Error('Default diagram does not fill text column');\n  const zoom=await evaluate(`(()=>{const b=document.querySelector('.diagram-zoom');b.click();const v=document.getElementById(b.getAttribute('aria-controls'));const r={expanded:b.getAttribute('aria-expanded'),class_expanded:v.classList.contains('is-enlarged'),viewport_width:v.clientWidth,scroll_width:v.scrollWidth,document_width:document.documentElement.scrollWidth};b.click();r.restored=b.getAttribute('aria-expanded')==='false'&&!v.classList.contains('is-enlarged');return r})()`);\n  if(zoom.expanded!=='true'||!zoom.class_expanded||!zoom.restored||zoom.document_width>width+1||zoom.scroll_width<800)throw new Error('Diagram zoom interaction failed');\n  const download=await evaluate(`(async()=>{const a=[...document.querySelectorAll('.md-typeset a')].find(a=>a.hasAttribute('download')&&a.getAttribute('href')?.endsWith('.ipynb'));if(!a)throw new Error('No download link');const r=await fetch(a.href);if(!r.ok)throw new Error('Download HTTP '+r.status);const n=await r.json();return {href:a.getAttribute('href'),http_status:r.status,lesson_id:n.metadata.lesson_id,code_cells:n.cells.filter(c=>c.cell_type==='code').length,colab:[...document.querySelectorAll('.md-typeset a')].filter(a=>a.href.startsWith('https://colab.research.google.com/')).map(a=>a.href)}})()`);\n  if(download.lesson_id!=='1.1'||!download.code_cells||!download.colab.length||download.colab.some(u=>!u.includes('/blob/'+info.revision+'/notebooks/01/1.1.ipynb')))throw new Error('Download or pinned Colab link differs from generated source');\n  const warmup=await evaluate(`(()=>{const a=[...document.querySelectorAll('.md-typeset a')].find(a=>a.getAttribute('href')?.includes('first-steps.html#W.2'));if(!a)throw new Error('Missing direct W.2 prerequisite');const href=a.href;a.click();return href})()`);\n  await until(`location.pathname.endsWith('/first-steps.html') && decodeURIComponent(location.hash)==='#W.2' && !!document.getElementById('W.2')`,'warmup jump');\n  const target=await evaluate(`({url:location.href,heading:document.getElementById('W.2').textContent,has_program:document.querySelectorAll('.md-typeset .language-python').length>0})`);\n  if(!target.heading.includes('W.2')||!target.has_program)throw new Error('Warmup content missing');\n  await navigate('1.1.html');\n  await until(`!!document.querySelector('.md-search__button')`,'search button');\n  await evaluate(`document.querySelector('.md-search__button').click()`);\n  await until(`[...document.querySelectorAll('*')].some(e=>e.shadowRoot?.querySelector('input[role=combobox]'))`,'shadow search input');\n  const searches=[];\n  for(const query of ['Flash','量化']){\n   await evaluate(`(()=>{const root=[...document.querySelectorAll('*')].find(e=>e.shadowRoot?.querySelector('input[role=combobox]')).shadowRoot;const input=root.querySelector('input[role=combobox]');input.focus();input.value='';input.dispatchEvent(new Event('input',{bubbles:true,composed:true}));})()`);\n   await page('Input.insertText',{text:query});\n   await until(`(()=>{const root=[...document.querySelectorAll('*')].find(e=>e.shadowRoot?.querySelector('input[role=combobox]')).shadowRoot;const links=[...root.querySelectorAll('a')];return root.querySelector('input').value===${JSON.stringify(query)}&&links.length>0&&links.every(a=>new URL(a.href).searchParams.get('h')===${JSON.stringify(query)})})()`,'search results for '+query);\n   const result=await evaluate(`(()=>{const root=[...document.querySelectorAll('*')].find(e=>e.shadowRoot?.querySelector('input[role=combobox]')).shadowRoot;return {query:root.querySelector('input').value,links:[...root.querySelectorAll('a')].map(a=>({href:a.href,title:a.querySelector('h2')?.textContent||a.textContent.slice(0,120)}))}})()`);\n   const expected=query==='Flash'?/\\/16\\.9\\.html/:/\\/17\\.\\d+\\.html/;\n   if(!result.links.some(a=>expected.test(new URL(a.href).pathname)))throw new Error('Search does not include a relevant lesson: '+query);\n   searches.push(result);\n  }\n  records.push({width,default_diagram:original,zoom,download,warmup:{clicked_href:warmup,target},searches});\n }\n const report={schema_version:1,status:'passed',checked_at:new Date().toISOString(),scope:'Actual Chromium interaction on desktop and mobile emulation: default figure sizing, diagram zoom/reset, direct prerequisite jump, fetching the lesson notebook, pinned Colab link inspection and typed Shadow DOM search. It does not execute Colab remotely or establish that tiny models answer correctly.',browser:version.Browser,build_info:info,verification_program:source,records};\n await fs.mkdir(path.dirname(output),{recursive:true});await fs.writeFile(output,JSON.stringify(report,null,2)+'\\n');\n console.log(JSON.stringify({status:report.status,viewports:records.map(r=>r.width),searches:records.map(r=>r.searches.map(s=>({query:s.query,results:s.links.length}))),output}));\n}finally{await call('Target.closeTarget',{targetId});socket.close()}\n",
+  "records": [
+    {
+      "width": 1440,
+      "default_diagram": {
+        "main_width": 688,
+        "figure_width": 688,
+        "image_width": 688,
+        "body_font": "17px",
+        "document_width": 1425,
+        "viewport": 1440
+      },
+      "zoom": {
+        "expanded": "true",
+        "class_expanded": true,
+        "viewport_width": 688,
+        "scroll_width": 800,
+        "document_width": 1425,
+        "restored": true
+      },
+      "download": {
+        "href": "http://127.0.0.1:9471/notebooks/01/1.1.ipynb",
+        "http_status": 200,
+        "lesson_id": "1.1",
+        "code_cells": 3,
+        "colab": [
+          "https://colab.research.google.com/github/birdhackor/tiny-perceptron-vlm/blob/58f3c57453af64595830a543f75db6aef1dd6ffc/notebooks/01/1.1.ipynb"
+        ]
+      },
+      "warmup": {
+        "clicked_href": "http://127.0.0.1:9471/first-steps.html#W.2",
+        "target": {
+          "url": "http://127.0.0.1:9471/first-steps.html#W.2",
+          "heading": "W.2 先認得五種 Python 寫法¶",
+          "has_program": true
+        }
+      },
+      "searches": [
+        {
+          "query": "Flash",
+          "links": [
+            {
+              "href": "http://127.0.0.1:9471/validation.html?h=Flash#%E6%9C%AC%E8%BC%AA%E6%AD%A3%E5%BC%8F%E8%A8%93%E7%B7%B4%E8%88%87%E5%85%AC%E9%96%8B%E6%AC%8A%E9%87%8D%E9%A9%97%E6%94%B6",
+              "title": "本輪正式訓練與公開權重驗收"
+            },
+            {
+              "href": "http://127.0.0.1:9471/curriculum.html?h=Flash",
+              "title": "小小感知機：教學大綱 v0.8"
+            },
+            {
+              "href": "http://127.0.0.1:9471/course.html?h=Flash#R.3",
+              "title": "全部章節各自回答什麼"
+            },
+            {
+              "href": "http://127.0.0.1:9471/curriculum.html?h=Flash#nanochat",
+              "title": "nanochat"
+            },
+            {
+              "href": "http://127.0.0.1:9471/publishing.html?h=Flash",
+              "title": "教材發布"
+            },
+            {
+              "href": "http://127.0.0.1:9471/glossary.html?h=Flash#G.4",
+              "title": "後段主題先對應到問題"
+            },
+            {
+              "href": "http://127.0.0.1:9471/16.9.html?h=Flash",
+              "title": "16.9 Attention 中間矩陣為何佔空間？"
+            },
+            {
+              "href": "http://127.0.0.1:9471/curriculum.html?h=Flash#%E7%AC%AC-16-%E7%AB%A0%E7%94%B1%E9%87%8F%E6%B8%AC%E5%B8%B6%E5%87%BA%E6%95%88%E7%8E%87-bkm",
+              "title": "第 16 章：由量測帶出效率 BKM"
+            },
+            {
+              "href": "http://127.0.0.1:9471/curriculum.html?h=Flash#%E8%B7%AF%E7%B7%9A%E8%88%87%E5%89%8D%E7%BD%AE%E7%9F%A5%E8%AD%98",
+              "title": "路線與前置知識"
+            },
+            {
+              "href": "http://127.0.0.1:9471/16.8.html?h=Flash",
+              "title": "16.8 手寫 attention 怎麼換成最佳化介面？"
+            }
+          ]
+        },
+        {
+          "query": "量化",
+          "links": [
+            {
+              "href": "http://127.0.0.1:9471/curriculum.html?h=%E9%87%8F%E5%8C%96#pytorch-torchao%E9%87%8F%E5%8C%96%E5%84%B2%E5%AD%98%E6%A0%BC%E5%BC%8F%E8%88%87-qat",
+              "title": "PyTorch TorchAO：量化、儲存格式與 QAT"
+            },
+            {
+              "href": "http://127.0.0.1:9471/17.11.html?h=%E9%87%8F%E5%8C%96",
+              "title": "17.11 Activation 也量化會改變什麼？"
+            },
+            {
+              "href": "http://127.0.0.1:9471/17.7.html?h=%E9%87%8F%E5%8C%96",
+              "title": "17.7 先只量化權重可以嗎？"
+            },
+            {
+              "href": "http://127.0.0.1:9471/chapter-17.html?h=%E9%87%8F%E5%8C%96",
+              "title": "第 17 章：量化，用更少位元表示模型"
+            },
+            {
+              "href": "http://127.0.0.1:9471/curriculum.html?h=%E9%87%8F%E5%8C%96#%E7%AC%AC-17-%E7%AB%A0%E9%87%8F%E5%8C%96%E7%94%A8%E6%9B%B4%E5%B0%91%E4%BD%8D%E5%85%83%E8%A1%A8%E7%A4%BA%E6%A8%A1%E5%9E%8B",
+              "title": "第 17 章：量化，用更少位元表示模型"
+            },
+            {
+              "href": "http://127.0.0.1:9471/18.14.html?h=%E9%87%8F%E5%8C%96",
+              "title": "18.14 蒸餾後再量化能省多少？"
+            },
+            {
+              "href": "http://127.0.0.1:9471/17.14.html?h=%E9%87%8F%E5%8C%96",
+              "title": "17.14 模型能預先適應量化誤差嗎？"
+            },
+            {
+              "href": "http://127.0.0.1:9471/17.12.html?h=%E9%87%8F%E5%8C%96",
+              "title": "17.12 如何決定 activation 的量化範圍？"
+            },
+            {
+              "href": "http://127.0.0.1:9471/17.15.html?h=%E9%87%8F%E5%8C%96",
+              "title": "17.15 品質與行為保留了多少？"
+            },
+            {
+              "href": "http://127.0.0.1:9471/17.3.html?h=%E9%87%8F%E5%8C%96",
+              "title": "17.3 轉回浮點會差多少？"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "width": 390,
+      "default_diagram": {
+        "main_width": 358,
+        "figure_width": 358,
+        "image_width": 358,
+        "body_font": "17px",
+        "document_width": 390,
+        "viewport": 390
+      },
+      "zoom": {
+        "expanded": "true",
+        "class_expanded": true,
+        "viewport_width": 358,
+        "scroll_width": 800,
+        "document_width": 390,
+        "restored": true
+      },
+      "download": {
+        "href": "http://127.0.0.1:9471/notebooks/01/1.1.ipynb",
+        "http_status": 200,
+        "lesson_id": "1.1",
+        "code_cells": 3,
+        "colab": [
+          "https://colab.research.google.com/github/birdhackor/tiny-perceptron-vlm/blob/58f3c57453af64595830a543f75db6aef1dd6ffc/notebooks/01/1.1.ipynb"
+        ]
+      },
+      "warmup": {
+        "clicked_href": "http://127.0.0.1:9471/first-steps.html#W.2",
+        "target": {
+          "url": "http://127.0.0.1:9471/first-steps.html#W.2",
+          "heading": "W.2 先認得五種 Python 寫法¶",
+          "has_program": true
+        }
+      },
+      "searches": [
+        {
+          "query": "Flash",
+          "links": [
+            {
+              "href": "http://127.0.0.1:9471/validation.html?h=Flash#%E6%9C%AC%E8%BC%AA%E6%AD%A3%E5%BC%8F%E8%A8%93%E7%B7%B4%E8%88%87%E5%85%AC%E9%96%8B%E6%AC%8A%E9%87%8D%E9%A9%97%E6%94%B6",
+              "title": "本輪正式訓練與公開權重驗收"
+            },
+            {
+              "href": "http://127.0.0.1:9471/curriculum.html?h=Flash",
+              "title": "小小感知機：教學大綱 v0.8"
+            },
+            {
+              "href": "http://127.0.0.1:9471/course.html?h=Flash#R.3",
+              "title": "全部章節各自回答什麼"
+            },
+            {
+              "href": "http://127.0.0.1:9471/curriculum.html?h=Flash#nanochat",
+              "title": "nanochat"
+            },
+            {
+              "href": "http://127.0.0.1:9471/publishing.html?h=Flash",
+              "title": "教材發布"
+            },
+            {
+              "href": "http://127.0.0.1:9471/glossary.html?h=Flash#G.4",
+              "title": "後段主題先對應到問題"
+            },
+            {
+              "href": "http://127.0.0.1:9471/16.9.html?h=Flash",
+              "title": "16.9 Attention 中間矩陣為何佔空間？"
+            },
+            {
+              "href": "http://127.0.0.1:9471/curriculum.html?h=Flash#%E7%AC%AC-16-%E7%AB%A0%E7%94%B1%E9%87%8F%E6%B8%AC%E5%B8%B6%E5%87%BA%E6%95%88%E7%8E%87-bkm",
+              "title": "第 16 章：由量測帶出效率 BKM"
+            },
+            {
+              "href": "http://127.0.0.1:9471/curriculum.html?h=Flash#%E8%B7%AF%E7%B7%9A%E8%88%87%E5%89%8D%E7%BD%AE%E7%9F%A5%E8%AD%98",
+              "title": "路線與前置知識"
+            },
+            {
+              "href": "http://127.0.0.1:9471/16.8.html?h=Flash",
+              "title": "16.8 手寫 attention 怎麼換成最佳化介面？"
+            }
+          ]
+        },
+        {
+          "query": "量化",
+          "links": [
+            {
+              "href": "http://127.0.0.1:9471/curriculum.html?h=%E9%87%8F%E5%8C%96#pytorch-torchao%E9%87%8F%E5%8C%96%E5%84%B2%E5%AD%98%E6%A0%BC%E5%BC%8F%E8%88%87-qat",
+              "title": "PyTorch TorchAO：量化、儲存格式與 QAT"
+            },
+            {
+              "href": "http://127.0.0.1:9471/17.11.html?h=%E9%87%8F%E5%8C%96",
+              "title": "17.11 Activation 也量化會改變什麼？"
+            },
+            {
+              "href": "http://127.0.0.1:9471/17.7.html?h=%E9%87%8F%E5%8C%96",
+              "title": "17.7 先只量化權重可以嗎？"
+            },
+            {
+              "href": "http://127.0.0.1:9471/chapter-17.html?h=%E9%87%8F%E5%8C%96",
+              "title": "第 17 章：量化，用更少位元表示模型"
+            },
+            {
+              "href": "http://127.0.0.1:9471/curriculum.html?h=%E9%87%8F%E5%8C%96#%E7%AC%AC-17-%E7%AB%A0%E9%87%8F%E5%8C%96%E7%94%A8%E6%9B%B4%E5%B0%91%E4%BD%8D%E5%85%83%E8%A1%A8%E7%A4%BA%E6%A8%A1%E5%9E%8B",
+              "title": "第 17 章：量化，用更少位元表示模型"
+            },
+            {
+              "href": "http://127.0.0.1:9471/18.14.html?h=%E9%87%8F%E5%8C%96",
+              "title": "18.14 蒸餾後再量化能省多少？"
+            },
+            {
+              "href": "http://127.0.0.1:9471/17.14.html?h=%E9%87%8F%E5%8C%96",
+              "title": "17.14 模型能預先適應量化誤差嗎？"
+            },
+            {
+              "href": "http://127.0.0.1:9471/17.12.html?h=%E9%87%8F%E5%8C%96",
+              "title": "17.12 如何決定 activation 的量化範圍？"
+            },
+            {
+              "href": "http://127.0.0.1:9471/17.15.html?h=%E9%87%8F%E5%8C%96",
+              "title": "17.15 品質與行為保留了多少？"
+            },
+            {
+              "href": "http://127.0.0.1:9471/17.3.html?h=%E9%87%8F%E5%8C%96",
+              "title": "17.3 轉回浮點會差多少？"
+            },
+            {
+              "href": "http://127.0.0.1:9471/17.13.html?h=%E9%87%8F%E5%8C%96",
+              "title": "17.13 極端值為什麼讓其他值難表示？"
+            },
+            {
+              "href": "http://127.0.0.1:9471/17.9.html?h=%E9%87%8F%E5%8C%96",
+              "title": "17.9 已訓練模型怎麼直接轉換？"
+            },
+            {
+              "href": "http://127.0.0.1:9471/17.1.html?h=%E9%87%8F%E5%8C%96",
+              "title": "17.1 權重到底佔多少空間？"
+            },
+            {
+              "href": "http://127.0.0.1:9471/chapter-17.html?h=%E9%87%8F%E5%8C%96#_1",
+              "title": "本章小節"
+            },
+            {
+              "href": "http://127.0.0.1:9471/17.4.html?h=%E9%87%8F%E5%8C%96",
+              "title": "17.4 零點偏移有什麼作用？"
+            },
+            {
+              "href": "http://127.0.0.1:9471/17.10.html?h=%E9%87%8F%E5%8C%96",
+              "title": "17.10 壓縮後怎麼實際運算？"
+            },
+            {
+              "href": "http://127.0.0.1:9471/17.5.html?h=%E9%87%8F%E5%8C%96",
+              "title": "17.5 一組 scale 應該管多大範圍？"
+            },
+            {
+              "href": "http://127.0.0.1:9471/17.2.html?h=%E9%87%8F%E5%8C%96",
+              "title": "17.2 浮點數怎麼放進少量整數格子？"
+            },
+            {
+              "href": "http://127.0.0.1:9471/17.8.html?h=%E9%87%8F%E5%8C%96",
+              "title": "17.8 4-bit 如何真的存成較小檔案？"
+            },
+            {
+              "href": "http://127.0.0.1:9471/17.6.html?h=%E9%87%8F%E5%8C%96",
+              "title": "17.6 從 8-bit 降到 4-bit 會發生什麼？"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
