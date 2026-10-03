@@ -1,0 +1,77 @@
+import json
+import re
+import hashlib
+import sys
+from pathlib import Path
+import nbclient
+import inspect
+
+root = Path.cwd()
+artifacts = root / "docs/technical-reviews/artifacts"
+receipt_path = root / "docs/validation-artifacts/reader-round-notebook-kernels.json"
+receipt_raw = receipt_path.read_bytes()
+receipt = json.loads(receipt_raw)
+raw = (root / "course/chapters/07.md").read_bytes()
+heads = list(re.finditer(rb"(?m)^## ([A-Z\d]+\.\d+) [^\r\n]+", raw))
+digest = lambda b: hashlib.sha256(b).hexdigest()
+records = []
+for rec in receipt["records"]:
+    if not rec["notebook"].startswith("notebooks/07/"):
+        continue
+    path = root / rec["notebook"]
+    output = root / "outputs/notebooks-reader-round/07" / path.name
+    input_raw, output_raw = path.read_bytes(), output.read_bytes()
+    nb, executed = json.loads(input_raw), json.loads(output_raw)
+    assert digest(input_raw) == rec["input_sha256"]
+    assert digest(output_raw) == rec["executed_sha256"]
+    assert len(nb["cells"]) == len(executed["cells"])
+    assert all(x["cell_type"] == y["cell_type"] and "".join(x["source"]) == "".join(y["source"]) for x, y in zip(nb["cells"], executed["cells"]))
+    code = [c for c in nb["cells"] if c["cell_type"] == "code"]
+    executed_code = [c for c in executed["cells"] if c["cell_type"] == "code"]
+    assert len(code) == rec["code_cells"]
+    assert all(isinstance(c["execution_count"], int) for c in executed_code)
+    assert not any(o["output_type"] == "error" for c in executed_code for o in c.get("outputs", []))
+    i = next(i for i, h in enumerate(heads) if h[1].decode() == path.stem)
+    body = raw[heads[i].start():heads[i + 1].start() if i + 1 < len(heads) else len(raw)]
+    fences = re.findall(r"```python\n(.*?)```", body.decode(), re.S)
+    plain = ["".join(c["source"]) for c in code if not c.get("metadata", {}).get("course_setup") and not c.get("metadata", {}).get("course_figure")]
+    assert [c.strip() for c in plain] == [f.strip() for f in fences]
+    snapshots = []
+    for original_cell, executed_cell in zip([c for c in nb["cells"] if c["cell_type"] == "code"], executed_code):
+        text = "".join(original_cell["source"])
+        bootstrap = bool(original_cell.get("metadata", {}).get("course_setup"))
+        if bootstrap:
+            (artifacts / "7.1-fresh-kernel-bootstrap.txt").write_bytes(text.encode())
+        saved_outputs = []
+        for out in executed_cell.get("outputs", []):
+            if out["output_type"] == "stream":
+                saved_outputs.append({"output_type": "stream", "name": out["name"], "text": "".join(out["text"])})
+            elif "image/svg+xml" in out.get("data", {}):
+                svg = out["data"]["image/svg+xml"]
+                svg = "".join(svg) if isinstance(svg, list) else svg
+                current_svg = (root / "course/figures/foundations_answer_alignment.svg").read_text()
+                display_svg = current_svg[:-1] if current_svg.endswith("\n") else current_svg
+                assert svg == display_svg
+                saved_outputs.append({"output_type": out["output_type"], "display_svg_sha256": digest(svg.encode()), "current_file_svg_sha256": digest(current_svg.encode()), "current_svg_matches_except_display_final_newline": True})
+            else:
+                saved_outputs.append({"output_type": out["output_type"], "mime_types": sorted(out.get("data", {}))})
+        snapshots.append({"bootstrap": bootstrap, "source_sha256": digest(text.encode()), "source": None if bootstrap else text, "execution_count": executed_cell["execution_count"], "outputs": saved_outputs})
+    records.append({"original_receipt_record": rec, "current_section_sha256": digest(body), "input_hash_matches": True, "executed_hash_matches": True, "all_cell_sources_match": True, "current_markdown_fences_match": True, "code_cells": snapshots, "error_outputs": 0})
+assert len(records) == 16
+assert nbclient.__version__ == receipt["environment"]["nbclient"] == "0.11.0"
+official_raw = Path("/tmp/7.1-nbclient-0.11.0.py").read_bytes()
+installed_raw = Path(inspect.getfile(nbclient.NotebookClient)).read_bytes()
+assert official_raw == installed_raw
+result = {
+    "reviewer_task": "/root/technical_round_coordinator/technical_7_1_fresh",
+    "artifact_kind": "reviewer_read_only_audit_of_existing_frozen_execution",
+    "original_receipt_path": receipt_path.relative_to(root).as_posix(),
+    "original_receipt_raw_sha256": digest(receipt_raw),
+    "original_receipt_metadata": {k: v for k, v in receipt.items() if k != "records"},
+    "kernel_records": records,
+    "audit_environment": {"python": sys.version, "nbclient": nbclient.__version__, "device": "cpu", "official_nbclient_sha256": digest(official_raw)},
+    "summary": {"notebooks": len(records), "code_cells": sum(len(r["code_cells"]) for r in records), "error_outputs": 0, "all_source_and_file_hashes_match": True},
+    "scope": "本task只親讀與比對既有2026-10-03固定新kernel執行證據，未重跑整章。各Notebook內部依序執行並共享該份kernel；不同Notebook不共享kernel。僅支持安裝好本repo的指定Linux CPU環境，不證明任意cwd/Colab或微調品質。",
+}
+(artifacts / "7.1-fresh-kernel-audit.json").write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n")
+print(json.dumps(result["summary"], ensure_ascii=False))
