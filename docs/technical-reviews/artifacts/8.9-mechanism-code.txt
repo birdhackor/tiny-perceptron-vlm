@@ -1,0 +1,53 @@
+import json
+import torch
+from torch import nn
+from tiny_perceptron.alignment import LoRALinear
+from tiny_perceptron.data import ByteTokenizer
+
+torch.manual_seed(0)
+layer = LoRALinear(nn.Linear(4, 3), rank=2, alpha=2)
+base_before = layer.base.weight.detach().clone()
+with torch.no_grad():
+    layer.b.fill_(0.1)
+    reference = layer.a
+    backup = layer.a.clone()
+    layer.a.fill_(0.2)
+    alias_changed = torch.equal(reference, layer.a)
+    backup_unchanged = not torch.equal(backup, layer.a)
+    layer.a.copy_(backup)
+    delta2 = layer.b @ layer.a * (layer.alpha / layer.rank)
+    layer.alpha = 4
+    delta4 = layer.b @ layer.a * (layer.alpha / layer.rank)
+    layer.alpha = 2
+    x = torch.tensor([[1., 2., 3., 4.]])
+    expected = layer.base(x) + (x @ layer.a.T @ layer.b.T)
+    branched = layer(x)
+    merged = nn.Linear(4, 3)
+    merged.weight.copy_(layer.merged_weight())
+    merged.bias.copy_(layer.base.bias)
+    merged_out = merged(x)
+    double = nn.Linear(4, 3)
+    double.weight.copy_(layer.merged_weight() + delta2)
+    double.bias.copy_(layer.base.bias)
+    double_out = double(x)
+    base_unchanged = torch.equal(base_before, layer.base.weight)
+    no_grad_backup = not backup.requires_grad and backup.grad_fn is None
+r = {
+    "a_shape": list(layer.a.shape), "b_shape": list(layer.b.shape),
+    "alias_changed_with_original": alias_changed,
+    "cloned_backup_not_changed": backup_unchanged,
+    "clone_inside_no_grad_untracked": no_grad_backup,
+    "alpha4_delta_exactly_twice_alpha2": torch.equal(delta4, 2 * delta2),
+    "forward_is_base_plus_one_delta": torch.equal(branched, expected),
+    "base_weight_not_changed": base_unchanged,
+    "merge_toy_max_abs_difference": float((branched - merged_out).abs().max()),
+    "double_apply_changes_toy_output": not torch.equal(double_out, merged_out),
+    "double_apply_toy_max_abs_difference": float((double_out - merged_out).abs().max()),
+    "formal_probe_decoded_bytes": ByteTokenizer().decode([57,51,57,69,71]),
+    "formal_probe_length": 9, "vocab_size": ByteTokenizer.vocab_size
+}
+print(json.dumps(r, ensure_ascii=False, indent=2))
+assert all(r[k] for k in ["alias_changed_with_original", "cloned_backup_not_changed", "clone_inside_no_grad_untracked", "alpha4_delta_exactly_twice_alpha2", "forward_is_base_plus_one_delta", "base_weight_not_changed", "double_apply_changes_toy_output"])
+assert r["a_shape"] == [2,4] and r["b_shape"] == [3,2]
+assert r["merge_toy_max_abs_difference"] < 1e-6
+assert r["formal_probe_decoded_bytes"] == "1+1=?"

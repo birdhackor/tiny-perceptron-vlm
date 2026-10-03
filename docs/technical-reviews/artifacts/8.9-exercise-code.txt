@@ -1,0 +1,15 @@
+import torch
+from torch import nn
+from tiny_perceptron.alignment import LoRALinear
+
+torch.manual_seed(0)
+layer = LoRALinear(nn.Linear(4, 3), rank=2, alpha=2)
+with torch.no_grad():
+    layer.b.fill_(0.1)
+    adapter_a = {"a": layer.a.clone(), "b": layer.b.clone()}
+    layer.a.fill_(0.2)
+    layer.b.fill_(-0.1)
+    adapter_b = {"a": layer.a.clone(), "b": layer.b.clone()}
+    layer.b.copy_(adapter_a["b"])
+print("切回A的B平均", round(layer.b.mean().item(), 2))
+print("A兩個矩陣都恢復", torch.equal(layer.a, adapter_a["a"]) and torch.equal(layer.b, adapter_a["b"]))

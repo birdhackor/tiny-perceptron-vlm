@@ -1,0 +1,36 @@
+import sys, os, json
+import torch
+assert torch.version.cuda is None
+assert not torch.cuda.is_available()
+assert os.environ['OMP_NUM_THREADS'] == '1'
+assert os.environ['MKL_NUM_THREADS'] == '1'
+torch.set_num_threads(1)
+torch.set_default_device('cpu')
+def guard(event, args):
+    if event.startswith('socket.') or event in {'subprocess.Popen', 'os.system', 'os.exec', 'os.posix_spawn'}:
+        raise RuntimeError('offline CPU audit guard: ' + event)
+sys.addaudithook(guard)
+def environment():
+    return {'python': sys.version, 'python_executable': sys.executable, 'torch': str(torch.__version__), 'torch_git_version': str(torch.version.git_version), 'device': 'cpu', 'cuda_build': str(torch.version.cuda), 'cuda_available': str(torch.cuda.is_available()), 'OMP_NUM_THREADS': os.environ['OMP_NUM_THREADS'], 'MKL_NUM_THREADS': os.environ['MKL_NUM_THREADS']}
+import re, io, contextlib, hashlib
+from pathlib import Path
+raw=Path('docs/technical-reviews/artifacts/8.10-section-raw.txt').read_bytes()
+code=re.search(rb'```python\n(.*?)```',raw,re.S).group(1)
+namespace={}
+stdout=io.StringIO()
+with contextlib.redirect_stdout(stdout):
+    exec(compile(code,'course/chapters/08.md#8.10:original-fence','exec'),namespace)
+human=namespace['human']; judge=namespace['recorded_judge']; agree=namespace['agree']
+assert agree.tolist() == [True,False,True,True]
+assert agree.float().tolist() == [1.0,0.0,1.0,1.0]
+assert agree.float().mean().item() == 0.75
+assert (~agree).tolist() == [False,True,False,False]
+assert (~agree).nonzero().tolist() == [[1]]
+assert (~agree).nonzero().flatten().tolist() == [1]
+assert agree[3].item() is True
+reordered=judge[torch.tensor([3,1,2,0])]
+easy_human=torch.ones(4,dtype=torch.int64); always_one=torch.ones(4,dtype=torch.int64)
+scores=torch.tensor([[60.0,70.0,80.0],[80.0,90.0,100.0]])
+assert scores.mean(dim=1).tolist() == [70.0,90.0]
+assert scores.mean(dim=0).tolist() == [70.0,80.0,90.0]
+print(json.dumps({'environment':environment(),'original_section_sha256':hashlib.sha256(raw).hexdigest(),'original_code_sha256':hashlib.sha256(code).hexdigest(),'original_stdout':stdout.getvalue(),'human':human.tolist(),'human_shape':list(human.shape),'human_dtype':str(human.dtype),'recorded_judge':judge.tolist(),'agree':agree.tolist(),'agree_dtype':str(agree.dtype),'float_agree':agree.float().tolist(),'float_dtype':str(agree.float().dtype),'mean_shape':list(agree.float().mean().shape),'rate':agree.float().mean().item(),'item_type':type(agree.float().mean().item()).__name__,'inverted':(~agree).tolist(),'nonzero':(~agree).nonzero().tolist(),'nonzero_shape':list((~agree).nonzero().shape),'flattened':(~agree).nonzero().flatten().tolist(),'list_type':type((~agree).nonzero().flatten().tolist()).__name__,'agreed_failure_index_3':agree[3].item(),'human_good_count':human.sum().item(),'reordered_judge':reordered.tolist(),'reordered_rate':(human==reordered).float().mean().item(),'all_positive_calibration_rate':(easy_human==always_one).float().mean().item(),'always_one_on_mixed_rate':(human==always_one).float().mean().item(),'prerequisite_scores':scores.tolist(),'per_student_mean':scores.mean(dim=1).tolist(),'per_exam_mean':scores.mean(dim=0).tolist()},ensure_ascii=False,indent=2))
