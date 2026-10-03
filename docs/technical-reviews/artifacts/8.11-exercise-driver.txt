@@ -1,0 +1,65 @@
+from pathlib import Path
+import contextlib
+import hashlib
+import io
+import json
+import os
+import sys
+
+root = Path(__file__).resolve().parents[3]
+artifacts = root / "docs/technical-reviews/artifacts"
+original = (artifacts / "8.11-original-code.txt").read_bytes()
+exercise = (artifacts / "8.11-exercise-code.txt").read_bytes()
+assert exercise == original.replace(b"return order[0]", b'return "correct"')
+events = []
+
+def guard(event, arguments):
+    if event.startswith("socket.") or event in {"subprocess.Popen", "os.system", "os.exec", "os.posix_spawn"}:
+        events.append(event)
+        raise PermissionError("Offline CPU review blocks network and child commands")
+
+sys.addaudithook(guard)
+output = io.StringIO()
+namespace = {"__name__": "__main__"}
+with contextlib.redirect_stdout(output):
+    exec(compile(exercise, "8.11-exercise-code.txt", "exec"), namespace)
+expected = "原順序選 correct 2+2=4\n交換後選 correct 2+2=4\n內容身分一致 True\n"
+assert output.getvalue() == expected
+assert namespace["first"] == namespace["second"] == "correct"
+assert namespace["original_order"] == ["correct", "wrong"]
+assert namespace["swapped_order"] == ["wrong", "correct"]
+assert namespace["answers"] == {"correct": "2+2=4", "wrong": "2+2=5"}
+record = {
+    "reviewer_task": "/root/technical_round_coordinator/technical_8_11_fresh",
+    "command": "OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1 TRANSFORMERS_OFFLINE=1 CUDA_VISIBLE_DEVICES='' .venv/bin/python -I docs/technical-reviews/artifacts/8.11-exercise-driver.txt",
+    "environment": {
+        "python": sys.version,
+        "device": "cpu",
+        "platform": sys.platform,
+        "OMP_NUM_THREADS": os.environ["OMP_NUM_THREADS"],
+        "MKL_NUM_THREADS": os.environ["MKL_NUM_THREADS"],
+        "HF_HUB_OFFLINE": os.environ["HF_HUB_OFFLINE"],
+        "HF_DATASETS_OFFLINE": os.environ["HF_DATASETS_OFFLINE"],
+        "TRANSFORMERS_OFFLINE": os.environ["TRANSFORMERS_OFFLINE"],
+        "torch": "not imported; exercise uses Python builtins only",
+    },
+    "exercise_rule": "只替換 return order[0] 為 return \"correct\"",
+    "code_sha256": hashlib.sha256(exercise).hexdigest(),
+    "original_code_sha256": hashlib.sha256(original).hexdigest(),
+    "driver_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+    "stdout": output.getvalue(),
+    "stderr": "",
+    "exit_code": 0,
+    "assertions": {
+        "stdout_exact_match": True,
+        "correct_for_both_orders": True,
+        "dictionary_unchanged": True,
+        "original_order_unchanged": True,
+        "swapped_order": namespace["swapped_order"],
+        "network_or_subprocess_attempts": events,
+    },
+    "scope": "僅手寫規則與兩份固定回答；未呼叫模型或外部服務，未更新任何訓練參數。",
+}
+(artifacts / "8.11-exercise-execution.json").write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n")
+print(record["stdout"], end="")
+print("assertions passed; network_or_subprocess_attempts =", events)
