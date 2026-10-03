@@ -1,0 +1,34 @@
+import hashlib
+import json
+from pathlib import Path
+import platform
+from types import SimpleNamespace
+import torch
+from tiny_perceptron.data import ByteTokenizer, render_chat
+from tiny_perceptron.model import generate
+
+tok = ByteTokenizer()
+assert tok.eos_id == 2
+encoded = tok.encode("1")
+assert encoded == [57]
+x, y = render_chat([{"role": "user", "content": "1?"}, {"role": "assistant", "content": "1"}])
+assert y[y != -100].tolist() == [57, 2]
+class EosModel(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.config = SimpleNamespace(max_length=12)
+        self.calls = 0
+    def forward(self, ids, cache=None):
+        self.calls += 1
+        logits = torch.zeros(ids.shape[0], ids.shape[1], 264)
+        logits[..., 2] = 100
+        return {"logits": logits, "cache": None}
+model = EosModel()
+answer = generate(model, torch.tensor([[1, 4]]), max_new_tokens=5, eos_id=tok.eos_id)
+assert answer.tolist() == [[1, 4, 2]] and model.calls == 1
+assert model.training
+print(json.dumps({"environment": {"python": platform.python_version(), "torch": str(torch.__version__), "device": "cpu"},
+                  "answer_ids": encoded, "supervised_targets_with_eos": y[y != -100].tolist(),
+                  "generated_sequence": answer.tolist(), "generator_calls": model.calls,
+                  "training_state_restored": model.training,
+                  "model_source_sha256": hashlib.sha256(Path("tiny_perceptron/model.py").read_bytes()).hexdigest()}, ensure_ascii=False, indent=2))
