@@ -1,0 +1,49 @@
+import hashlib
+import json
+import platform
+import random
+from pathlib import Path
+
+import torch
+
+from scripts.course_experiments.behavior import _conversation, _safety_records, _style_record
+from scripts.course_experiments.common import records_sha256, split_records, text_examples
+from scripts.course_experiments.text import arithmetic_records
+
+torch.set_num_threads(1)
+print('environment', platform.python_version(), str(torch.__version__), 'cpu')
+arithmetic = split_records(arithmetic_records(), seed=42)
+dates = []
+for day in range(1, 25):
+    date = f'2026-10-{day:02d}'
+    dates.append(_conversation(f'task=date;date={date};confirm', '已確認' + date + '。', 'date-' + date, style='clarification'))
+    dates.append(_conversation(f'task=date;id={day};date=?;confirm', '請提供日期。', 'date-' + date, style='clarification'))
+date_parts = split_records(dates, seed=42)
+conditional = {s: [_style_record(r, style, True) for r in rows for style in ('concise', 'vivid', 'json')] + date_parts[s] for s, rows in arithmetic.items()}
+safety = split_records(_safety_records(), seed=42)
+for name, parts in [('style', conditional), ('safety', safety)]:
+    frozen = json.loads(Path(f'docs/course-experiments/results/{name}.json').read_text())['results']['data']
+    for split, rows in parts.items():
+        raw = ''.join(json.dumps(r, ensure_ascii=False) + '\n' for r in rows).encode()
+        value = {'records': len(rows), 'families': len({r['family'] for r in rows}), 'jsonl_sha256': hashlib.sha256(raw).hexdigest(), 'effective_targets': sum(int((y != -100).sum()) for x, y in text_examples(rows, 'sft'))}
+        assert value['records'] == frozen[split]['records'] and value['families'] == frozen[split]['families'] and value['jsonl_sha256'] == frozen[split]['sha256']
+        print('split', name, split, json.dumps(value))
+
+def targets(rows, steps):
+    counts = [int((y != -100).sum()) for x, y in text_examples(rows, 'sft')]
+    sampler = random.Random(42)
+    return sum(sum(sampler.choices(counts, k=16)) for _ in range(steps))
+
+configs = [
+    ('content', arithmetic['train'], 1000, 36931),
+    ('default-concise/adapter-concise', [_style_record(r, 'concise', False) for r in arithmetic['train']], 450, 16591),
+    ('default-vivid/adapter-vivid/full-sft', [_style_record(r, 'vivid', False) for r in arithmetic['train']], 450, 318991),
+    ('conditional-style', conditional['train'], 1000, 324973),
+    ('safety-only', safety['train'], 900, 394888),
+    ('mixed-safety', safety['train'] + arithmetic['train'], 900, 275389),
+]
+for name, rows, steps, expected in configs:
+    observed = targets(rows, steps)
+    assert observed == expected
+    print('sampled_supervision', json.dumps({'branch': name, 'records': len(rows), 'steps': steps, 'batch': 16, 'seed': 42, 'effective_targets': observed, 'records_sha256': records_sha256(rows)}))
+print('scope: Only token counts and deterministic sampling replayed, no model updates, loss calculation or formal training rerun.')

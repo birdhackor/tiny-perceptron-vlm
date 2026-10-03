@@ -1,0 +1,51 @@
+import hashlib
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+import torch
+
+ROOT = Path(__file__).resolve().parents[3]
+os.chdir(ROOT)
+OUT = ROOT / "docs/technical-reviews/artifacts"
+environment = {
+    "python": sys.version,
+    "torch": str(torch.__version__),
+    "torch_commit": str(torch.version.git_version),
+    "device": "cpu",
+    "OMP_NUM_THREADS": os.environ["OMP_NUM_THREADS"],
+    "MKL_NUM_THREADS": os.environ["MKL_NUM_THREADS"],
+    "torch_threads": str(torch.get_num_threads()),
+}
+assert torch.get_num_threads() == 1
+
+for name, task in [("original-text", "text"), ("original-sft", "sft"), ("original-vision", "vision"), ("exercise-text", "text"), ("exercise-sft", "sft")]:
+    args = [sys.executable, "scripts/train.py", "--task", task, "--device", "cpu"]
+    result = subprocess.run(args, capture_output=True, text=True, timeout=45, env=os.environ.copy())
+    record = {
+        "command": "OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 .venv/bin/python scripts/train.py --task " + task + " --device cpu",
+        "cwd": str(ROOT),
+        "environment": environment,
+        "exit_code": result.returncode,
+        "stdout": result.stdout,
+        "stderr": result.stderr,
+        "review_scope": "原文 dry-run；未加 --train，沒有正式訓練、下載或雲端呼叫。練習的 text 與 sft 另各執行一次。",
+    }
+    assert result.returncode == 0, record
+    lines = result.stdout.splitlines()
+    assert len(lines) == 2, lines
+    entry, report = map(json.loads, lines)
+    assert report["mode"] == "dry-run-no-weight-update"
+    assert report["task"] == task and report["device"] == "cpu"
+    assert len(report["history"]) == 1 and entry == report["history"][0]
+    assert entry["step"] == 1
+    assert torch.isfinite(torch.tensor([entry["loss"], entry["grad_norm"]])).all()
+    assert entry["grad_norm"] > 0
+    if task != "vision":
+        assert entry["effective_tokens"] == {"text": 111, "sft": 8}[task]
+    record["parsed_entry"] = entry
+    record["parsed_report"] = report
+    (OUT / ("T.2-" + name + ".json")).write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n")
+    print(json.dumps({"name": name, "exit_code": result.returncode, "entry": entry, "mode": report["mode"]}, ensure_ascii=False))

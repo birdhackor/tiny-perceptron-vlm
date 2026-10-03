@@ -1,0 +1,45 @@
+import hashlib
+import json
+import platform
+from dataclasses import asdict
+from pathlib import Path
+
+import torch
+
+from scripts.evaluate import answer_sample, evaluate, parse_limit
+from scripts.prepare_data import generate_records
+from scripts.train import parser
+from tiny_perceptron.adapters import base_state_sha256, load_lora_adapter
+from tiny_perceptron.data import ByteTokenizer
+from tiny_perceptron.model import TinyLM
+from tiny_perceptron.training import load_checkpoint
+
+torch.set_num_threads(1)
+print('environment', platform.python_version(), str(torch.__version__), 'cpu', torch.get_num_threads())
+args = parser().parse_args('--task sft --data data/generated/style/train.jsonl --train --steps 500 --max-length 256 --output checkpoints/style.pt'.split())
+print('training_contract_only', json.dumps({k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()}, ensure_ascii=False))
+tok = ByteTokenizer()
+for label, ids in [('normal_eos', tok.encode('5') + [tok.eos_id]), ('no_eos', tok.encode('5')), ('whitespace', tok.encode(' 5') + [tok.eos_id]), ('role_token', tok.encode('5') + [tok.assistant_id, tok.eos_id])]:
+    print('answer_sample', label, json.dumps(answer_sample(tok, ids, '5'), ensure_ascii=False))
+print('parse_limit_all', parse_limit('all'))
+base_path = Path('checkpoints/course/style/content.pt')
+model, payload = load_checkpoint(base_path, 'cpu')
+print('public_base', json.dumps({'file_sha256': hashlib.sha256(base_path.read_bytes()).hexdigest(), 'state_sha256': base_state_sha256(payload['model']), 'config': asdict(model.config), 'format_version': payload['format_version']}, ensure_ascii=False))
+report = evaluate(model, [{'messages': [{'role': 'user', 'content': '2+2=?'}, {'role': 'assistant', 'content': '4'}]}], 'sft', 96)
+print('local_evaluation_only', json.dumps(report, ensure_ascii=False))
+for name in ('concise', 'vivid'):
+    path = Path('checkpoints/course/lora/adapter-' + name + '.pt')
+    p = torch.load(path, map_location='cpu', weights_only=True)
+    print('public_adapter', name, json.dumps({'file_sha256': hashlib.sha256(path.read_bytes()).hexdigest(), 'format_version': p['format_version'], 'base_sha256': p['base_sha256'], 'config': p['config'], 'scaling': p['scaling'], 'modules': [{'path': k, 'rank': v['rank'], 'alpha': v['alpha'], 'a_shape': list(v['a'].shape), 'b_shape': list(v['b'].shape)} for k, v in p['adapter'].items()]}, ensure_ascii=False))
+bad = TinyLM(model.config)
+bad.load_state_dict(payload['model'])
+with torch.no_grad():
+    next(bad.parameters()).view(-1)[0] += 1
+try:
+    load_lora_adapter(bad, 'checkpoints/course/lora/adapter-vivid.pt')
+except ValueError as error:
+    print('same_shape_modified_base_rejected', str(error))
+else:
+    raise AssertionError('Modified base unexpectedly accepted')
+print('generator_json_target', next(r['messages'][-1]['content'] for r in generate_records('style') if r['messages'][0]['content'] == 'style=json; 0+5=?'))
+print('scope: Original training/download/GPU commands were read, not executed. Existing pinned public weights were used for CPU inference/evaluation only; no backward or parameter updates.')

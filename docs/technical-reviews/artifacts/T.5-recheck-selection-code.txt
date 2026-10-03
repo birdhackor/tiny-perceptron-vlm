@@ -1,0 +1,60 @@
+import hashlib
+import importlib.util
+import json
+import os
+import platform
+import sys
+import tarfile
+from pathlib import Path
+
+import torch
+
+ROOT = Path.cwd()
+sys.path.insert(0, str(ROOT))
+from scripts.course_experiments.common import records_sha256, split_records
+
+fixed_path = Path("/tmp/T.5-original-sources/behavior-safety.py")
+source_sha = hashlib.sha256(fixed_path.read_bytes()).hexdigest()
+assert source_sha == "94ab92aa1b8017edbb8f5524ee598dce93756cf295377ac21515bf3c0a05bdc0"
+spec = importlib.util.spec_from_file_location("scripts.course_experiments._T5_original_safety", fixed_path)
+original = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(original)
+with tarfile.open(ROOT / "assets/training/pku-safe-rlhf-v1.tar.gz", "r:gz") as tar:
+    raw = tar.extractfile("behavior-initial/pku-safe-rlhf/train-first-100.jsonl").read()
+    rows = [json.loads(line) for line in raw.splitlines() if line]
+records = []
+for index, row in enumerate(rows):
+    safer = int(row["safer_response_id"])
+    if not row[f"is_response_{safer}_safe"]:
+        continue
+    answer = row[f"response_{safer}"]
+    records.append(original._conversation(
+        original._utf8_prefix(row["prompt"], 120),
+        original._utf8_prefix(answer, 120), original._digest(row["prompt"]),
+        source_row=index, source_record_sha256=original._digest(row),
+        safer_response_id=safer, better_response_id=int(row["better_response_id"])))
+assert len(rows) == 100 and len(records) == 60
+assert all(len(message["content"].encode("utf-8")) <= 120 for row in records for message in row["messages"])
+parts = split_records(records, seed=42)
+frozen = json.loads((ROOT / "docs/course-experiments/results/safety.json").read_bytes())["results"]["pku_pilot"]
+result = {}
+for name, records_in_split in parts.items():
+    encoded = "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in records_in_split).encode("utf-8")
+    digest = hashlib.sha256(encoded).hexdigest()
+    assert digest == frozen["data"][name]["sha256"]
+    assert len(records_in_split) == frozen["data"][name]["records"]
+    result[name] = {"records": len(records_in_split), "derived_jsonl_sha256": digest,
+                    "matches_frozen_data_manifest": True}
+assert records_sha256(parts["train"]) == frozen["training"]["records_sha256"]
+print(json.dumps({
+    "reviewer_task": "/root/technical_round_coordinator/technical_t_5_fresh",
+    "checked_on": "2026-10-03",
+    "fixed_behavior_source_sha256": source_sha,
+    "source_rows": len(rows), "safe_selected_rows": len(records), "derived_parts": result,
+    "derived_training_records_sha256": records_sha256(parts["train"]),
+    "all_prompt_and_response_prefixes_utf8_bytes_at_most": 120,
+    "environment": {"python": platform.python_version(), "torch": str(torch.__version__), "device": "cpu",
+                    "threads": str(torch.get_num_threads()), "OMP_NUM_THREADS": os.environ["OMP_NUM_THREADS"],
+                    "MKL_NUM_THREADS": os.environ["MKL_NUM_THREADS"]},
+    "scope": "只在 RAM 重建固定原碼的安全選取／120-byte 前綴／seed42 分側並核 JSONL SHA。未寫出任何選取／截短逐筆資料，未建立或訓練模型，沒有求導、更新、GPU、Git、下載或正式重跑。"
+}, ensure_ascii=False, indent=2))

@@ -1,0 +1,89 @@
+import contextlib
+import hashlib
+import io
+import json
+import os
+import platform
+import re
+import subprocess
+import tempfile
+from dataclasses import asdict
+from pathlib import Path
+
+import torch
+
+from scripts.evaluate import answer_sample, evaluate
+from scripts.prepare_data import generate_records
+from scripts.course_experiments.common import split_records, text_examples
+from scripts.course_experiments.text import arithmetic_records
+from tiny_perceptron.data import ByteTokenizer, load_jsonl, render_chat
+from tiny_perceptron.model import ModelConfig, TinyLM
+from tiny_perceptron.training import load_checkpoint
+
+ROOT = Path('/workspace/tiny-perceptron-vlm')
+ART = ROOT / 'docs/technical-reviews/artifacts'
+PYTHON = ROOT / '.venv/bin/python'
+torch.set_num_threads(1)
+report = {'accessed_on': '2026-10-03', 'environment': {'python': platform.python_version(), 'torch': str(torch.__version__), 'torch_git_version': torch.version.git_version, 'device': 'cpu', 'OMP_NUM_THREADS': os.environ['OMP_NUM_THREADS'], 'MKL_NUM_THREADS': os.environ['MKL_NUM_THREADS']}, 'runs': [], 'checks': {}}
+source = (ART / 'T.4-source.txt').read_text()
+fences = re.findall(r'```python\n(.*?)```', source, re.S)
+assert len(fences) == 3
+environment = dict(os.environ, PYTHONPATH=str(ROOT), HF_HUB_OFFLINE='1', TRANSFORMERS_OFFLINE='1')
+
+def run(arguments, cwd, label, stdout_file=None):
+    result = subprocess.run([str(PYTHON), *map(str, arguments)], cwd=cwd, env=environment, capture_output=True, text=True, timeout=30)
+    report['runs'].append({'label': label, 'argv': [str(PYTHON), *map(str, arguments)], 'cwd': str(cwd), 'returncode': result.returncode, 'stdout': result.stdout, 'stderr': result.stderr})
+    if stdout_file:
+        Path(stdout_file).write_text(result.stdout)
+    assert result.returncode == 0, result.stderr
+
+with tempfile.TemporaryDirectory(prefix='T.4-own-cpu-') as temporary:
+    scratch = Path(temporary)
+    (scratch / 'outputs').mkdir()
+    for kind in ('toy-text', 'attributes-sft'):
+        run([ROOT / 'scripts/prepare_data.py', '--kind', kind, '--seed', '42'], scratch, '原生成命令：' + kind)
+    for number, code in enumerate(fences[:2]):
+        path = scratch / f'example-{number}.py'
+        path.write_text(code)
+        run([path], scratch, '原 Python fence ' + str(number + 1))
+    baseline, payload = load_checkpoint(scratch / 'checkpoints/start.pt', 'cpu')
+    report['checks']['teaching_start'] = {'config': asdict(baseline.config), 'step': payload['step'], 'optimizer': payload['optimizer'], 'parameters': baseline.description()['parameters'], 'all_cpu': all(str(p.device) == 'cpu' for p in baseline.parameters())}
+    for kind, mode in (('toy-text', 'text'), ('attributes-sft', 'sft')):
+        data = scratch / f'data/generated/{kind}/validation.jsonl'
+        run([ROOT / 'scripts/evaluate.py', scratch / 'checkpoints/start.pt', '--data', data, '--mode', mode, '--tokens', '32' if mode == 'text' else '24', '--device', 'cpu', '--output', scratch / f'outputs/teaching-{mode}-before.json'], scratch, '原教學起點 evaluate：' + mode)
+    # Exercise execution uses already pinned formal weights and a matching formal start.
+    # It does not execute the prohibited 200/500-step teaching training commands.
+    start = ROOT / 'checkpoints/course/text_foundation/start.pt'
+    for kind, mode, data_kind, checkpoint, prompt, tokens in (
+        ('text', 'text', 'toy-text', ROOT / 'checkpoints/course/text_foundation/model.pt', 'color=', 32),
+        ('attributes', 'sft', 'attributes-sft', ROOT / 'checkpoints/course/sft/model.pt', 'color=red;shape=square;pitch=low;shape?', 24),
+    ):
+        for stage, path in (('before', start), ('after', checkpoint)):
+            run([ROOT / 'scripts/evaluate.py', path, '--data', scratch / f'data/generated/{data_kind}/validation.jsonl', '--mode', mode, '--tokens', tokens, '--device', 'cpu', '--output', scratch / f'outputs/{kind}-{stage}.json'], scratch, f'固定已存在權重 {kind} {stage} evaluate')
+            args = [ROOT / 'scripts/infer.py', path, '--prompt', prompt, '--tokens', tokens, '--temperature', '0', '--cache', '--device', 'cpu']
+            if mode == 'sft':
+                args.append('--chat')
+            run(args, scratch, f'固定已存在權重 {kind} {stage} infer', scratch / f'outputs/{kind}-prompt-{stage}.txt')
+        code = fences[2] if kind == 'attributes' else fences[2].replace('kind = "attributes"', 'kind = "text"')
+        path = scratch / f'compare-{kind}.py'
+        path.write_text(code)
+        run([path], scratch, f'原比較練習：{kind}；固定權重代替重訓')
+        report['checks'][f'exercise-{kind}'] = json.loads((scratch / f'outputs/{kind}-comparison.json').read_text())
+    report['checks']['generated_manifests'] = {kind: json.loads((scratch / f'data/generated/{kind}/manifest.json').read_text()) for kind in ('toy-text', 'attributes-sft')}
+
+torch.manual_seed(42)
+minimal = evaluate(TinyLM(ModelConfig(width=32)), [{'messages': [{'role':'user','content':'shape?'},{'role':'assistant','content':'circle'}]}], mode='sft', max_new_tokens=2)
+report['checks']['minimal_json_example'] = minimal
+assert abs(minimal['mean_token_nll'] - 5.97386714390346) < 1e-7
+assert minimal['effective_tokens'] == 7 and minimal['samples'][0]['generated_ids'] == [143, 30]
+tok = ByteTokenizer()
+report['checks']['raw_id_matching'] = {name: answer_sample(tok, ids, 'circle') for name, ids in [('correct_unfinished', tok.encode('circle')), ('correct_completed', tok.encode('circle')+[2]), ('invalid_role', [4]+tok.encode('circle')+[2]), ('leading_space', tok.encode(' circle')+[2])]}
+for kind in ('toy-text','attributes-sft'):
+    parts = split_records(generate_records(kind), seed=42)
+    report['checks'][kind+'-counts'] = {side: {'records':len(rows), 'families':len({r['family'] for r in rows}), 'effective_tokens': sum(int((y!=-100).sum()) for x,y in text_examples(rows, 'text' if kind=='toy-text' else 'sft')), 'raw_bytes':sum(len(r['text'].encode()) for r in rows) if kind=='toy-text' else None} for side,rows in parts.items()}
+parts = split_records(arithmetic_records(),seed=42)
+report['checks']['arithmetic'] = {side:{'records':len(rows),'families':len({r['family'] for r in rows})} for side,rows in parts.items()}
+report['checks']['fixed_prompt_family'] = {side: any(r['family']=='red:square:low' for r in rows) for side,rows in split_records(generate_records('attributes-sft'),seed=42).items()}
+report['checks']['no_training_executed'] = '沒有執行 train.py --train、course_experiments.run、fetch_training_assets 或任何參數更新；教學三個 Python fences 分別執行，比較練習使用既有固定公開權重，非 width32 200/500 步成績。'
+(ART / 'T.4-cpu-audit.json').write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n')
+print(json.dumps({'runs':len(report['runs']), 'minimal_nll':minimal['mean_token_nll'], 'checks':list(report['checks']), 'environment':report['environment']},ensure_ascii=False))

@@ -1,0 +1,234 @@
+import base64
+import copy
+import difflib
+import hashlib
+import json
+import os
+import platform
+import re
+import sys
+import tarfile
+from pathlib import Path
+
+import torch
+
+ROOT = Path.cwd()
+sys.path.insert(0, str(ROOT))
+from scripts.course_release import validate_approval
+from scripts.ingest_course_result import PRIVATE_TEXT_KEYS, redact
+
+ART = ROOT / "docs/technical-reviews/artifacts"
+sha = lambda raw: hashlib.sha256(raw).hexdigest()
+
+
+def save_json(name, value):
+    path = ART / name
+    assert not path.exists(), path
+    path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def section(path, identifier):
+    raw = path.read_bytes()
+    headings = list(re.finditer(rb"(?m)^## ([A-Z\d]+\.\d+) [^\r\n]+", raw))
+    index = next(i for i, heading in enumerate(headings) if heading[1].decode() == identifier)
+    end = headings[index + 1].start() if index + 1 < len(headings) else len(raw)
+    return raw[headings[index].start():end]
+
+
+def fences(raw):
+    return re.findall(rb"(?ms)^```[^\r\n]*\r?\n.*?^```[^\r\n]*(?:\r?\n|$)", raw)
+
+
+old_report_bytes = (ROOT / "docs/technical-reviews/T.5.json").read_bytes()
+old_report = json.loads(old_report_bytes)
+assert old_report["verdict"] == "revise"
+assert next(c for c in old_report["claims"] if c["id"] == "c50")["status"] == "contradicted"
+old_report_copy = ART / "T.5-original-revise-report.json"
+assert not old_report_copy.exists()
+old_report_copy.write_bytes(old_report_bytes)
+old_primary = (ART / "T.5-source.txt").read_bytes()
+old_t4_input = ROOT / "docs/technical-reviews/artifacts/T.1-read-T.4.txt"
+old_t4 = old_t4_input.read_bytes()
+new_primary = section(ROOT / "course/training.md", "T.5")
+new_t4 = section(ROOT / "course/training.md", "T.4")
+assert sha(old_primary) == "c9fe4ddcaf4e1b23b7c6bf455e4dd63a377c0333be9adf5eee45939603fe834d"
+assert sha(old_t4) == "6c27cba4636bcba1ac1b93dd6c5cddcfd98638bab6b4d3965aa289568012e5a2"
+assert sha(new_primary) == "5a1cadfa1e2511eb02fd742e5641cffd20c9dce132e0f56b65dec92248a52d50"
+assert sha(new_t4) == "49185a05ae4ad7333d61282435b3ad168f234a9121a59f46b916e3fe2c9cc01c"
+for name, raw in (("T.5-revised-source.txt", new_primary),
+                  ("T.5-prerequisite-T.4-old-source.txt", old_t4),
+                  ("T.5-prerequisite-T.4-new-source.txt", new_t4)):
+    path = ART / name
+    assert not path.exists()
+    path.write_bytes(raw)
+
+diff_results = {}
+for identifier, old, new, filename in (
+    ("T.5", old_primary, new_primary, "T.5-primary-revision-diff.json"),
+    ("T.4", old_t4, new_t4, "T.5-prerequisite-T.4-revision-diff.json"),
+):
+    diff = "".join(difflib.unified_diff(old.decode("utf-8").splitlines(keepends=True),
+                                     new.decode("utf-8").splitlines(keepends=True),
+                                     fromfile=f"course/training.md#{identifier}@old",
+                                     tofile=f"course/training.md#{identifier}@current", n=3))
+    value = {"reviewer_task": "/root/technical_round_coordinator/technical_t_5_fresh",
+             "scope": f"精確 course/training.md#{identifier} 原始 UTF-8 bytes，未 trim 或正規化換行。",
+             "old_raw_sha256": sha(old), "old_bytes": len(old),
+             "new_raw_sha256": sha(new), "new_bytes": len(new),
+             "diff_utf8_sha256": sha(diff.encode("utf-8")),
+             "diff": diff, "fences_identical": fences(old) == fences(new),
+             "fence_count": len(fences(new)),
+             "encoding_note": "完整 unified diff 以 JSON 字串保存；空 context 行的單一空格與換行原樣保留。"}
+    assert value["fences_identical"]
+    save_json(filename, value)
+    diff_results[identifier] = {key: value[key] for key in value if key != "diff"}
+
+retained_artifacts = []
+for item in old_report["artifacts"]:
+    digest = sha((ROOT / item["path"]).read_bytes())
+    assert digest == item["sha256"], item["id"]
+    retained_artifacts.append({"id": item["id"], "sha256": digest, "unchanged": True})
+retained_sources = []
+for item in old_report["sources"]:
+    if item["kind"] == "repository_code":
+        digest = sha((ROOT / item["path"]).read_bytes())
+        assert digest == item["sha256"], item["id"]
+        retained_sources.append({"id": item["id"], "path": item["path"], "sha256": digest, "unchanged": True})
+prerequisites = {}
+scope = json.loads((ART / "T.5-scope.json").read_bytes())
+for locator, old_hash in scope["prerequisite_raw_sha256"].items():
+    path, identifier = locator.split("#")
+    digest = sha(section(ROOT / path, identifier))
+    expected = sha(new_t4) if identifier == "T.4" else old_hash
+    assert digest == expected, locator
+    prerequisites[locator] = {"old_sha256": old_hash, "current_sha256": digest, "unchanged": digest == old_hash}
+figures = {}
+for path, digest in old_report["figure_sha256"].items():
+    assert sha((ROOT / path).read_bytes()) == digest
+    figures[path] = {"sha256": digest, "unchanged": True,
+                     "inspection": "本人的初次真實 render 與 view_image 保留於 a_figure；圖與前置 8.8 原文未變。此處核身份，不冒稱新看圖。"}
+
+archive_path = ROOT / "assets/training/pku-safe-rlhf-v1.tar.gz"
+archive_raw = archive_path.read_bytes()
+archive_sha = sha(archive_raw)
+assert archive_sha == "d7985db4234e5a68d336c93a4abda0fb1c699cb3ca61adeaffdd82a574013d88"
+manifest = json.loads((ROOT / "assets/training/manifest.json").read_bytes())
+asset = next(value for value in manifest["assets"] if value["id"] == "pku-safe-rlhf")
+assert asset["archive_sha256"] == archive_sha
+members = []
+with tarfile.open(archive_path, "r:gz") as tar:
+    for member in tar.getmembers():
+        if member.isfile():
+            contents = tar.extractfile(member).read()
+            members.append({"path": member.name, "bytes": len(contents), "sha256": sha(contents)})
+            if member.name.endswith("train-first-100.jsonl"):
+                rows = [json.loads(line) for line in contents.splitlines() if line]
+                row_count = len(rows)
+                row_schema = sorted(rows[0].keys())
+                assert row_count == 100
+            if member.name.endswith("LICENSE-AND-SOURCE.md"):
+                source_notice = contents.decode("utf-8")
+            if member.name.endswith("asset.json"):
+                packed_asset = json.loads(contents)
+            if member.name.endswith("source-README.md"):
+                card_sha = sha(contents)
+                assert b"license: cc-by-nc-4.0" in contents
+assert card_sha == "77ce394a7406b94e7ebe04b63e25850733286369db2d038936a6114502923579"
+official_card = Path("/tmp/T.5-original-sources/pku-card.md").read_bytes()
+assert sha(official_card) == card_sha
+cc_html = ROOT / "outputs/technical-sources/release-licenses/cc-by-nc.html"
+assert sha(cc_html.read_bytes()) == "3307f50ad87c95b551b6a9c4e30c7fc4408f15e5b0e957542b2883f24df74474"
+
+http_raw = (ART / "T.5-recheck-lfs-http-response.json").read_bytes()
+http_meta = json.loads(http_raw)
+pointer = base64.b64decode(http_meta["content"])
+assert sha(http_raw) == "1f6c244c87104a2a27e2b06e0f4e3b8cd8a6161ce103485fbe58fef93a0a2a0d"
+assert sha(pointer) == "eae5d6aad168cd1839bf919d486f7f19c29de02e6e9f57dee6a3a9bda4cd3fe2"
+assert pointer.decode().splitlines()[1] == f"oid sha256:{archive_sha}"
+assert pointer.decode().splitlines()[2] == f"size {len(archive_raw)}"
+
+frozen = json.loads((ROOT / "docs/course-experiments/results/safety.json").read_bytes())
+pilot = frozen["results"]["pku_pilot"]
+assert pilot["source_records"] == 100 and pilot["safe_selected_records"] == 60
+assert pilot["private_only"] is True
+assert [pilot["data"][name]["records"] for name in ("train", "validation", "test")] == [48, 6, 6]
+
+
+def text_keys(value, prefix=""):
+    found = []
+    if isinstance(value, dict):
+        for key, item in value.items():
+            path = f"{prefix}.{key}" if prefix else key
+            if key in PRIVATE_TEXT_KEYS:
+                found.append(path)
+            found.extend(text_keys(item, path))
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            found.extend(text_keys(item, f"{prefix}[{index}]"))
+    return found
+
+
+assert text_keys(pilot) == []
+assert all("samples" not in report for report in pilot["evaluation"].values())
+toy_sample_counts = {name: len(frozen["results"]["runs"][name]["safety"]["test"]["samples"])
+                     for name in ("safety-only", "model")}
+assert toy_sample_counts == {"safety-only": 17, "model": 17}
+redaction_result = redact({"private_only": True, "metrics": {"records": 6},
+                           "samples": [{"prompt": "T.5核對用合成文字", "generated": "同樣為合成文字"}]})
+assert text_keys(redaction_result) == [] and redaction_result["metrics"]["records"] == 6
+
+release = json.loads((ROOT / "docs/course-experiments/public-releases/safety.json").read_bytes())
+files = release["release"]["public_manifest"]["files"]
+outputs = [item["output"] for item in files]
+assert len(outputs) == 8
+assert sorted(name for name in outputs if name.endswith(".pt")) == ["model.pt", "safety-only.pt"]
+assert not any("pku" in name.lower() or name.endswith(".jsonl") for name in outputs)
+approval = json.loads((ROOT / "docs/course-experiments/releases/safety.json").read_bytes())
+validate_approval(approval, "safety", "course-v1", "birdhackor/tiny-perceptron-checkpoints")
+contract_rejections = {}
+for name in ("pku-excerpts/train.jsonl", "pku-pilot.pt"):
+    altered = copy.deepcopy(approval)
+    altered["files"][0]["path"] = name
+    try:
+        validate_approval(altered, "safety", "course-v1", "birdhackor/tiny-perceptron-checkpoints")
+    except ValueError as error:
+        contract_rejections[name] = str(error)
+    else:
+        raise AssertionError(f"PKU source wrongly accepted for export: {name}")
+
+print(json.dumps({
+    "reviewer_task": "/root/technical_round_coordinator/technical_t_5_fresh",
+    "checked_on": "2026-10-03",
+    "environment": {"python": platform.python_version(), "torch": str(torch.__version__),
+                    "device": "cpu", "threads": str(torch.get_num_threads()),
+                    "OMP_NUM_THREADS": os.environ["OMP_NUM_THREADS"], "MKL_NUM_THREADS": os.environ["MKL_NUM_THREADS"]},
+    "original_revise_report_sha256": sha(old_report_bytes),
+    "old_t4_raw_provenance": {"read_at_followup_from": str(old_t4_input.relative_to(ROOT)),
+        "sha256": sha(old_t4),
+        "note": "初次本人已實讀 T.4 並保存其 raw SHA，當時未另保存 T.4 raw 備份；本次只取得未加註的舊教材原 bytes，親核相同 SHA 後才保存自己副本。未讀其他審閱判詞或筆記。"},
+    "diffs": diff_results, "retained_artifacts": retained_artifacts,
+    "retained_repository_sources": retained_sources, "prerequisites": prerequisites, "figures": figures,
+    "public_source_archive": {"archive_sha256": archive_sha, "bytes": len(archive_raw),
+        "members": members, "training_jsonl_rows": row_count, "row_schema": row_schema,
+        "source_notice": source_notice, "asset_source": packed_asset.get("source"),
+        "asset_license": packed_asset.get("license"), "official_card_sha256": card_sha,
+        "identity_note": "只讀既有 hydrated archive。公開 Git blob 為 131-byte LFS pointer；它的 SHA 與 tar SHA 分列，不以 tar 冒稱 repository_code。"},
+    "public_pointer": {"url": "https://api.github.com/repos/birdhackor/tiny-perceptron-vlm/contents/assets/training/pku-safe-rlhf-v1.tar.gz?ref=a864a60bbf72583afc9bbaf45e052bd4fe076c62",
+        "version": "a864a60bbf72583afc9bbaf45e052bd4fe076c62", "http_response_sha256": sha(http_raw),
+        "git_blob_sha1": http_meta["sha"], "pointer_sha256": sha(pointer), "pointer_bytes": len(pointer),
+        "pointer": pointer.decode(), "hydrated_api_size": http_meta["size"],
+        "note": "本次只重新取得固定版官方 pointer metadata 1418 bytes；未下載 tar、訓練資料或模型。"},
+    "frozen_pku_scope": {"source_records": pilot["source_records"], "safe_selected_records": pilot["safe_selected_records"],
+        "data": pilot["data"], "training_steps": pilot["training"]["steps"],
+        "private_only_artifacts": frozen["results"]["private_only_artifacts"],
+        "private_only_data": frozen["results"]["private_only_data"],
+        "private_text_keys_in_pku_public_subtree": text_keys(pilot),
+        "public_evidence_note": pilot["public_evidence_note"], "toy_test_sample_counts": toy_sample_counts},
+    "actual_student_package": {"public_revision": release["release"]["revision"],
+        "weights_revision": release["release"]["weights_revision"], "files": files,
+        "PKU_text_files": [], "PKU_derived_weights": [], "release_receipt_anonymous_verified": release["release"]["anonymous_download_verified"],
+        "scope": "親讀固定公開 receipt 與實際清單；不是本人再次下載或重新上傳的驗證，也不涵蓋原公開來源 archive／歷史副本。"},
+    "executed_export_contract": {"actual_approval_accepted": True, "rejected_private_paths": contract_rejections},
+    "executed_redaction_contract": redaction_result,
+    "execution_scope": "離線短 CPU 只讀原 bytes、清單、schema、receipt 並驗證契約。沒有求導、更新、正式 training、GPU、安裝、Git、Notebook、模型或訓練資料下載。"
+}, ensure_ascii=False, indent=2))

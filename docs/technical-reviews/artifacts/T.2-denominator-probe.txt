@@ -1,0 +1,29 @@
+import importlib.util
+import json
+from pathlib import Path
+import random
+import sys
+
+import torch
+
+ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(ROOT))
+from tiny_perceptron.data import ByteTokenizer, pad_batch
+from tiny_perceptron.training import seed_everything
+
+spec = importlib.util.spec_from_file_location("T2train", ROOT / "scripts/train.py")
+train = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(train)
+records = []
+for task in ["text", "sft"]:
+    args = train.parser().parse_args(["--task", task, "--device", "cpu"])
+    seed_everything(args.seed)
+    examples = train.prepare_examples(args, ByteTokenizer())
+    selected = random.choices(examples, k=args.batch_size)
+    x, y, valid = pad_batch(selected, max_length=args.max_length)
+    record = {"task": task, "seed": args.seed, "batch_size": args.batch_size, "max_length": args.max_length, "data_file": None, "examples_count": len(examples), "selected_lengths": [len(a) for a, b in selected], "selected_label_counts": [int((b != -100).sum()) for a, b in selected], "padded_x_shape": list(x.shape), "effective_count": int((y != -100).sum()), "selected_x_ids": [a.tolist() for a, b in selected], "selected_y_labels": [b.tolist() for a, b in selected]}
+    assert record["effective_count"] == {"text": 111, "sft": 8}[task]
+    records.append(record)
+result = {"command": "OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 .venv/bin/python docs/technical-reviews/artifacts/T.2-denominator-probe.txt", "environment": {"python": sys.version, "torch": str(torch.__version__), "device": "cpu", "threads": str(torch.get_num_threads())}, "records": records, "scope": "親核預設seed42 toy資料分母，不下載正式訓練資料；未執行任何更新。改資料或設定後不保證相同值。"}
+(ROOT / "docs/technical-reviews/artifacts/T.2-denominator-proof.json").write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n")
+print(json.dumps([{key: value for key, value in record.items() if key not in ["selected_x_ids", "selected_y_labels"]} for record in records], ensure_ascii=False))

@@ -1,0 +1,36 @@
+import contextlib
+import hashlib
+import io
+import json
+import os
+from pathlib import Path
+import re
+import sys
+
+import torch
+
+ROOT = Path(__file__).resolve().parents[3]
+os.chdir(ROOT)
+sys.path.insert(0, str(ROOT))
+OUT = ROOT / "docs/technical-reviews/artifacts"
+assert torch.get_num_threads() == 1
+raw = (ROOT / "course/chapters/10.md").read_bytes()
+heads = list(re.finditer(rb"(?m)^## ([A-Z\d]+\.\d+) [^\r\n]+", raw))
+i = next(i for i, h in enumerate(heads) if h[1] == b"10.7")
+body = raw[heads[i].start():heads[i + 1].start()]
+code = re.search(r"```python\n(.*?)```", body.decode(), re.S)[1]
+records = []
+for name, current, ignored in [("original-3-features", code, 4), ("exercise-5-features", code.replace("randn(3, 8)", "randn(5, 8)"), 6)]:
+    ns = {}
+    stream = io.StringIO()
+    with contextlib.redirect_stdout(stream):
+        exec(compile(current, "course/chapters/10.md#10.7:" + name, "exec"), ns)
+    y = ns["y"]
+    assert y.tolist() == [[-100] * ignored + [73, 2]]
+    assert int((y != -100).sum()) == 2
+    assert list(ns["x"].shape) == [1, ignored + 2, 8]
+    records.append({"name": name, "code": current, "stdout": stream.getvalue(), "x_shape": list(ns["x"].shape), "y_labels": y.tolist(), "effective_labels": 2})
+(OUT / "T.2-new-10.7-source.txt").write_bytes(body)
+result = {"command": "OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 .venv/bin/python docs/technical-reviews/artifacts/T.2-new-10.7-probe.txt", "environment": {"python": sys.version, "torch": str(torch.__version__), "device": "cpu", "threads": str(torch.get_num_threads()), "OMP_NUM_THREADS": os.environ["OMP_NUM_THREADS"], "MKL_NUM_THREADS": os.environ["MKL_NUM_THREADS"]}, "source": "course/chapters/10.md#10.7", "source_sha256": hashlib.sha256(body).hexdigest(), "records": records, "scope": "T.2新增直接連結所需的10.7教學mask小例與其練習；沒有訓練、沒有重跑正文300步正式接頭實驗，也沒有另判10.7整節。圖片features從3到5只增加忽略位置，回答73與EOS2仍兩個有效目標。"}
+(OUT / "T.2-new-10.7-execution.json").write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n")
+print(json.dumps(records, ensure_ascii=False))

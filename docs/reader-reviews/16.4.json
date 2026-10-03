@@ -1,49 +1,196 @@
 {
   "lesson_id": "16.4",
   "source": "course/chapters/16.md#16.4",
-  "reviewer_task": "/root/readers_systems_applications_v2/reader_16_4",
+  "reviewer_task": "/root/reader_16_4_t4_scope_retry_fresh",
   "source_sha256": "4cf1aa4e1a6cb62c29d68cb050258a9d92bf0647e52712c9f4f8a5413b20d353",
   "verdict": "pass",
-  "reader_summary": "本節要減少長對話保存各層過去Key、Value的空間。保留多個分別計算的Query頭，讓它們分組共用較少的KV頭，叫GQA；全部Query共用一組KV的端點叫MQA。小例子寬度16、四個Query頭，所以每頭四特徵。一筆、三位置、一層，FP32每數4bytes，四KV的K與V兩份合計2×4×3×4×4=384bytes；一KV只保存96bytes，Query仍有四頭。圖左四個Q各連自己的KV、每組96bytes；右四個Q都連同一共享KV框，與正文相符。程式固定width=16、heads=4，依序只改kv_heads為4與1；cache每項是一層K/V，cache[0][0]取第一層K，numel()乘element_size()算每份儲存量並跨層、跨K/V加總。我重新用離線CPU實跑，輸出為「KV頭數 4 K形狀 (1, 4, 3, 4) bytes 384」及「KV頭數 1 K形狀 (1, 1, 3, 4) bytes 96」。四軸是筆數、KV頭數、位置數、每頭特徵數。練習只把ids改成[[1,2,3,4,5,6]]；先預測位置軸3變6、bytes加倍、比例仍4，實跑得到(1,4,6,4)與768、(1,1,6,4)與192。正式兩層模型每頭16特徵，先一次讀25位置提示的prefill快取，手算四KV為2×2×4×25×16×4=25,600bytes、一KV為6,400bytes。代價現在明說把每個標準ID的機率p換成-log(p)，沿有效目標平均；有效目標只含助手回答及表示結束的EOS，不計問題或補齊。標準[7,8,EOS]有三個目標，各機率0.5時平均約0.6931，這衡量位置機率，不等於整段生成完全匹配。因此一KV組雖驗證／最後代價0.16176／0.11392低於四KV的0.97333／0.31474，最後完整匹配都6/10仍不矛盾；代價分母36／69是計分ID數，匹配分母5／10是題數。SFT是用示範問題與正確回答繼續訓練，可複製的是模型中同形狀權重，不是結果表；改Query頭數及重新初始化一KV投影會改變模型，並未重現論文的投影平均再訓練方法。SDPA是以Q/K比對再取V的縮放點積注意力介面，後端是同一計算的不同實作選項。本次只訓練／快取手寫GQA，SDPA剖析是四KV的MHA，不能宣稱各選項都已測過。27.915與27.105毫秒只是一輪短提示觀察；快取縮四倍不能直接當作整個模型省四倍、品質提高或所有設定加速。",
+  "reader_summary": {
+    "problem": "長前文逐位置保存每層K和V，KV頭越多保存數字越多。本節讓多個Query頭讀同組較少的KV頭來縮小快取；Query的不同讀法仍保留。四Query兩KV是每組兩個Query，四Query一KV是MQA端點，Query頭數必須能被KV頭數整除。",
+    "example": "寬度16、四Query頭時每頭四特徵；一筆三位置的四KV快取用2份×4頭×3位置×4特徵×4 bytes=384，改一KV只96。正式寬64、兩層、25位置的同式另乘兩層，每頭16特徵，為25,600與6,400 bytes。省掉的是KV儲存，模型權重及其餘中間資料仍在。",
+    "program_and_output": "我在現有.venv用CPU實跑正文原例。TinyLM按ModelConfig建立模型，eval用評估行為、no_grad不記錄這次求導；一層cache是一對K、V。每tensor元素數乘每元素bytes後，把每層兩份都相加。實印四KV的K形狀(1,4,3,4)、384 bytes，一KV是(1,1,3,4)、96 bytes。cache保存未複製的KV，讀取時共享。兩個新模型分別初始化，這段沒有訓練、沒有比較生成品質，也沒有量GPU速度。",
+    "formal_comparison": "表格來自T.4單頭SFT基模改成四Query後各續訓100次：四KV141,568參數、一KV129,280；兩組訓練目標各11,278。驗證/最後檢查平均-log(p)以36/69個助手回答和EOS目標計算，而完整答案匹配以5/10整題原始生成ID核對，最多32新ID。四KV代價0.97333/0.31474、匹配2/5與6/10；一KV代價0.16176/0.11392、匹配3/5與6/10。低代價不等同每整題答對，最後檢查答對數相同。此正式訓練與L4計時是親讀正文結果，沒有由我重跑。",
+    "conversion_and_limits": "3.7/2.3讓我理解投影是一套Linear權重配方；我親讀明列GQA論文v3的2.1–2.2，原法將同組各原KV投影矩陣逐係數取平均，再用原預訓練配方續訓以適應新結構。平均的是權重，不是已生成的回答或單純重排cache；改共享仍不能保證原功能不變。本文只複製形狀相同的字表、位置表、FFN、正規化及投影等權重，新一KV投影隨機初始化，已明說沒有重現論文配方。短提示27.915到27.105毫秒只是本次包含prefill的總生成中位數觀察，不能推到長對話或所有後端。親讀官方2.14文件的GQA段，列Flash/cuDNN/math及NVIDIA CUDA memory-efficient，並要求Query頭整除、K/V頭數相同且不支援Nested tensor；本文手寫GQA後端與下一個僅測四KV的SDPA剖析不能代替所有GQA後端驗證。",
+    "exercise": "只把ids改成[[1,2,3,4,5,6]]，保留寬度、Query頭與兩組KV設定，先按位置軸加倍預測，再重跑同一段。我在CPU實印K=(1,4,6,4)、768 bytes及K=(1,1,6,4)、192 bytes。前文變長改第三軸，減KV頭改第二軸，二者均未改第一筆數軸或每頭四特徵；四倍比例保持。"
+  },
   "issues": [],
   "checks": {
     "background_and_links": {
       "status": "pass",
-      "details": "回查親讀完整16.4及當前明列前置03.md#3.7、16.md#16.3，另親讀新連結course/first-steps.md#W.4、course/training.md#T.4、course/chapters/16.md#16.2。3.7解釋head、投影與四軸；16.3解釋按層保留過去K/V；16.2解釋prefill、decode、eval/no_grad、cache[0][0]及EOS。W.4從機率、自然對數解釋-log(p)及平均代價；T.4說明SFT只計助手回答、家族切分45／5／10、36／69有效目標及正式單頭基模，補足本表背景。前次已直接親讀GQA原論文第2.1–2.2節與PyTorch 2.14 SDPA官方GQA段，這次正文相同的投影平均再訓練及支援選項敘述仍與它們一致。沒有搜尋其他專案材料補缺漏。"
+      "details": "由16.4明列3.7、16.3、16.2、W.4、T.4逐節親讀；再只沿這些小節的精確連結追讀Q/K/V、投影、拼接、tensor軸、softmax、因果許可、logits、FFN、正規化及SFT回答對齊。T.4已單獨全文讀取避免批次截斷，raw SHA256=49185a05ae4ad7333d61282435b3ad168f234a9121a59f46b916e3fe2c9cc01c。另親讀兩個本節明連的權威原文必要段落；沒有讀舊review、作者diff或計劃。這些內容足夠解釋本節的背景。"
     },
     "terminology": {
       "status": "pass",
-      "details": "GQA／MQA、FP32、KV頭數整除及Query仍各自計算均有正文說明。原缺口已逐項回查：代價明定-log(p)沿有效目標平均，EOS是回答結束特殊ID、有效目標是實際納入計分的標準下一ID；SFT已給監督式微調定義，prefill直接說一次讀提示且連16.2；可複製的表明指模型同形狀權重並排除結果表。SDPA給全名、中文名和Q/K/V的操作，後端給同一計算不同實作的定義，Flash、cuDNN、math、memory-efficient都明說是實作選項。這些補充足以理解本節比較，不必自行猜名稱用途。"
+      "details": "能分清Query的查詢、K的比對線索、V的取回內容與按頭/位置保存的cache；GQA分組保留Query，MQA是全部Query共享一KV的端點，FP32每元素4 bytes。SFT、EOS、有效目標、平均-log(p)、完整答案匹配、prefill、SDPA與後端均在本文或上述精確前置有解釋。可複製的表是模型權重表，並非成績表；原論文平均投影後再訓練與本文隨機新KV的差異也可理解。"
     },
     "example": {
       "status": "pass",
-      "details": "手算384／96bytes、正式兩層25,600／6,400bytes皆符合正文。新增[7,8,EOS]三目標各p=0.5的小例子能直接跟W.4連接；另以Python的math.log算得平均0.6931471805599453，與約0.6931一致。代價按計分ID平均，匹配按整題完整ID計數，所以較低代價與相同6/10可以並存，兩種分母36／69與5／10也能分辨。實際重新渲染並view_image看SVG：左Q0至3各接同號KV、每組96bytes合計384，右四Q連到單一綠色共享KV0、96bytes；頭編號不是位置，無方向箭頭的線條表示讀取關係，底端公式及位置均與正文一致，文字未裁切。"
+      "details": "手算384/96與25,600/6,400均吻合；親看本節SVG各KV框96 bytes、四個Query連線與三位置計算。讀表時把每位置代價分母36/69與完整問答分母5/10分開，且不將單輪低代價、同樣6/10答對或約0.81ms計時差外推為一般能力與普遍加速。"
     },
     "program_explanation": {
       "status": "pass",
-      "details": "本次從當前16.4精確擷取Python程式，在repo根目錄用.venv/bin/python離線CPU重新執行。for比較kv_heads=4與1，width及Query頭數仍16／4；16.2已解釋eval()與no_grad()的不同用途。cache[0][0]取第一層K，numel()與element_size()在本文解釋；兩個迴圈依層及該層K/V加總。實際依序輸出「KV頭數 4 K形狀 (1, 4, 3, 4) bytes 384」及「KV頭數 1 K形狀 (1, 1, 3, 4) bytes 96」，與預期吻合。只核對小例子形狀和儲存量，沒有把各自初始化的模型當成品質競賽，也未重跑正式100步續訓或GPU速度。"
+      "details": "已離線CPU實跑正文原例，兩行實際輸出為「KV頭數 4 K形狀 (1, 4, 3, 4) bytes 384」與「KV頭數 1 K形狀 (1, 1, 3, 4) bytes 96」。能逐步說明import、ids、eval/no_grad、讀第一層K，以及迭代每層的K與V、numel×element_size相加的用途。沒有以程式可跑宣稱隨機模型品質好，也沒有執行正式train --train、CUDA、Modal、新資料/權重下載或Notebook匯出。"
     },
     "exercise": {
       "status": "pass",
-      "details": "只把ids由[[1,2,3]]改為[[1,2,3,4,5,6]]，其他程式保持相同。先預測第三軸位置3變6，四KV／一KV分別需768／192bytes、比例仍4，再在離線CPU實跑同一程式。實際輸出K形狀(1,4,6,4)／(1,1,6,4)，bytes768／192，符合預測；能區分前文延長改位置軸、KV頭數減少改頭軸。"
+      "details": "自行只延長成六個ID並實跑，K形狀(1,4,6,4)/(1,1,6,4)及bytes768/192均符合事先依公式的預測。操作、預期輸出和要分辨的兩種儲存維度在本節明確。"
     }
   },
   "figure_sha256": {
     "course/figures/architecture_gqa_cache.svg": "78fdf172375e7139abd190370005880456b3aefff3b7d249daad3736d1e62bc7"
   },
-  "figure_inspection": {
-    "status": "pass",
-    "render_command": "node /tmp/render-course-svg.mjs architecture_gqa_cache.svg /tmp/reader_16_4_recheck_current.png 688",
-    "rendered_image": "/tmp/reader_16_4_recheck_current.png",
-    "viewed_with": "view_image",
-    "details": "本回查重新渲染並親眼查看，核對四個Query框、左四個KV框各96bytes、右一共享KV框96bytes、四條對應／共享連線，以及標題384／96bytes與底部單組公式。無箭頭、重疊、截斷或數字矛盾。"
-  },
-  "recheck": {
-    "resolved_gaps": [
-      "代價、有效目標、EOS：新增平均-log(p)定義及三目標小例子，並連W.4。",
-      "SFT、權重表、prefill：新增白話定義與T.4／16.2連結，明指同形狀模型權重。",
-      "SDPA、後端：新增中文全名、Q/K/V操作及不同實作選項的解釋。"
-    ],
-    "result": "三項原缺口皆已解決；重新親讀、看圖及執行後獨立判定pass。"
-  }
+  "figure_inspection": [
+    {
+      "path": "course/figures/architecture_gqa_cache.svg",
+      "sha256": "78fdf172375e7139abd190370005880456b3aefff3b7d249daad3736d1e62bc7",
+      "render": "node /tmp/render-course-svg.mjs architecture_gqa_cache.svg /tmp/reader_16_4_gqa.png 688",
+      "view_image": "/tmp/reader_16_4_gqa.png",
+      "details": "親看左右各四個Query框：左邊Q0至Q3各讀一個96 bytes的KV，總384；右邊四條連線都接共享KV0，96。底部2×3位置×4特徵×4 bytes=96，頭編號與位置編號沒有混用。標籤與圖框完整，連線和正文所說讀取關係一致。"
+    },
+    {
+      "path": "course/figures/foundations_heads.svg",
+      "sha256": "c5b256097cfca78212fca473122e553f607011aca2698bf2c0775e63f68c30fc",
+      "render": "node /tmp/render-course-svg.mjs foundations_heads.svg /tmp/reader_16_4_heads.png 688",
+      "view_image": "/tmp/reader_16_4_heads.png",
+      "details": "親看投影後[1,4,8]拆成head0和head1，每支均保留四位置、四特徵與自己的4×4比例表；兩支箭頭拼回[1,4,8]再經輸出Linear，沒有把位置分給不同head。"
+    },
+    {
+      "path": "course/figures/cache.svg",
+      "sha256": "4c0acaebb3e61a783ac0ca9b3b5afb31fd26044fbc7824ad940fdaaf5f699d20",
+      "render": "node /tmp/render-course-svg.mjs cache.svg /tmp/reader_16_4_cache.png 688",
+      "view_image": "/tmp/reader_16_4_cache.png",
+      "details": "親看舊K0/V0至K2/V2、新位置只算3、append後四格含K3/V3；0至3是位置，保存每層筆記的底部文字與正文一致。"
+    },
+    {
+      "path": "course/figures/foundations_attention.svg",
+      "sha256": "04731056df6adb40021b7d6ad11e03701344f8b56fd568fdd692c4a72639d849",
+      "render": "node /tmp/render-course-svg.mjs foundations_attention.svg /tmp/reader_16_4_attention.png 688",
+      "view_image": "/tmp/reader_16_4_attention.png",
+      "details": "親看Q=[1,0]比對左右K得到1與0，再softmax為0.731與0.269，分別加權各自V；下方結果[7.042,14.083,21.125]吻合正文，箭頭維持位置對應。"
+    },
+    {
+      "path": "course/figures/foundations_causal.svg",
+      "sha256": "75861259596de287ea7bf31f478d15a27ef27b2c0881f89ca5c5ce52dcfc30ed",
+      "render": "node /tmp/render-course-svg.mjs foundations_causal.svg /tmp/reader_16_4_causal.png 688",
+      "view_image": "/tmp/reader_16_4_causal.png",
+      "details": "親看列為查詢、欄為位置，對角線及下方綠格的1、1/2、1/3、1/4符合等分，右上灰色×是禁止讀取；圖沒有讓未來位置可見。"
+    },
+    {
+      "path": "course/figures/foundations_prediction_positions.svg",
+      "sha256": "27508fb0354d63062aba0da7723a329a193814776a4b9d017ac09bb64184f03e",
+      "render": "node /tmp/render-course-svg.mjs foundations_prediction_positions.svg /tmp/reader_16_4_predictions.png 688",
+      "view_image": "/tmp/reader_16_4_predictions.png",
+      "details": "親看三個位置的前文分別[1]、[1,2]、[1,2,3]，每列箭頭接候選0至19；只有綠色最後列拿全部已給前文，續寫說明與正文相符。"
+    },
+    {
+      "path": "course/figures/foundations_tensor_axes.svg",
+      "sha256": "9a0a44863fdc43f783e830b88d41b1575389e91336e5f656be9ef5c6d1528b5c",
+      "render": "node /tmp/render-course-svg.mjs foundations_tensor_axes.svg /tmp/reader_16_4_axes.png 688",
+      "view_image": "/tmp/reader_16_4_axes.png",
+      "details": "親看兩列成績60/70/80與80/90/100；橫箭頭dim=1得到每人[70,90]，直箭頭dim=0得到每次[70,80,90]，數字、方向與正文相符。"
+    }
+  ],
+  "prerequisite_reads": [
+    {
+      "source": "course/chapters/03.md#3.7",
+      "source_sha256": "e9a032b4a840d21c2ad3f3e3e184e9f8eb6323ce120c6185c79ea75ebe0747c2"
+    },
+    {
+      "source": "course/chapters/16.md#16.3",
+      "source_sha256": "4c9b1d82213f63119fce57b3186b5b17c35797cb4f3fb727049d3ecd7857f209"
+    },
+    {
+      "source": "course/chapters/16.md#16.2",
+      "source_sha256": "0d05e03fb325a3b16b9c7a68b4686590e4a69c546cab9ccc928b492d0f781e2e"
+    },
+    {
+      "source": "course/first-steps.md#W.4",
+      "source_sha256": "ef4e42ae84c5fa21081214e00beb9f807fc13cd805e7a7ba52abcb2a9720f04d"
+    },
+    {
+      "source": "course/training.md#T.4",
+      "source_sha256": "49185a05ae4ad7333d61282435b3ad168f234a9121a59f46b916e3fe2c9cc01c"
+    },
+    {
+      "source": "course/chapters/03.md#3.3",
+      "source_sha256": "5a5b930752359902c7fd653e889562f5cfb2eb602db1e8bd8acf39d5fc1c0a78"
+    },
+    {
+      "source": "course/chapters/03.md#3.4",
+      "source_sha256": "886c2e43b40f7fcf0840bba3dbbe7176880bd33caa2006e438efcc4fac4e09bb"
+    },
+    {
+      "source": "course/chapters/03.md#3.6",
+      "source_sha256": "b3a3a02bf09ebdada567c1f1b1330cd0a7da0f4e33bd2ddca33a58131f5b34a9"
+    },
+    {
+      "source": "course/chapters/02.md#2.3",
+      "source_sha256": "844ace0294be6bd66a796dce017f4b9a0f2d11e7a448719b20e055c61e1cb16c"
+    },
+    {
+      "source": "course/chapters/02.md#2.2",
+      "source_sha256": "99aa5f77d3fa03dc1be363dfccdf3abcaa54236fa19a01ce433cf7155ecb44f8"
+    },
+    {
+      "source": "course/chapters/04.md#4.6",
+      "source_sha256": "c8d4ccf957ba8bfeb3d23c436bd027e742bb00644fbdabc0ef12a1003da50a41"
+    },
+    {
+      "source": "course/chapters/05.md#5.17",
+      "source_sha256": "4290ab4c7b09513eb983c1d92ecbb8bee24cc012f1a13be764e1b39761f3cea2"
+    },
+    {
+      "source": "course/first-steps.md#W.3",
+      "source_sha256": "bad23aa0e0b79506991a4d4faf1583bf5ef7f09ed0082901397452733487d3d6"
+    },
+    {
+      "source": "course/first-steps.md#W.5",
+      "source_sha256": "5cc900914f02fa83c8b8d872d9883780df0e9905e33ce04f73cf1e68d4767aae"
+    },
+    {
+      "source": "course/chapters/01.md#1.7",
+      "source_sha256": "efdb4b1bf5a4b21e739bfc59597a35696d711eeaa5f7e054ae7bd9b16a3092e2"
+    },
+    {
+      "source": "course/chapters/07.md#7.1",
+      "source_sha256": "92aeee369ec2af39a249355786baa2683ab9fc09308aff1098af7f6edc11808d"
+    },
+    {
+      "source": "course/chapters/07.md#7.3",
+      "source_sha256": "169853b46c7ffaa3daaadd1b96fc992bb24f0c06db64b053e54150d7221d5a13"
+    },
+    {
+      "source": "course/chapters/04.md#4.4",
+      "source_sha256": "e354a3cd855838caa6864f3496381eda59b656046acdb7cbd91ae1e17dd16de6"
+    },
+    {
+      "source": "course/chapters/04.md#4.3",
+      "source_sha256": "9114c4a1bf718d4e209048fed90c31341db060652e31160e74070ebbc24bf18a"
+    },
+    {
+      "source": "course/chapters/04.md#4.7",
+      "source_sha256": "1657f654432bbec8396b2621137379cd3bb6d2d43fa5b3e566121f752191a193"
+    },
+    {
+      "source": "course/chapters/03.md#3.5",
+      "source_sha256": "304c5be0763e3abb08b3b062462647baee8bc0052dbfb16a5e200c35dd9275f7"
+    },
+    {
+      "source": "course/first-steps.md#W.2",
+      "source_sha256": "906104cc1f40374473eb6d087d106c3469c2e69f0e08f22cfc120fe700b988a8"
+    }
+  ],
+  "linked_primary_sources": [
+    {
+      "url": "https://arxiv.org/pdf/2305.13245v3",
+      "raw_cache": "outputs/technical-sources/gqa-2023.pdf",
+      "sha256": "ba9094fe73db9bf515d47ae8b2d502fee9d8a6c7b1327e197ddb160f4c63b94a",
+      "read_scope": "親將既有PDF以pdftotext -raw轉成/tmp/reader_16_4_gqa_raw.txt，讀2.1 Uptraining與2.2 Grouped-query attention；原文有arXiv v3標記。"
+    },
+    {
+      "url": "https://docs.pytorch.org/docs/2.14/generated/torch.nn.functional.scaled_dot_product_attention.html",
+      "raw_cache": "outputs/technical-sources/torch-runtime/docs214-sdpa.html",
+      "sha256": "f79084c6a533772c7874e5cb38b78b21d2d01a6f209cad49e742e1731180212f",
+      "read_scope": "親讀官方HTML標題2.14、SDPA函式簡介及GQA支援/限制段；只讀原文，沒有執行CUDA後端。"
+    }
+  ]
 }

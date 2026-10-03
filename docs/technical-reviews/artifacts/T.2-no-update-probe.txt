@@ -1,0 +1,62 @@
+import contextlib
+import hashlib
+import importlib.util
+import io
+import json
+import os
+from pathlib import Path
+import sys
+from unittest.mock import patch
+
+import torch
+
+ROOT = Path(__file__).resolve().parents[3]
+os.chdir(ROOT)
+sys.path.insert(0, str(ROOT))
+OUT = ROOT / "docs/technical-reviews/artifacts"
+spec = importlib.util.spec_from_file_location("T2_original_train", ROOT / "scripts/train.py")
+train = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(train)
+assert torch.get_num_threads() == 1
+records = []
+for task in ["text", "sft", "vision"]:
+    built = []
+    counts = {"language_forwards": 0, "backward_calls": 0, "optimizer_step_calls": 0, "save_checkpoint_calls": 0, "torch_save_calls": 0}
+    old_init = train.TinyLM.__init__
+    old_forward = train.TinyLM.forward
+    old_backward = torch.Tensor.backward
+    def snapshot(model):
+        digest = hashlib.sha256()
+        for name, tensor in model.state_dict().items():
+            digest.update(name.encode())
+            digest.update(tensor.detach().cpu().contiguous().numpy().tobytes())
+        return digest.hexdigest()
+    def init(model, *args, **kwargs):
+        old_init(model, *args, **kwargs)
+        built.append((model, snapshot(model)))
+    def forward(model, *args, **kwargs):
+        counts["language_forwards"] += 1
+        return old_forward(model, *args, **kwargs)
+    def backward(value, *args, **kwargs):
+        counts["backward_calls"] += 1
+        return old_backward(value, *args, **kwargs)
+    def forbidden_step(*args, **kwargs):
+        counts["optimizer_step_calls"] += 1
+        raise AssertionError("dry-run unexpectedly updates parameters")
+    def forbidden_checkpoint(*args, **kwargs):
+        counts["save_checkpoint_calls"] += 1
+        raise AssertionError("dry-run unexpectedly saves checkpoint")
+    def forbidden_save(*args, **kwargs):
+        counts["torch_save_calls"] += 1
+        raise AssertionError("dry-run unexpectedly torch.save")
+    stream = io.StringIO()
+    with patch.object(sys, "argv", ["scripts/train.py", "--task", task, "--device", "cpu"]), patch.object(train.TinyLM, "__init__", init), patch.object(train.TinyLM, "forward", forward), patch.object(torch.Tensor, "backward", backward), patch.object(torch.optim.AdamW, "step", forbidden_step), patch.object(train, "save_checkpoint", forbidden_checkpoint), patch.object(torch, "save", forbidden_save), contextlib.redirect_stdout(stream):
+        train.main()
+    states = [{"before_sha256": before, "after_sha256": snapshot(model), "unchanged": before == snapshot(model)} for model, before in built]
+    assert all(state["unchanged"] for state in states)
+    assert counts["backward_calls"] == 1
+    assert all(counts[key] == 0 for key in ["optimizer_step_calls", "save_checkpoint_calls", "torch_save_calls"])
+    records.append({"task": task, "counts": counts, "language_parameter_states": states, "stdout": stream.getvalue(), "scope": "親讀原碼後，在同一原始 main 加呼叫計數／禁止step與存檔的觀測wrapper；沒有修改教材或腳本。weights快照覆蓋TinyLM，vision額外encoder/projector以原碼沒有step分支及禁止step核對。"})
+result = {"command": "OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 .venv/bin/python docs/technical-reviews/artifacts/T.2-no-update-probe.txt", "environment": {"python": sys.version, "torch": str(torch.__version__), "device": "cpu", "threads": str(torch.get_num_threads()), "OMP_NUM_THREADS": os.environ["OMP_NUM_THREADS"], "MKL_NUM_THREADS": os.environ["MKL_NUM_THREADS"]}, "records": records}
+(OUT / "T.2-no-update-execution.json").write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n")
+print(json.dumps(records, ensure_ascii=False))

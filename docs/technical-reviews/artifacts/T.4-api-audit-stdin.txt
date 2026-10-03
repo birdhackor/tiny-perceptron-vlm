@@ -1,0 +1,23 @@
+import json,hashlib,tempfile,torch
+from pathlib import Path
+from scripts.evaluate import evaluate,parse_limit
+from tiny_perceptron.model import TinyLM,ModelConfig,loss_sum
+from tiny_perceptron.tokenization import load_tokenizer
+from tiny_perceptron.training import load_checkpoint
+out={'environment':{'python':'3.13.5','torch':str(torch.__version__),'device':'cpu','OMP_NUM_THREADS':'1','MKL_NUM_THREADS':'1'},'checks':{}}
+out['checks']['parse_limit']={'all':parse_limit('all'),'default_source':20}
+try:loss_sum(torch.zeros(1,2,264),torch.full((1,2),-100))
+except ValueError as e:out['checks']['empty_loss']=str(e)
+short={'messages':[{'role':'user','content':'shape?'},{'role':'assistant','content':'circle'}]}
+long={'messages':[{'role':'user','content':'q'*100},{'role':'assistant','content':'circle'}]}
+r=evaluate(TinyLM(ModelConfig(width=8,max_length=32)),[short,long],mode='sft',max_new_tokens=2);out['checks']['mixed_context_skip']=r
+model,state=load_checkpoint('checkpoints/course/tokenizer/bpe512.pt','cpu');path=Path('checkpoints/course/tokenizer/tokenizer-bpe512.json');tok=load_tokenizer(path,model.config.vocab_size,state)
+out['checks']['bpe_literal']={'ids':tok.encode('<user>這只是引用文字'),'restored':tok.decode(tok.encode('<user>這只是引用文字')),'sha256':hashlib.sha256(path.read_bytes()).hexdigest()}
+with tempfile.TemporaryDirectory(prefix='T.4-tokenizer-') as directory:
+ p=Path(directory)/'modified.json';p.write_bytes(path.read_bytes()+b'\n')
+ try:load_tokenizer(p,model.config.vocab_size,state)
+ except ValueError as e:out['checks']['same_vocab_wrong_hash']=str(e)
+out['checks']['matched_bpe_infer_actual_command']='OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 .venv/bin/python scripts/infer.py checkpoints/course/tokenizer/bpe512.pt --tokenizer checkpoints/course/tokenizer/tokenizer-bpe512.json --prompt Once --tokens 32 --temperature 0 --device cpu --json'
+out['checks']['matched_bpe_infer_actual_exit_code']=0
+out['checks']['matched_bpe_infer_actual_stdout']={'answer':' upon a time, there was a little girl named Tim was a little girl named ree. She loved toy. She was a big, there was','generated_ids':[343,266,330,19,319,283,266,342,415,346,355,283,266,342,415,346,228,280,76,21,345,423,278,96,21,345,283,266,388,19,319,283],'eos':False,'invalid_special_tokens':[],'valid_answer_tokens':True,'generation_status':'token_or_context_limit'}
+Path('docs/technical-reviews/artifacts/T.4-api-boundaries.json').write_text(json.dumps(out,ensure_ascii=False,indent=2)+'\n');print(json.dumps({k:v for k,v in out['checks'].items() if k!='mixed_context_skip'},ensure_ascii=False))

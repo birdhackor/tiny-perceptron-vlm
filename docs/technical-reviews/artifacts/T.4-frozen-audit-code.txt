@@ -1,0 +1,50 @@
+import ast
+import hashlib
+import json
+import math
+from pathlib import Path
+
+ROOT = Path('/workspace/tiny-perceptron-vlm')
+ART = ROOT / 'docs/technical-reviews/artifacts'
+observations = []
+for name in ['text_foundation', 'real_text', 'tokenizer', 'sft', 'sft_ablation']:
+    path = ROOT / f'docs/course-experiments/results/{name}.json'
+    receipt = json.loads(path.read_bytes())
+    def walk(value, location):
+        if isinstance(value, dict):
+            if 'nll' in value and 'nll_sum' in value:
+                expected = value['nll_sum'] / value['effective_tokens']
+                assert abs(expected - value['nll']) < 1e-12
+                observations.append({'experiment':name,'location':location,'metric':'nll','total':value['nll_sum'],'denominator':value['effective_tokens'],'observed':expected})
+            if 'matches' in value:
+                assert value['matches'] / value['records'] == value['exact_match']
+                if 'samples' in value:
+                    assert sum(s['exact'] for s in value['samples']) == value['matches']
+                    assert sum(s['eos'] for s in value['samples']) / len(value['samples']) == value['eos_rate']
+                observations.append({'experiment':name,'location':location,'metric':'exact_match','numerator':value['matches'],'denominator':value['records'],'observed':value['exact_match']})
+            if 'bpb_including_eos_boundary_targets' in value:
+                total = value.get('nll_sum', value.get('mean_token_nll',0) * value['effective_tokens'])
+                raw = value['raw_utf8_bytes']
+                bpb = total / (raw * math.log(2))
+                assert abs(bpb - value['bpb_including_eos_boundary_targets']) < 1e-10
+                observations.append({'experiment':name,'location':location,'metric':'bpb','total':total,'raw_utf8_bytes':raw,'observed':bpb})
+            for key, item in value.items():
+                walk(item, location + '.' + key)
+        elif isinstance(value,list):
+            for i,item in enumerate(value):
+                walk(item, location + f'[{i}]')
+    walk(receipt['results'], 'results')
+    assert receipt['device'] == 'cuda' and receipt['gpu'] == 'NVIDIA L4' and receipt['seed'] == 42
+
+import sys
+import platform
+import torch
+from scripts.train import parser
+options = parser().parse_args(['--task','sft','--train','--steps','500','--checkpoint','checkpoints/start.pt','--device','cpu'])
+contract = {'train_options':vars(options),'historical_not_rerun':True,'resume_supported_source_branches':['text','sft','dpo_reference','distillation_teacher','multimodal-v1'], 'no_runtime_training':True}
+recipe_ast = ast.parse((ROOT / 'scripts/course_experiments/run.py').read_text())
+contract['formal_runner_literals'] = [node.value for node in ast.walk(recipe_ast) if isinstance(node,ast.Constant) and isinstance(node.value,str) and node.value in ['--experiment','--device','--dependencies','--output','cuda','cpu']]
+contract['note'] = '只離線 parse 原 CLI 與親讀原碼；沒有呼叫 main/execute、正式training、下載、安裝或GPU。GPU數值的支持範圍來自原始凍結receipt，CPU只重算報告代數與分母。'
+result={'observations':observations,'contracts':contract,'environment':{'python':platform.python_version(),'torch':str(torch.__version__),'device':'cpu'}}
+(ART/'T.4-frozen-audit.json').write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str)+'\n')
+print(json.dumps({'receipt_checks':len(observations),'all_passed':True,'training_called':False},ensure_ascii=False))

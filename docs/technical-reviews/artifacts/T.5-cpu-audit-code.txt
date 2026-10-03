@@ -1,0 +1,86 @@
+import hashlib
+import json
+import platform
+import random
+from dataclasses import asdict
+from pathlib import Path
+
+import torch
+
+from scripts.course_experiments.behavior import _add_lora, _safety_records, _style_record
+from scripts.course_experiments.common import records_sha256, split_records, text_examples
+from scripts.course_experiments.text import arithmetic_records
+from scripts.prepare_data import generate_records
+from tiny_perceptron.data import ByteTokenizer, render_chat
+from tiny_perceptron.model import ModelConfig, TinyLM
+from tiny_perceptron.tokenization import generation_report
+
+torch.set_num_threads(1)
+tok = ByteTokenizer()
+print(json.dumps({'environment': {'python': platform.python_version(), 'torch': str(torch.__version__), 'device': 'cpu', 'threads': torch.get_num_threads()}, 'scope': 'No training or network. Data, parameter counts, frozen result arithmetic and token identity only.'}))
+
+arithmetic = split_records(arithmetic_records(), seed=42)
+safety = split_records(_safety_records(), seed=42)
+for label, parts in [('arithmetic', arithmetic), ('safety', safety)]:
+    counts = {s: {'records': len(rs), 'families': len({r['family'] for r in rs}), 'effective_tokens': sum(int((y != -100).sum()) for x, y in text_examples(rs, 'sft')), 'records_sha256': records_sha256(rs)} for s, rs in parts.items()}
+    print(label, json.dumps(counts, ensure_ascii=False))
+    families = [{r['family'] for r in parts[s]} for s in ('train', 'validation', 'test')]
+    assert not any(families[a] & families[b] for a, b in [(0, 1), (0, 2), (1, 2)])
+
+model = TinyLM(ModelConfig(width=64, layers=2, max_length=128))
+base_count = sum(p.numel() for p in model.parameters())
+layers = _add_lora(model, rank=4, alpha=4)
+print('parameter_count', json.dumps({'config': asdict(model.config), 'base': base_count, 'adapter': sum(p.numel() for p in model.parameters() if p.requires_grad), 'frozen': sum(p.numel() for p in model.parameters() if not p.requires_grad), 'layers': layers}))
+
+def audit_report(report, where):
+    if 'nll_sum' in report:
+        assert abs(report['nll_sum'] / report['effective_tokens'] - report['nll']) < 1e-12, where
+    if 'samples' not in report:
+        return
+    exact, ended, invalid = 0, 0, 0
+    for sample in report['samples']:
+        ids = sample['generated_ids']
+        raw = ids[:-1] if ids and ids[-1] == tok.eos_id else ids
+        actual = raw == tok.encode(sample['expected'])
+        assert actual == sample['exact'], where
+        exact += actual
+        ended += ids.count(tok.eos_id) == 1 and ids[-1] == tok.eos_id
+        invalid += bool(generation_report(tok, ids)['invalid_special_tokens'])
+    assert exact == report['matches'], where
+    assert len(report['samples']) == report['records'], where
+    print('frozen', where, json.dumps({'records': report['records'], 'matches': exact, 'eos': ended, 'invalid_control_records': invalid, 'effective_tokens': report['effective_tokens'], 'rubric': report.get('rubric'), 'refusal_audit': report.get('refusal_audit')}, ensure_ascii=False))
+    if where.endswith('/test') or where.endswith('/held_out_wording'):
+        print('test_samples', where, json.dumps([{'prompt': s['messages'][0]['content'], 'expected': s['expected'], 'generated': s['generated'], 'exact': s['exact'], 'eos': s['eos']} for s in report['samples']], ensure_ascii=False))
+
+def walk(value, where):
+    if isinstance(value, dict):
+        audit_report(value, where)
+        for key, child in value.items():
+            if key not in ('samples', 'history'):
+                walk(child, where + '/' + key)
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            walk(child, where + '/' + str(index))
+
+for experiment in ('style', 'safety', 'lora'):
+    path = Path('docs/course-experiments/results') / (experiment + '.json')
+    frozen = json.loads(path.read_text())
+    r = frozen['results']
+    print('receipt', experiment, json.dumps({'sha256': hashlib.sha256(path.read_bytes()).hexdigest(), 'revision': frozen['revision'], 'seed': frozen['seed'], 'device': frozen['device'], 'gpu': frozen['gpu'], 'evidence_status': frozen['evidence_status'], 'step_scale': frozen['step_scale']}))
+    def training(value, where):
+        if isinstance(value, dict):
+            if 'steps' in value and 'effective_tokens' in value:
+                print('training_config', where, json.dumps({k: value[k] for k in ('steps', 'effective_tokens', 'records', 'records_sha256', 'parameters', 'trainable_parameters') if k in value}))
+            for k, v in value.items():
+                if k not in ('samples', 'history'):
+                    training(v, where + '/' + k)
+    training(r, experiment)
+    walk(r, experiment)
+
+rows = generate_records('style')
+families = sorted({r['family'] for r in rows})
+random.Random(42).shuffle(families)
+validation = [r for r in rows if r['family'] in families[int(.8 * len(families)):int(.9 * len(families))]]
+print('generator_validation_questions', json.dumps(sorted({r['messages'][0]['content'] for r in validation}), ensure_ascii=False))
+print('generator_zero_plus_five_in_validation', any(r['messages'][0]['content'].endswith('0+5=?') for r in validation))
+print('toy_safety_permissions', sorted({str(r['permission']) for r in generate_records('safety')}))

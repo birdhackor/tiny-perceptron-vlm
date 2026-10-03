@@ -1,0 +1,80 @@
+import contextlib
+import hashlib
+import io
+import json
+import os
+from pathlib import Path
+import re
+import sys
+
+import torch
+
+ROOT = Path(__file__).resolve().parents[3]
+os.chdir(ROOT)
+sys.path.insert(0, str(ROOT))
+OUT = ROOT / "docs/technical-reviews/artifacts"
+environment = {"python": sys.version, "torch": str(torch.__version__), "device": "cpu", "threads": str(torch.get_num_threads()), "OMP_NUM_THREADS": os.environ["OMP_NUM_THREADS"], "MKL_NUM_THREADS": os.environ["MKL_NUM_THREADS"]}
+assert torch.get_num_threads() == 1
+records = []
+
+def read_fence(path, identifier):
+    raw = (ROOT / path).read_bytes()
+    matches = list(re.finditer(rb"(?m)^## ([A-Z\d]+\.\d+) [^\r\n]+", raw))
+    i = next(i for i, m in enumerate(matches) if m[1].decode() == identifier)
+    end = matches[i + 1].start() if i + 1 < len(matches) else len(raw)
+    body = raw[matches[i].start():end]
+    fence = re.search(r"```python\n(.*?)```", body.decode(), re.S)[1]
+    return fence, hashlib.sha256(body).hexdigest()
+
+def execute(path, identifier, name, change=None, expected_error=None):
+    code, sha = read_fence(path, identifier)
+    if change:
+        code = change(code)
+    stream = io.StringIO()
+    error = None
+    with contextlib.redirect_stdout(stream):
+        try:
+            exec(compile(code, path + "#" + identifier + ":" + name, "exec"), {})
+        except Exception as e:
+            error = type(e).__name__ + ": " + str(e)
+    assert (error is None) if expected_error is None else (expected_error in (error or "")), error
+    records.append({"source": path + "#" + identifier, "source_sha256": sha, "name": name, "code": code, "stdout": stream.getvalue(), "expected_error": expected_error, "observed_error": error})
+
+execute("course/chapters/04.md", "4.7", "original")
+execute("course/chapters/04.md", "4.7", "exercise-extended", lambda c: c.replace("shifted([1, 2, 3, 4])", "shifted([1, 2, 3, 4, 0])"))
+execute("course/chapters/04.md", "4.7", "exercise-copy-current", lambda c: c.replace("model = TinyLM", "y = x.clone()\nmodel = TinyLM"))
+execute("course/chapters/05.md", "5.1", "original-40-step-fixed-toy")
+execute("course/chapters/05.md", "5.1", "exercise-all-ignored", lambda c: c.replace("y = torch.tensor([[2, 3, 4]])", "y = torch.tensor([[-100, -100, -100]])"), "ValueError: 所有 labels 都被忽略")
+execute("course/chapters/07.md", "7.3", "original")
+execute("course/chapters/07.md", "7.3", "exercise-two-chinese", lambda c: c.replace('"content": "答"', '"content": "答案"'))
+execute("course/chapters/07.md", "7.3", "exercise-OK", lambda c: c.replace('"content": "答"', '"content": "OK"'))
+execute("course/chapters/12.md", "12.5", "original")
+execute("course/chapters/12.md", "12.5", "exercise-880", lambda c: c.replace("tone(440.0", "tone(880.0"))
+
+from tiny_perceptron.data import ByteTokenizer, render_chat
+tok = ByteTokenizer()
+x, y = render_chat([{"role": "user", "content": "只回答yes"}, {"role": "assistant", "content": "yes"}])
+role_rows = []
+for position, (token, target) in enumerate(zip(x.tolist(), y.tolist(), strict=True)):
+    role_rows.append({"position": position, "input_id": token, "label": target, "scored": target != -100})
+assert y[y != -100].tolist() == tok.encode("yes") + [tok.eos_id]
+
+from tiny_perceptron.training import choose_device
+from unittest.mock import patch
+device_checks = []
+for cuda, mps, expected in [(True, True, "cuda"), (False, True, "mps"), (False, False, "cpu")]:
+    with patch("torch.cuda.is_available", return_value=cuda), patch("torch.backends.mps.is_available", return_value=mps):
+        actual = str(choose_device("auto"))
+        assert actual == expected
+        device_checks.append({"mock_cuda_available": cuda, "mock_mps_available": mps, "expected": expected, "observed": actual, "scope": "只核對選擇分支；未建立 GPU/MPS tensor 或執行其運算。"})
+
+p = torch.nn.Parameter(torch.tensor([1.0, 2.0]))
+p.grad = torch.tensor([3.0, 0.0])
+before = p.detach().clone()
+returned = torch.nn.utils.clip_grad_norm_([p], 1.0)
+assert returned.item() == 3.0 and torch.equal(before, p.detach()) and p.grad[1].item() == 0.0
+norm_example = {"initial_gradient": [3.0, 0.0], "reported_preclip_norm": returned.item(), "postclip_gradient": p.grad.tolist(), "parameter_unchanged": torch.equal(before, p.detach()), "scope": "正總範數不表示每格非零，clip_grad_norm_改梯度但不更新參數。"}
+
+result = {"command": "OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 .venv/bin/python docs/technical-reviews/artifacts/T.2-prerequisite-probe.txt", "environment": environment, "records": records, "T.2-yes-exercise": {"rows": role_rows, "effective_labels": y[y != -100].tolist(), "effective_count": int((y != -100).sum())}, "auto_branch_checks": device_checks, "norm_example": norm_example, "scope": "必要前置的教學小例與練習；5.1只做原文40步width8固定玩具，不重跑600步正式實驗。沒有核定前置其他主張的整節判詞。"}
+(OUT / "T.2-prerequisite-execution.json").write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n")
+print(json.dumps({"cases": len(records), "expected_error_cases": sum(r["observed_error"] is not None for r in records), "yes_effective_count": int((y != -100).sum()), "device_checks": device_checks, "norm_example": norm_example}, ensure_ascii=False))
