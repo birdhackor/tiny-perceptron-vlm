@@ -1,0 +1,176 @@
+import contextlib
+import hashlib
+import io
+import json
+import os
+from pathlib import Path
+import random
+import re
+import sys
+
+import torch
+import numpy as np
+
+ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(ROOT))
+torch.set_num_threads(1)
+mode = sys.argv[1]
+env = {"python": sys.version, "torch": torch.__version__, "torch_git": torch.version.git_version,
+       "device": "cpu", "OMP_NUM_THREADS": os.environ.get("OMP_NUM_THREADS", ""),
+       "MKL_NUM_THREADS": os.environ.get("MKL_NUM_THREADS", ""), "threads": str(torch.get_num_threads())}
+assert os.environ.get("OMP_NUM_THREADS") == os.environ.get("MKL_NUM_THREADS") == "1"
+
+def section(path, lesson):
+    b = (ROOT / path).read_bytes()
+    h = list(re.finditer(rb"(?m)^## [^\r\n]+", b))
+    i = next(i for i, m in enumerate(h) if m[0].startswith(("## " + lesson + " ").encode()))
+    return b[h[i].start():h[i+1].start() if i + 1 < len(h) else len(b)]
+
+def run(code):
+    out = io.StringIO()
+    ns = {}
+    with contextlib.redirect_stdout(out):
+        exec(compile(code, "<read-raw-course-code>", "exec"), ns)
+    return ns, out.getvalue()
+
+if mode in ("original", "exercise"):
+    raw = section("course/chapters/11.md", "11.12")
+    assert hashlib.sha256(raw).hexdigest() == "7921777ff071d108ca4d07416be199f75f5327476ccd360859b48aa98ae5ff81"
+    code = re.search(rb"```python\n(.*?)```", raw, re.S)[1].decode()
+    original_code = code
+    if mode == "exercise":
+        code = code.replace('"1": ["010",', '"1": ["110",', 1)
+        assert code != original_code
+    ns, stdout = run(code)
+    glyphs = ns["glyphs"]
+    values = {label: torch.tensor([[int(c) for c in row] for row in rows], dtype=torch.float32).tolist()
+              for label, rows in glyphs.items()}
+    assert list(glyphs) == ["0", "1"]
+    assert all(len(v) == 5 and all(len(r) == 3 for r in v) for v in values.values())
+    assert values["0"] == [[1.,1.,1.],[1.,0.,1.],[1.,0.,1.],[1.,0.,1.],[1.,1.,1.]]
+    first = [1.,1.,0.] if mode == "exercise" else [0.,1.,0.]
+    assert values["1"][0] == first
+    assert values["1"][1:] == [[1.,1.,0.],[0.,1.,0.],[0.,1.,0.],[1.,1.,1.]]
+    print(json.dumps({"mode": mode, "environment": env, "source_sha256": hashlib.sha256(raw).hexdigest(),
+                     "code": code, "original_fence_sha256": hashlib.sha256(original_code.encode()).hexdigest(),
+                     "stdout": stdout, "labels": list(glyphs), "pixels": values,
+                     "ascii_glyph_1": [r.replace("0", ".").replace("1", "#") for r in glyphs["1"]],
+                     "changed_cell": [0, 0] if mode == "exercise" else None,
+                     "dtype": str(ns["image"].dtype), "requires_grad": ns["image"].requires_grad,
+                     "parameter_updates": 0, "result": "all exact assertions passed"}, ensure_ascii=False, indent=2))
+
+elif mode == "prerequisites":
+    records = []
+    for path, lesson, before, after in [
+        ("course/first-steps.md", "W.3", "[60.0, 70.0, 80.0]", "[60.0, 70.0, 110.0]"),
+        ("course/chapters/10.md", "10.1", 'scene("red", "square")', 'scene("blue", "square")'),
+        ("course/chapters/10.md", "10.5", "torch.tensor([0, 1])", "torch.tensor([1, 0])")]:
+        raw = section(path, lesson)
+        code = re.search(rb"```python\n(.*?)```", raw, re.S)[1].decode()
+        for label, current in [("original", code), ("exercise", code.replace(before, after, 1))]:
+            ns, out = run(current)
+            records.append({"source": path + "#" + lesson, "source_sha256": hashlib.sha256(raw).hexdigest(),
+                            "mode": label, "stdout": out, "parameter_updates": 0})
+    print(json.dumps({"mode": mode, "environment": env, "records": records,
+                      "result": "all six examples completed on CPU"}, ensure_ascii=False, indent=2))
+
+elif mode == "audit":
+    from scripts.prepare_ocr import GLYPHS, draw_digits
+    from tiny_perceptron.data import ByteTokenizer
+    from tiny_perceptron.multimodal import VisionEncoder
+    rpath = ROOT / "docs/course-experiments/results/ocr.json"
+    raw_result = rpath.read_bytes()
+    r = json.loads(raw_result)
+    t = r["results"]["training"]
+    splits = r["results"]["data"]["splits"]
+    groups = {k: set(x["family"] for x in v["records"]) for k, v in splits.items()}
+    assert not (groups["train"] & groups["validation"] or groups["train"] & groups["test"] or groups["validation"] & groups["test"])
+    assert set.union(*groups.values()) == set(map(str, range(100)))
+    families = list(range(100)); random.Random(r["seed"]).shuffle(families)
+    split_note = {}
+    for k, selected in [("train", families[:80]), ("validation", families[80:90]), ("test", families[90:])]:
+        rows = splits[k]["records"]
+        expected = [{"modality":"vision", "digits": str(value), "offset": offset, "family": str(value),
+                     "question":"read digits", "answer": str(value)} for value in selected for offset in (-1,0,1)]
+        assert rows == expected
+        sha = hashlib.sha256(json.dumps(rows, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+        assert sha == splits[k]["sha256"]
+        assert len(rows) == splits[k]["count"] == 3 * len(selected)
+        split_note[k] = {"records": len(rows), "families": len(groups[k]), "family_values": list(map(str, selected)),
+                         "offsets": [-1,0,1], "records_sha256": sha}
+    counts = []
+    for step, row in enumerate(t["history"]):
+        rng = random.Random(r["seed"] + step)
+        n = sum(len(ByteTokenizer().encode(rng.choice(splits["train"]["records"])["answer"])) + 1 for _ in range(8))
+        assert row["step"] == step + 1 and row["effective_targets"] == n
+        counts.append(n)
+    assert len(counts) == t["steps"] == 500
+    assert sum(counts) == t["effective_tokens"] == t["effective_targets"] == 11584
+    eval_note = {}
+    tok = ByteTokenizer()
+    for k in ("validation", "test"):
+        e = r["results"][k]
+        for s, row in zip(e["samples"], splits[k]["records"], strict=True):
+            ids = s["generated_ids"]
+            raw = ids[:ids.index(tok.eos_id)] if tok.eos_id in ids else ids
+            assert s["target"] == row["answer"]
+            assert s["generated"] == tok.decode(raw)
+            assert s["exact_match"] == (raw == tok.encode(s["target"]))
+        count = sum(s["exact_match"] for s in e["samples"])
+        assert count == e["correct"] and len(e["samples"]) == e["examples"] == 30
+        assert e["exact_match"] == count / 30
+        eval_note[k] = {"correct": count, "examples": 30, "exact_match": e["exact_match"],
+                        "all_samples_checked": True,
+                        "pairs": [{"row":s["row"], "target": s["target"], "generated": s["generated"],
+                                   "raw_ids":s["generated_ids"], "exact_match": s["exact_match"]} for s in e["samples"]]}
+    assert all(len(g) == 7 and all(len(row) == 5 for row in g) for g in GLYPHS)
+    canvas = torch.zeros(16,16)
+    glyph = torch.tensor([[int(c) for c in row] for row in ["010", "110", "010", "010", "111"]], dtype=torch.float32)
+    canvas[5:10,6:9] = glyph
+    rgb = canvas.unsqueeze(0).repeat(3,1,1)
+    output = VisionEncoder()(rgb.unsqueeze(0))
+    assert tuple(rgb.shape) == (3,16,16) and tuple(output.shape) == (1,16,16)
+    rejection = None
+    try:
+        VisionEncoder()(glyph.unsqueeze(0))
+    except ValueError as error:
+        rejection = str(error)
+    assert rejection is not None
+    pixels = np.asarray(draw_digits("42",0))
+    assert pixels.shape == (16,16,3) and set(np.unique(pixels).tolist()) == {0,255}
+    assert np.array_equal(pixels[:,:,0],pixels[:,:,1]) and np.array_equal(pixels[:,:,1],pixels[:,:,2])
+    canvas_checks = 0
+    for value in range(100):
+        text = str(value)
+        for offset in (-1,0,1):
+            rendered = np.asarray(draw_digits(text, offset))
+            assert rendered.shape == (16,16,3)
+            assert np.array_equal(rendered[:,:,0], rendered[:,:,1])
+            assert np.array_equal(rendered[:,:,1], rendered[:,:,2])
+            width = len(text) * 6 - 1
+            start = (16-width)//2 + offset
+            intended = {(4+y, start+6*i+x) for i,digit in enumerate(text)
+                        for y,row in enumerate(GLYPHS[int(digit)]) for x,bit in enumerate(row) if bit == "1"}
+            assert all(0 <= y < 16 and 0 <= x < 16 for y,x in intended)
+            observed = set(map(tuple, np.argwhere(rendered[:,:,0] == 255).tolist()))
+            assert observed == intended
+            assert set(np.unique(rendered).tolist()) == {0,255}
+            canvas_checks += 1
+    logits = torch.tensor([[0.,0.]], requires_grad=True)
+    torch.nn.functional.cross_entropy(logits, torch.tensor([1])).backward()
+    assert logits.grad.tolist() == [[0.5,-0.5]]
+    print(json.dumps({"mode": mode, "environment": env, "result_sha256": hashlib.sha256(raw_result).hexdigest(),
+                     "formal_environment": {k:r[k] for k in ["revision","device","seed","torch_version","python_version","gpu","step_scale","evidence_status"]},
+                     "training": {k:t[k] for k in ["steps","parameters","trainable_parameters","initial_loss","final_loss","loss_probe","effective_targets","weights_changed","cpu_smoke"]},
+                     "batch_size": 8, "recomputed_all_500_target_counts": True, "target_count_sum": sum(counts),
+                     "target_count_includes": "answer UTF-8 bytes and one EOS per sampled image; excludes question and image positions",
+                     "splits": split_note, "evaluations": eval_note,
+                     "rounding": {"initial_3dp": round(t["initial_loss"],3), "final_3dp":round(t["final_loss"],3), "test_percent_1dp":round(eval_note["test"]["exact_match"]*100,1)},
+                     "font_shape": [7,5], "canvas_shape_HWC": list(pixels.shape), "RGB_levels": [0,255],
+                     "all_digit_offset_canvas_checks": canvas_checks, "glyph_pixels_preserved_without_clipping": True,
+                     "grayscale_adaptation_CHW": list(rgb.shape), "vision_output":list(output.shape), "raw_5x3_rejection": rejection,
+                     "given_label_1_logit_gradient": logits.grad.tolist(), "string_matches_for_target_0": {s:s=="0" for s in ["0","1","00"]},
+                     "scope": "fixed-result and deterministic counts audit; no formal training or weight download was performed",
+                     "result": "all exact assertions passed"}, ensure_ascii=False, indent=2))
+else:
+    raise ValueError(mode)
