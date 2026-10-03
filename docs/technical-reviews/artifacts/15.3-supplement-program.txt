@@ -1,0 +1,79 @@
+import hashlib
+import json
+import math
+from pathlib import Path
+
+import torch
+
+x = torch.tensor([[1.0, 2.0]])
+weight = torch.tensor([[0.0, 0.0, math.log(2)], [0.0, 0.0, 0.0]])
+scores = x @ weight
+prob = scores.softmax(-1)
+expert_outputs = torch.stack([x, 2 * x, 3 * x], dim=1)
+expanded = prob[:, :, None]
+weighted = expanded * expert_outputs
+output = weighted.sum(1)
+print(json.dumps({
+    "e": math.e,
+    "log2": math.log(2),
+    "exp0": math.exp(0),
+    "exp_log2": math.exp(math.log(2)),
+    "scores": scores.tolist(),
+    "probability": prob.tolist(),
+    "shapes": {"x": list(x.shape), "weight": list(weight.shape), "scores": list(scores.shape), "experts": list(expert_outputs.shape), "expanded": list(expanded.shape), "weighted": list(weighted.shape), "output": list(output.shape)},
+    "weighted": weighted.tolist(),
+    "output": output.tolist(),
+    "softmax_negative_matches_last_axis": torch.equal(prob, scores.softmax(1)),
+    "probability_sum": prob.sum(1).tolist(),
+}, ensure_ascii=False))
+assert torch.equal(output, torch.tensor([[2.25, 4.5]]))
+assert torch.equal(expanded, prob.unsqueeze(-1))
+changed_second_feature = torch.tensor([[1.0, 99.0]]) @ weight
+changed_first_feature = torch.tensor([[2.0, 2.0]]) @ weight
+assert torch.equal(changed_second_feature, scores)
+assert torch.equal(changed_first_feature, torch.tensor([[0.0, 0.0, 2 * math.log(2)]]))
+print("feature_dependency", changed_second_feature.tolist(), changed_first_feature.tolist())
+
+# The original program does not optimize this tensor. This bounded derivative
+# check illustrates the learning signal without any parameter update or training.
+for values in ([1.0, 2.0, 3.0], [1.0, 2.0, 30.0]):
+    gate_scores = torch.zeros(3, dtype=torch.float64, requires_grad=True)
+    gate = gate_scores.softmax(-1)
+    values_tensor = torch.tensor(values, dtype=torch.float64)
+    mixed = (gate * values_tensor).sum()
+    derivative = torch.autograd.grad(mixed, gate_scores)[0]
+    analytical = gate.detach() * (values_tensor - mixed.detach())
+    assert torch.allclose(derivative, analytical, atol=1e-14, rtol=0)
+    print("output_scale_derivative", values, derivative.tolist())
+
+for advantage in (8.0, 0.1):
+    scores = torch.tensor([[advantage, 0.0, 0.0]]).repeat(12, 1)
+    prob = scores.softmax(-1)
+    chosen = prob.topk(1, dim=-1).indices
+    counts = torch.bincount(chosen.flatten(), minlength=3)
+    print("prerequisite_15.8", advantage, prob.mean(0).tolist(), counts.tolist())
+    assert counts.tolist() == [12, 0, 0]
+
+p = Path("docs/course-experiments/results/moe.json")
+frozen = json.loads(p.read_text())
+v = frozen["results"]["variants"]["top2_aux0.01"]
+routing = v["validation_routing"]
+layer = routing["layers"][1]
+fractions = [count / layer["dispatch_denominator"] for count in layer["dispatch_counts"]]
+assert routing["effective_input_tokens"] * v["model"]["config"]["top_k"] == layer["dispatch_denominator"]
+assert sum(layer["dispatch_counts"]) == layer["dispatch_denominator"]
+assert fractions == layer["load_fraction"]
+assert [round(v, 4) for v in layer["mean_router_probability"]] == [0.2875, 0.1772, 0.2652, 0.2701]
+assert [round(v, 4) for v in fractions] == [0.2065, 0.2692, 0.2260, 0.2983]
+print("frozen_metrics", json.dumps({"frozen_sha256": hashlib.sha256(p.read_bytes()).hexdigest(), "input_tokens": routing["effective_input_tokens"], "dispatch_denominator": layer["dispatch_denominator"], "dispatch_counts": layer["dispatch_counts"], "mean_router_probability": layer["mean_router_probability"], "rounded_mean": [round(v, 4) for v in layer["mean_router_probability"]], "recomputed_fraction": fractions, "rounded_fraction": [round(v, 4) for v in fractions]}))
+
+# Multiplying by a small or zero mixture coefficient does not itself skip a call.
+calls = []
+def expert(value, scale):
+    calls.append(scale)
+    return value * scale
+results = torch.stack([expert(x, scale) for scale in (1, 2, 3)], dim=1)
+_ = (torch.tensor([[1.0, 0.0, 0.0]])[:, :, None] * results).sum(1)
+assert calls == [1, 2, 3]
+print("zero_weight_expert_calls", calls)
+print("all_supplement_assertions_passed")

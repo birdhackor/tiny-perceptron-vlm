@@ -1,0 +1,94 @@
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+import json
+from types import SimpleNamespace
+import torch
+from tiny_perceptron.modern import MoEFFN
+from tiny_perceptron.model import TinyLM, ModelConfig
+from tiny_perceptron.data import pad_batch
+from scripts.course_experiments.architecture import _forward, _routing
+
+torch.set_num_threads(1)
+torch.manual_seed(156)
+print(json.dumps({"python": sys.version.split()[0], "torch": str(torch.__version__),
+                  "torch_git_version": str(torch.version.git_version), "device": "cpu",
+                  "torch_threads": torch.get_num_threads()}, ensure_ascii=False))
+rows = torch.tensor([2, 0, 2])
+result = torch.zeros(3, 2)
+returned = result.index_add_(0, rows, torch.tensor([[1., 1.], [2., 2.], [3., 3.]]))
+assert returned is result
+print("index_add_return_is_self", returned is result)
+
+layer = MoEFFN(2, experts=4, top_k=2, hidden=3)
+with torch.no_grad():
+    layer.router.weight.copy_(torch.tensor([[4., 0.], [3., 0.], [-3., 0.], [-4., 0.]]))
+x = torch.tensor([[[1., 1.], [2., 1.], [3., 1.]], [[4., 1.], [5., 1.], [6., 1.]]])
+calls = [0] * 4
+handles = []
+for i, expert in enumerate(layer.experts):
+    def count_rows(module, args, index=i):
+        calls[index] += len(args[0])
+    handles.append(expert.register_forward_pre_hook(count_rows))
+with torch.no_grad():
+    actual, _, chosen = layer(x)
+for handle in handles:
+    handle.remove()
+flat = x.flatten(0, 1)
+probability = layer.router(flat).softmax(-1)
+weights, reference_chosen = probability.topk(2, dim=-1)
+weights = weights / weights.sum(-1, keepdim=True)
+expected = torch.zeros_like(flat)
+with torch.no_grad():
+    for row in range(len(flat)):
+        for slot in range(2):
+            expert = int(reference_chosen[row, slot])
+            expected[row] += layer.experts[expert](flat[row]) * weights[row, slot]
+max_error = float((expected - actual.flatten(0, 1)).abs().max())
+assert calls == [6, 6, 0, 0]
+assert torch.equal(chosen, reference_chosen)
+assert actual.shape == x.shape
+assert max_error < 1e-6
+print(json.dumps({"selected_only_rows_per_expert": calls, "selected_assignments": int(chosen.numel()),
+                  "output_shape": list(actual.shape), "combine_max_abs_error": max_error}))
+
+examples = [(torch.tensor([1, 8, 9]), torch.tensor([8, 9, 2])),
+            (torch.tensor([1]), torch.tensor([2]))]
+ids, labels, valid = pad_batch(examples)
+assert ids.tolist() == [[1, 8, 9], [1, 0, 0]]
+assert int(valid.sum()) == 4
+model = TinyLM(ModelConfig(width=8, layers=2, heads=2, max_length=3, experts=4, top_k=2))
+model.eval()
+work = [[0] * 4 for _ in model.blocks]
+captured = []
+handles = []
+for block_index, block in enumerate(model.blocks):
+    for expert_index, expert in enumerate(block.ffn.experts):
+        def count_work(module, args, bi=block_index, ei=expert_index):
+            work[bi][ei] += len(args[0])
+        handles.append(expert.register_forward_pre_hook(count_work))
+    def capture(module, args, result):
+        probability = module.router(args[0][valid]).float().softmax(-1)
+        selection = result[2][valid.reshape(-1)]
+        counts = torch.bincount(selection.flatten(), minlength=4).float()
+        fraction = counts / counts.sum()
+        captured.append(4 * (fraction.detach() * probability.mean(0)).sum())
+    handles.append(block.ffn.register_forward_hook(capture))
+with torch.no_grad():
+    output = _forward(model, ids, valid)
+for handle in handles:
+    handle.remove()
+expected_auxiliary = torch.stack(captured).sum()
+aux_error = float((output["auxiliary"] - expected_auxiliary).abs())
+assert all(sum(layer_work) == 12 for layer_work in work)
+assert aux_error < 1e-6
+with torch.no_grad():
+    statistics = _routing(model, examples, SimpleNamespace(device="cpu"))
+assert statistics["effective_input_tokens"] == 4
+assert statistics["padding_excluded"] is True
+assert all(layer_stats["dispatch_denominator"] == 8 for layer_stats in statistics["layers"])
+print(json.dumps({"ids": ids.tolist(), "valid": valid.tolist(), "valid_input_positions": 4,
+                  "padded_positions": 6, "expert_assignments_in_forward_per_layer": [sum(v) for v in work],
+                  "valid_statistics_dispatch_per_layer": [s["dispatch_denominator"] for s in statistics["layers"]],
+                  "valid_only_auxiliary": float(output["auxiliary"]), "auxiliary_max_abs_error": aux_error,
+                  "routing_statistics": statistics}, ensure_ascii=False))

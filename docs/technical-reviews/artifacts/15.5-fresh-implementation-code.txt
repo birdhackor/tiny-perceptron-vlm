@@ -1,0 +1,46 @@
+import torch
+from torch import nn
+from tiny_perceptron.modern import MoEFFN, DenseFFN
+class FixedExpert(nn.Module):
+    def __init__(self, value):
+        super().__init__()
+        self.register_buffer("value", torch.tensor(value))
+    def forward(self, x):
+        return self.value.expand(x.shape[0], -1)
+x = torch.tensor([[[1.0, 0.0]]])
+for k in (1, 2):
+    module = MoEFFN(width=2, experts=3, top_k=k)
+    with torch.no_grad():
+        module.router.weight.copy_(torch.tensor([[0.7,1.0],[0.2,1.0],[0.1,1.0]]).log() * torch.tensor([[1.0,0.0]]))
+    module.experts = nn.ModuleList([FixedExpert([1.0,0.0]), FixedExpert([0.0,2.0]), FixedExpert([9.0,9.0])])
+    y, auxiliary, chosen = module(x)
+    target = torch.tensor([[[0.7,0.0]]]) if k == 1 else torch.tensor([[[7/9,4/9]]])
+    assert torch.allclose(y, target, atol=1e-6, rtol=0)
+    print("top_k",k,"chosen",chosen.tolist(),"output",y.tolist(),"shape",list(y.shape))
+ffn = DenseFFN(2)
+assert tuple(ffn(x).shape) == tuple(x.shape)
+print("FFN linear shapes",list(ffn.up.weight.shape),list(ffn.down.weight.shape),"output shape",list(ffn(x).shape))
+# 另以三列檢查圖中的依原 row 累加及順序恢復。
+module = MoEFFN(width=2, experts=3, top_k=2)
+with torch.no_grad():
+    module.router.weight.copy_(torch.tensor([[0.7,0.1],[0.2,0.7],[0.1,0.2]]).log())
+module.experts = nn.ModuleList([FixedExpert([1.0,0.0]), FixedExpert([0.0,2.0]), FixedExpert([9.0,9.0])])
+x_rows = torch.tensor([[[1.0,0.0],[0.0,1.0],[1.0,1.0]]])
+y, _, chosen = module(x_rows)
+expected = torch.tensor([[[7/9,4/9],[0.2*9/0.9,0.7*2/0.9+0.2*9/0.9],[1/3,4/3]]])
+assert torch.allclose(y, expected, atol=1e-6, rtol=0)
+print("three row chosen",chosen.tolist(),"row ordered output",y.tolist())
+# 外層殘差與expert內部合併是分離步驟。
+from tiny_perceptron.model import Block, ModelConfig
+class ZeroAttention(nn.Module):
+    def forward(self, x, *args):
+        return torch.zeros_like(x), None
+class FixedBranch(nn.Module):
+    def forward(self, x):
+        return torch.tensor([3.0,4.0]).expand_as(x), x.new_zeros(()), None
+block = Block(ModelConfig(width=2, heads=1))
+block.attention, block.ffn = ZeroAttention(), FixedBranch()
+residual_input = torch.tensor([[[1.0,0.0]]])
+result, _, _ = block(residual_input)
+assert torch.equal(result, torch.tensor([[[4.0,4.0]]]))
+print("outer residual",result.tolist())

@@ -1,0 +1,33 @@
+import hashlib
+import json
+import sys
+from pathlib import Path
+import torch
+
+torch.set_num_threads(1)
+p = Path('docs/course-experiments/results/moe.json')
+raw = p.read_bytes()
+v = json.loads(raw)
+assert hashlib.sha256(raw).hexdigest() == 'a95f60479ef6c51b018af486b1e42d3f8e6ea99bb90c88470184406adb8f9890'
+out = {'original_path': str(p), 'source_sha256': hashlib.sha256(raw).hexdigest(), 'recorded_revision': v['revision'], 'recorded_environment': {k:v[k] for k in ('device','seed','torch_version','python_version','gpu')}, 'validation_dataset':v['results']['dataset']['validation'], 'scope':'只讀固定實驗JSON並核對整數分母與份額；沒有重訓、沒有載入權重、沒有執行CUDA。', 'variants':{}}
+for name, result in v['results']['variants'].items():
+    routing = result['validation_routing']
+    if routing is None:
+        continue
+    config = result['model']['config']
+    k, n = config['top_k'], routing['effective_input_tokens']
+    assert config['layers'] == 2 and config['experts'] == 4 and n == 39256
+    assert routing['padding_excluded'] and len(routing['layers']) == 2
+    assert result['training']['steps'] == 180
+    layers = []
+    for i, layer in enumerate(routing['layers']):
+        counts = layer['dispatch_counts']
+        denominator = layer['dispatch_denominator']
+        assert len(counts) == 4 and sum(counts) == denominator == n * k
+        expected = [count / denominator for count in counts]
+        assert all(abs(a-b) < 1e-15 for a,b in zip(expected, layer['load_fraction'], strict=True))
+        assert abs(sum(layer['load_fraction']) - 1) < 1e-15
+        layers.append({'layer_index': i, 'dispatch_counts': counts, 'dispatch_denominator': denominator, 'load_fraction': layer['load_fraction'], 'recalculated_fraction':expected})
+    out['variants'][name] = {'config':config,'training_steps':result['training']['steps'],'effective_input_tokens':n,'padding_excluded':routing['padding_excluded'],'layers':layers}
+assert len(out['variants']) == 4
+print(json.dumps(out, ensure_ascii=False, indent=2))

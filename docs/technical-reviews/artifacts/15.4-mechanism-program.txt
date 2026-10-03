@@ -1,0 +1,81 @@
+import hashlib
+import json
+import math
+import sys
+from pathlib import Path
+import torch
+
+sys.path.insert(0, str(Path.cwd()))
+from tiny_perceptron.modern import MoEFFN
+from tiny_perceptron.data import pad_batch
+from scripts.course_experiments.architecture import _routing
+from types import SimpleNamespace
+
+torch.set_num_threads(1)
+assert torch.version.cuda is None
+out = {"python": sys.version, "torch": str(torch.__version__), "torch_commit": torch.version.git_version, "device": "cpu", "updates": 0}
+prob0 = torch.tensor([0.1, 0.7, 0.2], dtype=torch.float64)
+coeff = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float64)
+out["gradient"] = []
+for k in (1, 2):
+    scores = prob0.log().clone().requires_grad_(True)
+    probability = scores.softmax(-1)
+    weights, chosen = probability.topk(k)
+    loss = (weights * coeff[chosen]).sum()
+    loss.backward()
+    active = torch.zeros_like(coeff)
+    active[chosen] = coeff[chosen]
+    manual = probability.detach() * (active - loss.detach())
+    assert torch.allclose(scores.grad, manual, atol=1e-12, rtol=0)
+    numerical = []
+    for j in range(3):
+        delta = torch.zeros(3, dtype=torch.float64)
+        delta[j] = 1e-6
+        def value(s):
+            w, c = s.softmax(-1).topk(k)
+            return (w * coeff[c]).sum()
+        numerical.append(float((value(scores.detach() + delta) - value(scores.detach() - delta)) / 2e-6))
+    assert torch.allclose(scores.grad, torch.tensor(numerical, dtype=torch.float64), atol=1e-8, rtol=0)
+    out["gradient"].append({"k": k, "chosen": chosen.tolist(), "chosen_dtype": str(chosen.dtype), "chosen_requires_grad": chosen.requires_grad, "weights_requires_grad": weights.requires_grad, "loss": float(loss.detach()), "score_gradient": scores.grad.tolist(), "manual": manual.tolist(), "finite_difference": numerical})
+out["ranking_boundary"] = []
+for epsilon in (-1e-6, 1e-6):
+    w, c = torch.tensor([0.0, epsilon], dtype=torch.float64).softmax(-1).topk(1)
+    out["ranking_boundary"].append({"epsilon": epsilon, "chosen": c.tolist(), "weights": w.tolist()})
+assert out["ranking_boundary"][0]["chosen"] == [0]
+assert out["ranking_boundary"][1]["chosen"] == [1]
+
+torch.manual_seed(154)
+x = torch.tensor([[[1.0, 0.0], [0.0, 1.0]]])
+out["dispatch"] = []
+for k in (1, 2):
+    module = MoEFFN(2, experts=3, top_k=k, hidden=2)
+    with torch.no_grad():
+        module.router.weight.copy_(torch.tensor([[math.log(0.1), math.log(0.6)], [math.log(0.7), math.log(0.3)], [math.log(0.2), math.log(0.1)]]))
+    rows = [0, 0, 0]
+    handles = []
+    for i, expert in enumerate(module.experts):
+        def hook(m, args, result, i=i):
+            rows[i] += int(args[0].shape[0])
+        handles.append(expert.register_forward_hook(hook))
+    with torch.no_grad():
+        result, auxiliary, selected = module(x)
+    for h in handles:
+        h.remove()
+    assert sum(rows) == 2 * k
+    expected = [[1], [0]] if k == 1 else [[1, 2], [0, 1]]
+    assert selected.tolist() == expected
+    out["dispatch"].append({"k": k, "selected": selected.tolist(), "expert_token_rows": rows, "total_expert_rows": sum(rows), "output_shape": list(result.shape)})
+
+from tiny_perceptron.model import ModelConfig, TinyLM
+examples = [(torch.tensor([1, 8, 9]), torch.tensor([8, 9, 2])), (torch.tensor([1]), torch.tensor([2]))]
+xpad, _, valid = pad_batch(examples)
+assert int(valid.sum()) == 4 and xpad.numel() == 6
+out["masked_routing"] = []
+for k in (1, 2):
+    model = TinyLM(ModelConfig(width=4, layers=2, heads=1, max_length=4, experts=4, top_k=k))
+    stat = _routing(model, examples, SimpleNamespace(device=torch.device("cpu")))
+    assert stat["effective_input_tokens"] == 4 and stat["padding_excluded"]
+    assert len(stat["layers"]) == 2
+    assert all(layer["dispatch_denominator"] == 4 * k and sum(layer["dispatch_counts"]) == 4 * k for layer in stat["layers"])
+    out["masked_routing"].append({"k": k, "padded_positions": xpad.numel(), "effective_positions": int(valid.sum()), "routing": stat})
+print(json.dumps(out, ensure_ascii=False, indent=2))
