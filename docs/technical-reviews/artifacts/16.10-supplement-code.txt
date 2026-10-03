@@ -1,0 +1,20 @@
+import copy, json, torch
+from torch import nn
+from torch.utils.checkpoint import checkpoint
+torch.set_num_threads(1)
+observations=[]
+for width in (8,16):
+    torch.manual_seed(0)
+    layer=nn.Sequential(nn.Linear(4,width),nn.GELU(),nn.Linear(width,4))
+    old={k:v.detach().clone() for k,v in layer.state_dict().items()}
+    base=torch.randn(2,4)
+    a=base.clone().requires_grad_(); b=base.clone().requires_grad_()
+    ya=layer(a); yb=checkpoint(layer,b,use_reentrant=False)
+    ya.square().sum().backward()
+    first={k:p.grad.detach().clone() for k,p in layer.named_parameters()}
+    yb.square().sum().backward()
+    accumulated_error=max((p.grad-2*first[k]).abs().max().item() for k,p in layer.named_parameters())
+    unchanged=all(torch.equal(old[k],v) for k,v in layer.state_dict().items())
+    assert accumulated_error==0 and unchanged and a.data_ptr()!=b.data_ptr()
+    observations.append({"hidden_width":width,"input_independent_storage":a.data_ptr()!=b.data_ptr(),"same_input_values":torch.equal(a,b),"weights_unchanged":unchanged,"shared_parameter_gradient_error_from_two_times_plain":accumulated_error,"parameter_shapes":{k:list(v.shape) for k,v in layer.state_dict().items()},"hidden_activation_shape":[2,width],"dtype":str(base.dtype)})
+print(json.dumps(observations,ensure_ascii=False))

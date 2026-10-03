@@ -1,0 +1,28 @@
+import hashlib,json,random
+from pathlib import Path
+root=Path(__file__).resolve().parents[3]
+p=root/"docs/course-experiments/results/efficiency.json"
+d=json.loads(p.read_text());r=d["results"]
+assert d["revision"]=="48a4f3e912b483d70aee57c42c2aac226534a9a6"
+observations={"original_results_sha256":hashlib.sha256(p.read_bytes()).hexdigest(),"scope":"CPU reads and arithmetic audit of archived L4 run; no GPU run or model update", "original_environment":{k:d[k] for k in ("device","gpu","seed","torch_version","python_version")},"probe":r["activation_checkpoint"],"branches":{}}
+assert r["activation_checkpoint"]["logit_max_error"]==0 and r["activation_checkpoint"]["gradient_max_error"]==0
+for name,expected_ms,expected_mem in [("ordinary","14.070",["67.164","75.988","8.824"]),("activation_checkpoint","20.735",["69.336","74.377","5.041"])]:
+    v=r["update_variants"][name];t=v["training"]
+    assert t["steps"]==t["optimizer_updates"]==t["requested_steps"]==40
+    assert t["skipped_updates"]==0 and t["effective_tokens"]==2328
+    before=t["memory_allocated_before_bytes"];peak=t["peak_memory_allocated_bytes"];extra=t["peak_additional_allocated_bytes"]
+    assert peak-before==extra
+    millis=f"{t['warm_step_median_seconds']*1000:.3f}"
+    mem=[f"{x/2**20:.3f}" for x in (before,peak,extra)]
+    assert millis==expected_ms and mem==expected_mem
+    heldout={}
+    for split,matches,records in [("validation",3,5),("test",5,10)]:
+        h=v["heldout"][split]
+        actual=sum(row["exact"] for row in h["samples"])
+        assert actual==h["matches"]==matches and len(h["samples"])==h["records"]==records
+        assert h["exact_match"]==matches/records
+        heldout[split]={"matches":actual,"records":records,"answer_effective_tokens":h["effective_tokens"],"exact_match":h["exact_match"]}
+    observations["branches"][name]={"requested_steps":t["requested_steps"],"optimizer_updates":t["optimizer_updates"],"effective_tokens":t["effective_tokens"],"skipped_updates":t["skipped_updates"],"milliseconds_rounded":millis,"memory_bytes":[before,peak,extra],"MiB_rounded":mem,"heldout":heldout}
+assert r["update_variants"]["activation_checkpoint"]["weight_max_error_from_ordinary_after_updates"]==0
+observations["checkpoint_weight_max_error"]=0.0
+print(json.dumps(observations,ensure_ascii=False))

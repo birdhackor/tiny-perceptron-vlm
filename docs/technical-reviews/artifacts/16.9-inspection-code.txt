@@ -1,0 +1,63 @@
+import hashlib
+import json
+import math
+import os
+import platform
+import re
+import statistics
+import subprocess
+import sys
+from pathlib import Path
+import torch
+
+root = Path.cwd()
+out = root / "docs/technical-reviews/artifacts"
+def sha(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+flash_path = root / "docs/course-experiments/results/flash_probe.json"
+flash = json.loads(flash_path.read_bytes())
+f = flash["results"]
+report = {"scope": "離線CPU核算現存凍結GPU報告；沒有重跑GPU或正式實驗。", "environment": {"python": platform.python_version(), "torch": str(torch.__version__), "torch_git_version": str(torch.version.git_version), "device": "cpu", "threads": str(torch.get_num_threads()), "OMP_NUM_THREADS": os.environ["OMP_NUM_THREADS"], "MKL_NUM_THREADS": os.environ["MKL_NUM_THREADS"]}, "frozen_sha256": sha(flash_path), "frozen_gpu_run": {"revision": flash["revision"], "run_id": flash["modal"]["run_id"], "hf_result_revision": flash["hf"]["result_revision"], "hf_fixture_revision": flash["hf"]["revision"], "fixture_sha256": flash["artifacts"][1]["sha256"], "seed": flash["seed"], "torch": flash["torch_version"], "gpu": flash["gpu"], "runtime": f["runtime"], "configuration": f["configuration"]}, "measurements": []}
+assert f["configuration"]["shape_B_H_T_D"] == [2, 4, 512, 32]
+assert f["configuration"]["warmup_calls"] == 3
+assert f["configuration"]["measured_calls"] == 9
+assert flash["evidence_status"] == "complete_run"
+for dtype in ("fp16", "bf16"):
+    route = f["routes"][dtype]
+    assert route["all_checks_finite"] and route["all_comparisons_within_tolerance"]
+    report.setdefault("correctness", {})[dtype] = route["correctness"]
+    report.setdefault("profiles", {})[dtype] = route["profiles"]
+    for mode in ("forward", "forward_backward"):
+        profile = route["profiles"][mode]
+        assert profile["flash_cuda_verified"] and profile["cuda_kernel_names"]
+        assert "aten::_scaled_dot_product_flash_attention" in profile["operator_names"]
+        if mode == "forward_backward":
+            assert "aten::_scaled_dot_product_flash_attention_backward" in profile["operator_names"]
+        for backend in ("manual", "forced_flash"):
+            m = route["measurements"][mode][backend]
+            median = statistics.median(m["samples_seconds"])
+            assert len(m["samples_seconds"]) == m["measured_calls"] == 9
+            assert m["warmup_calls"] == 3 and m["synchronized"]
+            assert median == m["median_seconds"]
+            assert m["additional_peak_allocated_bytes"] == m["peak_allocated_bytes"] - m["allocated_before_bytes"]
+            report["measurements"].append({"dtype": dtype, "mode": mode, "backend": backend, "original": m, "recomputed_median_ms": median * 1000, "rounded_ms": round(median * 1000, 3), "baseline_MiB": m["allocated_before_bytes"] / 2**20, "additional_peak_MiB": m["additional_peak_allocated_bytes"] / 2**20, "rounded_additional_peak_MiB": round(m["additional_peak_allocated_bytes"] / 2**20, 3), "total_peak_MiB": m["peak_allocated_bytes"] / 2**20})
+for path in ("scripts/course_experiments/architecture.py", "scripts/course_experiments/run.py"):
+    assert sha(root / path) == flash["code_sha256"][path]
+report["code_identity"] = {path: sha(root / path) for path in ("scripts/course_experiments/architecture.py", "scripts/course_experiments/run.py")}
+eff_path = root / "docs/course-experiments/results/efficiency.json"
+eff = json.loads(eff_path.read_bytes())
+attention = eff["results"]["manual_vs_sdpa"]
+assert attention["backend"]["selected"] == "memory_efficient"
+assert not attention["backend"]["flash_attention_observed"]
+for m in attention["timings"].values():
+    assert statistics.median(m["samples_seconds"]) == m["median_seconds"]
+report["efficiency"] = {"source_sha256": sha(eff_path), "revision": eff["revision"], "run_id": eff["modal"]["run_id"], "result_revision": eff["hf"]["result_revision"], "gpu": eff["gpu"], "torch": eff["torch_version"], "seed": eff["seed"], "shape": attention["shape"], "attention": attention, "difference_milliseconds": 1000 * (attention["timings"]["manual"]["median_seconds"] - attention["timings"]["sdpa"]["median_seconds"])}
+report["math"] = {"T_squared": {str(t): t*t for t in (4, 8, 8192)}, "exp_log": {str(x): math.exp(math.log(x)) for x in (1, 2, 4)}, "log_values": {str(x): math.log(x) for x in (1, 2, 4)}, "full_numerator": 10 + 2*20 + 4*30, "full_denominator": 1 + 2 + 4, "full_result": 170/7, "first_block": {"denominator": .5 + 1, "numerator": .5*10 + 1*20}, "rescale_factor": math.exp(math.log(2) - math.log(4)), "second_block": {"denominator": 1.5*.5 + 1, "numerator": 25*.5 + 30}, "wrong_unscaled_numerator_result": (25 + 30)/1.75, "wrong_unscaled_denominator_result": 42.5/(1.5 + 1), "initial_factor": math.exp(float("-inf") - math.log(2)), "MiB_bytes": 1024*1024, "increment_ratio": 32.75/2.0322265625, "total_peak_ratio": 97.75/67.0322265625}
+assert abs(report["math"]["full_result"] - 42.5/1.75) < 1e-12
+cmd = [sys.executable, "-m", "scripts.course_experiments.run", "--help"]
+help_result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+assert help_result.returncode == 0
+report["cli_help"] = {"command": "OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 CUDA_VISIBLE_DEVICES='' HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1 TRANSFORMERS_OFFLINE=1 .venv/bin/python -m scripts.course_experiments.run --help", "returncode": help_result.returncode, "stdout": help_result.stdout, "stderr": help_result.stderr}
+report["not_available_locally"] = {"flash_probe_current_run_json": not (root / "outputs/course-experiments/course-v1/flash_probe/current-run.json").exists(), "meaning": "未讀本機fixture；以持久凍結報告中的run_id、不可變HF版本及fixtureSHA界定支持範圍。未宣稱重新核驗遠端tensor。"}
+(out / "16.9-frozen-inspection-execution.json").write_text(json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8")
+print(json.dumps({"environment": report["environment"], "measurements": [{k:v for k,v in m.items() if k != "original"} for m in report["measurements"]], "efficiency_difference_ms": report["efficiency"]["difference_milliseconds"], "math": report["math"], "cli_help_returncode": help_result.returncode}, ensure_ascii=False, indent=2))

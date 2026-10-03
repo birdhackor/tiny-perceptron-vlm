@@ -1,0 +1,58 @@
+import json, hashlib, statistics, ast
+from pathlib import Path
+H=lambda p:hashlib.sha256(Path(p).read_bytes()).hexdigest()
+def read(p):return json.loads(Path(p).read_text())
+e=read("docs/course-experiments/results/efficiency.json")
+f=read("docs/course-experiments/results/flash_probe.json")
+er=e["results"];fr=f["results"]
+assert e["gpu"]==f["gpu"]=="NVIDIA L4"
+assert er["models"]["mha"]["model"]["config"]["heads"]==4 and er["models"]["mha"]["model"]["config"]["kv_heads"]==4
+assert er["manual_vs_sdpa"]["shape"]==[4,53] and er["manual_vs_sdpa"]["dtype"]=="torch.float32"
+assert er["manual_vs_sdpa"]["output_max_error"]==3.814697265625e-6
+assert er["manual_vs_sdpa"]["gradient_max_error"]==1.6007106751203537e-10
+assert er["manual_vs_sdpa"]["backend"]["selected"]=="memory_efficient" and not er["manual_vs_sdpa"]["backend"]["flash_attention_observed"]
+for route,ms in [("manual",2.990),("sdpa",2.346)]:
+    t=er["manual_vs_sdpa"]["timings"][route]
+    assert t["warmup_calls"]==3 and len(t["samples_seconds"])==t["measured_calls"]==9
+    assert statistics.median(t["samples_seconds"])==t["median_seconds"]
+    assert round(t["median_seconds"]*1000,3)==ms and t["synchronized"]
+for name,ms in [("ordinary",14.070),("sdpa",12.849)]:
+    v=er["update_variants"][name]
+    assert v["training"]["steps"]==v["training"]["optimizer_updates"]==40
+    assert v["training"]["effective_tokens"]==2328 and v["training"]["skipped_updates"]==0
+    assert v["heldout"]["test"]["matches"]==5 and v["heldout"]["test"]["records"]==10
+    assert sum(int(s["exact"]) for s in v["heldout"]["test"]["samples"])==5
+    assert round(v["training"]["warm_step_median_seconds"]*1000,3)==ms
+assert er["update_variants"]["sdpa"]["weight_max_error_from_ordinary_after_updates"]==3.5136938095092773e-5
+cfg=fr["configuration"]
+assert cfg["shape_B_H_T_D"]==[2,4,512,32] and cfg["attn_mask"] is None and cfg["is_causal"] and cfg["dropout_p"]==0
+assert cfg["requested_backend"]=="SDPBackend.FLASH_ATTENTION only" and fr["seed"]==42
+checks={}
+for n,outmax,gradmax,otol,gtol in [("fp16",0.001953125,0.000244140625,(0.01,0.01),(0.03,0.03)),("bf16",0.015625,0.001953125,(0.06,0.04),(0.08,0.08))]:
+    route=fr["routes"][n]; c=route["correctness"]
+    assert c["output"]["max_absolute_error"]==outmax
+    assert max(v["max_absolute_error"] for v in c["gradients"].values())==gradmax
+    assert (c["output"]["atol"],c["output"]["rtol"])==otol
+    for g in c["gradients"].values():assert (g["atol"],g["rtol"])==gtol
+    assert all(x["finite"] and x["within_declared_tolerance"] for x in [c["output"],*c["gradients"].values()])
+    for mode,p in route["profiles"].items():
+        assert p["flash_forward_operator_observed"] and p["flash_cuda_verified"] and p["cuda_kernel_names"]
+        assert any("pytorch_flash::flash_fwd_kernel" in k for k in p["cuda_kernel_names"])
+        if mode=="forward_backward":
+            assert p["flash_backward_operator_observed"]
+            assert any("pytorch_flash::flash_bwd" in k for k in p["cuda_kernel_names"])
+    checks[n]={"output_max":outmax,"qkv_gradient_max":gradmax,"output_tolerances":otol,"gradient_tolerances":gtol,"profiles_verified":True,"all_finite_and_close":True}
+current=Path("scripts/course_experiments/architecture.py").read_text(); lines=current.splitlines(keepends=True)
+functions={n.name:"".join(lines[n.lineno-1:n.end_lineno]) for n in ast.parse(current).body if isinstance(n,ast.FunctionDef)}
+frozen=read("docs/technical-reviews/artifacts/16.8-frozen-efficiency-source.json")
+assert frozen["original_download_sha256"]==e["code_sha256"]["scripts/course_experiments/architecture.py"]
+for n,v in frozen["functions"].items():assert v["raw_text"]==functions[n]
+assert H("scripts/course_experiments/architecture.py")==f["code_sha256"]["scripts/course_experiments/architecture.py"]
+for p in ["tiny_perceptron/attention.py","tiny_perceptron/model.py","scripts/course_experiments/common.py"]:assert H(p)==e["code_sha256"][p]
+release=read("docs/course-experiments/public-releases/efficiency.json");student=read("docs/course-experiments/student-checks/efficiency.json")
+manifest={d["output"]:d["sha256"] for d in release["release"]["public_manifest"]["files"]}
+for n in ["README.md","evaluation.json"]:assert H("checkpoints/course/efficiency/"+n)==manifest[n]
+assert student["public_source"]["revision"]==release["release"]["revision"]
+audit={"scope":"本人只執行離線凍結紀錄／sourcepin／分母／數值抽查；以下GPU實測源自具名凍結run，沒有本輪GPU重跑、訓練或發布", "efficiency_record_sha256":H("docs/course-experiments/results/efficiency.json"),"flash_record_sha256":H("docs/course-experiments/results/flash_probe.json"),"model_config":er["models"]["mha"]["model"],"full_model_comparison":er["manual_vs_sdpa"],"training_summaries":{n:{"updates":er["update_variants"][n]["training"]["optimizer_updates"],"effective_targets":er["update_variants"][n]["training"]["effective_tokens"],"matches":er["update_variants"][n]["heldout"]["test"]["matches"],"records":er["update_variants"][n]["heldout"]["test"]["records"],"warm_step_ms":round(er["update_variants"][n]["training"]["warm_step_median_seconds"]*1000,3)} for n in ["ordinary","sdpa"]},"flash_configuration":cfg,"flash_correctness":checks,"sourcepin_verified":True,"card_release_student_pin_verified":True,"source_inspection":{"timed_full_model":'manual(x, valid=valid)' in functions["_sdpa_probe"],"ordinary_sdpa_deepcopy_base":'model = copy.deepcopy(base)' in functions["run_efficiency"],"seed42_fixture_same_upstream":'generator = torch.Generator().manual_seed(ctx.seed)' in functions["run_flash_probe"] and 'actual_gradients = torch.autograd.grad(actual, inputs, upstream)' in functions["run_flash_probe"],"source_fixed_tolerances":'output_tolerance = (0.01, 0.01)' in functions["run_flash_probe"],"probe_has_no_optimizer_training":not any(isinstance(n,ast.Call) and ((isinstance(n.func,ast.Attribute) and n.func.attr in ['AdamW','Adam','SGD','step','backward']) or (isinstance(n.func,ast.Name) and n.func.id=='_train')) for n in ast.walk(ast.parse(functions["run_flash_probe"])))}}
+assert all(audit["source_inspection"].values())
+print(json.dumps(audit,ensure_ascii=False))

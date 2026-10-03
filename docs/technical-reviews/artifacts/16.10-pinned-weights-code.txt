@@ -1,0 +1,22 @@
+import hashlib,json,torch
+from pathlib import Path
+from tiny_perceptron.training import load_checkpoint
+torch.set_num_threads(1)
+release=json.loads(Path("docs/course-experiments/public-releases/efficiency.json").read_text())["release"]
+files={v["output"]:v for v in release["public_manifest"]["files"]}
+models={};identities={}
+for name in ("ordinary","activation_checkpoint"):
+    filename=name+".pt";p=Path("checkpoints/course/efficiency")/filename
+    digest=hashlib.sha256(p.read_bytes()).hexdigest()
+    assert digest==files[filename]["sha256"]
+    model,payload=load_checkpoint(p,device="cpu");model.eval();models[name]=model
+    identities[name]={"url":"https://huggingface.co/birdhackor/tiny-perceptron-course-models/resolve/"+release["weights_revision"]+"/course/course-v1/efficiency/"+filename,"sha256":digest,"bytes":p.stat().st_size,"config":model.description(),"step":payload.get("step"),"state_table_shapes":{k:list(v.shape) for k,v in model.state_dict().items()}}
+a=models["ordinary"];b=models["activation_checkpoint"]
+assert a.state_dict().keys()==b.state_dict().keys()
+weight_error=max((a.state_dict()[k]-b.state_dict()[k]).abs().max().item() for k in a.state_dict())
+with torch.no_grad():
+    ids=torch.tensor([[1,2,3]])
+    ya=a(ids)["logits"];yb=b(ids)["logits"]
+    output_error=(ya-yb).abs().max().item()
+assert weight_error==0 and output_error==0
+print(json.dumps({"identities":identities,"weight_max_error":weight_error,"CPU_synthetic_input":[[1,2,3]],"shape":list(ya.shape),"logit_max_error":output_error,"scope":"Offline comparison of existing immutable-public weights and one CPU forward; no updates, no evaluation-quality or L4 speed extrapolation"},ensure_ascii=False))
