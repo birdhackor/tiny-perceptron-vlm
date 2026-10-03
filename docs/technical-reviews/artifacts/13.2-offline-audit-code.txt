@@ -1,0 +1,127 @@
+"""13.2 bounded CPU evidence: only data preparation and deterministic scoring, no training."""
+from pathlib import Path
+import ast
+import hashlib
+import json
+import math
+import random
+import sys
+import torch
+from tiny_perceptron.data import render_chat
+from tiny_perceptron.alignment import sequence_log_probability
+
+OUT = Path('docs/technical-reviews/artifacts')
+def sha(raw):
+    return hashlib.sha256(raw).hexdigest()
+def block_network(event, args):
+    if event.startswith('socket.') or event in {'subprocess.Popen', 'os.system'}:
+        raise RuntimeError('offline review prohibits network and subprocesses')
+sys.addaudithook(block_network)
+torch.set_num_threads(1)
+environment = {'python': sys.version, 'torch': torch.__version__, 'torch_commit': torch.version.git_version,
+               'device': 'cpu', 'OMP_NUM_THREADS': '1', 'MKL_NUM_THREADS': '1'}
+
+# Execute only the original pure functions from the pinned formal source, never its training entrypoint.
+namespace = {'json': json, 'hashlib': hashlib, 'random': random}
+for filename, names in [('formal-text.py', {'_json_bytes', '_digest', '_utf8_prefix'}),
+                        ('formal-common.py', {'split_records'})]:
+    tree = ast.parse((Path('/tmp/13.2-originals') / filename).read_text())
+    nodes = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in names]
+    assert {node.name for node in nodes} == names
+    exec(compile(ast.Module(body=nodes, type_ignores=[]), filename, 'exec'), namespace)
+prefix, digest, split_records = (namespace[name] for name in ('_utf8_prefix', '_digest', 'split_records'))
+input_path = Path('outputs/training-assets-validation/behavior-initial/ultrafeedback-dpo/train-first-100.jsonl')
+input_bytes = input_path.read_bytes()
+assert sha(input_bytes) == 'fe64a046481faf482a23b2d0f66e14789e1342ad46e553f35a57e29e7688a3dd'
+raw = [json.loads(line) for line in input_bytes.splitlines()]
+assert len(raw) == 100
+records, rows, max_byte_lengths, source_length_ranges = [], [], {}, {}
+for index, row in enumerate(raw):
+    texts = {side: next(m['content'] for m in reversed(row[side]) if m['role'] == 'assistant')
+             for side in ('chosen', 'rejected')}
+    assert row['chosen'][0]['content'] == row['prompt'] == row['rejected'][0]['content']
+    texts['prompt'] = row['prompt']
+    cropped = {key: prefix(text, 120) for key, text in texts.items()}
+    record = {'family': row.get('prompt_id', digest(row['prompt'])),
+              'prompt': cropped['prompt'], 'chosen': cropped['chosen'], 'rejected': cropped['rejected'],
+              'source_row': index, 'source_record_sha256': digest(row)}
+    records.append(record)
+    original_lengths = {key: len(text.encode('utf-8')) for key, text in texts.items()}
+    cropped_lengths = {key: len(text.encode('utf-8')) for key, text in cropped.items()}
+    assert all(length <= 120 for length in cropped_lengths.values())
+    assert all(cropped[key].encode('utf-8').decode('utf-8') == cropped[key] for key in cropped)
+    rows.append({'source_row': index, 'source_record_sha256': digest(row), 'family': record['family'],
+                 'original_utf8_bytes': original_lengths, 'cropped_utf8_bytes': cropped_lengths})
+parts = split_records(records, seed=42)
+frozen_path = Path('docs/course-experiments/results/dpo.json')
+frozen_bytes = frozen_path.read_bytes()
+frozen = json.loads(frozen_bytes)
+pilot = frozen['results']['ultrafeedback_pilot']
+assert frozen['revision'] == '8a7571847dd0106c20aaeb8fe32c9d4a0e675c0d' and frozen['seed'] == 42
+split_evidence = {}
+for name, records_in_split in parts.items():
+    serialized = ''.join(json.dumps(row, ensure_ascii=False) + '\n' for row in records_in_split).encode('utf-8')
+    families = {row['family'] for row in records_in_split}
+    expected = pilot['data'][name]
+    assert sha(serialized) == expected['sha256']
+    assert len(records_in_split) == expected['records'] == len(families)
+    split_evidence[name] = {'records': len(records_in_split), 'families': len(families),
+                            'sha256': sha(serialized), 'matches_frozen_result': True,
+                            'source_rows': [row['source_row'] for row in records_in_split]}
+    for row in rows:
+        if row['family'] in families:
+            row['split'] = name
+family_sets = [set(row['family'] for row in part) for part in parts.values()]
+assert all(not family_sets[i] & family_sets[j] for i in range(3) for j in range(i + 1, 3))
+assert [len(parts[name]) for name in ('train', 'validation', 'test')] == [80, 10, 10]
+assert prefix('答' * 41, 120) == '答' * 40
+assert prefix('答' * 40 + '案', 121) == '答' * 40
+
+# Exercise explanation: a changed question changes the conditioning prefix; unequal answers need their own shift.
+def chat(prompt, answer):
+    return render_chat([{'role': 'user', 'content': prompt}, {'role': 'assistant', 'content': answer}])
+xc, yc = chat('1+1=?', '2')
+xr, yr = chat('1+1=?', '3')
+x_other, y_other = chat('2+2=?', '3')
+x_long, y_long = chat('1+1=?', '33')
+assert xc[:9].tolist() == xr[:9].tolist()
+assert x_other[:9].tolist() != xc[:9].tolist()
+assert x_long.tolist() == [1, 3, 57, 51, 57, 69, 71, 2, 4, 59, 59]
+assert y_long.tolist() == [-100] * 8 + [59, 59, 2]
+def toy_logits(inputs):
+    logits = torch.zeros(1, len(inputs), 264, dtype=torch.float64)
+    logits[0, -1, 2] = {58: 1.0, 59: 3.0}[int(inputs[-1])]
+    return logits
+correct_rejected = float(sequence_log_probability(toy_logits(xr), yr.unsqueeze(0)))
+mixed_rejected = float(sequence_log_probability(toy_logits(xc), yr.unsqueeze(0)))
+expected_correct = -math.log(264) + 3 - math.log(263 + math.exp(3))
+expected_mixed = -math.log(264) + 1 - math.log(263 + math.exp(1))
+assert abs(correct_rejected - expected_correct) < 1e-12
+assert abs(mixed_rejected - expected_mixed) < 1e-12
+assert correct_rejected != mixed_rejected
+logits = torch.zeros(10, 264, dtype=torch.float64, requires_grad=True)
+per_token = torch.nn.functional.cross_entropy(logits, yc, reduction='none', ignore_index=-100)
+per_token.sum().backward()
+assert per_token[:8].tolist() == [0.0] * 8
+assert torch.count_nonzero(logits.grad[:8]) == 0
+assert torch.count_nonzero(logits.grad[8:]) > 0
+result = {'environment': environment, 'exit_code': 0,
+          'input': {'path': str(input_path), 'sha256': sha(input_bytes), 'rows': len(raw),
+                    'immutable_revision': '3949bf5f8c17c394422ccfab0c31ea9c20bdeb85'},
+          'frozen_result': {'path': str(frozen_path), 'sha256': sha(frozen_bytes),
+                            'revision': frozen['revision'], 'device': frozen['device'], 'seed': frozen['seed'],
+                            'source_records': pilot['source_records'], 'scope': pilot['scope']},
+          'splits': split_evidence, 'family_intersections_empty': True,
+          'all_100_shared_source_prompts': True, 'all_300_fields_valid_utf8_at_most_120_bytes': True,
+          'rows': rows, 'utf8_boundary_examples': {'120_bytes': 40, '121_bytes': 40, 'unit': 'three-byte Chinese characters'},
+          'exercise_followup': {'different_prompt_input': x_other.tolist(),
+                                'different_prompt_breaks_shared_prefix': True,
+                                'unequal_length_input': x_long.tolist(), 'unequal_length_labels': y_long.tolist()},
+          'score_alignment': {'correct_rejected_logp': correct_rejected, 'mixed_rejected_logp': mixed_rejected,
+                              'tolerance': 1e-12, 'toy_logits_only_no_model_no_training': True},
+          'ignore_index': {'first_8_losses': per_token[:8].tolist(), 'first_8_gradient_nonzero': 0,
+                           'active_losses': per_token[8:].tolist()},
+          'scope': 'Data preparation audit plus deterministic CPU mechanics; no training, model downloads, or quality conclusions.'}
+(OUT / '13.2-offline-audit-execution.json').write_text(json.dumps(result, ensure_ascii=False, indent=2) + '\n')
+print(json.dumps({key: result[key] for key in ('environment', 'splits', 'family_intersections_empty',
+      'all_100_shared_source_prompts', 'all_300_fields_valid_utf8_at_most_120_bytes', 'score_alignment', 'ignore_index')}, ensure_ascii=False))
