@@ -1,0 +1,31 @@
+import torch
+from torch import nn
+
+torch.manual_seed(0)
+teacher = nn.Linear(2, 3).eval().requires_grad_(False)
+student = nn.Linear(2, 3)
+optimizer = torch.optim.SGD(student.parameters(), lr=0.1)
+x = torch.tensor([[1.0, 2.0]])
+teacher_before = teacher.weight.detach().clone()
+student_before = student.weight.detach().clone()
+with torch.no_grad():
+    target = teacher(x)
+output = student(x)
+optimizer.zero_grad()
+(output - target).square().mean().backward()
+optimizer.step()
+print("教師梯度", teacher.weight.grad)
+print("教師最大改動", (teacher.weight - teacher_before).abs().max().item())
+print("學生有改動", bool((student.weight - student_before).abs().max() > 0))
+probe = x.clone().requires_grad_()
+with torch.no_grad():
+    probe_output = teacher(probe)
+print("輸入可微時教師輸出記圖", probe_output.requires_grad)
+assert not probe_output.requires_grad
+
+import json,platform,os
+print("審核環境",json.dumps({"python":platform.python_version(),"torch":torch.__version__,"torch_git":torch.version.git_version,"device":str(x.device),"threads":torch.get_num_threads(),"OMP_NUM_THREADS":os.environ.get("OMP_NUM_THREADS"),"MKL_NUM_THREADS":os.environ.get("MKL_NUM_THREADS")},ensure_ascii=False))
+print("核對",json.dumps({"teacher_eval":not teacher.training,"teacher_all_frozen":all(not p.requires_grad for p in teacher.parameters()),"teacher_all_grad_none":all(p.grad is None for p in teacher.parameters()),"only_student_optimizer":{id(p) for g in optimizer.param_groups for p in g["params"]}=={id(p) for p in student.parameters()},"target_shape":list(target.shape),"target_requires_grad":target.requires_grad,"output_shape":list(output.shape),"teacher_snapshot_independent":teacher_before.data_ptr()!=teacher.weight.data_ptr(),"student_weight_max_change":(student.weight-student_before).abs().max().item(),"target":target.tolist(),"student_before_output":output.detach().tolist()},ensure_ascii=False))
+assert teacher.weight.grad is None
+assert torch.equal(teacher.weight,teacher_before)
+assert (student.weight-student_before).abs().max()>0

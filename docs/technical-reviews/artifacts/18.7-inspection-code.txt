@@ -1,0 +1,75 @@
+import json, hashlib, ast, platform
+from pathlib import Path
+import torch
+from torch import nn
+
+art = Path("docs/technical-reviews/artifacts")
+fixed = json.loads((art / "18.7-frozen-evidence.json").read_text())
+selected = json.loads((art / "18.7-frozen-code-selection.json").read_text())
+results = json.loads(Path("docs/course-experiments/results/distillation.json").read_text())
+assert selected["original_full_file_sha256"] == results["code_sha256"]["scripts/course_experiments/compression.py"]
+for item in fixed["original_files"]:
+    assert hashlib.sha256(Path(item["path"]).read_bytes()).hexdigest() == item["sha256"]
+func = selected["functions"]
+for name, row in func.items():
+    ast.parse(row["raw_source"])
+assert "model.state_dict().items()" in func["_parameter_hash"]["raw_source"]
+assert "value.detach().cpu().contiguous().numpy().tobytes()" in func["_parameter_hash"]["raw_source"]
+for name in ["_cache_text", "_hard_targets"]:
+    assert func[name]["raw_source"].startswith("@torch.no_grad()")
+    assert "teacher.eval().requires_grad_(False)" in func[name]["raw_source"]
+assert "optimizer = torch.optim.AdamW(model.parameters()" in func["_fit_text"]["raw_source"]
+assert 'teacher_cache[i]' in func["_fit_text"]["raw_source"]
+assert 'y[i] != IGNORE' in func["_cache_text"]["raw_source"]
+assert 'hard=False' in func["run_distillation"]["raw_source"]
+assert '_parameter_hash(teacher) != frozen_hash' in func["_distill_case"]["raw_source"]
+assert fixed["release_chain"]["approval_matches"]
+assert fixed["release_chain"]["student_all_returncodes_zero"]
+formal = {}
+for name, row in fixed["tasks"].items():
+    actual = results["results"]["tasks"][name]
+    assert actual["teacher_frozen_and_unchanged"] is True
+    assert row["teacher_cache"] == actual["teacher_cache"]
+    r = row["cache_rounding"]
+    assert r["seconds_to_3_decimals"] == format(actual["teacher_cache"]["seconds"], ".3f")
+    assert r["MB_to_2_decimals"] == format(actual["teacher_cache"]["file_bytes"] / 1_000_000, ".2f")
+    hard = actual["hard_target_generation"]
+    if hard is not None:
+        assert row["hard_seconds_to_3_decimals"] == format(hard["seconds"], ".3f")
+    else:
+        assert name == "moe_to_dense"
+    formal[name] = {"frozen_and_unchanged": actual["teacher_frozen_and_unchanged"], "cache_seconds": actual["teacher_cache"]["seconds"], "cache_MB": actual["teacher_cache"]["file_bytes"] / 1_000_000, "hard_seconds": hard["seconds"] if hard else None, "data": actual["data"], "student_branches": len(row["student_training"])}
+assert fixed["tasks"]["attributes"]["hard_circle_example"]["teacher_answer"] == "circle"
+assert results["results"]["tasks"]["attributes"]["teacher_test"]["correct"] == 5
+assert results["results"]["tasks"]["attributes"]["teacher_test"]["examples"] == 10
+assert results["results"]["tasks"]["style_transfer"]["teacher_style"]["content_correct"] == 3
+assert results["results"]["tasks"]["style_transfer"]["teacher_style"]["examples"] == 27
+assert "shape=" in results["results"]["tasks"]["attributes"]["teacher_validation"]["generated_samples"][0]["question"]
+assert "style=" in results["results"]["tasks"]["style_transfer"]["teacher_validation"]["generated_samples"][0]["question"]
+assert results["results"]["tasks"]["moe_to_dense"]["teacher_provenance"]["config"]["experts"] == 4
+assert results["results"]["tasks"]["moe_to_dense"]["teacher_provenance"]["config"]["top_k"] == 2
+for name in ["attributes", "style_transfer"]:
+    audit = results["results"]["tasks"][name]["hard_target_generation"]["audit"]
+    assert all(isinstance(row["teacher_answer"], str) and isinstance(row["teacher_ids"], list) for row in audit)
+
+torch.manual_seed(0)
+dropout = nn.Dropout(0.5).eval()
+z = torch.ones(2, 3, requires_grad=True)
+assert torch.equal(dropout(z), z)
+assert dropout(z).requires_grad
+layer = nn.Linear(2, 3).eval()
+x = torch.tensor([[1., 2.]])
+assert layer(x).requires_grad
+layer.requires_grad_(False)
+assert all(not p.requires_grad for p in layer.parameters())
+probe = x.clone().requires_grad_()
+assert layer(probe).requires_grad
+with torch.no_grad():
+    out = layer(probe)
+assert not out.requires_grad
+reference = layer.weight
+detached = layer.weight.detach()
+snapshot = layer.weight.detach().clone()
+assert reference.data_ptr() == detached.data_ptr()
+assert reference.data_ptr() != snapshot.data_ptr()
+print(json.dumps({"runtime":{"python":platform.python_version(),"torch":torch.__version__,"torch_git":torch.version.git_version,"device":"cpu","threads":torch.get_num_threads()},"software_probes":{"eval_dropout_identity":True,"eval_dropout_gradient_remains":True,"eval_linear_gradient_remains":True,"module_freeze_includes_bias":True,"input_grad_survives_freeze":True,"no_grad_probe_false":True,"reference_detach_alias_and_clone_independent":True},"fixed_original_records_inspected":formal,"formal_code_hash_matches":True,"formal_measurement_rerun":False,"scope":"只執行離線官方 API 小探針、固定 manifest SHA 與原碼條件解析；GPU 時間是既有正式原紀錄，不是本次重新量測。"},ensure_ascii=False))
