@@ -1,0 +1,58 @@
+from pathlib import Path
+import hashlib,json,platform,time,statistics,inspect,ast
+import torch
+from tiny_perceptron.model import TinyLM,ModelConfig
+from tiny_perceptron.attention import attention_mask
+
+torch.set_num_threads(1)
+torch.manual_seed(42)
+environment={'python':platform.python_version(),'torch':str(torch.__version__),'torch_git':str(torch.version.git_version),'device':'cpu','cpu':platform.processor() or 'x86_64','torch_threads':str(torch.get_num_threads()),'OMP_NUM_THREADS':'1','MKL_NUM_THREADS':'1'}
+model=TinyLM(ModelConfig(width=8))
+payload=sum(p.numel()*p.element_size() for p in model.parameters())
+assert model.description()['parameters']==6104 and payload==24416
+assert {str(p.dtype) for p in model.parameters()}=={'torch.float32'}
+model.eval()
+assert not model.training
+before=model(torch.tensor([[1,2,3]]))['logits']
+with torch.no_grad():after=model(torch.tensor([[1,2,3]]))['logits']
+assert before.requires_grad and not after.requires_grad and after.grad_fn is None
+rows=[]
+with torch.no_grad():
+ for T in (3,6):
+  x=torch.tensor([[1,2,3]*(T//3)])
+  for _ in range(3):model(x)
+  elapsed=[]
+  for replicate in range(5):
+   start=time.perf_counter()
+   for _ in range(100):model(x)
+   elapsed.append((time.perf_counter()-start)/100)
+  q=torch.ones(1,1,T,8);k=q.clone();scores=q@k.transpose(-2,-1)
+  mask=attention_mask(torch.arange(T),torch.arange(T))
+  masked=scores.masked_fill(~mask,float('-inf'))
+  assert tuple(masked.shape)==(1,1,T,T)
+  rows.append({'T':T,'parameters':model.description()['parameters'],'payload_bytes':payload,'score_shape':list(scores.shape),'score_cells':scores.numel(),'allowed_cells':int(mask.sum()),'seconds_per_forward':elapsed,'median_seconds':statistics.median(elapsed)})
+model.double()
+assert model.description()['parameters']==6104
+assert sum(p.numel()*p.element_size() for p in model.parameters())==48832
+formal_path=Path('docs/course-experiments/results/text_foundation.json')
+raw=formal_path.read_bytes();f=json.loads(raw)
+rev=f['revision'];cache=Path('outputs/technical-sources/5.9-fresh')
+code={}
+for name,repo_path in [('formal-common.py','scripts/course_experiments/common.py'),('formal-text.py','scripts/course_experiments/text.py'),('formal-model.py','tiny_perceptron/model.py'),('formal-run.py','scripts/course_experiments/run.py')]:
+ digest=hashlib.sha256((cache/name).read_bytes()).hexdigest()
+ assert digest==f['code_sha256'][repo_path]
+ code[repo_path]=digest
+weight_path=Path('checkpoints/course/text_foundation/model.pt')
+weights_raw=weight_path.read_bytes()
+exports=json.loads(Path('checkpoints/course/text_foundation/export-manifest.json').read_text())
+expected=next(x['sha256'] for x in exports['files'] if x['output']=='model.pt')
+assert hashlib.sha256(weights_raw).hexdigest()==expected
+checkpoint=torch.load(weight_path,map_location='cpu',weights_only=True)
+fit_node=next(n for n in ast.parse((cache/'formal-common.py').read_text()).body if isinstance(n,ast.FunctionDef) and n.name=='fit_lm')
+fit_defaults={arg.arg:ast.literal_eval(value) for arg,value in zip(fit_node.args.args[-len(fit_node.args.defaults):],fit_node.args.defaults)}
+cuda_api={'signature':str(inspect.signature(torch.cuda.synchronize)),'docstring':inspect.getdoc(torch.cuda.synchronize),'called':False}
+state=checkpoint['model']
+assert all(v.dtype==torch.float32 for v in state.values())
+formal={'revision':rev,'result_sha256':hashlib.sha256(raw).hexdigest(),'code_sha256':code,'device':f['device'],'gpu':f['gpu'],'python':f['python_version'],'torch':f['torch_version'],'seed':f['seed'],'training':f['results']['training'],'train_data':f['results']['data']['train'],'elapsed_seconds':f['elapsed_seconds'],'timing_scope':f['timing_scope'],'comparison_names':list(f['results']['scaling']),'resume':f['results']['resume'],'checkpoint_sha256':expected,'checkpoint_config':checkpoint['config'],'parameter_elements':sum(v.numel() for v in state.values()),'parameter_payload_bytes':sum(v.numel()*v.element_size() for v in state.values()),'checkpoint_dtypes':sorted({str(v.dtype) for v in state.values()}),'fit_lm_defaults':fit_defaults}
+assert formal['parameter_elements']==141568 and formal['parameter_payload_bytes']==566272
+print(json.dumps({'environment':environment,'tiny':rows,'eval_requires_grad':before.requires_grad,'no_grad_requires_grad':after.requires_grad,'fp64_payload_bytes':48832,'cuda_api_inspection':cuda_api,'formal':formal,'scope':'僅有界CPU前向與凍結報告／已下載公開權重核對；沒有重訓或重播正式排程。'},ensure_ascii=False,indent=2))

@@ -1,0 +1,44 @@
+from pathlib import Path
+import io, contextlib, json, sys, random
+import torch
+from tiny_perceptron.model import TinyLM, ModelConfig, masked_loss
+from tiny_perceptron.training import save_checkpoint, load_checkpoint, learning_rate
+from scripts.prepare_data import generate_records
+from scripts.course_experiments.common import text_examples
+
+original = Path('docs/technical-reviews/artifacts/5.7-original-code.txt').read_text()
+report = {'environment': {'python':sys.version, 'torch':torch.__version__, 'torch_git_version':torch.version.git_version, 'device':'cpu', 'OMP_NUM_THREADS':'1', 'MKL_NUM_THREADS':'1'}, 'cases':[]}
+for name, code in [('original',original),('exercise_optimizer_load_commented',original.replace('    restored_optimizer.load_state_dict(payload["optimizer"])','    # restored_optimizer.load_state_dict(payload["optimizer"])'))]:
+    code=code.replace('    restored_optimizer = torch.optim.AdamW', '    checkpoint_optimizer_steps_before_update = sorted(set(float(s["step"]) for s in payload["optimizer"]["state"].values()))\n    restored_optimizer = torch.optim.AdamW')
+    code=code.replace('    for candidate, opt in', '    initial_logit_equal = True\n    for candidate, opt in')
+    namespace={}; stdout=io.StringIO(); failed=None
+    try:
+        with contextlib.redirect_stdout(stdout): exec(compile(code, name, 'exec'), namespace)
+    except AssertionError:
+        failed='second equality assertion after each model updates once'
+    m,loaded=namespace['model'],namespace['loaded']; x=namespace['x']
+    diff=float((m(x)['logits']-loaded(x)['logits']).detach().abs().max())
+    payload=namespace['payload']
+    report['cases'].append({'name':name,'stdout':stdout.getvalue(),'assertion_failure':failed,'logits_shape':list(m(x)['logits'].shape),'x_dtype':str(x.dtype),'final_max_logit_difference':diff,'payload_step':payload['step'],'payload_keys':sorted(payload),'optimizer_states_saved':len(payload['optimizer']['state']),'optimizer_state_keys':sorted(next(iter(payload['optimizer']['state'].values()))),'optimizer_steps_saved_before_update':namespace['checkpoint_optimizer_steps_before_update'],'initial_logit_equal':namespace.get('initial_logit_equal',False),'payload_optimizer_steps_after_update':sorted(set(float(s['step']) for s in payload['optimizer']['state'].values())),'restored_optimizer_steps_after_update':sorted(set(float(s['step']) for s in namespace['restored_optimizer'].state_dict()['state'].values())),'chars':payload['metadata']['chars']})
+    if name=='original': assert failed is None and diff==0
+    else: assert failed is not None and diff>0
+
+# Inspect this demonstration's unmasked target count and loss definition with no update.
+torch.manual_seed(42); model=TinyLM(ModelConfig(vocab_size=5,width=8,max_length=8)); x=torch.tensor([[1,2,3]]); y=torch.tensor([[2,3,4]])
+logits=model(x)['logits']; manual=-logits.log_softmax(-1).gather(-1,y[...,None]).sum()/3
+report['loss_check']={'shape':list(logits.shape),'effective_targets':int(y.numel()),'masked_loss':float(masked_loss(logits,y).detach()),'manual_nll_mean':float(manual.detach()),'equal':bool(torch.equal(masked_loss(logits,y),manual)),'dropout_modules':sum(isinstance(m,torch.nn.Dropout) for m in model.modules()),'parameter_tensors':len(list(model.parameters()))}
+# One CPU RNG check, no training: rebuilding consumes RNG then restore_rng restores it.
+import tempfile
+with tempfile.TemporaryDirectory() as directory:
+    path=Path(directory)/'rng.pt'; random.seed(42); save_checkpoint(path,model)
+    expected_torch=torch.rand(4); expected_python=[random.random() for _ in range(4)]
+    loaded,payload=load_checkpoint(path,restore_rng=True)
+    observed_torch=torch.rand(4); observed_python=[random.random() for _ in range(4)]
+    report['rng_check']={'torch_equal':bool(torch.equal(expected_torch,observed_torch)),'python_equal':expected_python==observed_python,'temporary_directory_removed_after_exit':None}
+report['rng_check']['temporary_directory_removed_after_exit']=not Path(directory).exists()
+# Configuration and denominator inspection only; the official 80-step experiment is not re-run.
+probe_model=TinyLM(ModelConfig(width=16,layers=1,max_length=64))
+examples=text_examples(generate_records('toy-text'),mode='text',max_length=64)
+report['formal_probe_denominators']={'state_tensors':len(probe_model.state_dict()),'state_scalar_entries':sum(t.numel() for t in probe_model.state_dict().values()),'generated_records':len(generate_records('toy-text')),'examples':len(examples),'batch_sampling':'random.choices with replacement k=4','sampled_examples_per_uninterrupted_path':80*4,'post_checkpoint_samples':40*4,'note':'No formal experiment updates executed; actual weighted loss target counts depend on randomly sampled example lengths.'}
+report['schedule_inspection']={'at_zero_based_step40_total80':learning_rate(40,80,peak=.003),'at_zero_based_step40_total120':learning_rate(40,120,peak=.003),'different':learning_rate(40,80,peak=.003)!=learning_rate(40,120,peak=.003)}
+print(json.dumps(report,ensure_ascii=False,indent=2))

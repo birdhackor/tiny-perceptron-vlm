@@ -1,0 +1,63 @@
+原始正式執行原始碼版本 b52935d99f58b694cd932ac158c10c4d8d92d4c2
+URL: https://raw.githubusercontent.com/birdhackor/tiny-perceptron-vlm/b52935d99f58b694cd932ac158c10c4d8d92d4c2/scripts/course_experiments/text.py
+全檔 SHA-256: c3c98e1b2ff5dce288308afe105ed0307aabe473458cabfc0d66d99bef5a0c3c
+讀取日期: 2026-10-03
+以下為 MIT 專案必要小片段，實際親讀後保留；不是此次重跑。
+34: def _steps(ctx, count):
+35:     """正式預設完整跑；本機通路檢查可由 caller 明示 step_scale。"""
+36:     return max(1, round(count * getattr(ctx, "step_scale", 1.0)))
+37:
+205: def _resume_probe(ctx):
+206:     seed(ctx.seed)
+207:     model = new_lm(ctx, width=16, layers=1, max_length=64)
+208:     examples = text_examples(generate_records("toy-text"), mode="text", max_length=64)
+209:     optimizer = torch.optim.AdamW(model.parameters(), lr=0.003)
+210:     total = max(4, _steps(ctx, 80))
+211:     halfway = total // 2
+212:
+213:     def update(current_model, current_optimizer, step):
+214:         selected = random.choices(examples, k=4)
+215:         x, y, valid = (tensor.to(ctx.device) for tensor in pad_batch(selected))
+216:         for group in current_optimizer.param_groups:
+217:             group["lr"] = learning_rate(step, total, peak=0.003)
+218:         current_optimizer.zero_grad(set_to_none=True)
+219:         loss = masked_loss(current_model(x, valid=valid)["logits"], y)
+220:         loss.backward()
+221:         norm = torch.nn.utils.clip_grad_norm_(current_model.parameters(), 1.0)
+222:         if not torch.isfinite(loss) or not torch.isfinite(norm):
+223:             raise ValueError("resume probe has non-finite training")
+224:         current_optimizer.step()
+225:
+226:     for step in range(total):
+227:         update(model, optimizer, step)
+228:         if step + 1 == halfway:
+229:             save_checkpoint(
+230:                 ctx.output / "resume-middle.pt",
+231:                 model,
+232:                 optimizer,
+233:                 halfway,
+234:                 {"schedule_steps": total, "peak_lr": 0.003, "seed": ctx.seed},
+235:             )
+236:     final = {name: tensor.detach().clone() for name, tensor in model.state_dict().items()}
+237:     resumed, payload = load_checkpoint(ctx.output / "resume-middle.pt", ctx.device, restore_rng=True)
+238:     resumed_optimizer = torch.optim.AdamW(resumed.parameters(), lr=0.003)
+239:     resumed_optimizer.load_state_dict(payload["optimizer"])
+240:     for step in range(halfway, total):
+241:         update(resumed, resumed_optimizer, step)
+242:     difference = max(float((final[name] - value).abs().max()) for name, value in resumed.state_dict().items())
+243:     save_checkpoint(
+244:         ctx.output / "resume-final.pt",
+245:         resumed,
+246:         resumed_optimizer,
+247:         total,
+248:         {"schedule_steps": total, "peak_lr": 0.003, "seed": ctx.seed},
+249:     )
+250:     if difference > 1e-5:
+251:         raise ValueError(f"resume did not reproduce uninterrupted training: {difference}")
+252:     return {
+253:         "total_steps": total,
+254:         "saved_step": halfway,
+255:         "max_weight_difference": difference,
+256:         "schedule_total_preserved": True,
+257:         "optimizer_and_rng_restored": True,
+258:         "tolerance": 1e-5,

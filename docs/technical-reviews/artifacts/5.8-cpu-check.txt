@@ -1,0 +1,93 @@
+import contextlib
+import hashlib
+import io
+import json
+import math
+import re
+import sys
+from pathlib import Path
+
+import torch
+
+from scripts.course_experiments.common import split_records
+from scripts.prepare_data import generate_records
+
+base = Path("docs/technical-reviews/artifacts")
+body = (base / "5.8-section-5.8.txt").read_bytes()
+assert hashlib.sha256(body).hexdigest() == "6150518ffeba295e5e22a3b06e15b9c55689f438a5ff470fb9a4379189e14dc5"
+code = re.search(rb"```python\n(.*?)```", body, re.S)[1].decode()
+exercise = code.replace("teacher_forced = [1, 2, 0, 4]", "teacher_forced = [1, 2, 3, 4]")
+assert code != exercise
+
+def execute(label, snippet, expected):
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        exec(compile(snippet, label, "exec"), {})
+    actual = out.getvalue()
+    assert actual == expected
+    return {"code": snippet, "stdout": actual, "expected": expected, "pass": True}
+
+result = {
+    "command": "OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1 TRANSFORMERS_OFFLINE=1 CUDA_VISIBLE_DEVICES='' .venv/bin/python -c \"import sys; sys.path.insert(0,'.'); exec(compile(open('docs/technical-reviews/artifacts/5.8-cpu-check.txt').read(),'5.8-cpu-check.txt','exec'))\"",
+    "environment": {"python": sys.version, "torch": str(torch.__version__), "torch_git": str(torch.version.git_version), "device": "cpu", "threads": str(torch.get_num_threads())},
+    "original": execute("5.8-original", code, "正確前文下 逐字正確率 0.75 整串相同 False\n自由生成 逐字正確率 0.5 整串相同 False\n"),
+    "exercise": execute("5.8-exercise", exercise, "正確前文下 逐字正確率 1.0 整串相同 True\n自由生成 逐字正確率 0.5 整串相同 False\n"),
+}
+strict = []
+for prediction in ([1, 2, 3], [1, 2, 3, 4, 5]):
+    try:
+        sum(a == b for a, b in zip([1, 2, 3, 4], prediction, strict=True))
+    except ValueError as error:
+        strict.append({"lengths": [4, len(prediction)], "error": str(error)})
+    else:
+        raise AssertionError("zip(strict=True) did not reject unequal lengths")
+result["strict_length_checks"] = strict
+result["bool_sum"] = sum([True, True, False, True])
+result["list_equality"] = {"same": [1, 2, 3, 4] == [1, 2, 3, 4], "reordered": [1, 2, 3, 4] == [1, 2, 4, 3], "different_length": [1, 2, 3, 4] == [1, 2, 3]}
+assert result["bool_sum"] == 3
+assert result["list_equality"] == {"same": True, "reordered": False, "different_length": False}
+result["same_accuracy_different_nll"] = [
+    {"p_correct": p, "p_other": 1 - p, "argmax_correct": p > 1 - p, "nll": -math.log(p)}
+    for p in (0.6, 0.9)
+]
+assert result["same_accuracy_different_nll"][0]["nll"] > result["same_accuracy_different_nll"][1]["nll"]
+
+foundation = json.loads(Path("docs/course-experiments/results/text_foundation.json").read_text())
+real = json.loads(Path("docs/course-experiments/results/real_text.json").read_text())
+parts = split_records(generate_records("toy-text"), seed=42)
+for name, rows in parts.items():
+    data_bytes = "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows).encode()
+    assert hashlib.sha256(data_bytes).hexdigest() == foundation["results"]["data"][name]["sha256"]
+assert parts["validation"] == [{"text": "color=blue;shape=circle;side=left.", "family": "color=blue;shape=circle;side=left.", "source": "course-generated", "license": "MIT"}]
+result["toy_validation_reconstructed_without_training"] = parts["validation"]
+result["toy_prompt_ambiguity"] = [row["text"] for row in generate_records("toy-text") if row["text"].startswith("color=blue;shape=circle;")]
+assert result["toy_prompt_ambiguity"] == ["color=blue;shape=circle;side=left.", "color=blue;shape=circle;side=right."]
+
+fr = foundation["results"]
+tr = real["results"]["runs"]["tinystories"]
+result["frozen_metric_checks"] = []
+for label, run in [("toy-text", fr), ("tinystories", tr)]:
+    for stage in ("before", "after"):
+        e = run[stage]["validation"]
+        observed = e["nll_sum"] / e["effective_tokens"]
+        assert math.isclose(observed, e["nll"], abs_tol=1e-12)
+        result["frozen_metric_checks"].append({"dataset": label, "stage": stage, "nll_sum": e["nll_sum"], "effective_tokens": e["effective_tokens"], "records": e["records"], "nll": e["nll"], "rounded_5dp": f"{e['nll']:.5f}", "recalculated": observed})
+assert [x["rounded_5dp"] for x in result["frozen_metric_checks"]] == ["5.73454", "0.96282", "5.76091", "1.80083"]
+assert tr["data"]["train"]["records"] == 409
+assert tr["after"]["validation"]["records"] == 51
+assert tr["after"]["validation"]["effective_tokens"] == 42453
+assert tr["after"]["validation"]["effective_tokens"] == tr["after"]["validation"]["raw_utf8_bytes"] + 51
+sample = tr["after"]["validation"]["samples"][1]
+assert sample["prompt"] == "Once upon a time there w"
+assert sample["generated"] == "as a big was a she was a ber the"
+assert bytes(identifier - 8 for identifier in sample["generated_ids"]).decode() == sample["generated"]
+assert len(sample["generated_ids"]) == 32
+result["quoted_story_sample"] = sample
+result["sample_counts"] = {
+    dataset: {stage: {side: len(run[stage][side]["samples"]) for side in ("validation", "test")} for stage in ("before", "after")}
+    for dataset, run in real["results"]["runs"].items()
+}
+assert all(count == 8 for dataset in result["sample_counts"].values() for stage in dataset.values() for count in stage.values())
+result["scope"] = "原例、只改示意資料的練習、API邊界與凍結報告算術核對；未執行任何正式訓練或資料下載，不支持一般生成品質或GPU效能。"
+(base / "5.8-cpu-results.json").write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n")
+print(json.dumps(result, ensure_ascii=False, indent=2))

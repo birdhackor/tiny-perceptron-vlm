@@ -1,0 +1,163 @@
+import contextlib
+import hashlib
+import io
+import json
+import math
+import os
+import platform
+import sys
+from pathlib import Path
+
+import torch
+
+from scripts.course_experiments.common import records_sha256, split_records, text_examples
+from scripts.course_experiments.text import _deduplicate_text
+from tiny_perceptron.data import load_jsonl
+
+root = Path.cwd()
+artifacts = root / "docs/technical-reviews/artifacts"
+original = (artifacts / "5.10-original-code.txt").read_text()
+assert "test" not in original.split("print")[0]
+results = {
+    "environment": {
+        "python": sys.version,
+        "torch": str(torch.__version__),
+        "torch_git_version": str(torch.version.git_version),
+        "device": "cpu",
+        "platform": platform.platform(),
+        "OMP_NUM_THREADS": os.environ.get("OMP_NUM_THREADS"),
+        "MKL_NUM_THREADS": os.environ.get("MKL_NUM_THREADS"),
+    },
+    "runs": [],
+}
+torch.set_num_threads(1)
+assert torch.version.cuda is None
+for label, value, expected_lr in [
+    ("original", None, 0.01),
+    ("exercise_validation_0.6", 0.6, 0.01),
+    ("exercise_validation_0.9", 0.9, 0.1),
+]:
+    code = original
+    if value is not None:
+        code = code.replace(
+            ']\nselected =',
+            '    {"lr": 0.1, "validation": ' + str(value) + '},\n]\nselected =',
+        )
+        assert code != original
+    namespace = {}
+    stdout = io.StringIO()
+    with contextlib.redirect_stdout(stdout):
+        exec(compile(code, label, "exec"), namespace)
+    selected = namespace["selected"]
+    assert selected["lr"] == expected_lr
+    assert stdout.getvalue().splitlines()[1] == "test仍封存，尚未計算最終成績"
+    assert "test" not in namespace
+    results["runs"].append({
+        "label": label,
+        "added_validation": value,
+        "selected": selected,
+        "stdout": stdout.getvalue(),
+        "test_variable_created": False,
+        "code": code,
+    })
+
+frozen_path = root / "docs/course-experiments/results/real_text.json"
+frozen = json.loads(frozen_path.read_bytes())
+results["frozen_report"] = {
+    "path": str(frozen_path.relative_to(root)),
+    "sha256": hashlib.sha256(frozen_path.read_bytes()).hexdigest(),
+    "revision": frozen["revision"],
+    "seed": frozen["seed"],
+    "device": frozen["device"],
+}
+results["split_audits"] = {}
+for identifier, basename in [
+    ("tinystories", "tinystories-train-512.jsonl"),
+    ("chinese-poetry", "chinese-classical-train-365.jsonl"),
+]:
+    source_path = root / "data/training/text-initial" / basename
+    raw = load_jsonl(source_path)
+    records = _deduplicate_text(raw)
+    parts = split_records(records, seed=42)
+    run = frozen["results"]["runs"][identifier]
+    audit = {
+        "source_path": str(source_path.relative_to(root)),
+        "source_sha256": hashlib.sha256(source_path.read_bytes()).hexdigest(),
+        "raw_records": len(raw),
+        "deduplicated_records": len(records),
+        "upstream_revisions": sorted({r["source_revision"] for r in raw}),
+        "splits": {},
+    }
+    all_families = []
+    for side, rows in parts.items():
+        encoded = "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows).encode()
+        sha = hashlib.sha256(encoded).hexdigest()
+        assert sha == run["data"][side]["sha256"]
+        assert len(rows) == run["data"][side]["records"]
+        families = {r["family"] for r in rows}
+        assert all(not (families & previous) for previous in all_families)
+        all_families.append(families)
+        examples = text_examples(rows, max_length=128)
+        assert all(len(x) <= 128 and len(x) == len(y) for x, y in examples)
+        targets = sum(len(y) for _, y in examples)
+        raw_bytes = sum(len(r["text"].encode("utf-8")) for r in rows)
+        assert targets == raw_bytes + len(rows)
+        audit["splits"][side] = {
+            "records": len(rows),
+            "families": len(families),
+            "sha256": sha,
+            "windows": len(examples),
+            "maximum_input_length": max(len(x) for x, _ in examples),
+            "effective_targets": targets,
+            "raw_utf8_bytes": raw_bytes,
+        }
+        if side == "train":
+            training_records_sha = records_sha256(rows)
+            assert training_records_sha == run["training"]["records_sha256"]
+            audit["training_records_sha256"] = training_records_sha
+        if side in ("validation", "test"):
+            for phase in ("before", "after"):
+                evaluation = run[phase][side]
+                assert targets == evaluation["effective_tokens"]
+                assert len(examples) == evaluation["examples"]
+                assert abs(evaluation["nll_sum"] / targets - evaluation["nll"]) < 1e-12
+    audit["cross_split_family_intersection"] = 0
+    audit["near_duplicate_clustering"] = "not performed; exact normalized-text families only"
+    results["split_audits"][identifier] = audit
+
+source_hash_comparison = {}
+for name in (
+    "scripts/course_experiments/text.py",
+    "scripts/course_experiments/common.py",
+    "tiny_perceptron/data.py",
+    "tiny_perceptron/model.py",
+):
+    actual = hashlib.sha256((root / name).read_bytes()).hexdigest()
+    recorded = frozen["code_sha256"][name]
+    assert actual == recorded
+    source_hash_comparison[name] = {"actual": actual, "frozen": recorded, "matches": True}
+results["source_hash_comparison"] = source_hash_comparison
+
+anthology = root / "data/training/text-initial/tang300-source.json"
+poems = json.loads(anthology.read_bytes())
+assert isinstance(poems, list) and len(poems) == 366
+results["upstream_poetry_structure"] = {
+    "path": str(anthology.relative_to(root)),
+    "sha256": hashlib.sha256(anthology.read_bytes()).hexdigest(),
+    "root_type": "list",
+    "records": len(poems),
+    "record_keys": sorted({k for row in poems for k in row}),
+    "has_split_fields": any("split" in row for row in poems),
+}
+
+# Transparent mathematical counterexample, not a trained-model measurement.
+p_a = [0.9, 0.9, 0.9, 0.49]
+p_b = [0.6] * 4
+results["loss_vs_exact_match_derivation"] = {
+    "assumption": "Four binary positions; competing class has probability 1-p; prefix independent toy",
+    "A": {"true_probabilities": p_a, "mean_nll": -sum(map(math.log, p_a)) / 4, "token_accuracy": 0.75, "exact_match": False},
+    "B": {"true_probabilities": p_b, "mean_nll": -sum(map(math.log, p_b)) / 4, "token_accuracy": 1.0, "exact_match": True},
+}
+assert results["loss_vs_exact_match_derivation"]["A"]["mean_nll"] < results["loss_vs_exact_match_derivation"]["B"]["mean_nll"]
+results["result"] = "All original/exercise, split fingerprint, window denominator and derivation assertions passed; no training executed."
+print(json.dumps(results, ensure_ascii=False, indent=2, allow_nan=False))
