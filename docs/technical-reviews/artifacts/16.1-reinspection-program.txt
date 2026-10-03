@@ -1,0 +1,26 @@
+from pathlib import Path
+import ast, hashlib, json, platform, re
+def sha(raw):return hashlib.sha256(raw).hexdigest()
+old=Path('docs/technical-reviews/artifacts/16.1-source-raw.txt').read_bytes()
+whole=Path('course/chapters/16.md').read_bytes();heads=list(re.finditer(rb'(?m)^## ',whole));new=whole[heads[0].start():heads[1].start()]
+oldcode=re.findall(rb'```python\n(.*?)```',old,re.S);newcode=re.findall(rb'```python\n(.*?)```',new,re.S)
+assert oldcode==newcode
+exercise='練習把ids改成'.encode();assert old[old.index(exercise):]==new[new.index(exercise):]
+d=json.loads(Path('docs/course-experiments/results/efficiency.json').read_text());r=d['results'];fields=['memory_allocated_before_bytes','peak_memory_allocated_bytes','peak_additional_allocated_bytes']
+branches={**{k:v['training'] for k,v in r['models'].items()},**{k:v['training'] for k,v in r['update_variants'].items()},**{k:v for k,v in r['packing']['actual_updates'].items() if k in ('padded','packed')}}
+coverage={k:{'present':{f:v[f] for f in fields if f in v},'missing':[f for f in fields if f not in v],'steps':v['steps'],'effective_tokens':v['effective_tokens']} for k,v in branches.items()}
+assert [k for k,v in coverage.items() if not v['missing']]==['mha','gqa','ordinary','accumulated','activation_checkpoint','sdpa']
+assert all(coverage[k]['missing']==fields for k in ['padded','packed'])
+codepath=Path('/tmp/16.1-frozen-architecture.txt');coderaw=codepath.read_bytes();assert sha(coderaw)==d['code_sha256']['scripts/course_experiments/architecture.py']
+tree=ast.parse(coderaw);facts={}
+for fn in tree.body:
+ if isinstance(fn,ast.FunctionDef) and fn.name in ('_train','_packing_updates'):
+  calls=[ast.unparse(x.func) for x in ast.walk(fn) if isinstance(x,ast.Call)]
+  facts[fn.name]={'source_lines':[fn.lineno,fn.end_lineno],'reset_peak_memory_stats_calls':calls.count('torch.cuda.reset_peak_memory_stats'),'memory_allocated_calls':calls.count('torch.cuda.memory_allocated'),'max_memory_allocated_calls':calls.count('torch.cuda.max_memory_allocated')}
+assert facts['_train']['reset_peak_memory_stats_calls']==1
+assert facts['_train']['memory_allocated_calls']==1
+assert facts['_train']['max_memory_allocated_calls']==1
+assert all(facts['_packing_updates'][k]==0 for k in ['reset_peak_memory_stats_calls','memory_allocated_calls','max_memory_allocated_calls'])
+output={'command':'OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 .venv/bin/python docs/technical-reviews/artifacts/16.1-reinspection-program.txt','environment':{'python':platform.python_version(),'device':'CPU；只解析rawJSON/AST，未執行GPU原碼','OMP_NUM_THREADS':'1','MKL_NUM_THREADS':'1'},'old_primary_sha256':sha(old),'new_primary_sha256':sha(new),'intro_sha256':sha(whole[:heads[0].start()]),'python_fence_sha256':[sha(x) for x in newcode],'python_fences_equal':oldcode==newcode,'exercise_equal':True,'efficiency_file_sha256':sha(Path('docs/course-experiments/results/efficiency.json').read_bytes()),'fixed_architecture_sha256':sha(coderaw),'code_sha_matches_frozen_receipt':True,'memory_coverage':coverage,'fixed_code_ast_inspection':facts,'result':'新版六支線逐支reset/三欄與rawreceipt一致；padded/packed缺三欄，不能用此報告比較兩支峰值；未變CPU/圖不重跑。'}
+print(json.dumps(output,ensure_ascii=False,indent=2))
+Path('docs/technical-reviews/artifacts/16.1-reinspection-output.json').write_text(json.dumps(output,ensure_ascii=False,indent=2)+'\n')

@@ -1,0 +1,30 @@
+import hashlib, json, os, platform, re, subprocess, sys
+from pathlib import Path
+ROOT=Path.cwd()
+raw=Path("course/chapters/16.md").read_bytes()
+headers=list(re.finditer(rb"(?m)^## ([0-9]+\.[0-9]+) [^\r\n]+",raw))
+sections={h[1].decode():raw[h.start():headers[i+1].start() if i+1<len(headers) else len(raw)] for i,h in enumerate(headers)}
+env=os.environ.copy()
+env.update(OMP_NUM_THREADS="1",MKL_NUM_THREADS="1",CUDA_VISIBLE_DEVICES="",HF_HUB_OFFLINE="1",HF_DATASETS_OFFLINE="1",TRANSFORMERS_OFFLINE="1",PYTHONDONTWRITEBYTECODE="1")
+bootstrap="import sys\ndef _offline_guard(event,args):\n    if event in ('socket.connect','socket.getaddrinfo','socket.sendto','socket.bind'): raise RuntimeError('offline CPU review forbids networking')\nsys.addaudithook(_offline_guard)\nimport torch\ntorch.set_num_threads(1)\ntorch.manual_seed(42)\n"
+entries=[]
+todo=[]
+original=re.findall(rb"```python\n(.*?)```",sections['16.1'],re.S)[0].decode()
+exercise=original.replace('ids = torch.tensor([[1, 2, 3]])','ids = torch.arange(1,13)[None]')
+extra="\nprint('review parameter count',sum(v.numel() for v in model.parameters()))\nprint('review dtype',str(next(model.parameters()).dtype))\nprint('review operator counts',{e.key:e.count for e in p.key_averages() if e.key in ('aten::index_select','aten::softmax','aten::_softmax','aten::gelu','aten::mm','aten::linear')})\n"
+for repetition in range(1,4):todo.append(('16.1-exercise-'+str(repetition),'16.1',exercise+extra))
+for lesson in ['16.2','16.3','16.4','16.5','16.6','16.7','16.8','16.9','16.10','16.11']:
+    fences=re.findall(rb"```python\n(.*?)```",sections[lesson],re.S)
+    for i,code in enumerate(fences):todo.append((lesson+'-intro-original-'+str(i+1),lesson,code.decode()))
+for run_id,lesson,code in todo:
+    complete=bootstrap+code
+    command=[str(ROOT/'.venv/bin/python'),'-c',complete]
+    try:
+        result=subprocess.run(command,cwd=ROOT,env=env,text=True,capture_output=True,timeout=45)
+        e={'id':run_id,'lesson':lesson,'section_sha256':hashlib.sha256(sections[lesson]).hexdigest(),'code':code,'code_sha256':hashlib.sha256(code.encode()).hexdigest(),'complete_program':complete,'complete_program_sha256':hashlib.sha256(complete.encode()).hexdigest(),'command_argv':command,'exit_code':result.returncode,'stdout':result.stdout,'stderr':result.stderr}
+    except subprocess.TimeoutExpired as error:
+        e={'id':run_id,'lesson':lesson,'section_sha256':hashlib.sha256(sections[lesson]).hexdigest(),'code':code,'code_sha256':hashlib.sha256(code.encode()).hexdigest(),'complete_program':complete,'complete_program_sha256':hashlib.sha256(complete.encode()).hexdigest(),'command_argv':command,'exit_code':'timeout','stdout':error.stdout,'stderr':error.stderr}
+    entries.append(e)
+    print(run_id,e['exit_code'],e['stdout'],e['stderr'],flush=True)
+    output={'scope':'16.1 exercise and chapter introduction evidence only; no primary verdict for prerequisite lessons','environment':{'python':platform.python_version(),'device':'CPU','torch':__import__('torch').__version__,'torch_git_version':__import__('torch').version.git_version,'OMP_NUM_THREADS':'1','MKL_NUM_THREADS':'1','offline':'socket audit guard; CUDA_VISIBLE_DEVICES empty'},'runs':entries}
+    Path('docs/technical-reviews/artifacts/16.1-exercise-and-intro-executions.json').write_text(json.dumps(output,ensure_ascii=False,indent=2)+'\n')

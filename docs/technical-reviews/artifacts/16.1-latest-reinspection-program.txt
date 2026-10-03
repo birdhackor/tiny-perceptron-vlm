@@ -1,0 +1,118 @@
+from pathlib import Path
+import ast, hashlib, json, platform, re
+
+def sha(raw):
+    return hashlib.sha256(raw).hexdigest()
+
+def section(raw, lesson):
+    heads = list(re.finditer(rb'(?m)^## ([A-Z\d]+\.\d+) [^\r\n]+', raw))
+    pos = next(i for i, h in enumerate(heads) if h[1].decode() == lesson)
+    return raw[heads[pos].start():heads[pos + 1].start() if pos + 1 < len(heads) else len(raw)]
+
+root = Path('docs/technical-reviews/artifacts')
+old = (root / '16.1-source-raw.txt').read_bytes()
+middle = (root / '16.1-current-source-raw.txt').read_bytes()
+whole = Path('course/chapters/16.md').read_bytes()
+new = section(whole, '16.1')
+assert sha(new) == '2cc9c51149a14143fd03708de1a5d98534acee6170de3308a850ad99dd394507'
+assert new == (root / '16.1-latest-source-raw.txt').read_bytes()
+fences = lambda raw: re.findall(rb'```python\n(.*?)```', raw, re.S)
+assert fences(old) == fences(middle) == fences(new)
+exercise = '練習把ids改成'.encode()
+assert old[old.index(exercise):] == middle[middle.index(exercise):] == new[new.index(exercise):]
+
+receipt_raw = Path('docs/course-experiments/results/efficiency.json').read_bytes()
+receipt = json.loads(receipt_raw)
+results = receipt['results']
+fields = ['memory_allocated_before_bytes', 'peak_memory_allocated_bytes', 'peak_additional_allocated_bytes']
+branches = {**{k: v['training'] for k, v in results['models'].items()}, **{k: v['training'] for k, v in results['update_variants'].items()}, **{k: v for k, v in results['packing']['actual_updates'].items() if k in ('padded', 'packed')}}
+coverage = {k: {'present': {f: v[f] for f in fields if f in v}, 'missing': [f for f in fields if f not in v], 'steps': v['steps'], 'effective_tokens': v['effective_tokens']} for k, v in branches.items()}
+assert [k for k, v in coverage.items() if not v['missing']] == ['mha', 'gqa', 'ordinary', 'accumulated', 'activation_checkpoint', 'sdpa']
+assert all(coverage[k]['missing'] == fields for k in ('padded', 'packed'))
+
+architecture = Path('/tmp/16.1-frozen-architecture.txt').read_bytes()
+run_code = Path('/tmp/16.1-frozen-run.txt').read_bytes()
+assert sha(architecture) == receipt['code_sha256']['scripts/course_experiments/architecture.py']
+assert sha(run_code) == receipt['code_sha256']['scripts/course_experiments/run.py']
+tree = ast.parse(architecture)
+facts = {}
+for fn in tree.body:
+    if isinstance(fn, ast.FunctionDef) and fn.name in ('_train', '_packing_updates', '_compile_probe', '_compile_worker'):
+        nodes = [x for x in ast.walk(fn) if isinstance(x, ast.Call)]
+        calls = [ast.unparse(x.func) for x in nodes]
+        facts[fn.name] = {'source_lines': [fn.lineno, fn.end_lineno], 'reset_peak_memory_stats_calls': calls.count('torch.cuda.reset_peak_memory_stats'), 'memory_allocated_calls': calls.count('torch.cuda.memory_allocated'), 'max_memory_allocated_calls': calls.count('torch.cuda.max_memory_allocated')}
+        if fn.name == '_compile_worker':
+            compile_call = next(x for x in nodes if ast.unparse(x.func) == 'torch.compile')
+            facts[fn.name]['compile_keywords'] = {x.arg: ast.literal_eval(x.value) for x in compile_call.keywords}
+            facts[fn.name]['executes_compiled_callable'] = 'compiled' in calls
+        if fn.name == '_compile_probe':
+            spawn = next(x for x in nodes if ast.unparse(x.func) == 'subprocess.run')
+            facts[fn.name]['subprocess_command_ast'] = ast.unparse(spawn.args[0])
+            facts[fn.name]['subprocess_run_calls'] = calls.count('subprocess.run')
+assert all(facts['_train'][k] == 1 for k in ('reset_peak_memory_stats_calls', 'memory_allocated_calls', 'max_memory_allocated_calls'))
+assert all(facts['_packing_updates'][k] == 0 for k in ('reset_peak_memory_stats_calls', 'memory_allocated_calls', 'max_memory_allocated_calls'))
+assert facts['_compile_worker']['compile_keywords'] == {'backend': 'inductor', 'fullgraph': True, 'dynamic': False}
+assert facts['_compile_worker']['executes_compiled_callable']
+assert facts['_compile_probe']['subprocess_run_calls'] == 1
+assert '--compile-worker' in facts['_compile_probe']['subprocess_command_ast']
+compile_receipt = results['compile']
+assert compile_receipt['status'] == 'completed' and compile_receipt['backend'] == 'inductor'
+assert compile_receipt['inductor_generated_kernel_count'] > 0
+
+scope = json.loads((root / '16.1-current-scope-check.json').read_text())
+for item in scope['sections']:
+    path, lesson = item['source'].split('#')
+    current = section(Path(path).read_bytes(), lesson)
+    item['current_sha256'] = sha(current)
+    item['equal'] = item['current_sha256'] == item['previously_read_sha256']
+    assert item['equal'] or lesson == '16.1'
+for item in scope['figures']:
+    item['current_sha256'] = sha(Path(item['path']).read_bytes())
+    item['equal'] = item['current_sha256'] == item['old_sha256']
+    assert item['equal']
+for group in ('repository_code_and_frozen_result_checks', 'original_CPU_evidence_preserved'):
+    for item in scope[group]:
+        expected = item.get('previous_sha256', item.get('sha256'))
+        item['current_sha256'] = sha(Path(item['path']).read_bytes())
+        item['equal'] = item['current_sha256'] == expected
+        assert item['equal']
+old_whole = Path('/tmp/root-late-review-source-cache/3c74580fd2f0365873f5ba2f03a0149f5b8c1421/course/chapters/16.md').read_bytes()
+assert sha(old_whole) == '78149cab1683387266a69dd25716b930987da0ec83fe2e552b628bf6aaa9b517'
+assert section(old_whole, '16.1') == old
+intro = whole[:re.search(rb'(?m)^## ', whole).start()]
+scope['intro_sha256'] = sha(intro)
+scope['intro_equal'] = intro == (root / '16.1-intro-raw.txt').read_bytes()
+assert scope['intro_equal']
+scope['old_whole_file_sha256'] = sha(old_whole)
+scope['current_whole_file_sha256'] = sha(whole)
+scope['current_primary_raw_sha256'] = sha(new)
+scope['unchanged_scope'] = '本次第二修訂只擴充16.1記憶體解釋；逐一核對必要scope、原例/練習、code、frozen results及六圖皆未改。保留本人原實跑與親看紀錄。'
+scope['checked_on'] = '2026-10-03'
+(root / '16.1-latest-scope-check.json').write_text(json.dumps(scope, ensure_ascii=False, indent=2) + '\n')
+
+official_files = {
+    'memory_py': ('/tmp/16.1-torch-memory.txt', 'ed3e6068d73ef9d2165f7276476041ee5bfe8f19db863e3e11172d840812173b'),
+    'cuda_memory_doc': ('/tmp/16.1-cuda-doc-md.txt', '133ae6298b2696c121a866eeb1e0433c2344fb2d938188b43ebdddea0b09bf8a'),
+    'compile_init': ('/tmp/16.1-compile-init.txt', 'bd4a10ff16357ed78f45aaf4b46ce5b771fdc0e8549402206e324d0eb792c672'),
+    'inductor_backend': ('/tmp/16.1-inductor-backend.txt', '7d28f1128ad42dd98203157132835c053bd3b73129189bfe5875131ef4c4ed05'),
+    'nvidia_driver_readme': ('/tmp/16.1-driver-readme.txt', '0e95fac3f43db864b550a548e94dbdee6a08fab79a0ac563c3f57d163675d7c5'),
+}
+official_hashes = {}
+for name, (path, expected) in official_files.items():
+    official_hashes[name] = sha(Path(path).read_bytes())
+    assert official_hashes[name] == expected
+
+output = {
+    'command': 'OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 .venv/bin/python docs/technical-reviews/artifacts/16.1-latest-reinspection-program.txt',
+    'program_sha256': sha(Path(__file__).read_bytes()),
+    'environment': {'python': platform.python_version(), 'device': 'CPU；只解析JSON/AST/原bytes，未載入或執行CUDA/Inductor原碼', 'OMP_NUM_THREADS': '1', 'MKL_NUM_THREADS': '1'},
+    'old_primary_sha256': sha(old), 'intermediate_primary_sha256': sha(middle), 'new_primary_sha256': sha(new),
+    'intro_sha256': sha(intro), 'python_fence_sha256': [sha(x) for x in fences(new)], 'all_three_python_fences_equal': True, 'all_three_exercise_bytes_equal': True,
+    'efficiency_file_sha256': sha(receipt_raw), 'fixed_architecture_sha256': sha(architecture), 'fixed_run_sha256': sha(run_code), 'fixed_code_sha_matches_receipt': True,
+    'memory_coverage': coverage, 'fixed_code_ast_inspection': facts, 'compile_receipt': compile_receipt, 'official_download_sha256': official_hashes,
+    'scope_artifact_sha256': sha((root / '16.1-latest-scope-check.json').read_bytes()),
+    'result': 'exit0；六支memory三欄與兩packing缺欄仍吻合；固定原碼明用subprocess獨立啟動compile-worker，worker用Inductor並呼叫編譯函式；原receipt記錄completed和實際產生kernel，沒有子程序memory峰值合併。新增一般定義另由官方原始文件親讀核實，非由此AST自動證明。',
+}
+text = json.dumps(output, ensure_ascii=False, indent=2) + '\n'
+(root / '16.1-latest-reinspection-output.json').write_text(text)
+print(text, end='')

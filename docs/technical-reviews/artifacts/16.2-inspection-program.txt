@@ -1,0 +1,54 @@
+import json, sys, statistics, hashlib
+from pathlib import Path
+from types import SimpleNamespace
+sys.path.insert(0,str(Path.cwd()))
+import torch
+from torch import nn
+from tiny_perceptron.model import TinyLM, ModelConfig, generate
+from tiny_perceptron.data import ByteTokenizer
+from scripts.course_experiments.architecture import _fixed_decode
+torch.set_num_threads(1)
+model=TinyLM(ModelConfig(width=8)).eval()
+with_grad=model(torch.tensor([[1,2,3,4]]))["logits"]
+with torch.no_grad(): without_grad=model(torch.tensor([[1,2,3,4]]))["logits"]
+assert model.training is False and with_grad.requires_grad and not without_grad.requires_grad
+shapes=[]
+handle=model.blocks[0].attention.q.register_forward_hook(lambda module,args,out:shapes.append(list(out.shape)))
+with torch.no_grad():
+    first=model(torch.tensor([[1,2,3,4]]))
+    second=model(torch.tensor([[5]]),cache=first["cache"])
+handle.remove()
+assert shapes==[[1,4,8],[1,1,8]]
+assert torch.equal(first["cache"][0][0],second["cache"][0][0][:,:,:4])
+assert torch.equal(first["cache"][0][1],second["cache"][0][1][:,:,:4])
+print(json.dumps({"eval_training_flag":model.training,"eval_logits_require_grad":with_grad.requires_grad,"no_grad_logits_require_grad":without_grad.requires_grad,"q_projection_output_shapes":shapes,"old_KV_preserved":True}))
+tok=ByteTokenizer();prompt="Once upon a time, a girl";prefix=[tok.bos_id]+tok.encode(prompt)
+assert len(prefix)==25 and tok.bos_id==1 and tok.eos_id==2
+print(json.dumps({"prompt":prompt,"prompt_bytes":len(prompt.encode("utf-8")),"bos_id":tok.bos_id,"eos_id":tok.eos_id,"prefix_ids":prefix,"prompt_tokens_including_bos":len(prefix)},ensure_ascii=False))
+class AlwaysEOS(nn.Module):
+    def __init__(self):
+        super().__init__();self.config=SimpleNamespace(max_length=128);self.calls=[]
+    def forward(self,ids,cache=None):
+        self.calls.append(int(ids.shape[1]));s=0 if cache is None else cache[0][0].shape[2]
+        logits=torch.zeros((*ids.shape,264));logits[...,2]=1
+        kv=torch.zeros((ids.shape[0],1,s+ids.shape[1],1))
+        return {"logits":logits,"cache":[(kv,kv)]}
+ids=torch.tensor([prefix]);ordinary=AlwaysEOS();fixed=AlwaysEOS()
+normal=generate(ordinary,ids,max_new_tokens=12,eos_id=2,use_cache=True)
+continued=_fixed_decode(fixed,ids,12,True)
+assert normal.shape[1]-len(prefix)==1 and continued.shape[1]-len(prefix)==12
+assert continued[0,len(prefix):].tolist()==[2]*12
+print(json.dumps({"bounded_eos_stub":"deterministic contract probe; no training or quality claim","ordinary_new_ids":normal[0,len(prefix):].tolist(),"ordinary_forward_input_lengths":ordinary.calls,"fixed_new_ids":continued[0,len(prefix):].tolist(),"fixed_forward_input_lengths":fixed.calls},ensure_ascii=False))
+f=Path("docs/course-experiments/results/efficiency.json");raw=f.read_bytes();d=json.loads(raw);m=d["results"]["models"]["mha"];c=m["cache"]
+summary={"source":str(f),"sha256":hashlib.sha256(raw).hexdigest(),"revision":d["revision"],"device":d["device"],"gpu":d["gpu"],"seed":d["seed"],"python_version":d["python_version"],"torch_version":d["torch_version"],"model":m["model"],"cache":c,"derived_median_ms":{}}
+for key in ["prefill","full_recompute_decode","cached_decode"]:
+    t=c[key];median=statistics.median(t["samples_seconds"]);assert median==t["median_seconds"]
+    assert len(t["samples_seconds"])==t["measured_calls"]==9 and t["warmup_calls"]==3 and t["synchronized"]
+    summary["derived_median_ms"][key]=round(1000*median,3)
+assert summary["derived_median_ms"]=={"prefill":2.421,"full_recompute_decode":29.034,"cached_decode":27.915}
+assert len(c["generated_ids_full"])==len(c["generated_ids_cached"])==c["generated_tokens"]==12
+assert c["prompt_tokens"]==25 and m["model"]["config"]["heads"]==m["model"]["config"]["kv_heads"]==4
+assert tok.decode(c["generated_ids_full"])==c["generated_text"]
+summary["heldout_eos_policy_evidence"]={"validation_samples":len(m["heldout"]["validation"]["samples"]),"test_samples":len(m["heldout"]["test"]["samples"]),"every_saved_sample_ends_in_eos":all(s["generated_ids"][-1]==2 for split in ["validation","test"] for s in m["heldout"][split]["samples"])}
+print(json.dumps(summary,ensure_ascii=False,indent=2))
+print(json.dumps({"python":sys.version,"torch":str(torch.__version__),"device":"cpu","torch_git_version":torch.version.git_version,"scope":"CPU mechanics and frozen-result arithmetic only; L4 schedules were not rerun"},ensure_ascii=False))

@@ -1,0 +1,25 @@
+import hashlib, json, platform, re, statistics
+from pathlib import Path
+import torch
+from tiny_perceptron.model import TinyLM, ModelConfig
+torch.set_num_threads(1)
+m=TinyLM(ModelConfig(width=8))
+params={n:{'shape':list(p.shape),'numel':p.numel(),'element_size':p.element_size(),'dtype':str(p.dtype)} for n,p in m.named_parameters()}
+math={'parameters':params,'total_parameters':sum(x['numel'] for x in params.values()),'weight_bytes':sum(x['numel']*x['element_size'] for x in params.values()),'median_even':statistics.median([1,2,3,20]),'mean_even':statistics.mean([1,2,3,20]),'one_MiB_bytes':2**20,'KV_example_bytes':{'MHA':2*4*3*4*4,'MQA':2*1*3*4*4},'online_softmax_result':170/7}
+d=json.loads(Path('docs/course-experiments/results/efficiency.json').read_text());r=d['results']
+memkeys=['memory_allocated_before_bytes','peak_memory_allocated_bytes','peak_additional_allocated_bytes']
+branchmem={}
+for name,branch in {**{k:v['training'] for k,v in r['models'].items()},**{k:v['training'] for k,v in r['update_variants'].items()},**{k:v for k,v in r['packing']['actual_updates'].items() if k in ('padded','packed')}}.items():
+    branchmem[name]={'steps':branch['steps'],'effective_tokens':branch['effective_tokens'],'present_memory_fields':{k:branch[k] for k in memkeys if k in branch},'missing_memory_fields':[k for k in memkeys if k not in branch]}
+medians=[]
+for model,branch in r['models'].items():
+    for mode in ['prefill','full_recompute_decode','cached_decode']:
+        b=branch['cache'][mode];medians.append({'model':model,'mode':mode,'warmup_calls':b['warmup_calls'],'measured_calls':b['measured_calls'],'sorted_samples_seconds':sorted(b['samples_seconds']),'stored_median':b['median_seconds'],'recomputed_median':statistics.median(b['samples_seconds']),'synchronized':b['synchronized']})
+sft=json.loads(Path('docs/course-experiments/results/sft.json').read_text())['results']['after']['test']
+sft_check={'recorded_matches':sft['matches'],'records':sft['records'],'sample_exact_sum':sum(bool(x['exact']) for x in sft['samples']),'sample_count':len(sft['samples']),'effective_targets':sft['effective_tokens']}
+flash=json.loads(Path('docs/course-experiments/results/flash_probe.json').read_text())['results']['routes']['fp16']['measurements']
+flash_math=[{'mode':mode,'route':route,'baseline_bytes':b['allocated_before_bytes'],'peak_bytes':b['peak_allocated_bytes'],'additional_bytes':b['additional_peak_allocated_bytes'],'baseline_MiB':b['allocated_before_bytes']/2**20,'peak_MiB':b['peak_allocated_bytes']/2**20,'additional_MiB':b['additional_peak_allocated_bytes']/2**20,'median_check':statistics.median(b['samples_seconds'])==b['median_seconds']} for mode,routes in flash.items() for route,b in routes.items()]
+book=Path('course/chapters/16.md').read_bytes();first=list(re.finditer(rb'(?m)^## ',book));sec=book[first[0].start():first[1].start()]
+out={'environment':{'python':platform.python_version(),'torch':str(torch.__version__),'device':'CPU','OMP_NUM_THREADS':'1','MKL_NUM_THREADS':'1'},'math':math,'sft_test_exact_check':sft_check,'flash_fp16_MiB_check':flash_math,'efficiency_file_sha256':hashlib.sha256(Path('docs/course-experiments/results/efficiency.json').read_bytes()).hexdigest(),'training_branch_memory_coverage':branchmem,'inference_median_checks':medians,'primary_section_sha256':hashlib.sha256(sec).hexdigest(),'api_docstrings':{'numel':torch.numel.__doc__,'element_size':torch.Tensor.element_size.__doc__}}
+print(json.dumps(out,ensure_ascii=False,indent=2))
+Path('docs/technical-reviews/artifacts/16.1-calculation-output.json').write_text(json.dumps(out,ensure_ascii=False,indent=2)+'\n')
