@@ -1,0 +1,142 @@
+import contextlib
+import hashlib
+import io
+import json
+import math
+import platform
+import re
+import signal
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+ROOT = Path.cwd()
+sys.path.insert(0, str(ROOT))
+import torch
+from torch.nn import functional as F
+
+signal.alarm(90)
+torch.set_num_threads(1)
+torch.set_num_interop_threads(1)
+assert torch.version.git_version == "5c4886908584029761b579af026dcfb627c84070"
+assert not torch.cuda.is_available()
+
+SPECS = [
+    ("course/chapters/01.md", "1.6"),
+    ("course/chapters/01.md", "1.7"),
+    ("course/chapters/01.md", "1.8"),
+    ("course/first-steps.md", "W.6"),
+    ("course/chapters/01.md", "1.9"),
+    ("course/chapters/05.md", "5.2"),
+    ("course/chapters/05.md", "5.7"),
+    ("course/chapters/07.md", "7.11"),
+    ("course/chapters/13.md", "13.1"),
+    ("course/chapters/13.md", "13.5"),
+    ("course/chapters/08.md", "8.8"),
+    ("course/chapters/09.md", "9.9"),
+    ("course/chapters/05.md", "5.8"),
+]
+records, read_scope, codes = [], [], {}
+for path, lesson in SPECS:
+    raw = Path(path).read_bytes()
+    headings = list(re.finditer(rb"(?m)^## ([A-Z\d]+\.\d+) [^\r\n]+", raw))
+    index = next(i for i, h in enumerate(headings) if h[1].decode() == lesson)
+    end = headings[index + 1].start() if index + 1 < len(headings) else len(raw)
+    body = raw[headings[index].start():end]
+    fences = re.findall(r"```python\n(.*?)```", body.decode(), re.S)
+    assert len(fences) == 1, (lesson, len(fences))
+    codes[lesson] = fences[0]
+    read_scope.append({"source": path + "#" + lesson,
+                       "raw_sha256": hashlib.sha256(body).hexdigest(),
+                       "file_sha256": hashlib.sha256(raw).hexdigest(),
+                       "svg": re.findall(r"\(([^)]+\.svg)\)", body.decode())})
+
+def run(lesson, variant, code=None, expected_exception=None):
+    code = codes[lesson] if code is None else code
+    namespace = {}
+    stdout = io.StringIO()
+    record = {"source": lesson, "variant": variant,
+              "code_sha256": hashlib.sha256(code.encode()).hexdigest()}
+    if variant != "original":
+        record["variant_code"] = code
+    with contextlib.redirect_stdout(stdout):
+        try:
+            exec(compile(code, lesson + ":" + variant, "exec"), namespace)
+        except Exception as error:
+            record["exception"] = type(error).__name__
+            record["exception_message"] = str(error)
+            if expected_exception is None or not isinstance(error, expected_exception):
+                raise
+            record["result"] = "expected_exception"
+        else:
+            assert expected_exception is None, (lesson, variant, "expected exception absent")
+            record["result"] = "completed"
+    record["stdout"] = stdout.getvalue()
+    if lesson == "5.7":
+        record["post_update_max_logit_difference"] = float(
+            (namespace["model"](namespace["x"])["logits"] -
+             namespace["loaded"](namespace["x"])["logits"]).detach().abs().max())
+    records.append(record)
+    return namespace
+
+for _, lesson in SPECS:
+    run(lesson, "original")
+run("1.6", "exercise-dog-row", codes["1.6"].replace(
+    "scores.weight[0, 1] = 2.0", "scores.weight[0, 1] = 2.0\n    scores.weight[2, 0] = 3.0"))
+run("1.7", "exercise-first-logit-3", codes["1.7"].replace("[1.0, 2.0, -1.0]", "[3.0, 2.0, -1.0]"))
+run("1.8", "exercise-target-0", codes["1.8"].replace("target = torch.tensor([1])", "target = torch.tensor([0])").replace("probabilities[0, 1]", "probabilities[0, 0]"))
+for rate in [0.6, 1.1]:
+    run("W.6", "exercise-learning-rate-" + str(rate), codes["W.6"].replace("0.1 * w.grad", str(rate) + " * w.grad"))
+for point in [5.0, 3.0]:
+    run("1.9", "exercise-w-" + str(point), codes["1.9"].replace("w = 1.0", "w = " + str(point)))
+run("5.2", "exercise-six-valid-targets", codes["5.2"].replace("[1, -100, -100, -100]", "[1, 2, -100, -100]"))
+run("5.2", "exercise-return-to-five", codes["5.2"])
+run("5.7", "exercise-omit-optimizer-state", codes["5.7"].replace(
+    '    restored_optimizer.load_state_dict(payload["optimizer"])\n', ""), expected_exception=AssertionError)
+run("7.11", "exercise-assistant-0-to-3", '''
+from tiny_perceptron.data import toy_conversations, render_chat
+messages = [dict(message) for message in toy_conversations()[0]]
+_, old_targets = render_chat(messages)
+messages[1]["content"] = "3"
+_, new_targets = render_chat(messages)
+print("原有效目標", old_targets[old_targets != -100].tolist())
+print("改後有效目標", new_targets[new_targets != -100].tolist())
+assert old_targets[old_targets != -100].tolist() == [56, 2]
+assert new_targets[new_targets != -100].tolist() == [59, 2]
+''')
+run("13.1", "exercise-remove-format-condition", codes["13.1"].replace("只回數字：2+2=?", "2+2=?"))
+run("13.5", "exercise-policy-chosen-minus5", codes["13.5"].replace(
+    "chosen = torch.tensor([-4.0]", "chosen = torch.tensor([-5.0]"))
+run("8.8", "exercise-rank4-alpha4", codes["8.8"].replace("rank=2, alpha=2", "rank=4, alpha=4"))
+run("9.9", "exercise-correct-index0", codes["9.9"].replace("correct_index = 1", "correct_index = 0"))
+run("5.8", "exercise-third-teacher-forced-correct", codes["5.8"].replace("teacher_forced = [1, 2, 0, 4]", "teacher_forced = [1, 2, 3, 4]"))
+
+# G.2 has no Python fence; this is the reviewer's numeric verification only.
+z = torch.tensor([2.0, 1.0, 0.0], dtype=torch.float64, requires_grad=True)
+p = z.softmax(0)
+loss = F.cross_entropy(z.unsqueeze(0), torch.tensor([2]))
+loss.backward()
+hand = [math.exp(value) / sum(math.exp(t) for t in [2, 1, 0]) for value in [2, 1, 0]]
+assert max(abs(float(a) - b) for a, b in zip(p.detach(), hand)) < 1e-14
+assert max(abs(float(a) - b) for a, b in zip(p.detach(), [0.665, 0.245, 0.090])) < 0.0005
+assert abs(float(loss.detach()) + math.log(hand[2])) < 1e-14
+assert torch.allclose(z.grad, p.detach() - torch.tensor([0., 0., 1.], dtype=torch.float64))
+primary = {"fences": 0, "numeric_input": [2, 1, 0], "target_index": 2,
+           "probabilities": p.detach().tolist(), "probability_sum": float(p.detach().sum()),
+           "loss_nats": float(loss.detach()), "logit_gradient": z.grad.tolist(),
+           "manual_probabilities": hand,
+           "exercise_scope_answer": "5.8 明示的兩份假設預測支持：同一真值上逐位置正確率與整串完全匹配是不同指標。它沒有測得訓練後模型品質；還需以未參與更新的新題，固定自由生成設定，檢查 loss、完整任務成功率與回答內容。"}
+result = {"run_at": datetime.now(timezone.utc).isoformat(),
+          "command": "OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 .venv/bin/python docs/technical-reviews/artifacts/G.2-cpu-runner.txt",
+          "environment": {"python": platform.python_version(), "torch": str(torch.__version__),
+                          "torch_git": torch.version.git_version, "device": "cpu",
+                          "threads": str(torch.get_num_threads()), "interop_threads": str(torch.get_num_interop_threads())},
+          "scope": "G.2 無 fence；13 個直接必要前置各跑原例，再分別跑其練習；只做教材 5.7 的兩次小模型更新，未跑正式訓練、GPU、雲端或下載資料。",
+          "primary": primary, "read_scope": read_scope, "cases": records,
+          "counts": {"original_examples": 13, "exercise_runs": len(records) - 13,
+                     "completed": sum(r["result"] == "completed" for r in records),
+                     "expected_exceptions": sum(r["result"] == "expected_exception" for r in records)}}
+Path("docs/technical-reviews/artifacts/G.2-cpu-results.json").write_text(
+    json.dumps(result, ensure_ascii=False, indent=2) + "\n")
+print(json.dumps(result, ensure_ascii=False, indent=2))
+signal.alarm(0)
