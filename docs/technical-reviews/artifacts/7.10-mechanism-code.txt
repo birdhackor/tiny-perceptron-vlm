@@ -1,0 +1,60 @@
+import json
+import math
+import platform
+
+import torch
+from torch.nn import functional as F
+
+from tiny_perceptron.data import ByteTokenizer, pad_batch, render_chat
+from tiny_perceptron.model import ModelConfig, TinyLM, masked_loss
+
+torch.set_num_threads(1)
+torch.manual_seed(42)
+example = render_chat([
+    {"role": "user", "content": "很長的問題"},
+    {"role": "assistant", "content": "是"},
+])
+x, y = example
+model = TinyLM(ModelConfig(width=8, layers=1, heads=1, max_length=32))
+with torch.no_grad():
+    logits = model(x[:2][None])["logits"]
+assert logits.shape == (1, 2, 264) and bool(torch.isfinite(logits).all())
+ignored = y[:2][None]
+mean = F.cross_entropy(logits.reshape(-1, 264), ignored.reshape(-1), reduction="mean")
+summed = F.cross_entropy(logits.reshape(-1, 264), ignored.reshape(-1), reduction="sum")
+assert math.isnan(float(mean)) and float(summed) == 0
+try:
+    masked_loss(logits, ignored)
+except ValueError as error:
+    empty_loss_error = str(error)
+else:
+    raise AssertionError("empty supervision must be rejected")
+short = render_chat([
+    {"role": "user", "content": "Q"},
+    {"role": "assistant", "content": "A"},
+])
+individual_counts = [int((short[1][:6] != -100).sum()), int((y[:6] != -100).sum())]
+assert individual_counts == [2, 0]
+try:
+    pad_batch([short, example], max_length=6)
+except ValueError as error:
+    mixed_batch_error = str(error)
+    assert "第 1 筆" in mixed_batch_error
+else:
+    raise AssertionError("a positive batch total must not hide an empty row")
+tok = ByteTokenizer()
+length_counts = {str(n): int((y[:n] != -100).sum()) for n in (2, 18, 19, 20, 21, 22)}
+assert length_counts == {"2": 0, "18": 0, "19": 1, "20": 2, "21": 3, "22": 4}
+assert x[18].item() == tok.assistant_id
+assert y[18].item() == tok.encode("是")[0]
+result = {
+    "environment": {"python": platform.python_version(), "torch": torch.__version__, "device": "cpu", "threads": torch.get_num_threads()},
+    "inputs": {"question_utf8_bytes": len("很長的問題".encode()), "answer_utf8_bytes": len("是".encode()), "x": x.tolist(), "y": y.tolist()},
+    "forward_without_supervision": {"shape": list(logits.shape), "all_finite": bool(torch.isfinite(logits).all()), "labels": ignored.tolist()},
+    "all_ignored_cross_entropy": {"dtype": str(logits.dtype), "target_dtype": str(ignored.dtype), "mean_is_nan": math.isnan(float(mean)), "sum": float(summed), "class_weight": None, "label_smoothing": 0.0, "ignore_index": -100},
+    "custom_loss_error": empty_loss_error,
+    "mixed_batch": {"per_row_effective_targets": individual_counts, "total": sum(individual_counts), "error": mixed_batch_error},
+    "length_counts": length_counts,
+    "scope": "離線有界 CPU；只做前向、標籤統計與拒絕檢查，沒有求導、更新、下載或正式訓練。NaN 另可能由其他資料或數值問題造成。",
+}
+print(json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False))

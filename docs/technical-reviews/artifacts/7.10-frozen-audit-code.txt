@@ -1,0 +1,111 @@
+import hashlib
+import json
+import platform
+import random
+import tarfile
+from pathlib import Path
+
+import torch
+
+from scripts.course_experiments.common import records_sha256, split_records
+from scripts.course_experiments.text import _digest, _utf8_prefix
+from tiny_perceptron.data import ByteTokenizer, render_chat
+
+torch.set_num_threads(1)
+
+def sha(data):
+    return hashlib.sha256(data).hexdigest()
+
+report_path = Path("docs/course-experiments/results/sft.json")
+report = json.loads(report_path.read_bytes())
+pilot = report["results"]["ultrachat_pilot"]
+assert report["step_scale"] == 1.0 and report["status"] == "completed"
+code_hashes = {}
+for path in ("tiny_perceptron/data.py", "tiny_perceptron/model.py", "scripts/course_experiments/text.py", "scripts/course_experiments/common.py"):
+    digest = sha(Path(path).read_bytes())
+    assert digest == report["code_sha256"][path]
+    code_hashes[path] = digest
+archive = Path("assets/training/ultrachat-sft-v1.tar.gz")
+archive_sha = sha(archive.read_bytes())
+asset = next(a for a in report["assets"] if a["id"] == "ultrachat-sft")
+assert archive_sha == asset["archive_sha256"]
+with tarfile.open(archive, "r:gz") as reader:
+    member = next(m for m in reader.getmembers() if m.name.endswith("/train-first-100.jsonl"))
+    rawbytes = reader.extractfile(member).read()
+expected_raw_sha = next(f["sha256"] for f in asset["files"] if f["path"].endswith("/train-first-100.jsonl"))
+assert sha(rawbytes) == expected_raw_sha
+rows = [json.loads(line) for line in rawbytes.splitlines()]
+records = []
+lengths = []
+for index, row in enumerate(rows):
+    user = next((m["content"] for m in row["messages"] if m["role"] == "user"), None)
+    assistant = next((m["content"] for m in row["messages"] if m["role"] == "assistant"), None)
+    if user and assistant:
+        messages = [{"role": "user", "content": _utf8_prefix(user, 120)}, {"role": "assistant", "content": _utf8_prefix(assistant, 120)}]
+        record = {"family": row.get("prompt_id", _digest(user)), "source_row": index, "source_record_sha256": _digest(row), "scope": "first-turn UTF-8-safe excerpt", "messages": messages}
+        records.append(record)
+        x, y = render_chat(messages)
+        assert len(x) <= 256 and (y != -100).any() and y[-1].item() == 2
+        lengths.append({"source_row": index, "question_bytes": len(messages[0]["content"].encode()), "answer_bytes": len(messages[1]["content"].encode()), "xy_positions": len(x), "effective_targets": int((y != -100).sum()), "question_was_cut": messages[0]["content"] != user, "answer_was_cut": messages[1]["content"] != assistant})
+parts = split_records(records, seed=report["seed"])
+sets = [{r["family"] for r in parts[s]} for s in ("train", "validation", "test")]
+assert not (sets[0] & sets[1] or sets[0] & sets[2] or sets[1] & sets[2])
+split_stats = {}
+for split, prepared in parts.items():
+    encoded = "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in prepared).encode()
+    assert sha(encoded) == pilot["data"][split]["sha256"]
+    split_stats[split] = {"records": len(prepared), "families": len({r["family"] for r in prepared}), "sha256": sha(encoded), "effective_targets": sum(int((render_chat(r["messages"])[1] != -100).sum()) for r in prepared)}
+assert len(rows) == len(records) == 100
+assert [split_stats[s]["records"] for s in ("train", "validation", "test")] == [80, 10, 10]
+sampler = random.Random(report["seed"])
+train_counts = [int((render_chat(r["messages"])[1] != -100).sum()) for r in parts["train"]]
+steps = pilot["training"]["steps"]
+training_targets = sum(sum(train_counts[i] for i in sampler.choices(range(80), k=4)) for _ in range(steps))
+assert steps == 80 and training_targets == pilot["training"]["effective_tokens"] == 38714
+assert records_sha256(parts["train"]) == pilot["training"]["records_sha256"]
+tok = ByteTokenizer()
+evaluation = {}
+for split, result in pilot["evaluation"].items():
+    samples = []
+    for index, sample in enumerate(result["samples"]):
+        ids = sample["generated_ids"]
+        raw = ids[:ids.index(2)] if 2 in ids else ids
+        expected_ids = tok.encode(sample["expected"])
+        computed_exact = raw == expected_ids
+        assert computed_exact == sample["exact"]
+        assert tok.decode(raw) == sample["generated"]
+        assert sample["expected"] == parts[split][index]["messages"][-1]["content"]
+        assert sample["messages"] == parts[split][index]["messages"][:-1]
+        samples.append({"row": index, "expected_utf8_sha256": sha(sample["expected"].encode()), "expected_id_count": len(expected_ids), "generated_ids": ids, "generated": sample["generated"], "exact_recomputed": computed_exact, "eos_recomputed": 2 in ids})
+    matches = sum(s["exact_recomputed"] for s in samples)
+    eos = sum(s["eos_recomputed"] for s in samples)
+    assert matches == result["matches"] == 0
+    assert len(samples) == result["records"] == 10
+    assert result["effective_tokens"] == split_stats[split]["effective_targets"] == 1210
+    assert matches / len(samples) == result["exact_match"]
+    assert eos / len(samples) == result["eos_rate"]
+    evaluation[split] = {"matches": matches, "records": len(samples), "effective_tokens": result["effective_tokens"], "nll": result["nll"], "nll_sum": result["nll_sum"], "nll_recomputed": result["nll_sum"] / result["effective_tokens"], "eos_count": eos, "samples": samples}
+checkpoint_path = Path("checkpoints/course/sft/ultrachat-pilot.pt")
+checkpoint_sha = sha(checkpoint_path.read_bytes())
+release_path = Path("docs/course-experiments/public-releases/sft.json")
+release = json.loads(release_path.read_bytes())["release"]
+public_entry = next(f for f in release["public_manifest"]["files"] if f["output"] == "ultrachat-pilot.pt")
+assert checkpoint_sha == public_entry["sha256"]
+checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+config = checkpoint["config"]
+parameter_count = sum(t.numel() for t in checkpoint["model"].values())
+assert config["width"] == 32 and config["layers"] == 1 and config["max_length"] == 256
+assert parameter_count == pilot["training"]["parameters"] == 37728
+print(json.dumps({
+    "reviewed_on": "2026-10-03",
+    "environment": {"python": platform.python_version(), "torch": torch.__version__, "device": "cpu", "threads": torch.get_num_threads()},
+    "scope": "只讀現存本地資料包、凍結正式報告與公開權重；重算轉換／分組／分母／生成ID匹配。沒有下載資料或模型、没有訓練／推論重播、沒有使用GPU。",
+    "formal_run": {k: report[k] for k in ("revision", "seed", "device", "torch_version", "python_version", "gpu", "step_scale", "status")},
+    "formal_result_path": str(report_path), "formal_result_sha256": sha(report_path.read_bytes()),
+    "formal_code_sha256_binding": code_hashes,
+    "raw_source": {"archive_sha256": archive_sha, "raw_records_sha256": sha(rawbytes), "revision": "8049631c405ae6576f93f445c6b8166f76f5505a", "source_url": "https://datasets-server.huggingface.co/rows?dataset=HuggingFaceH4%2Fultrachat_200k&config=default&split=train_sft&offset=0&length=100&revision=8049631c405ae6576f93f445c6b8166f76f5505a"},
+    "preparation": {"source_records": len(rows), "prepared_records": len(records), "question_and_answer_byte_cap": 120, "max_xy_positions": max(r["xy_positions"] for r in lengths), "source_rows": lengths, "splits": split_stats, "families_disjoint": True},
+    "training": {"steps": steps, "batch_size": 4, "learning_rate": 0.003, "parameters": parameter_count, "effective_targets_recorded": pilot["training"]["effective_tokens"], "effective_targets_from_same_sampling_schedule": training_targets, "train_records_sha256": records_sha256(parts["train"]), "generation_token_limit": 128},
+    "evaluation": evaluation,
+    "published_checkpoint": {"local_path": str(checkpoint_path), "sha256": checkpoint_sha, "public_repository": release["repo"], "immutable_revision": release["revision"], "weights_revision": release["weights_revision"], "public_file_path": public_entry["path"], "config": config, "architecture": checkpoint["architecture"], "metadata": checkpoint["metadata"], "parameter_count": parameter_count},
+}, ensure_ascii=False, indent=2, allow_nan=False))
