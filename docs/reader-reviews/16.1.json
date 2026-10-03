@@ -1,48 +1,406 @@
 {
   "lesson_id": "16.1",
   "source": "course/chapters/16.md#16.1",
-  "reviewer_task": "/root/readers_systems_applications_v2/reader_16_1",
+  "reviewer_task": "/root/reader_16_1_t4_scope_retry_fresh",
   "source_sha256": "b4f1c69fdee3812314c4eade35d1915c6875558dc94ae65a63e0c384867d596d",
   "intro_sha256": "a8b2dae29d5488abdc4432aa08f634efdb946ae3b3d9b0a22045657c85ba6a78",
-  "intro_summary": "章導言提醒我，跑得慢、長對話快取變大與訓練批次放不下是三種可能有不同原因的問題。先量出成本位置，再逐項看快取、裝填、梯度累積與精度，之後比較分塊、重算和編譯。CPU例子先教我核對運算關係；要判斷實際速度或最高記憶體收益，還須指定硬體、輸入長度與工作模式再量測。",
+  "intro_summary": "本章先問成本在哪裡，再分別檢查生成快取、短文件裝填、梯度累積及精度，後半部看注意力分塊、反向重算與編譯的取捨。CPU 小例子先讓我核對計算關係；真正速度與最高記憶體收益，還要在指定硬體、長度和工作模式實量，不能由做法名稱推定。",
   "verdict": "pass",
-  "reader_summary": "本節要讓我先找出慢或占空間的位置，再決定改什麼，而不是只看總耗時或選項名稱。TinyLM以width=8處理一列三個ID，先暖機三次，再用CPU profiler記錄五次向前計算；分數形狀(1,3,264)表示一筆輸入、三位置、每位置264項候選。Self CPU只計運算自己花的時間，CPU total含子運算，父子total不能全部相加；多處用到同運算，所以呼叫次數可能超過五次。權重格數乘每格bytes後加總，是6104×4=24416 bytes，並不含全部中間量、cache、梯度與更新器狀態。練習把ids改成torch.arange(1,13)[None]，先預測(1,12,264)與權重bytes不變，再多輪比較前五項耗時。我本次在離線CPU重跑原例與練習，各自得到預期形狀和24416 bytes，排行與前次閱讀實跑不同。正式L4段說明TF32是GPU的FP32矩陣計算模式：儲存仍是FP32，乘法可降低精細位數、以FP32累加，所以要固定是否開啟這項計算條件。中位數的算法也可照文操作：排序九個時間取第5個；偶數次則平均中間兩個，與全部相加再除以次數的一般平均不同。推論與訓練有不同採樣規則，記憶體須看每支線開始前配置、峰值和新增量，不能把外層最後一次reset後的數字當整組峰值。",
+  "reader_summary": {
+    "problem": "只知道模型總共跑兩秒，無法知道要改善注意力、特徵處理或首次初始化；先用 profiler 找時間成本的位置，再在固定條件下重複量總耗時和記憶體。BKM 是目前明確條件下已知的做法，條件換了就重新量。",
+    "example": "CPU 上建立 width=8 的 TinyLM，一列三個 ID 先查字/位置表，經 LayerNorm、注意力和 FFN，最後每位置產生 264 個候選 logits。eval 設推理行為，no_grad 不記反向關係。先向前三次暖機，再讓 CPU profiler 記五次；這不是訓練或 GPU 量測。",
+    "expected_output": "第一行應 (1,3,264)，實跑相符。接著列 Self CPU 排序前五個運算：Self 不含子運算，total 包含，父子 total 不可全相加。多個線性層反覆呼叫，所以例如 aten::mm 為 25 calls、不是五輪就只有 5。index_select 對查表、softmax 對注意力比例、gelu 對 FFN 的啟動函數。6104 個 FP32 參數×每個 4 bytes=24416 bytes，實跑相符；這不是微秒，也不是全模型執行峰值記憶體。",
+    "measurement": "L4 正式組從 T.4 直接 SFT 模型和 45/5/10 題切分開始；原模型只答對最後檢查 5/10。四 Query 的四 KV/一 KV 兩組各續訓 100 次，再從 MHA 分別續訓各更新方式。推論暖機 3 次、同步等裝置完成後量 9 次，排序取第 5 個作中位數；偶數取中間兩個平均，普通平均則全部相加除次數。訓練略過前 3 步後的完整更新中位數，不能混入推論欄。",
+    "memory": "權重格數乘每格 bytes 只算參數表；還有中間特徵、cache、訓練梯度和 Adam 歷史。CUDA allocator 每支線開始前重新設定峰值，保留已配置基線、該支峰值及峰值減基線的新增量；MiB=2**20 bytes。這個範圍不含 driver、reserved 未用空間或 Inductor 子程序；外層最後一次 reset 之後的數字不能稱整組實驗峰值。profiler 的定位時間也有工具開銷，總時間另重複量。",
+    "fixture_and_training": "T.8 明確把 Flash 的 fixture.pt 定為固定 Q/K/V 與反傳輸入，不含模型權重，也沒有 loss、更新器或整模型訓練；它只核驗固定注意力核心的後端、數值和成本。efficiency 的 sft/model.pt、各支線實際更新及留出問答才是另一範圍，兩種結果不能互換。",
+    "exercise": "將 ids 一行改成 torch.arange(1,13)[None]，得到一筆 12 token；先預測 logits (1,12,264)、權重 24416 bytes 不變，再從頭重跑前五個成本，多跑幾輪看長度變大的工作，無需指定某操作第一。本次同模型兩種長度各實跑 3 輪 profiler，shape 和 bytes 都符合，前五項排序的確會變。"
+  },
   "issues": [],
   "checks": {
     "background_and_links": {
       "status": "pass",
-      "details": "本次重新親讀當前16.1從##到下一個##前的全文，以及章導言。前次已親讀的明列前置範圍仍為4.5、15.11、course/training.md#T.4/#T.8與16.4，沒有另找其他專案材料補省略內容。本次另使用直接連結efficiency實報的本地同資源，核對mha與gqa的cached_decode九次採樣。TF32與中位數現在由16.1自身解釋，不必從設定欄位猜概念。外部max_memory_allocated網頁未開啟，記憶體範圍依本節與原先親讀的實報。"
+      "details": "從 16.1 明列的 4.5、15.11、T.4、16.4、T.8 出發，僅循本文精確連結追讀必要小節。T.4 全文親讀並親算 raw SHA=49185a05ae4ad7333d61282435b3ad168f234a9121a59f46b916e3fe2c9cc01c。SFT 家族切分、基模品質、四 Query 改動與正式/CPU 練流程的不同已能理解；全部親讀小節和 SHA 記在 prerequisites_read。沒有讀其他 reader/technical reviews、作者 diff/計畫或搜尋未連結課程。"
     },
     "terminology": {
       "status": "pass",
-      "details": "原兩項卡點均解決。TF32新文字清楚分開FP32資料儲存與矩陣乘法精度，並說明關閉是固定計算條件；我現在知道它不代表把權重檔改存成另一種大小。中位數新文字明列先排序、九次取第5個與偶數次取中間兩項平均，並另列全部平均的算法。BKM、profiler、Self CPU／CPU total、呼叫次數、aten前綴、numel、element_size、bytes與MiB的既有解釋仍可用；SFT與FP32／Query-KV分組可由原先明列前置理解。"
+      "details": "BKM、profiler、Self/total、calls、aten 前綴、暖機、中位數/普通平均、FP32/TF32、CUDA allocator、MiB 都由 16.1 本身解釋；embedding、Linear、Attention/QKV/head、FFN/GELU、logits、eval/no_grad、梯度/優化器的必要背景由精確前置補足。TF32 是 FP32 儲存但矩陣乘法可減少精細位數再 FP32 累加，會影響精度/速度；正式組明確關閉。沒有留下阻礙本節理解的未解術語。"
     },
     "example": {
       "status": "pass",
-      "details": "重新閱讀做飯總時間比喻、三ID模型與L4量測規則，能區分找瓶頸、量整體速度與量記憶體。新增[1,2,3,20]偶數採樣例可手算(2+3)/2=2.5，一般平均則(1+2+3+20)/4=6.5；用離線Python核對相同結果。我再將實報mha與gqa的cached_decode九次時間排序取第5個，分別得到0.027915452999998536與0.027104872000002445秒，與報告median_seconds完全一致，現在能從採樣重算正式數字。"
+      "details": "餐點總時間不能定位步驟成本的比喻能理解。CPU 三 token 對 12 token 是固定同模型的形狀/成本觀察，不是品質比較。親讀 frozen efficiency/sft/flash_probe JSON 的必要環境、分母、各支線、九次原始採樣和記憶體範圍；程式核對推論九次採樣中位數和峰值減基線。MHA/GQA 快取 25600/6400 bytes，留出同為 6/10；原單頭 SFT 為 5/10，不能宣稱完全答對或架構改動等價。"
     },
     "program_explanation": {
       "status": "pass",
-      "details": "完整程式與預期輸出已重新親讀；本次再於repo根目錄使用.venv/bin/python離線CPU執行同樣的三次暖機、五次profile。三ID實得分數形狀(1,3,264)、權重24416 bytes；此次Self CPU前五項為mm、embedding、gelu、index_select、clone，gelu呼叫5次、index_select10次、mm25次，吻合彙整與多處呼叫的說明。此次Self CPU總量約3.116 ms屬本次profiler結果；沒有當固定速度或無profiler總計時。未啟動GPU、正式訓練、付費或雲端工作。"
+      "details": "在現成 .venv 的 torch 2.14.1+cpu 上親跑原 CPU profiler 程式和練習，單執行緒、eval、no_grad、3 次暖機及 5 次記錄；各做 3 輪。原例 (1,3,264)、練習 (1,12,264)、6104 參數與 24416 bytes 全相符。讀到 mm 25 次、gelu 5 次、native_layer_norm 15 次，能區分操作彙整與模型輪數。另用 perf_counter 量各 9 次 CPU 總時間，僅作本機觀察。所有 L4、CUDA/Flash/Inductor/正式更新成績均為親讀既有原始報告，未親跑 GPU 或正式訓練。"
     },
     "exercise": {
       "status": "pass",
-      "details": "重新親讀練習指定修改行、先預測形狀與權重bytes、重跑比較前五項與多輪觀察的操作要求。本次以torch.arange(1,13)[None]再跑一次CPU，實得(1,12,264)、24416 bytes；前五項為new_empty、masked_fill、gelu、mm、view。前次同一練習已跑三輪且第一名不同，本次也再次變動，符合本文提醒；不以這個短例排序判斷GPU效率或宣稱輸入加長一定出現固定倍數成本。"
+      "details": "arange(1,13) 建 ID1 至 12 的一排，再 [None] 加一筆的軸；改這一行而不改模型即可重跑。先預測候選軸仍 264、位置軸 12、參數 bytes 不變，再看前五項耗時並重跑。三輪實測中前三 token 的第一名在 expand/gelu 間變，12 token 的第一名在 view/mm/gelu 間變；教材沒有要求固定排行，因此我能解釋結果也知道下一步怎樣操作。"
     }
   },
-  "figure_sha256": {},
-  "figure_inspection": {
-    "status": "not_applicable",
-    "details": "本次親讀的16.1與章導言沒有SVG。"
-  },
-  "resolved_issues": [
+  "prerequisites_read": [
     {
-      "id": "16.1-tf32",
-      "resolution": "當前本節直接解釋TF32的GPU FP32矩陣運算模式、儲存與乘法精度的區別，以及記錄關閉以固定條件的原因；原理解缺口已解決。"
+      "source": "course/chapters/04.md#4.5",
+      "via_lesson": "16.1",
+      "source_sha256": "07c9ba209dee722627a1ee291307f4e55fca0bef1ffe7c7917cbd0f7a104b429",
+      "purpose": "理解預設模型的 block、注意力與 FFN 接法",
+      "reading": "親讀完整精確小節；未讀其他讀者或技術審查報告"
     },
     {
-      "id": "16.1-median",
-      "resolution": "當前本節直接給排序九次取第5個、偶數取中間兩個平均、與一般平均的不同算法。已手算並離線核對新增例子，也從兩組實報九次採樣重算成功。"
+      "source": "course/chapters/15.md#15.11",
+      "via_lesson": "16.1",
+      "source_sha256": "2064af5a7d00a8dbc41628d7f5afff37c490e9d6a6078fede56559eacb642dbc",
+      "purpose": "理解工作量代理不等於耗時、單執行緒、暖機、重複計時與 CPU/GPU 範圍",
+      "reading": "親讀完整精確小節；未讀其他讀者或技術審查報告"
+    },
+    {
+      "source": "course/training.md#T.4",
+      "via_lesson": "16.1",
+      "source_sha256": "49185a05ae4ad7333d61282435b3ad168f234a9121a59f46b916e3fe2c9cc01c",
+      "purpose": "理解直接屬性 SFT、45/5/10 題家族切分及正式 GPU 訓練與 CPU 操作練習差別",
+      "reading": "親讀完整精確小節；未讀其他讀者或技術審查報告"
+    },
+    {
+      "source": "course/chapters/04.md#4.2",
+      "via_lesson": "4.5",
+      "source_sha256": "846070309ea0bbaa2ccb945dd651d81f62273ef97a2c5c5f3cf098dbcbe77064",
+      "purpose": "理解殘差是原表示逐格加修正",
+      "reading": "親讀完整精確小節；未讀其他讀者或技術審查報告"
+    },
+    {
+      "source": "course/chapters/04.md#4.3",
+      "via_lesson": "4.5",
+      "source_sha256": "9114c4a1bf718d4e209048fed90c31341db060652e31160e74070ebbc24bf18a",
+      "purpose": "理解 LayerNorm 在每個位置的最後特徵軸整理尺度",
+      "reading": "親讀完整精確小節；未讀其他讀者或技術審查報告"
+    },
+    {
+      "source": "course/chapters/04.md#4.4",
+      "via_lesson": "4.5",
+      "source_sha256": "e354a3cd855838caa6864f3496381eda59b656046acdb7cbd91ae1e17dd16de6",
+      "purpose": "理解 FFN、兩個 Linear 與 GELU",
+      "reading": "親讀完整精確小節；未讀其他讀者或技術審查報告"
+    },
+    {
+      "source": "course/chapters/07.md#7.1",
+      "via_lesson": "T.4",
+      "source_sha256": "92aeee369ec2af39a249355786baa2683ab9fc09308aff1098af7f6edc11808d",
+      "purpose": "理解 token、消息角色、SFT 示範回答及 EOS",
+      "reading": "親讀完整精確小節；未讀其他讀者或技術審查報告"
+    },
+    {
+      "source": "course/chapters/07.md#7.3",
+      "via_lesson": "T.4",
+      "source_sha256": "169853b46c7ffaa3daaadd1b96fc992bb24f0c06db64b053e54150d7221d5a13",
+      "purpose": "理解只計助手回答與 EOS、有效目標和輸入問題仍提供線索",
+      "reading": "親讀完整精確小節；未讀其他讀者或技術審查報告"
+    },
+    {
+      "source": "course/chapters/16.md#16.4",
+      "via_lesson": "16.1",
+      "source_sha256": "4cf1aa4e1a6cb62c29d68cb050258a9d92bf0647e52712c9f4f8a5413b20d353",
+      "purpose": "理解四個 Query 頭、MHA/一個 KV 頭改動與留出品質",
+      "reading": "親讀完整精確小節；未讀其他讀者或技術審查報告"
+    },
+    {
+      "source": "course/training.md#T.8",
+      "via_lesson": "16.1",
+      "source_sha256": "3dbe9d266bc18079127a54874e1200f8f0d5e2c55d54a685b39a369f06102c4f",
+      "purpose": "理解正式 efficiency 的 CUDA 重跑入口、依賴、各更新支線與固定 Flash fixture 的範圍",
+      "reading": "親讀完整精確小節；未讀其他讀者或技術審查報告"
+    },
+    {
+      "source": "course/chapters/04.md#4.1",
+      "via_lesson": "7.3",
+      "source_sha256": "4755e670ca067bf1263d95837f09a01bf9b7bcacedba5cffdff8f43098b13702",
+      "purpose": "理解字與位置查表以及特徵寬度",
+      "reading": "親讀完整精確小節；未讀其他讀者或技術審查報告"
+    },
+    {
+      "source": "course/chapters/03.md#3.7",
+      "via_lesson": "16.4",
+      "source_sha256": "e9a032b4a840d21c2ad3f3e3e184e9f8eb6323ce120c6185c79ea75ebe0747c2",
+      "purpose": "理解每個注意力頭保留全部位置，Q/K/V 投影後分組",
+      "reading": "親讀完整精確小節；未讀其他讀者或技術審查報告"
+    },
+    {
+      "source": "course/chapters/16.md#16.2",
+      "via_lesson": "16.4",
+      "source_sha256": "0d05e03fb325a3b16b9c7a68b4686590e4a69c546cab9ccc928b492d0f781e2e",
+      "purpose": "理解 prefill、decode、固定輸出成本和服務 TTFT 差別",
+      "reading": "親讀完整精確小節；未讀其他讀者或技術審查報告"
+    },
+    {
+      "source": "course/chapters/16.md#16.3",
+      "via_lesson": "16.4",
+      "source_sha256": "4c9b1d82213f63119fce57b3186b5b17c35797cb4f3fb727049d3ecd7857f209",
+      "purpose": "理解 cache 保存各層 K/V、位置偏移及與整段重算核對",
+      "reading": "親讀完整精確小節；未讀其他讀者或技術審查報告"
+    },
+    {
+      "source": "course/chapters/03.md#3.3",
+      "via_lesson": "16.2",
+      "source_sha256": "5a5b930752359902c7fd653e889562f5cfb2eb602db1e8bd8acf39d5fc1c0a78",
+      "purpose": "理解 Query/Key、匹配分數、轉置與候選軸",
+      "reading": "親讀完整精確小節；未讀其他讀者或技術審查報告"
+    },
+    {
+      "source": "course/chapters/03.md#3.4",
+      "via_lesson": "16.2",
+      "source_sha256": "886c2e43b40f7fcf0840bba3dbbe7176880bd33caa2006e438efcc4fac4e09bb",
+      "purpose": "理解 softmax 比例按位置混合 Value",
+      "reading": "親讀完整精確小節；未讀其他讀者或技術審查報告"
+    },
+    {
+      "source": "course/chapters/03.md#3.6",
+      "via_lesson": "3.7",
+      "source_sha256": "b3a3a02bf09ebdada567c1f1b1330cd0a7da0f4e33bd2ddca33a58131f5b34a9",
+      "purpose": "理解因果遮罩允許自己與過去、快取前文可重用的原因",
+      "reading": "親讀完整精確小節；未讀其他讀者或技術審查報告"
+    },
+    {
+      "source": "course/chapters/04.md#4.6",
+      "via_lesson": "16.2",
+      "source_sha256": "c8d4ccf957ba8bfeb3d23c436bd027e742bb00644fbdabc0ef12a1003da50a41",
+      "purpose": "理解每個位置 logits 的候選分數及三個軸",
+      "reading": "親讀完整精確小節；未讀其他讀者或技術審查報告"
+    },
+    {
+      "source": "course/chapters/05.md#5.17",
+      "via_lesson": "16.2",
+      "source_sha256": "4290ab4c7b09513eb983c1d92ecbb8bee24cc012f1a13be764e1b39761f3cea2",
+      "purpose": "理解 eval 與 no_grad 的不同用途",
+      "reading": "親讀完整精確小節；未讀其他讀者或技術審查報告"
+    },
+    {
+      "source": "course/chapters/02.md#2.1",
+      "via_lesson": "4.1",
+      "source_sha256": "ad3735e64cde5f41cabb008d1d71f07b8b0121c1aa5c1c86e4c7004d14b4498e",
+      "purpose": "理解 embedding 是按 ID 查可學特徵表",
+      "reading": "親讀完整精確小節；未讀其他讀者或技術審查報告"
+    },
+    {
+      "source": "course/chapters/02.md#2.3",
+      "via_lesson": "4.4",
+      "source_sha256": "844ace0294be6bd66a796dce017f4b9a0f2d11e7a448719b20e055c61e1cb16c",
+      "purpose": "理解 Linear、權重矩陣、bias 與矩陣乘法",
+      "reading": "親讀完整精確小節；未讀其他讀者或技術審查報告"
+    },
+    {
+      "source": "course/chapters/02.md#2.4",
+      "via_lesson": "4.4",
+      "source_sha256": "28eb3311c8266075b12108649c8af90148990789f0bc052e53606715c5addc3b",
+      "purpose": "理解非線性和啟動函數",
+      "reading": "親讀完整精確小節；未讀其他讀者或技術審查報告"
+    },
+    {
+      "source": "course/chapters/01.md#1.7",
+      "via_lesson": "3.4",
+      "source_sha256": "efdb4b1bf5a4b21e739bfc59597a35696d711eeaa5f7e054ae7bd9b16a3092e2",
+      "purpose": "理解 logits 與 softmax 機率不同",
+      "reading": "親讀完整精確小節；未讀其他讀者或技術審查報告"
+    },
+    {
+      "source": "course/chapters/01.md#1.8",
+      "via_lesson": "4.6",
+      "source_sha256": "c7ad6f245be1f0ebeb314d2985c81a7468d5326758ce34394435546c697ea574",
+      "purpose": "理解正式報告 NLL 取正確 ID 機率的負對數平均",
+      "reading": "親讀完整精確小節；未讀其他讀者或技術審查報告"
+    },
+    {
+      "source": "course/chapters/01.md#1.10",
+      "via_lesson": "5.17",
+      "source_sha256": "0fa781db00fd4803814b6ccf6bd25e61dab79a7078560fce816f070d24db4bfd",
+      "purpose": "理解向前、反向、梯度、計算圖和 no_grad 暫停的記錄",
+      "reading": "親讀完整精確小節；未讀其他讀者或技術審查報告"
+    },
+    {
+      "source": "course/chapters/03.md#3.5",
+      "via_lesson": "4.3",
+      "source_sha256": "304c5be0763e3abb08b3b062462647baee8bc0052dbfb16a5e200c35dd9275f7",
+      "purpose": "理解平均、變異數與標準差，補足 LN 和縮放點積背景",
+      "reading": "親讀完整精確小節；未讀其他讀者或技術審查報告"
+    },
+    {
+      "source": "course/chapters/05.md#5.4",
+      "via_lesson": "T.4",
+      "source_sha256": "1cf9cbccfa7ff9ac3d54a48af7c665ed5095eb6bdf73f3e01e423bb3de1e2d0d",
+      "purpose": "理解優化器保存方向和平方梯度歷史，權重不是全部訓練記憶體",
+      "reading": "親讀完整精確小節；未讀其他讀者或技術審查報告"
+    },
+    {
+      "source": "course/chapters/04.md#4.7",
+      "via_lesson": "T.4",
+      "source_sha256": "1657f654432bbec8396b2621137379cd3bb6d2d43fa5b3e566121f752191a193",
+      "purpose": "理解下一 token 對齊及新加筆數軸 [None]",
+      "reading": "親讀完整精確小節；未讀其他讀者或技術審查報告"
+    },
+    {
+      "source": "course/chapters/06.md#6.6",
+      "via_lesson": "7.1",
+      "source_sha256": "39889431c93d22d58028019039c3e93c714c563234434c41ad9dab831e0ebc7d",
+      "purpose": "理解八個控制 ID 加 256 bytes 構成 264 項字表",
+      "reading": "親讀完整精確小節；未讀其他讀者或技術審查報告"
+    },
+    {
+      "source": "course/chapters/06.md#6.7",
+      "via_lesson": "T.4",
+      "source_sha256": "73551ff251b63b566c029dd6d937763b36842df619c500263379f5cb1146217d",
+      "purpose": "理解 token 不等於肉眼字數及不完整 byte 顯示不等於原始 ID 損壞",
+      "reading": "親讀完整精確小節；未讀其他讀者或技術審查報告"
     }
-  ]
+  ],
+  "figure_sha256": {
+    "course/figures/foundations_residual.svg": "ca92a2406f7bb15b085c95043aacc371aaa431dc159f6f1062379b113eab9508",
+    "course/figures/architecture_gqa_cache.svg": "78fdf172375e7139abd190370005880456b3aefff3b7d249daad3736d1e62bc7",
+    "course/figures/foundations_heads.svg": "c5b256097cfca78212fca473122e553f607011aca2698bf2c0775e63f68c30fc",
+    "course/figures/cache.svg": "4c0acaebb3e61a783ac0ca9b3b5afb31fd26044fbc7824ad940fdaaf5f699d20",
+    "course/figures/foundations_attention.svg": "04731056df6adb40021b7d6ad11e03701344f8b56fd568fdd692c4a72639d849",
+    "course/figures/foundations_causal.svg": "75861259596de287ea7bf31f478d15a27ef27b2c0881f89ca5c5ce52dcfc30ed",
+    "course/figures/foundations_prediction_positions.svg": "27508fb0354d63062aba0da7723a329a193814776a4b9d017ac09bb64184f03e",
+    "course/figures/foundations_embedding.svg": "989d1e041c940fbbb978c0287fbaa9e85af78f0b51b48c97484e8487a89333e7",
+    "course/figures/foundations_nonlinearity.svg": "cdd8e9dfc6e66f69f424eeefc9fad8b7297d17fa918bba4d18c97f37054c397c",
+    "course/figures/foundations_chain.svg": "309bd04d79ad5d96dc918d0b6d8ca074b69828fb52899e2782b11ea5455a941d"
+  },
+  "figure_scope": "16.1 與導言沒有 SVG；此表記錄全部必要前置中親讀、實際 render 並 view_image 的 10 張 SVG，讓它們後續變更也能要求重查。",
+  "figure_inspection": [
+    {
+      "path": "course/figures/foundations_residual.svg",
+      "lesson": "4.2",
+      "render_command": "node /tmp/render-course-svg.mjs foundations_residual.svg /tmp/reader_16_1_residual.png 688",
+      "rendered_image": "/tmp/reader_16_1_residual.png",
+      "view_image_performed": true,
+      "details": "左側 [1,2] 分為乘 2 的 [2,4] 與直接 [1,2]；兩路到加號，右側 [3,6]；底部敏感度 1+2=3 與正文一致。"
+    },
+    {
+      "path": "course/figures/architecture_gqa_cache.svg",
+      "lesson": "16.4",
+      "render_command": "node /tmp/render-course-svg.mjs architecture_gqa_cache.svg /tmp/reader_16_1_gqa.png 688",
+      "rendered_image": "/tmp/reader_16_1_gqa.png",
+      "view_image_performed": true,
+      "details": "左右均保留 Q 頭 0 至 3。左側各自讀 96 bytes 的 KV、合計 384；右側四條讀取連線到共享 KV 96 bytes；底式 2×3位置×4特徵×4bytes=96 與正文一致。"
+    },
+    {
+      "path": "course/figures/foundations_heads.svg",
+      "lesson": "3.7",
+      "render_command": "node /tmp/render-course-svg.mjs foundations_heads.svg /tmp/reader_16_1_heads.png 688",
+      "rendered_image": "/tmp/reader_16_1_heads.png",
+      "view_image_performed": true,
+      "details": "X [1,4,8] 下接三套 Linear 的 Q/K/V [1,4,8]，再分兩頭，每頭全部 4 位置×4 特徵及自己的 4×4 比例表；向下拼接回 [1,4,8]，軸與箭頭一致。"
+    },
+    {
+      "path": "course/figures/cache.svg",
+      "lesson": "16.3",
+      "render_command": "node /tmp/render-course-svg.mjs cache.svg /tmp/reader_16_1_cache.png 688",
+      "rendered_image": "/tmp/reader_16_1_cache.png",
+      "view_image_performed": true,
+      "details": "上列 K0/V0 至 K2/V2、中央只算位置 3、下列 append 後保留前三格並加 K3/V3；圖註保存每層筆記、不預先知道下一答案，與正文一致。"
+    },
+    {
+      "path": "course/figures/foundations_attention.svg",
+      "lesson": "3.4",
+      "render_command": "node /tmp/render-course-svg.mjs foundations_attention.svg /tmp/reader_16_1_attention.png 688",
+      "rendered_image": "/tmp/reader_16_1_attention.png",
+      "view_image_performed": true,
+      "details": "Q [1,0] 向兩位置 K 分支，分數 1/0 經 softmax 得 0.731/0.269，沿欄對準 V [10,20,30] 與 [-1,-2,-3]；下方混合 [7.042,14.083,21.125] 對應逐格加權。"
+    },
+    {
+      "path": "course/figures/foundations_causal.svg",
+      "lesson": "3.6",
+      "render_command": "node /tmp/render-course-svg.mjs foundations_causal.svg /tmp/reader_16_1_causal.png 688",
+      "rendered_image": "/tmp/reader_16_1_causal.png",
+      "view_image_performed": true,
+      "details": "查詢為列、候選位置為欄，綠色下三角含對角線；各列有效比例 1、1/2、1/3、1/4，右上灰色 × 禁止且比例 0，符合正文。"
+    },
+    {
+      "path": "course/figures/foundations_prediction_positions.svg",
+      "lesson": "4.6",
+      "render_command": "node /tmp/render-course-svg.mjs foundations_prediction_positions.svg /tmp/reader_16_1_prediction.png 688",
+      "rendered_image": "/tmp/reader_16_1_prediction.png",
+      "view_image_performed": true,
+      "details": "三列可讀前文 [1]、[1,2]、[1,2,3] 各箭頭到候選 0 至 19 分數，最後綠框才含完整前文；底註續寫選最後列再加回輸入，與本文一致。"
+    },
+    {
+      "path": "course/figures/foundations_embedding.svg",
+      "lesson": "2.1",
+      "render_command": "node /tmp/render-course-svg.mjs foundations_embedding.svg /tmp/reader_16_1_embedding.png 688",
+      "rendered_image": "/tmp/reader_16_1_embedding.png",
+      "view_image_performed": true,
+      "details": "左表 5×3 含 ID1 [1,0,0]、ID2 [0,1,0]；右側位置 0/2 查 ID1 得相同向量、位置 1 查 ID2；箭頭和顏色表示查列，符合正文。"
+    },
+    {
+      "path": "course/figures/foundations_nonlinearity.svg",
+      "lesson": "2.4",
+      "render_command": "node /tmp/render-course-svg.mjs foundations_nonlinearity.svg /tmp/reader_16_1_nonlinearity.png 688",
+      "rendered_image": "/tmp/reader_16_1_nonlinearity.png",
+      "view_image_performed": true,
+      "details": "左圖輸入 -2/0/2 的三點輸出全 0；右圖負數清零後輸出 2/0/2 成 V 形，橫軸輸入、縱軸輸出，點和標籤一致。"
+    },
+    {
+      "path": "course/figures/foundations_chain.svg",
+      "lesson": "1.10",
+      "render_command": "node /tmp/render-course-svg.mjs foundations_chain.svg /tmp/reader_16_1_chain.png 688",
+      "rendered_image": "/tmp/reader_16_1_chain.png",
+      "view_image_performed": true,
+      "details": "上方藍箭頭向右 w=3→u=6→L=36；下方橘箭頭向左回查 dL/du=12、du/dw=2，底部梯度 12×2=24，方向與數字一致。"
+    }
+  ],
+  "formal_evidence": [
+    {
+      "source": "docs/course-experiments/results/efficiency.json",
+      "sha256": "d4bae2fdfab076fe76a65b3555b1a9347a562e1748406c7afc101266e4ee1615",
+      "scope": "親讀 linked frozen 原始報告：環境、45/5/10 切分，MHA/GQA 模型配置/100 更新/11278 目標與留出分母、cache 全 12 ID/誤差/九次採樣，ordinary/accumulated/checkpoint/sdpa 40 次與 2328 目標、開始配置/峰值/新增量；packing 更新目標、SDPA 實際 memory-efficient、組件 Inductor 首次/穩態/原始採樣；GPU 未重跑。"
+    },
+    {
+      "source": "docs/course-experiments/results/sft.json",
+      "sha256": "77caf612ec0856053f40cba862fac186c989fb8863bf6f0832f9209278ec3998",
+      "scope": "親讀 data 家族 9/1/2 與題數 45/5/10、training 900 更新/141568 參數；after validation/test 36/69 有效目標與全部 5/10 題原始生成，核對 baseline test matches=5/records=10；GPU 未重跑。"
+    },
+    {
+      "source": "docs/course-experiments/results/flash_probe.json",
+      "sha256": "fd6d8dd7dde2f0edd6ca8f78f3bb0a7b8749643b9f02e6fe3b5bc6b39f724c1d",
+      "scope": "親讀環境、固定 [2,4,512,32] fixture 無模型權重、FP16/BF16 各輸出/三梯度有限值和容差、真正 CUDA Flash forward/backward profiler 運算子與 kernel、各路線全部九次採樣/中位數/基線/峰值/新增量及 exclusions；GPU 未重跑。"
+    }
+  ],
+  "cpu_execution": {
+    "device": "cpu",
+    "torch_version": "2.14.1+cpu",
+    "model_parameter_count": 6104,
+    "parameter_bytes": 24416,
+    "logits_shapes": {
+      "three_ids": [
+        1,
+        3,
+        264
+      ],
+      "twelve_ids": [
+        1,
+        12,
+        264
+      ]
+    },
+    "profiler_runs_per_length": 3,
+    "warmup_calls": 3,
+    "recorded_calls_per_run": 5,
+    "independent_timing": "各 9 次 CPU perf_counter，3 token 中位數約 0.339967 ms、12 token 約 0.358655 ms；同次程序的小形狀觀察，不能以此推定 GPU 或普遍加速。",
+    "temporary_evidence_path": "/tmp/reader_16_1_cpu_evidence.json",
+    "limitations": "沒有 GPU、Modal、正式訓練、下載新資料/權重/依賴、Git 或 Notebook 匯出；正式 GPU 成績只親讀原 frozen JSON。"
+  },
+  "external_reference_check": {
+    "linked_url": "https://docs.pytorch.org/docs/2.14/generated/torch.cuda.max_memory_allocated.html",
+    "url_fetch": "HTTP 403，未聲稱親讀到這份網頁。",
+    "fallback": "親讀本環境 PyTorch 2.14.1+cpu 的 torch.cuda.max_memory_allocated 和 reset_peak_memory_stats 原 API docstring：最大 tensor 配置 bytes、自程序開始或最近 reset 起算；沒有呼叫任何 CUDA API。正文自己已足夠解釋量測範圍。"
+  },
+  "validation": {
+    "own_raw_hashes_and_fields": "已親提取未正規化 UTF-8 原文並驗算本節、導言、T.4、全部已讀前置與全 10 SVG；五項 checks 均有 status/details。",
+    "global_checker": {
+      "command": ".venv/bin/python scripts/check_course_reviews.py",
+      "exit_code": 1,
+      "reported_failures": [
+        "T.6: 通過的審閱不是目前正文",
+        "T.7: 通過的審閱不是目前正文"
+      ],
+      "scope": "16.1 未列為失敗；本次獨立驗算 16.1 的來源、導言、30 個必要前置、10 個 SVG、正式原報告指紋及必填欄位全部通過。全域未通過來自 T.6/T.7 的並行其他小節版本，沒有讀取或改寫那些報告。"
+    }
+  }
 }
