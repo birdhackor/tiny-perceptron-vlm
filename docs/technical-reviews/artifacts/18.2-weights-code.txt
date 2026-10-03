@@ -1,0 +1,31 @@
+import hashlib, json, platform
+from pathlib import Path
+import torch
+from tiny_perceptron.model import TinyLM, ModelConfig
+
+def sha(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+manifest = json.loads(Path("docs/course-experiments/public-releases/distillation.json").read_bytes())
+revision = manifest["release"]["revision"]
+files = {row["output"]: row for row in manifest["release"]["public_manifest"]["files"]}
+rows = []
+for name in ["sft-teacher.pt", "sft-w16-ce.pt", "sft-w16-teacher_hard.pt", "sft-w16-ce_kl.pt", "sft-w32-ce.pt", "sft-w32-teacher_hard.pt", "sft-w32-ce_kl.pt"]:
+    path = Path("checkpoints/course/distillation") / name
+    digest = sha(path)
+    assert digest == files[name]["sha256"]
+    checkpoint = torch.load(path, map_location="cpu", weights_only=True)
+    state = checkpoint["model"]
+    model = TinyLM(ModelConfig(**checkpoint["config"]))
+    model.load_state_dict(state, strict=True)
+    count = sum(p.numel() for p in model.parameters())
+    tensor_bytes = sum(p.numel() * p.element_size() for p in model.parameters())
+    assert all(p.dtype == torch.float32 for p in model.parameters())
+    rows.append({"name": name, "url": "https://huggingface.co/birdhackor/tiny-perceptron-course-models/resolve/" + revision + "/course/course-v1/distillation/" + name, "immutable_revision": revision, "file_sha256": digest, "file_bytes": path.stat().st_size, "config": checkpoint["config"], "architecture": checkpoint["architecture"], "parameter_count": count, "parameter_tensor_bytes": tensor_bytes, "parameters": [{"name": k, "shape": list(v.shape), "numel": v.numel(), "dtype": str(v.dtype), "element_size": v.element_size()} for k, v in model.named_parameters()], "output_projection_shape": list(state["output.weight"].shape), "output_projection_sha256": hashlib.sha256(state["output.weight"].contiguous().numpy().tobytes()).hexdigest(), "state_keys": list(state)})
+for width, expected in [(16, 13744), (32, 33632)]:
+    selected = [r for r in rows if r["name"].startswith(f"sft-w{width}-")]
+    assert len(selected) == 3 and all(r["parameter_count"] == expected for r in selected)
+    assert len({json.dumps(r["config"], sort_keys=True) for r in selected}) == 1
+    assert len({json.dumps(r["state_keys"]) for r in selected}) == 1
+    assert len({json.dumps(r["output_projection_shape"]) for r in selected}) == 1
+assert rows[0]["parameter_count"] == 141568
+print(json.dumps({"environment": {"python": platform.python_version(), "torch": str(torch.__version__), "torch_git_version": torch.version.git_version, "device": "cpu", "threads": str(torch.get_num_threads()), "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"}, "public_release_source_sha256": sha(Path("docs/course-experiments/public-releases/distillation.json")), "scope": "既有公開 pinned FP32 權重的 CPU 載入、完整參數數目與投影形狀；未訓練或生成，沒有品質或 GPU 效能結論。output_projection_sha256 是訓練後 tensor，不應把相同輸出層結構解作三支訓練後權重值相同。", "rows": rows}, ensure_ascii=False, indent=2))

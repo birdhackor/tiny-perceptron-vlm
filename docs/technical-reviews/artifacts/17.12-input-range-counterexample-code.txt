@@ -1,0 +1,51 @@
+import hashlib
+import json
+import os
+import platform
+import sys
+from pathlib import Path
+import torch
+
+assert torch.get_num_threads() == 1
+assert torch.version.git_version == '5c4886908584029761b579af026dcfb627c84070'
+assert not torch.cuda.is_available()
+
+def offline_guard(event, arguments):
+    if event in ('socket.connect', 'socket.getaddrinfo', 'socket.bind', 'socket.sendto', 'subprocess.Popen', 'os.system'):
+        raise RuntimeError('Offline bounded CPU review blocks ' + event)
+
+sys.addaudithook(offline_guard)
+weights = torch.tensor([[1.0, 1.0], [2.0, 2.0]])
+first_input = torch.tensor([1.0, 0.0])
+second_input = torch.tensor([0.0, 1.0])
+with torch.no_grad():
+    first_features = weights @ first_input
+    repeated_features = weights @ first_input.clone()
+    second_features = weights @ second_input
+assert not torch.equal(first_input, second_input)
+assert torch.equal(first_features, repeated_features)
+assert torch.equal(first_features, second_features)
+assert first_features.tolist() == [1.0, 2.0]
+assert first_features.abs().max().item() == second_features.abs().max().item() == 2.0
+record = {
+    'command': 'OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1 TRANSFORMERS_OFFLINE=1 CUDA_VISIBLE_DEVICES= .venv/bin/python docs/technical-reviews/artifacts/17.12-input-range-counterexample-code.txt docs/technical-reviews/artifacts/17.12-input-range-counterexample-execution.json',
+    'environment': {'python': platform.python_version(), 'torch': str(torch.__version__), 'torch_git_version': str(torch.version.git_version), 'device': 'cpu', 'dtype': str(weights.dtype), 'threads': str(torch.get_num_threads()), 'OMP_NUM_THREADS': os.environ['OMP_NUM_THREADS'], 'MKL_NUM_THREADS': os.environ['MKL_NUM_THREADS'], 'offline_guard': 'network and subprocess blocked'},
+    'code_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+    'weights': weights.tolist(),
+    'first_input': first_input.tolist(),
+    'second_input': second_input.tolist(),
+    'first_features': first_features.tolist(),
+    'repeated_features': repeated_features.tolist(),
+    'second_features': second_features.tolist(),
+    'first_max_abs': first_features.abs().max().item(),
+    'second_max_abs': second_features.abs().max().item(),
+    'distinct_inputs': not torch.equal(first_input, second_input),
+    'same_input_same_features': torch.equal(first_features, repeated_features),
+    'distinct_inputs_same_features': torch.equal(first_features, second_features),
+    'stdout': '兩個不同輸入經同一固定線性層均得到[1,2]，最大絕對值皆2；重複相同輸入也得到相同特徵。\n',
+    'stderr': '',
+    'exit_code': 0,
+    'scope': '只反證中間特徵每次輸入都變的全稱敘述。無訓練、無模型下載、无GPU或品質／速度外推；三次2×2矩陣乘法。',
+}
+Path(sys.argv[1]).write_text(json.dumps(record, ensure_ascii=False, indent=2, allow_nan=False) + '\n')
+print(json.dumps(record, ensure_ascii=False, indent=2, allow_nan=False))

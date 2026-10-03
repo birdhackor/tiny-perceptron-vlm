@@ -1,0 +1,44 @@
+import hashlib
+import json
+import os
+import platform
+import sys
+from pathlib import Path
+import torch
+
+assert torch.get_num_threads() == 1
+assert torch.version.git_version == '5c4886908584029761b579af026dcfb627c84070'
+assert not torch.cuda.is_available()
+
+def offline_guard(event, arguments):
+    if event in ('socket.connect', 'socket.getaddrinfo', 'socket.bind', 'socket.sendto', 'subprocess.Popen', 'os.system'):
+        raise RuntimeError('Offline bounded CPU review blocks ' + event)
+
+sys.addaudithook(offline_guard)
+evaluation = torch.tensor([-0.2, 0.4, 3.0])
+records = []
+for name, maximum, expected_mask, expected_count in (
+    ('fixed', torch.tensor(1.0), [False, False, True], 1),
+    ('dynamic', torch.tensor(3.0), [False, False, False], 0),
+):
+    mask = evaluation.abs() > maximum
+    count = mask.sum()
+    number = count.item()
+    assert mask.dtype == torch.bool and mask.shape == (3,)
+    assert mask.tolist() == expected_mask
+    assert count.dtype == torch.int64 and count.shape == torch.Size([])
+    assert type(number) is int and number == expected_count
+    records.append({'case': name, 'maximum': maximum.item(), 'comparison_tensor': mask.tolist(), 'comparison_dtype': str(mask.dtype), 'comparison_shape': list(mask.shape), 'sum_tensor_value': count.item(), 'sum_dtype': str(count.dtype), 'sum_shape': list(count.shape), 'item_value': number, 'item_python_type': type(number).__name__})
+result = {
+    'command': 'OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1 TRANSFORMERS_OFFLINE=1 CUDA_VISIBLE_DEVICES= .venv/bin/python docs/technical-reviews/artifacts/17.12-overflow-api-code.txt docs/technical-reviews/artifacts/17.12-overflow-api-execution.json',
+    'environment': {'python': platform.python_version(), 'torch': str(torch.__version__), 'torch_git_version': str(torch.version.git_version), 'device': 'cpu', 'input_dtype': str(evaluation.dtype), 'threads': str(torch.get_num_threads()), 'OMP_NUM_THREADS': os.environ['OMP_NUM_THREADS'], 'MKL_NUM_THREADS': os.environ['MKL_NUM_THREADS'], 'offline_guard': 'network and subprocess blocked'},
+    'code_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+    'evaluation': evaluation.tolist(),
+    'records': records,
+    'stdout': 'fixed比較=[False,False,True]，sum是0維int64 tensor(1)，item為Python int 1；dynamic比較=[False,False,False]，sum是0維int64 tensor(0)，item為Python int 0。\n',
+    'stderr': '',
+    'exit_code': 0,
+    'scope': '只針對新增prose所述comparison/sum/item保存必要中間型別和數值。兩次三元素計数，沒有重跑原simulate、原exercise、counterexample或SVG；無訓練、模型下載、GPU、品質／速度外推。',
+}
+Path(sys.argv[1]).write_text(json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False) + '\n')
+print(json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False))

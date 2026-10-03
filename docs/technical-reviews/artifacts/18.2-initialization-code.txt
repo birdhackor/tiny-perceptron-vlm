@@ -1,0 +1,35 @@
+import copy, hashlib, json, platform
+from pathlib import Path
+import torch
+from tiny_perceptron.model import TinyLM, ModelConfig
+from tiny_perceptron.training import seed_everything
+from tiny_perceptron.data import ByteTokenizer
+
+def parameter_hash(model):
+    digest = hashlib.sha256()
+    for name, value in model.state_dict().items():
+        digest.update(name.encode())
+        digest.update(value.detach().cpu().contiguous().numpy().tobytes())
+    return digest.hexdigest()
+
+fixed = json.loads(Path("docs/course-experiments/results/distillation.json").read_bytes())["results"]["tasks"]["attributes"]
+rows=[]
+for width in [16, 32]:
+    seed_everything(42)
+    initial = TinyLM(ModelConfig(width=width, layers=1, heads=2, max_length=128))
+    branches = {method: copy.deepcopy(initial) for method in ["ce", "teacher_hard", "ce_kl"]}
+    hash_value = parameter_hash(initial)
+    assert hash_value == fixed["runs"][f"w{width}_ce"]["training"]["initialization_sha256"]
+    assert all(parameter_hash(model)==hash_value for model in branches.values())
+    assert len({tuple(model.state_dict()) for model in branches.values()})==1
+    rows.append({"width": width, "initialization_sha256": hash_value, "matches_original_record": True, "three_deepcopies_equal": True, "branches": {name: {"count": sum(p.numel() for p in model.parameters()), "all_trainable": all(p.requires_grad for p in model.parameters()), "FP32_element_bytes": sorted({p.element_size() for p in model.parameters()}), "output_shape": list(model.output.weight.shape), "bias": model.output.bias, "separate_output_from_embedding": model.output.weight is not model.embedding.weight, "layers": len(model.blocks), "heads": model.blocks[0].attention.heads} for name,model in branches.items()}})
+ids=torch.tensor([ByteTokenizer().encode("cat")])
+features=[]
+for width in [8,16]:
+    model=TinyLM(ModelConfig(width=width,layers=1))
+    x=model.embedding(ids)
+    att=model.blocks[0].attention
+    q=att.q(x).view(1,3,1,width).transpose(1,2)
+    k=att.k(x).view(1,3,1,width).transpose(1,2)
+    features.append({"width":width,"embedding_features_shape":list(x.shape),"q_projection_shape":list(att.q.weight.shape),"attention_scores_shape":list((q @ k.transpose(-2,-1)).shape),"logits_shape":list(model(ids)["logits"].shape)})
+print(json.dumps({"environment":{"python":platform.python_version(),"torch":str(torch.__version__),"device":"cpu","threads":str(torch.get_num_threads()),"OMP_NUM_THREADS":"1","MKL_NUM_THREADS":"1","torch_git_version":torch.version.git_version},"initialization_rows":rows,"feature_shapes":features,"token_ids":ids.tolist(),"vocab_size":ByteTokenizer.vocab_size,"scope":"只重建原碼的初始化與 copy.deepcopy，沒有 optimizer 或 loss 更新，沒有重訓。實際 before-state hash 與固定實驗相符；同寬三支共用初始結構及值。較窄縮的是可學權重和 D 特徵軸，attention T×T 與 logits 的 V 軸固定；不是峰值或時間測量。"},ensure_ascii=False,indent=2))
