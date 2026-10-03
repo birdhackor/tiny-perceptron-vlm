@@ -1,0 +1,40 @@
+from pathlib import Path
+import sys, json, hashlib, platform, os
+sys.path.insert(0,str(Path.cwd()))
+import torch
+from scripts.course_experiments.applications import _FinitePolicy, _policy_features, _POLICY_ACTIONS
+from scripts.course_experiments.common import Context
+
+out=Path('docs/technical-reviews/artifacts')
+result=json.loads(Path('docs/course-experiments/results/reasoning.json').read_bytes())
+release_path=Path('docs/course-experiments/public-releases/reasoning.json')
+manifest=json.loads(release_path.read_bytes())['release']['public_manifest']
+public_files=[manifest['files'][8],manifest['files'][9]]
+assert [f['output'] for f in public_files]==['policy-strict.pt','policy-weak_proxy.pt']
+ctx=Context('cpu',Path('/tmp/C.7-unused'),Path('/tmp'),Path('/tmp'),42)
+torch.manual_seed(42)
+initial=_FinitePolicy().state_dict()
+evidence=[]
+for branch,entry in zip(('strict','weak_proxy'),public_files,strict=True):
+    local=Path('checkpoints/course/reasoning')/entry['output']
+    raw=local.read_bytes()
+    actual_sha=hashlib.sha256(raw).hexdigest()
+    assert actual_sha==entry['sha256'] and len(raw)==entry['bytes']
+    payload=torch.load(local,map_location='cpu',weights_only=True)
+    state=payload['model']
+    model=_FinitePolicy()
+    model.load_state_dict(state,strict=True)
+    rows=result['results']['reinforce'][branch]['after']['samples']
+    with torch.no_grad():
+        logits=model(_policy_features(rows,ctx))
+        probs=logits.softmax(-1)
+    original=torch.tensor([row['probabilities'] for row in rows])
+    difference=float((probs-original).abs().max())
+    assert difference<1e-5
+    greedy=[_POLICY_ACTIONS[i] for i in logits.argmax(-1).tolist()]
+    assert greedy==[row['greedy_action'] for row in rows]
+    tensors=[{'name':name,'shape':list(tensor.shape),'dtype':str(tensor.dtype),'sha256_tensor_bytes':hashlib.sha256(tensor.contiguous().numpy().tobytes()).hexdigest(),'max_absolute_change_from_seed42_initial':float((tensor-initial[name]).abs().max()),'changed_elements_from_seed42_initial':int((tensor!=initial[name]).sum())} for name,tensor in state.items()]
+    assert all(t['changed_elements_from_seed42_initial']>0 for t in tensors)
+    evidence.append({'branch':branch,'local_ignored_path':str(local),'immutable_url':f'https://huggingface.co/{manifest["repo"]}/resolve/{manifest["revision"]}/{entry["path"]}','public_revision':manifest['revision'],'public_export_sha256':actual_sha,'bytes':len(raw),'original_full_checkpoint_artifact':next(a for a in result['artifacts'] if a['path']==entry['output']),'architecture':payload['architecture'],'format_version':payload['format_version'],'revision':payload['metadata']['revision'],'experiment_id':payload['metadata']['experiment_id'],'tensors':tensors,'cpu_forward_max_probability_difference_from_frozen_cuda':difference,'cpu_greedy_actions':greedy})
+record={'command':'OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 .venv/bin/python docs/technical-reviews/artifacts/C.7-fresh7-weights-code.txt','result':'僅既有公開policy權重bytes/provenance/tensor配置與24題CPU forward，無採樣重播或訓練。公開匯出SHA與原完整checkpoint SHA不同，兩者明列。','environment':{'python':platform.python_version(),'torch':str(torch.__version__),'device':'cpu','OMP_NUM_THREADS':os.environ.get('OMP_NUM_THREADS',''),'MKL_NUM_THREADS':os.environ.get('MKL_NUM_THREADS','')},'manifest_selected_fields':{'path':str(release_path),'repo':manifest['repo'],'revision':manifest['revision'],'files':public_files},'evidence':evidence}
+print(json.dumps(record,ensure_ascii=False,indent=2))

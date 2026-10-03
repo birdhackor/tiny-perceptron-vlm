@@ -1,0 +1,75 @@
+from pathlib import Path
+import hashlib, json, math, platform, subprocess, sys, os
+sys.path.insert(0,str(Path.cwd()))
+import torch
+from scripts.course_experiments.applications import _FinitePolicy, _policy_features, _policy_reward, _POLICY_ACTIONS, _reasoning_records
+from scripts.course_experiments.common import Context, split_records, records_sha256
+
+out=Path('docs/technical-reviews/artifacts')
+environment={'python':platform.python_version(),'torch':str(torch.__version__),'device':'cpu','torch_module_file':torch.__file__,'torch_git_version':str(torch.version.git_version),'OMP_NUM_THREADS':os.environ.get('OMP_NUM_THREADS',''),'MKL_NUM_THREADS':os.environ.get('MKL_NUM_THREADS','')}
+for label in ('example','exercise'):
+    command=[sys.executable,str(out/f'C.7-fresh7-{label}-code.txt')]
+    result=subprocess.run(command,capture_output=True,text=True,timeout=30)
+    assert result.returncode==0, result.stderr
+    record={'command':'OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 '+'.venv/bin/python '+command[1],'exit_code':result.returncode,'stdout':result.stdout,'stderr':result.stderr,'environment':environment}
+    (out/f'C.7-fresh7-{label}-execution.json').write_text(json.dumps(record,ensure_ascii=False,indent=2)+'\n',encoding='utf8')
+
+p=Path('docs/course-experiments/results/reasoning.json')
+raw=p.read_bytes(); x=json.loads(raw)
+relevant_paths=['scripts/course_experiments/applications.py','scripts/course_experiments/common.py','scripts/course_experiments/run.py']
+current={name:hashlib.sha256(Path(name).read_bytes()).hexdigest() for name in relevant_paths}
+assert all(current[name]==x['code_sha256'][name] for name in relevant_paths)
+splits=split_records(_reasoning_records(),42)
+for name,rows in splits.items():
+    assert len(rows)==x['results']['split'][name]['records']
+    assert records_sha256(rows)==x['results']['split'][name]['sha256']
+assert not ({row['family'] for row in splits['train']} & {row['family'] for row in splits['test']})
+ctx=Context('cpu',Path('/tmp/C.7-unused'),Path('/tmp'),Path('/tmp'),42)
+features=_policy_features([{'a':2,'b':0,'c':5}],ctx)
+assert features.tolist()==[[0.,0.,1.,0.,0.,0.,1.,0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,1.]]
+torch.manual_seed(42)
+model=_FinitePolicy()
+assert model(features).shape==(1,17)
+assert tuple(model.net[0].weight.shape)==(48,18)
+assert tuple(model.net[2].weight.shape)==(17,48)
+assert all(_policy_reward(16,t)==0 and _policy_reward(16,t,True)==1 for t in range(16))
+uniform=torch.distributions.Categorical(logits=torch.zeros(17))
+entropy=float(uniform.entropy())
+assert abs(entropy-math.log(17))<1e-6
+assert torch.distributions.Categorical(probs=torch.nn.functional.one_hot(torch.tensor(0),17).float()).entropy()<1e-6
+
+states={}
+snapshot={'original_path':str(p),'original_sha256':hashlib.sha256(raw).hexdigest(),'revision':x['revision'],'config':{k:x[k] for k in ('device','seed','torch_version','python_version','gpu','step_scale','evidence_status','unfinished_schedules')},'code_sha256':{name:x['code_sha256'][name] for name in relevant_paths},'current_sha256':current,'split':x['results']['split'],'policy_actions':_POLICY_ACTIONS,'artifacts':[a for a in x['artifacts'] if a['path'].startswith('policy-')],'branches':{}}
+for branch in ('strict','weak_proxy'):
+    b=x['results']['reinforce'][branch]
+    assert b['training']['steps']==1200 and b['training']['sampled_actions']==1200*64 and b['training']['effective_tokens']==0
+    snapshot['branches'][branch]={'training':b['training']}
+    for state in ('before','after'):
+        data=b[state]; rows=data['samples']; assert len(rows)==24
+        for row in rows:
+            assert row['truth']==row['a']+row['b']+row['c']
+            assert len(row['samples'])==16 and len(row['probabilities'])==17
+            assert abs(sum(row['probabilities'])-1)<1e-6
+            argmax=max(range(17),key=lambda i:row['probabilities'][i])
+            assert row['greedy_action']==_POLICY_ACTIONS[argmax]
+            assert row['greedy_strict_correct']==bool(_policy_reward(argmax,row['truth']))
+            for candidate in row['samples']:
+                action=candidate['action_id']; truth=row['truth']
+                assert candidate['generated']==_POLICY_ACTIONS[action]
+                assert candidate['strict_reward']==_policy_reward(action,truth)
+                assert candidate['proxy_reward']==_policy_reward(action,truth,True)
+        candidates=[c for row in rows for c in row['samples']]
+        counts={'greedy_accuracy':sum(row['greedy_strict_correct'] for row in rows),'sample_accuracy':sum(int(c['strict_reward']) for c in candidates),'sample_proxy_reward':sum(int(c['proxy_reward']) for c in candidates),'enumeration_action_rate':sum(c['action_id']==16 for c in candidates)}
+        for key,numerator in counts.items():
+            denominator=24 if key=='greedy_accuracy' else 384
+            assert data[key]['numerator']==numerator and data[key]['denominator']==denominator
+            assert data[key]['rate']==numerator/denominator
+        states[f'{branch}/{state}']=counts
+        snapshot['branches'][branch][state]={'original_metrics':{k:v for k,v in data.items() if k!='samples'},'raw_trace_projection':[{'question':r['question'],'family':r['family'],'a':r['a'],'b':r['b'],'c':r['c'],'truth':r['truth'],'probabilities':r['probabilities'],'greedy_action':r['greedy_action'],'greedy_strict_correct':r['greedy_strict_correct'],'action_ids':[c['action_id'] for c in r['samples']],'strict_rewards':[c['strict_reward'] for c in r['samples']],'proxy_rewards':[c['proxy_reward'] for c in r['samples']]} for r in rows]}
+assert x['results']['reinforce']['strict']['before']==x['results']['reinforce']['weak_proxy']['before']
+assert x['results']['reinforce']['strict']['training']['reward_history'][-1]['sampled_mean_reward']==39/64
+example=next(r for r in x['results']['reinforce']['strict']['after']['samples'] if r['question']=='(0+3)+3=?')
+assert example['truth']==6 and example['greedy_action']=='7' and [c['action_id'] for c in example['samples']]==[7]*16
+(out/'C.7-fresh7-frozen-evidence.json').write_text(json.dumps(snapshot,ensure_ascii=False,indent=2)+'\n',encoding='utf8')
+result={'environment':environment,'result_sha256':snapshot['original_sha256'],'matched_frozen_source_hashes':current,'split_counts':{k:len(v) for k,v in splits.items()},'one_hot_2_0_5':features.tolist(),'policy_shapes':{'first_weight':[48,18],'second_weight':[17,48],'forward':[1,17]},'uniform_entropy':entropy,'theoretical_maximum':math.log(17),'recomputed_counts':states,'strict_last_batch_reward':39/64,'strict_example_sample_ids':[7]*16,'executed_scope':'原例和reward=0練習各自子程序；正式既有JSON逐樣本與程式路由核對；無正式訓練重播、GPU、weights下載、參數訓練或品質外推'}
+print(json.dumps(result,ensure_ascii=False,indent=2))
