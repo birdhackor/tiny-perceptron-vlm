@@ -1,0 +1,81 @@
+import hashlib
+import json
+import math
+import platform
+from pathlib import Path
+
+import torch
+from tiny_perceptron.alignment import distillation_kl
+from tiny_perceptron.data import render_chat, pad_batch
+from tiny_perceptron.model import TinyLM, ModelConfig
+
+torch.set_num_threads(1)
+assert not torch.cuda.is_available()
+assert torch.version.cuda is None
+print("environment", json.dumps({"python": platform.python_version(), "torch": str(torch.__version__), "torch_git_version": torch.version.git_version, "device": "cpu", "threads": torch.get_num_threads()}))
+p_values = [0.8, 0.2]
+q_values = [0.5, 0.5]
+terms = [p * math.log(p / q) for p, q in zip(p_values, q_values)]
+kl = sum(terms)
+entropy = -sum(p * math.log(p) for p in p_values)
+ce = -sum(p * math.log(q) for p, q in zip(p_values, q_values))
+reverse = sum(q * math.log(q / p) for p, q in zip(p_values, q_values))
+print("math", json.dumps({"kl_terms": terms, "kl": kl, "entropy": entropy, "ce": ce, "ce_minus_entropy": ce - entropy, "reverse_kl": reverse}))
+assert abs(kl - (ce - entropy)) < 1e-14
+assert kl != reverse
+for labels in (torch.tensor([[-100, 0, 1]]), torch.tensor([[0, 0, 1]])):
+    student = torch.zeros(1, 3, 2, requires_grad=True)
+    teacher = torch.tensor([[p_values, p_values, p_values]]).log().requires_grad_()
+    assert teacher.is_leaf and teacher.requires_grad
+    loss = distillation_kl(student, teacher, labels, temperature=1.0)
+    loss.backward()
+    n = int((labels != -100).sum())
+    expected = torch.tensor([[[0.0, 0.0], [-0.15, 0.15], [-0.15, 0.15]]]) if n == 2 else torch.tensor([[[-0.1, 0.1]] * 3])
+    torch.testing.assert_close(student.grad, expected, rtol=1e-6, atol=1e-7)
+    assert abs(loss.item() - kl) < 1e-6
+    assert teacher.grad is None
+    print("example_exercise_full_precision", json.dumps({"labels": labels.tolist(), "valid_positions": n, "shape": list(teacher.shape), "loss": loss.item(), "student_grad": student.grad.tolist(), "teacher_grad": teacher.grad, "teacher_is_leaf": teacher.is_leaf, "teacher_requires_grad": teacher.requires_grad}))
+
+labels = torch.tensor([[-100, 0, 1]])
+teacher = torch.tensor([[p_values, p_values, p_values]]).log().requires_grad_()
+for temperature in (1.0, 2.0, 4.0):
+    student = torch.tensor([[[0.2, -0.5], [0.7, -0.1], [0.0, 0.0]]], requires_grad=True)
+    pt = (teacher.detach() / temperature).softmax(-1)
+    log_q = (student / temperature).log_softmax(-1)
+    manual = (pt * (pt.log() - log_q)).sum(-1)[labels != -100].mean() * temperature ** 2
+    actual = distillation_kl(student, teacher, labels, temperature)
+    ce_t = -(pt * log_q).sum(-1)[labels != -100].mean() * temperature ** 2
+    grad_kl = torch.autograd.grad(actual, student, retain_graph=True)[0]
+    grad_ce = torch.autograd.grad(ce_t, student, retain_graph=True)[0]
+    torch.testing.assert_close(actual, manual, rtol=1e-5, atol=1e-6)
+    torch.testing.assert_close(grad_kl, grad_ce, rtol=1e-6, atol=1e-7)
+    changed_label = distillation_kl(student, teacher, torch.tensor([[-100, 1, 0]]), temperature)
+    torch.testing.assert_close(actual, changed_label, rtol=0, atol=0)
+    print("temperature_and_ce", json.dumps({"T": temperature, "helper": actual.item(), "manual_T_squared_once": manual.item(), "ce_minus_kl": (ce_t - actual).item(), "gradient_max_difference": (grad_ce - grad_kl).abs().max().item(), "labels_values_only_mask": actual.item() == changed_label.item()}))
+
+examples = [render_chat([{"role": "user", "content": "Q"}, {"role": "assistant", "content": text}]) for text in ("A", "ABC")]
+x, y, valid = pad_batch(examples)
+assert bool((y[~valid] == -100).all())
+assert bool((x[~valid] == 0).all())
+print("pad", json.dumps({"x": x.tolist(), "labels": y.tolist(), "attention_valid": valid.tolist(), "supervised_targets": (y != -100).sum().item()}))
+
+torch.manual_seed(19)
+model = TinyLM(ModelConfig(vocab_size=2, width=8, heads=2, max_length=3))
+embedding = torch.randn(1, 3, 8, requires_grad=True)
+logits = model(embeddings=embedding)["logits"]
+logits.retain_grad()
+loss = distillation_kl(logits, teacher, labels, 1.0)
+loss.backward()
+assert bool((logits.grad[0, 0] == 0).all())
+assert embedding.grad[0, 0].norm().item() > 0
+modified = embedding.detach().clone()
+modified[0, 0] += torch.arange(8) * 0.2
+with torch.no_grad():
+    other_logits = model(embeddings=modified)["logits"]
+    difference = (other_logits[0, -1] - logits.detach()[0, -1]).abs().max().item()
+assert difference > 0
+print("ignored_prefix", json.dumps({"ignored_logit_grad": logits.grad[0, 0].tolist(), "ignored_input_embedding_grad_norm": embedding.grad[0, 0].norm().item(), "later_logit_change_if_prefix_changes": difference, "seed": 19, "optimizer_updates": 0, "scope": "random tiny CPU model, mechanism only"}))
+
+for name in ("torch/nn/functional.py", "torch/_tensor.py", "torch/nn/modules/loss.py", "torch/_torch_docs.py", "torch/_tensor_docs.py"):
+    path = Path(".venv/lib/python3.13/site-packages") / name
+    print("installed_source_sha", name, hashlib.sha256(path.read_bytes()).hexdigest())
