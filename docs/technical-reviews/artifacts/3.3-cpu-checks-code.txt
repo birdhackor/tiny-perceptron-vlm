@@ -1,0 +1,131 @@
+import json
+import os
+import platform
+from pathlib import Path
+
+import torch
+from torch import nn
+
+torch.set_num_threads(1)
+torch.set_default_device("cpu")
+result = {
+    "environment": {
+        "python": platform.python_version(),
+        "torch": torch.__version__,
+        "torch_git_version": torch.version.git_version,
+        "device": "cpu",
+        "OMP_NUM_THREADS": os.environ.get("OMP_NUM_THREADS"),
+        "MKL_NUM_THREADS": os.environ.get("MKL_NUM_THREADS"),
+    },
+    "updates": 0,
+}
+
+# 3.3 original values; the unmodified original fence was run separately.
+q = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
+k = torch.tensor([[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]])
+scores = q @ k.T
+assert torch.equal(scores, torch.tensor([[1., 0., 1.], [0., 1., 1.]]))
+assert torch.equal(k.T.T, k)
+assert torch.equal(scores, torch.matmul(q, k.T))
+result["original_check"] = {
+    "q_shape": list(q.shape), "k_shape": list(k.shape),
+    "k_transposed_shape": list(k.T.shape), "scores": scores.tolist(),
+    "dtype": str(scores.dtype), "output_shape": list(scores.shape),
+}
+
+# 3.3 exercise: append one candidate, leaving both queries intact.
+k_exercise = torch.cat([k, torch.tensor([[2.0, 0.0]])], dim=0)
+exercise_scores = q @ k_exercise.T
+assert exercise_scores.shape == (2, 4)
+assert torch.equal(exercise_scores[:, -1], torch.tensor([2., 0.]))
+assert torch.equal(exercise_scores[:, :3], scores)
+result["exercise"] = {
+    "q_shape": list(q.shape), "k_shape": list(k_exercise.shape),
+    "scores": exercise_scores.tolist(), "output_shape": list(exercise_scores.shape),
+    "new_column": exercise_scores[:, -1].tolist(),
+}
+
+# Check candidate-axis normalization and the contrasting query axis.
+candidate_weights = scores.softmax(dim=-1)
+query_weights = scores.softmax(dim=0)
+assert torch.allclose(candidate_weights.sum(dim=-1), torch.ones(2), atol=1e-6)
+assert torch.allclose(query_weights.sum(dim=0), torch.ones(3), atol=1e-6)
+assert not torch.allclose(query_weights.sum(dim=-1), torch.ones(2))
+result["axis_check"] = {
+    "candidate_weights": candidate_weights.tolist(),
+    "candidate_row_sums": candidate_weights.sum(-1).tolist(),
+    "query_axis_weights": query_weights.tolist(),
+    "query_axis_column_sums": query_weights.sum(0).tolist(),
+    "query_axis_row_sums": query_weights.sum(-1).tolist(),
+}
+
+# Matching feature dimensions must agree for the two 2-D matrices.
+try:
+    q @ torch.zeros(3, 3).T
+except RuntimeError as exc:
+    result["incompatible_features"] = {"error": str(exc)}
+else:
+    raise AssertionError("Expected incompatible matmul dimensions")
+
+# Separately reproduce the directly read 3.2 example and its exercises.
+keys32 = torch.tensor([[1., 0.], [0., 1.], [-1., 0.]])
+scores32 = torch.tensor([1., 0.]) @ keys32.T
+weights32 = scores32.softmax(dim=0)
+assert torch.equal(scores32, torch.tensor([1., 0., -1.]))
+scores32_ex1 = torch.tensor([0., 1.]) @ keys32.T
+assert torch.equal(scores32_ex1, torch.tensor([0., 1., 0.]))
+keys32_ex2 = torch.tensor([[1., 0.], [0., 1.], [-1., 1.]])
+scores32_ex2 = torch.tensor([0., 1.]) @ keys32_ex2.T
+weights32_ex2 = scores32_ex2.softmax(dim=0)
+assert torch.equal(scores32_ex2, torch.tensor([0., 1., 1.]))
+assert weights32_ex2[1] == weights32_ex2[2]
+assert abs(weights32_ex2[1].item() - 0.422) < 0.0005
+result["prerequisite_3_2"] = {
+    "original_scores": scores32.tolist(), "original_weights": weights32.tolist(),
+    "exercise_1_scores": scores32_ex1.tolist(),
+    "exercise_2_scores": scores32_ex2.tolist(),
+    "exercise_2_weights": weights32_ex2.tolist(),
+}
+
+# Reproduce the directly read 2.3 original code and exercise.
+layer = nn.Linear(3, 2)
+with torch.no_grad():
+    layer.weight.copy_(torch.tensor([[1.0, 0.0, 2.0], [0.0, -1.0, 1.0]]))
+    layer.bias.copy_(torch.tensor([1.0, 0.0]))
+x = torch.tensor([[1.0, 2.0, 4.0]])
+y = layer(x)
+manual = x @ layer.weight.T + layer.bias
+assert torch.allclose(y, manual)
+assert torch.equal(y, torch.tensor([[10., 2.]]))
+batched_shape = list(layer(torch.ones(2, 4, 3)).shape)
+assert batched_shape == [2, 4, 2]
+with torch.no_grad():
+    layer.weight[0, 2] = 3.
+exercise23 = layer(x)
+assert torch.equal(exercise23, torch.tensor([[14., 2.]]))
+result["prerequisite_2_3"] = {
+    "weight_shape": list(layer.weight.shape), "original_output": y.tolist(),
+    "batched_output_shape": batched_shape, "exercise_output": exercise23.tolist(),
+    "weight_requires_grad": layer.weight.requires_grad,
+    "bias_requires_grad": layer.bias.requires_grad,
+}
+
+# Same X, distinct Q/K feature recipes; no optimizer or training run.
+x_projection = torch.tensor([[1., 2.], [3., 4.]])
+q_layer = nn.Linear(2, 2, bias=False)
+k_layer = nn.Linear(2, 2, bias=False)
+with torch.no_grad():
+    q_layer.weight.copy_(torch.eye(2))
+    k_layer.weight.copy_(torch.tensor([[0., 1.], [1., 0.]]))
+projected_q = q_layer(x_projection)
+projected_k = k_layer(x_projection)
+assert not torch.equal(projected_q, projected_k)
+result["separate_linear_recipes"] = {
+    "X": x_projection.tolist(), "Q": projected_q.tolist(), "K": projected_k.tolist(),
+    "q_requires_grad": q_layer.weight.requires_grad,
+    "k_requires_grad": k_layer.weight.requires_grad,
+    "same_parameter_object": q_layer.weight is k_layer.weight,
+    "scope": "固定人工權重，零訓練更新；只示範獨立參數及同源表示可得到不同Q/K。",
+}
+
+print(json.dumps(result, ensure_ascii=False, indent=2))

@@ -1,0 +1,62 @@
+import hashlib
+import json
+import platform
+import sys
+from pathlib import Path
+import torch
+from torch.nn import functional as F
+from tiny_perceptron.data import split_documents, toy_documents
+from tiny_perceptron.simple import ContextMLP
+from scripts.course_experiments.text import _simple_examples
+
+torch.set_num_threads(1)
+assert torch.version.cuda is None and not torch.cuda.is_available()
+root = Path.cwd()
+frozen = json.loads((root / "docs/course-experiments/results/simple_models.json").read_text())
+public = json.loads((root / "docs/course-experiments/public-releases/simple_models.json").read_text())
+files = public["release"]["public_manifest"]["files"]
+parts = split_documents(toy_documents(), seed=42)
+assert {key: len(value) for key, value in parts.items()} == {"train": 9, "validation": 1, "test": 2}
+assert parts["validation"] == ["顏色=紅；形狀=圓。"]
+assert frozen["seed"] == 42 and frozen["device"] == "cpu" and frozen["evidence_status"] == "complete_run"
+data_hashes = {}
+for split, documents in parts.items():
+    data_path = root / "outputs/course-experiments/course-v1/simple_models" / frozen["results"]["data"][split]["path"]
+    data_sha = hashlib.sha256(data_path.read_bytes()).hexdigest()
+    assert data_sha == frozen["results"]["data"][split]["sha256"]
+    assert [json.loads(line)["text"] for line in data_path.read_text().splitlines()] == documents
+    data_hashes[split] = data_sha
+for source in ["tiny_perceptron/simple.py", "tiny_perceptron/data.py", "scripts/course_experiments/text.py"]:
+    assert hashlib.sha256((root/source).read_bytes()).hexdigest() == frozen["code_sha256"][source]
+vocabulary = {char: index + 2 for index, char in enumerate(sorted(set("".join(parts["train"]))))}
+assert len(vocabulary) + 2 == 17
+observed = {}
+for name, context in [("mlp1", 1), ("mlp3", 3), ("mlp5", 5)]:
+    formal_run = frozen["results"]["runs"][name]
+    assert formal_run["context"] == context and formal_run["steps"] == 200 and formal_run["history"][-1]["step"] == 200
+    path = root / f"checkpoints/course/simple_models/{name}.pt"
+    expected_sha = next(item["sha256"] for item in files if item["output"] == path.name)
+    sha = hashlib.sha256(path.read_bytes()).hexdigest()
+    assert sha == expected_sha
+    payload = torch.load(path, map_location="cpu", weights_only=True)
+    assert payload["format_version"] == "simple-v1"
+    assert payload["context"] == context and payload["width"] == 16 and payload["vocabulary"] == vocabulary
+    model = ContextMLP(len(vocabulary) + 2, context=context, width=16)
+    model.load_state_dict(payload["model"])
+    model.eval()
+    parameters = sum(p.numel() for p in model.parameters())
+    assert parameters == 577 + 256 * context == frozen["results"]["runs"][name]["parameters"]
+    values = {}
+    with torch.no_grad():
+        for split, documents in parts.items():
+            x, y = _simple_examples(documents, vocabulary, context)
+            assert y.numel() == sum(len(text) + 1 for text in documents)
+            logits = model(x)
+            nll = F.cross_entropy(logits, y)
+            direct = -F.log_softmax(logits, dim=-1).gather(1, y[:, None]).mean()
+            assert torch.allclose(nll, direct, atol=2e-7, rtol=0)
+            formal = frozen["results"]["runs"][name]["after_nll_same_post_update_time"][split]
+            assert abs(float(nll) - formal) < 1e-6
+            values[split] = {"documents": len(documents), "targets_including_eos": int(y.numel()), "mean_nll": float(nll), "formal_nll": formal, "absolute_difference": abs(float(nll) - formal), "five_decimal": f"{float(nll):.5f}"}
+    observed[name] = {"checkpoint_sha256": sha, "parameters": parameters, "embedding_parameters": model.embedding.weight.numel(), "hidden_weight_parameters": model.hidden.weight.numel(), "hidden_bias_parameters": model.hidden.bias.numel(), "output_parameters": sum(p.numel() for p in model.output.parameters()), "results": values}
+print(json.dumps({"scope": "僅載入既有公開權重、重算逐目標NLL及參數；沒有訓練或更新", "result": "所有斷言通過", "original_experiment_environment": {"revision": frozen["revision"], "python": frozen["python_version"], "torch": frozen["torch_version"], "device": frozen["device"], "seed": frozen["seed"], "steps": 200, "width": 16}, "data_sha256": data_hashes, "split": parts, "runs": observed, "environment": {"python": sys.version, "torch": str(torch.__version__), "torch_git_version": str(torch.version.git_version), "device": "cpu", "platform": platform.platform(), "threads": str(torch.get_num_threads())}}, ensure_ascii=False, indent=2))
