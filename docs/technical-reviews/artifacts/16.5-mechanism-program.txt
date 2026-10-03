@@ -1,0 +1,60 @@
+import copy
+import json
+import torch
+from tiny_perceptron.attention import attention_mask, manual_attention
+from tiny_perceptron.data import ByteTokenizer, pad_batch, render_chat
+from tiny_perceptron.model import ModelConfig, TinyLM, loss_sum
+from scripts.course_experiments.common import text_examples
+
+torch.set_num_threads(1)
+torch.manual_seed(42)
+position = torch.arange(4)
+segments = torch.tensor([[0, 0, 1, 1]])
+allowed = attention_mask(position, position, segments=segments)
+assert allowed.shape == (1, 1, 4, 4) and allowed.dtype == torch.bool
+assert allowed[0, 0].int().tolist() == [[1, 0, 0, 0], [1, 1, 0, 0], [0, 0, 1, 0], [0, 0, 1, 1]]
+q = torch.zeros(1, 1, 4, 2)
+scores = q @ q.transpose(-2, -1)
+_, weights = manual_attention(q, q, torch.ones_like(q), allowed)
+assert scores.numel() == 16 and weights.numel() == 16
+print(json.dumps({"mask_shape": list(allowed.shape), "dtype": str(allowed.dtype), "dense_score_entries": scores.numel(), "padded_toy_positions": 2 * 4, "real_toy_positions": 2 * 2}))
+
+examples = text_examples([{"text": "ab"}, {"text": "cde"}])
+x, y, valid = pad_batch(examples)
+px = torch.cat([a for a, _ in examples])[None]
+py = torch.cat([b for _, b in examples])[None]
+positions = torch.cat([torch.arange(len(a)) for a, _ in examples])[None]
+segment = torch.cat([torch.full((len(a),), i) for i, (a, _) in enumerate(examples)])[None]
+model = TinyLM(ModelConfig(width=8, heads=2, max_length=32))
+padded_model, packed_model = copy.deepcopy(model), copy.deepcopy(model)
+def evaluate(candidate, ids, labels, valid=None, positions=None, segments=None):
+    candidate.zero_grad(set_to_none=True)
+    logits = candidate(ids, valid=valid, positions=positions, segments=segments)["logits"]
+    total, count = loss_sum(logits, labels)
+    loss = total / count
+    loss.backward()
+    gradients = {n: p.grad.detach().clone() for n, p in candidate.named_parameters()}
+    return logits.detach(), gradients, float(loss.detach()), int(count)
+
+a, ga, la, ca = evaluate(padded_model, x, y, valid=valid)
+b, gb, lb, cb = evaluate(packed_model, px, py, positions=positions, segments=segment)
+flat = torch.cat([a[i, :len(t[0])] for i, t in enumerate(examples)], 0)
+logit_error = float((flat - b[0]).abs().max())
+gradient_error = max(float((ga[n] - gb[n]).abs().max()) for n in ga)
+assert ca == cb == 7 and all(int(t[-1]) == ByteTokenizer.eos_id for _, t in examples)
+assert torch.equal(py[0], torch.cat([t for _, t in examples]))
+assert logit_error < 1e-6 and gradient_error < 1e-6
+changed = px.clone()
+boundary = len(examples[0][0])
+changed[:, :boundary] = (changed[:, :boundary] + 7) % model.config.vocab_size
+with torch.no_grad():
+    changed_isolated = model(changed, positions=positions, segments=segment)["logits"]
+    causal = model(px, positions=positions)["logits"]
+    changed_causal = model(changed, positions=positions)["logits"]
+isolation_error = float((b[:, boundary:] - changed_isolated[:, boundary:]).abs().max())
+causal_error = float((causal[:, boundary:] - changed_causal[:, boundary:]).abs().max())
+assert isolation_error == 0 and causal_error > 1e-4
+chat_x, chat_y = render_chat([{"role": "user", "content": "query"}, {"role": "assistant", "content": "AB"}])
+assert ByteTokenizer.user_id in chat_x.tolist()
+assert int((chat_y != -100).sum()) == 3
+print(json.dumps({"document_lengths": [len(t[0]) for t in examples], "padded_positions": x.numel(), "packed_positions": px.numel(), "local_positions": positions.tolist(), "packed_labels": py.tolist(), "effective_targets": cb, "loss_error": abs(la-lb), "logit_max_error": logit_error, "gradient_max_error": gradient_error, "isolated_second_document_error": isolation_error, "causal_second_document_error": causal_error, "sft_effective_targets": int((chat_y != -100).sum()), "parameter_updates": 0}))

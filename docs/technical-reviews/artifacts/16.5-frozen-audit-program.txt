@@ -1,0 +1,73 @@
+import hashlib
+import json
+from pathlib import Path
+from tiny_perceptron.data import ByteTokenizer
+
+path = Path("docs/course-experiments/results/efficiency.json")
+raw = path.read_bytes()
+report = json.loads(raw)
+packing = report["results"]["packing"]
+updates = packing["actual_updates"]
+assert report["gpu"] == "NVIDIA L4" and report["seed"] == 42
+assert report["step_scale"] == 1 and report["evidence_status"] == "complete_run"
+assert packing["document_prefix_lengths"] == [7, 7]
+assert packing["padded_positions"] == packing["packed_positions"] == packing["effective_input_positions"] == 14
+assert packing["positions_reset_per_document"] and packing["cross_document_targets_added"] == 0
+assert format(packing["logit_max_error"], ".6g") == "1.90735e-06"
+assert format(packing["gradient_max_error"], ".6g") == "1.78814e-07"
+assert packing["second_document_error_after_first_document_change_with_isolation"] == 0
+assert format(packing["second_document_error_without_isolation"], ".6g") == "5.42937"
+assert format(updates["weight_max_error_after_updates"], ".6g") == "5.97909e-06"
+tok = ByteTokenizer()
+summaries = {}
+samples = {}
+variants = {"mha_baseline": report["results"]["models"]["mha"]["heldout"]}
+for name, expected_ms in [("padded", "10.799"), ("packed", "11.191")]:
+    branch = updates[name]
+    assert branch["steps"] == branch["optimizer_updates"] == 40
+    assert branch["requested_steps"] == 40 and branch["skipped_updates"] == 0
+    assert branch["effective_tokens"] == 845 and branch["status"] == "completed"
+    assert format(1000 * branch["warm_step_median_seconds"], ".3f") == expected_ms
+    variants[name] = branch["heldout"]
+for variant, splits in variants.items():
+    summaries[variant] = {}
+    samples[variant] = {}
+    for split, metrics in splits.items():
+        assert len(metrics["samples"]) == metrics["records"]
+        correct = 0
+        rows = []
+        for item in metrics["samples"]:
+            ids = item["generated_ids"]
+            content = ids[:ids.index(tok.eos_id)] if tok.eos_id in ids else ids
+            exact = content == tok.encode(item["expected"])
+            assert exact == item["exact"]
+            correct += int(exact)
+            rows.append(item)
+        assert correct == metrics["matches"]
+        assert metrics["exact_match"] == correct / metrics["records"]
+        summaries[variant][split] = {k:v for k,v in metrics.items() if k != "samples"}
+        samples[variant][split] = rows
+assert summaries["mha_baseline"]["validation"]["matches"] == 2
+assert summaries["mha_baseline"]["test"]["matches"] == 6
+for variant in ["padded", "packed"]:
+    assert summaries[variant]["validation"]["matches"] == 0
+    assert summaries[variant]["test"]["matches"] == 1
+    row = samples[variant]["test"][1]
+    assert row["messages"][0]["content"] == "color=blue;shape=circle;pitch=low;shape?"
+    assert row["expected"] == "circle" and row["generated"] == "low"
+assert samples["padded"] == samples["packed"]
+result = {
+    "scope": "離線 CPU 親讀與核算凍結報告；沒有重跑 GPU 訓練或計時",
+    "source": str(path), "source_sha256": hashlib.sha256(raw).hexdigest(),
+    "original_run": {k:report[k] for k in ["revision", "device", "seed", "torch_version", "python_version", "gpu", "step_scale", "evidence_status", "status", "hf"]},
+    "runtime": report["results"]["runtime"],
+    "dataset": report["results"]["dataset"],
+    "model": report["results"]["models"]["mha"]["model"],
+    "probe": {k:v for k,v in packing.items() if k != "actual_updates"},
+    "update_configuration": {name:{k:v for k,v in updates[name].items() if k != "heldout"} for name in ["padded", "packed"]},
+    "weight_max_error_after_updates": updates["weight_max_error_after_updates"],
+    "objective": updates["objective"], "summaries": summaries, "samples": samples,
+    "relevant_frozen_code_sha256": {k:report["code_sha256"][k] for k in ["tiny_perceptron/attention.py", "tiny_perceptron/data.py", "tiny_perceptron/model.py", "scripts/course_experiments/common.py", "scripts/course_experiments/architecture.py"]},
+    "parameter_updates_executed_by_reviewer": 0,
+}
+print(json.dumps(result, ensure_ascii=False, indent=2))
