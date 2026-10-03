@@ -1,0 +1,26 @@
+from pathlib import Path
+import re, json, hashlib, subprocess, sys, os, torch
+root = Path.cwd()
+raw = (root / 'course/chapters/18.md').read_bytes()
+heads = list(re.finditer(rb'(?m)^## ([A-Z\d]+\.\d+) [^\r\n]+', raw))
+records = []
+for n, head in enumerate(heads):
+    if head[1] == b'18.1':
+        continue
+    end = heads[n + 1].start() if n + 1 < len(heads) else len(raw)
+    section = raw[head.start():end]
+    for number, match in enumerate(re.finditer(rb'```(\w*)\n(.*?)```', section, re.S), 1):
+        code = match[2].decode()
+        line = raw[:head.start() + match.start()].count(b'\n') + 1
+        item = {'lesson_id': head[1].decode(), 'fence': number, 'language': match[1].decode(), 'line': line, 'section_sha256': hashlib.sha256(section).hexdigest(), 'code_sha256': hashlib.sha256(match[2]).hexdigest(), 'code': code}
+        if match[1] != b'python':
+            item.update({'executed': False, 'reason': '正式實驗排程／依賴既有多模態權重的 CLI；本任務禁止正式排程，未執行。此紀錄不保證每個 fence 可独立執行。'})
+        else:
+            command = [sys.executable, '-c', code]
+            done = subprocess.run(command, cwd=root, env={**os.environ, 'OMP_NUM_THREADS':'1', 'MKL_NUM_THREADS':'1'}, text=True, capture_output=True, timeout=30)
+            item.update({'executed': True, 'command': command, 'exit_code': done.returncode, 'stdout': done.stdout, 'stderr': done.stderr})
+        records.append(item)
+result = {'scope': '只為 18.1 own 導言核對章內小 Python 程式使用人工數字或新初始化結構；逐 fence 新 CPU 程序，18.7 是原有一次玩具 SGD 更新。未訓練任何正式教師／學生；沒有替其他節做判定。', 'chapter_sha256':hashlib.sha256(raw).hexdigest(), 'environment': {'python':sys.version.split()[0], 'torch':torch.__version__, 'device':'cpu', 'threads':str(torch.get_num_threads()), 'OMP_NUM_THREADS':'1','MKL_NUM_THREADS':'1'}, 'records':records}
+p = root / 'docs/technical-reviews/artifacts/18.1-intro-fences-output.json'
+p.write_text(json.dumps(result, ensure_ascii=False, indent=2)+'\n', encoding='utf-8')
+print(json.dumps({'executed_python_fences':sum(x.get('executed',False) for x in records), 'failed':[(x['lesson_id'],x['fence'],x.get('stderr')) for x in records if x.get('executed') and x['exit_code']!=0], 'unexecuted_bash':[(x['lesson_id'],x['fence']) for x in records if not x.get('executed')], 'artifact':str(p)},ensure_ascii=False))

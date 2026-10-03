@@ -1,0 +1,25 @@
+from pathlib import Path
+import json, sys, hashlib, torch
+from tiny_perceptron.data import pad_batch, IGNORE
+from tiny_perceptron.model import TinyLM, ModelConfig, masked_loss
+from tiny_perceptron.training import load_checkpoint
+from tiny_perceptron.alignment import distillation_kl
+from scripts.course_experiments.compression import _cache_text, _examples
+root=Path.cwd(); torch.manual_seed(42)
+teacher,_=load_checkpoint(root/'checkpoints/course/distillation/sft-teacher.pt','cpu')
+records=[{'family':'own-artificial','messages':[{'role':'user','content':'2+2=?'},{'role':'assistant','content':'4'}]}]
+cache,_=_cache_text(teacher,records,'cpu')
+x,y,valid=pad_batch(_examples(records,128))
+student=TinyLM(ModelConfig(width=8,layers=1))
+logits=student(x,valid=valid)['logits']
+ce=masked_loss(logits,y)
+selected=logits[y!=IGNORE][None]; targets=torch.cat(cache)[None]; labels=y[y!=IGNORE][None]
+kl=distillation_kl(selected,targets,labels,temperature=2.0)
+p=(targets.float()/2).softmax(-1); log_q=(selected.float()/2).log_softmax(-1)
+manual=((p*(p.log()-log_q)).sum(-1)).mean()*4
+assert selected.shape==targets.shape==(1,2,264)
+assert torch.allclose(kl,manual,atol=1e-6,rtol=1e-6)
+((ce+kl)/2).backward()
+out={'environment':{'python':sys.version.split()[0],'torch':torch.__version__,'device':'cpu','threads':str(torch.get_num_threads()),'OMP_NUM_THREADS':'1','MKL_NUM_THREADS':'1'},'record':records[0],'labels':y.tolist(),'valid_answer_rows':int((y!=IGNORE).sum()),'cache_shape':list(targets.shape),'student_selected_shape':list(selected.shape),'ce':float(ce.detach()),'forward_kl_T2':float(kl.detach()),'manual_forward_kl_T2':float(manual.detach()),'maximum_teacher_probability_sum_error':float((p.sum(-1)-1).abs().max()),'student_output_has_nonzero_gradient':bool(student.output.weight.grad.abs().sum()>0),'teacher_all_gradients_none':all(t.grad is None for t in teacher.parameters()),'optimizer_updates':0,'scope':'一筆人工gold回答與既有公開SFT教師，CPU只做cache／CE／forwardKL／backward；未更新正式學生或重跑GPU實验，不测品質。原run與current相同的cache/text loss相關函式已另核對。'}
+(root/'docs/technical-reviews/artifacts/18.1-objective-probe-output.json').write_text(json.dumps(out,ensure_ascii=False,indent=2)+'\n')
+print(json.dumps(out,ensure_ascii=False))

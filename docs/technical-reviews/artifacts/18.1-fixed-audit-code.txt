@@ -1,0 +1,58 @@
+from pathlib import Path
+import json, re, hashlib, sys, torch
+from tiny_perceptron.data import ByteTokenizer, CharTokenizer
+from tiny_perceptron.training import load_checkpoint
+from tiny_perceptron.tokenization import generation_report
+root=Path.cwd(); out=root/'docs/technical-reviews/artifacts'; tok=ByteTokenizer()
+path=root/'docs/course-experiments/results/distillation.json'; result=json.loads(path.read_bytes())
+def sha(p): return hashlib.sha256(p.read_bytes()).hexdigest()
+def raw_ids(sample):
+    ids=sample['generated_ids']; return ids[:ids.index(tok.eos_id)] if tok.eos_id in ids else ids
+records={}
+for name, task in result['results']['tasks'].items():
+    t=task['teacher_test']; samples=t['generated_samples']
+    flags=[raw_ids(s)==tok.encode(s['expected']) for s in samples]
+    assert sum(flags)==t['correct'] and len(samples)==t['examples']
+    runs={}
+    for key,run in task['runs'].items():
+        test=run['test']; flags_r=[raw_ids(s)==tok.encode(s['expected']) for s in test['generated_samples']]
+        assert sum(flags_r)==test['correct'] and len(flags_r)==test['examples']
+        runs[key]={'test':{k:v for k,v in test.items() if k!='generated_samples'},'storage':run['storage'],'training':run.get('training'), 'first_sample':test['generated_samples'][0]}
+    records[name]={'teacher_provenance':task['teacher_provenance'],'teacher_storage':task['teacher_storage'],'teacher_validation':{k:v for k,v in task['teacher_validation'].items() if k!='generated_samples'},'teacher_test':{k:v for k,v in t.items() if k!='generated_samples'},'teacher_correct_recomputed':sum(flags),'teacher_test_flags':flags,'teacher_frozen_and_unchanged':task['teacher_frozen_and_unchanged'],'data':task['data'],'teacher_cache':task['teacher_cache'],'teacher_first_sample':samples[0],'runs':runs}
+    if name=='attributes': records[name]['all_teacher_samples']=samples
+    if name=='style_transfer':
+        all_checks=[]
+        for s in task['teacher_style']['samples']:
+            text=generation_report(tok,s['generated_ids'])
+            m=re.fullmatch(r'style=(concise|vivid|json); (\d+)\+(\d+)=\?',s['question'])
+            invalid=bool(text['invalid_special_tokens']) or not text['valid_answer_tokens']
+            if m:
+                style,a,b=m.groups(); gold=int(a)+int(b)
+                if style=='json':
+                    v=json.loads(text['answer']); content=isinstance(v,dict) and set(v)=={'answer'} and type(v['answer']) is int and v['answer']==gold
+                elif style=='vivid': content=text['answer'].split('，',1)[0].strip()==str(gold)
+                else: content=text['answer'].strip()==str(gold)
+            else: style='clarification';gold=s['expected'];content=raw_ids(s)==tok.encode(s['expected'])
+            content=bool(content and not invalid)
+            all_checks.append({'question':s['question'],'expected':s['expected'],'generated':text['answer'],'generated_ids':s['generated_ids'],'style':style,'gold':gold,'content_correct_recomputed':content,'valid_answer_tokens':text['valid_answer_tokens']})
+        assert sum(x['content_correct_recomputed'] for x in all_checks)==task['teacher_style']['content_correct']==3
+        records[name]['teacher_style_recompute']=all_checks
+        records[name]['teacher_style_summary']={k:v for k,v in task['teacher_style'].items() if k!='samples'}
+release_path=root/'docs/course-experiments/public-releases/distillation.json'; release=json.loads(release_path.read_bytes())['release']
+manifest_path=root/'checkpoints/course/distillation/export-manifest.json'; manifest=json.loads(manifest_path.read_bytes())
+card=root/'checkpoints/course/distillation/README.md'; checkpath=root/'docs/course-experiments/student-checks/distillation.20261002T221133313058Z.json'; checked=json.loads(checkpath.read_bytes())
+public_notes=[]
+for name in ['sft-teacher.pt','style-teacher.pt','moe-teacher.pt']:
+    p=root/'checkpoints/course/distillation'/name
+    row=next(x for x in release['public_manifest']['files'] if x['output']==name)
+    exported=next(x for x in manifest['files'] if x['output']==name)
+    assert sha(p)==row['sha256']==exported['sha256']
+    original_artifact=next(x for x in result['artifacts'] if x['path']==name)
+    assert exported['source_sha256']==original_artifact['sha256']
+    model,payload=load_checkpoint(p,'cpu'); model.eval().requires_grad_(False)
+    with torch.no_grad(): logits=model(torch.tensor([[1,2,3]]))['logits']
+    public_notes.append({'immutable_url':f"https://huggingface.co/{release['repo']}/resolve/{release['revision']}/{row['path']}",'public_revision':release['revision'],'weights_revision':release['weights_revision'],'file_sha256':sha(p),'source_run_export_sha256':exported['source_sha256'],'original_run_input_provenance':records[{'sft-teacher.pt':'attributes','style-teacher.pt':'style_transfer','moe-teacher.pt':'moe_to_dense'}[name]]['teacher_provenance'],'payload_keys':list(payload),'payload_step':payload.get('step'),'payload_config':payload['config'],'parameter_count':sum(x.numel() for x in model.parameters()),'parameter_tensor_bytes':sum(x.numel()*x.element_size() for x in model.parameters()),'synthetic_cpu_forward_shape':list(logits.shape),'finite':bool(torch.isfinite(logits).all()),'scope':'既有 pinned 公開推論權重，未下載或重訓；檔案 SHA 鏈與 tensor配置核對及 synthetic forward，不是 GPU 重測或新題品質重測。原 input、原 re-save、public sanitize 是三個不同檔案 SHA。'})
+text='4'; retoken={'text':text,'byte_ids':tok.encode(text),'char_ids':CharTokenizer('345').encode(text),'byte_decode':tok.decode(tok.encode(text)),'char_decode':CharTokenizer('345').decode(CharTokenizer('345').encode(text))}
+audit={'environment':{'python':sys.version.split()[0],'torch':torch.__version__,'device':'cpu','threads':str(torch.get_num_threads()),'OMP_NUM_THREADS':'1','MKL_NUM_THREADS':'1'},'scope':'只重新核算固定原始結果中的分子、分母與原始生成 ID，並載入既有公開教師權重；没有重跑正式實驗。','original_run':{k:result[k] for k in ['revision','seed','device','torch_version','python_version','gpu','step_scale','evidence_status','code_sha256']},'fixed_inputs':{'result':{'path':str(path.relative_to(root)),'sha256':sha(path)},'release':{'path':str(release_path.relative_to(root)),'sha256':sha(release_path)},'student_check':{'path':str(checkpath.relative_to(root)),'sha256':sha(checkpath),'environment':checked['environment'],'public_source':checked['public_source'],'scope':checked['scope'],'all_returncodes':[x['returncode'] for x in checked['commands']]},'ignored_original_card':{'immutable_url':f"https://huggingface.co/{release['repo']}/resolve/{release['revision']}/course/course-v1/distillation/README.md",'sha256':sha(card),'actual_read_location':'行1–140；限制與教師／學生來源預算；對 formal counts 另直接親核固定 result 與 raw IDs，未把卡片摘要代替原資料。'},'ignored_export_manifest':{'immutable_url':f"https://huggingface.co/{release['repo']}/resolve/{release['revision']}/course/course-v1/distillation/export-manifest.json",'sha256':sha(manifest_path),'content':manifest}},'tasks':records,'public_teachers':public_notes,'retokenization_demo':retoken}
+(out/'18.1-fixed-audit-output.json').write_text(json.dumps(audit,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+print(json.dumps({'teacher_attribute_correct':records['attributes']['teacher_correct_recomputed'],'teacher_attribute_examples':10,'teacher_style_content_correct':3,'teacher_style_examples':27,'public_teacher_loads':[(x['payload_step'],x['parameter_count'],x['finite']) for x in public_notes],'retokenization':retoken,'artifact':'docs/technical-reviews/artifacts/18.1-fixed-audit-output.json'},ensure_ascii=False))
