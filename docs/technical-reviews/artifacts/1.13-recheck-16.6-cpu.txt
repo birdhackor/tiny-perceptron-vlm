@@ -1,0 +1,93 @@
+"""必要前置16.6修訂範圍短核對；不重跑1.13、1.10或既有16.6短例。"""
+import hashlib
+import json
+import os
+from pathlib import Path
+import sys
+from fractions import Fraction
+
+import torch
+
+torch.set_num_threads(1)
+torch.set_default_device("cpu")
+torch.set_default_dtype(torch.float64)
+root = Path(__file__).resolve().parents[3]
+art = root / "docs/technical-reviews/artifacts"
+diff = json.loads((art / "1.13-recheck-16.6-raw-diff.json").read_text())
+
+
+def average_values(values, split):
+    x = torch.tensor(values)
+    parts = (x[:split], x[split:])
+    whole = x.mean()
+    means_mean = torch.stack([part.mean() for part in parts]).mean()
+    shared = sum(part.sum() / len(x) for part in parts)
+    return {"counts": [len(part) for part in parts], "losses": values,
+            "whole_mean": whole.item(), "means_mean": means_mean.item(),
+            "sum_div_shared_N": shared.item()}
+
+
+same_values = average_values([1.0] * 11, 1)
+changed_values = average_values([2.0] + [1.0] * 10, 1)
+equal_counts = average_values([1.0, 2.0, 3.0, 4.0], 2)
+assert same_values["whole_mean"] == same_values["means_mean"] == 1.0
+assert abs(changed_values["whole_mean"] - 12 / 11) < 1e-12
+assert changed_values["means_mean"] == 1.5
+assert abs(changed_values["whole_mean"] - changed_values["sum_div_shared_N"]) < 1e-12
+assert equal_counts["whole_mean"] == equal_counts["means_mean"] == 2.5
+
+# 11個位置在w=0的loss皆1，但第一份的局部導數2，第二份各位置局部導數4。
+# 值相同不保證導數相同。每次新前向、同一w，只在小份間累積.grad。
+a = torch.tensor([1.0] + [2.0] * 10)
+whole_w = torch.tensor(0.0, requires_grad=True)
+whole_loss = (1 + a * whole_w).square().mean()
+whole_loss.backward()
+correct_w = torch.tensor(0.0, requires_grad=True)
+wrong_w = torch.tensor(0.0, requires_grad=True)
+correct_loss_value = 0.0
+wrong_loss_value = 0.0
+for part in (a[:1], a[1:]):
+    correct_loss = (1 + part * correct_w).square().sum() / len(a)
+    wrong_loss = (1 + part * wrong_w).square().mean() / 2
+    correct_loss_value += correct_loss.item()
+    wrong_loss_value += wrong_loss.item()
+    correct_loss.backward()
+    wrong_loss.backward()
+gradient = {
+    "counts": [1, 10], "fixed_w": 0.0,
+    "per_position_loss_at_w": [1.0] * 11,
+    "per_position_derivative_at_w": [2.0] + [4.0] * 10,
+    "whole_loss": whole_loss.item(), "means_mean_loss": wrong_loss_value,
+    "sum_div_shared_N_loss": correct_loss_value,
+    "whole_gradient": whole_w.grad.item(),
+    "means_mean_gradient": wrong_w.grad.item(),
+    "sum_div_shared_N_gradient": correct_w.grad.item(),
+}
+assert whole_loss.item() == wrong_loss_value == 1.0
+assert abs(whole_w.grad.item() - float(Fraction(42, 11))) < 1e-12
+assert wrong_w.grad.item() == 3.0
+assert abs(correct_w.grad.item() - whole_w.grad.item()) < 1e-12
+
+result = {
+    "reviewer_task": "/root/technical_round_coordinator/technical_1_13_fresh",
+    "executed_on": "2026-10-03",
+    "command": "OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 CUDA_VISIBLE_DEVICES='' HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1 TRANSFORMERS_OFFLINE=1 .venv/bin/python docs/technical-reviews/artifacts/1.13-recheck-16.6-cpu.txt",
+    "environment": {"python": sys.version, "python_executable": sys.executable,
+                    "torch": str(torch.__version__), "torch_git_version": str(torch.version.git_version),
+                    "device": "cpu", "dtype": "torch.float64", "torch_threads": str(torch.get_num_threads()),
+                    "OMP_NUM_THREADS": str(os.environ.get("OMP_NUM_THREADS")), "MKL_NUM_THREADS": str(os.environ.get("MKL_NUM_THREADS"))},
+    "prerequisite_source_sha256": diff["new"]["sha256"],
+    "all_one_coincidence": same_values,
+    "changed_first_loss_counterexample": changed_values,
+    "equal_counts_guarantee_example": equal_counts,
+    "same_loss_different_gradient_counterexample": gradient,
+    "exact_coefficients": {"whole_per_position": str(Fraction(1, 11)),
+                           "means_mean_first_part": str(Fraction(1, 2)),
+                           "means_mean_second_part_each": str(Fraction(1, 20)),
+                           "whole_gradient": str(Fraction(42, 11)), "means_mean_gradient": "3"},
+    "tolerance": "float64絕對誤差1e-12；已另列Fraction透明精確公式。",
+    "scope": "只核新增必要前置的平均保證與數值巧合；未執行未變1.13例/練習、1.10圖、16.6原三樣本例或正式結果。無參數更新、GPU、網路或資料下載。",
+    "result": "新增範圍全部assert通過；同loss值的巧合不能取代每位置等權保證。",
+}
+(art / "1.13-recheck-16.6-cpu-results.json").write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n")
+print(json.dumps(result, ensure_ascii=False, indent=2))
