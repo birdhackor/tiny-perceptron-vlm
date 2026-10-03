@@ -1,0 +1,144 @@
+import argparse
+import contextlib
+import hashlib
+import io
+import json
+import os
+import platform
+import re
+import sys
+from pathlib import Path
+
+import torch
+
+ROOT = Path.cwd()
+ART = ROOT / 'docs/technical-reviews/artifacts'
+assert not torch.cuda.is_available() and torch.version.cuda is None
+torch.set_num_threads(1)
+torch.set_default_device('cpu')
+
+
+def sha(raw):
+    return hashlib.sha256(raw).hexdigest()
+
+
+def section(path, lesson):
+    raw = (ROOT / path).read_bytes()
+    headers = list(re.finditer(rb'(?m)^## [^\r\n]+', raw))
+    i = next(i for i, h in enumerate(headers) if h[0].startswith(('## ' + lesson + ' ').encode()))
+    start = headers[i].start()
+    end = headers[i + 1].start() if i + 1 < len(headers) else len(raw)
+    return raw[start:end]
+
+
+def fences(raw):
+    return re.findall(rb'(?ms)^```python\n(.*?)^```\s*$', raw)
+
+
+def run_code(raw, name):
+    output = io.StringIO()
+    ns = {'__name__': '__main__'}
+    with contextlib.redirect_stdout(output):
+        exec(compile(raw, name, 'exec'), ns)
+    return output.getvalue(), ns
+
+
+parser = argparse.ArgumentParser()
+parser.add_argument('mode', choices=['original', 'exercise', 'intro', 'frozen'])
+args = parser.parse_args()
+environment = {
+    'python': platform.python_version(),
+    'torch': str(torch.__version__),
+    'torch_git_version': str(torch.version.git_version),
+    'device': 'cpu',
+    'threads': str(torch.get_num_threads()),
+    'executable': sys.executable,
+    'OMP_NUM_THREADS': os.environ.get('OMP_NUM_THREADS', ''),
+    'MKL_NUM_THREADS': os.environ.get('MKL_NUM_THREADS', ''),
+    'offline': 'HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1 TRANSFORMERS_OFFLINE=1; no data/model/network or training entrypoint used',
+}
+result = {'mode': args.mode, 'environment': environment, 'checks': []}
+raw = section('course/chapters/15.md', '15.1')
+result['source_sha256'] = sha(raw)
+if args.mode in ('original', 'exercise'):
+    code = fences(raw)[0]
+    if args.mode == 'exercise':
+        code = code.replace(b'torch.cat([x, x], dim=0)', b'torch.cat([x, x, x], dim=0)')
+    stdout, ns = run_code(code, '15.1-' + args.mode)
+    result.update(code=code.decode(), code_sha256=sha(code), stdout=stdout)
+    print(stdout, end='')
+    count = 4 if args.mode == 'original' else 6
+    expected = torch.tensor([[4., 5.], [5., 4.]]).repeat(count // 2, 1)
+    repeated = torch.cat([ns['x']] * (count // 2), dim=0)
+    actual = ns['ffn'](repeated)
+    assert torch.equal(actual, expected)
+    assert ns['up'].shape == (2, 3) and ns['down'].shape == (3, 2)
+    assert ns['up'].numel() + ns['down'].numel() == 12
+    assert torch.equal(torch.relu(torch.tensor([-2., 0., 3.])), torch.tensor([0., 0., 3.]))
+    result['checks'] = [
+        {'expected_output': expected.tolist(), 'observed_output': actual.tolist(), 'rows': count, 'weight_count': 12, 'equality': 'exact'},
+        {'hand_calculation_first_row': {'up': [1, 2, 3], 'relu': [1, 2, 3], 'down': [4, 5]}, 'hand_calculation_second_row': [5, 4]},
+        {'scalar_counts_for_dense_products': [{'rows': n, 'multiplications': 12 * n, 'additions': 7 * n, 'relu_elements': 3 * n} for n in (2, 4, 6)], 'count_scope': 'two dense matmuls only; addition reduction per dot product, no bias; not measured latency'},
+    ]
+    print('assertions: exact output, shape, 12 weights, ReLU negative/zero/positive passed')
+elif args.mode == 'intro':
+    # Only execute existing small teaching examples to support the introduction.
+    # Separate namespaces; no formal training, models, datasets, or experiment runner.
+    entries = []
+    for number in range(1, 14):
+        lesson = f'15.{number}'
+        body = section('course/chapters/15.md', lesson)
+        codes = fences(body)
+        combined = b'\n'.join(codes)
+        assert len(codes) > 0
+        stdout, ns = run_code(combined, lesson)
+        entries.append({'lesson': lesson, 'raw_sha256': sha(body), 'code_sha256': sha(combined), 'code': combined.decode(), 'stdout': stdout, 'exit_code': 0})
+        print(lesson, stdout.strip())
+    result['bounded_examples'] = entries
+    result['checks'] = ['13 existing short examples executed independently on CPU; input tables/configurations fixed, 15.11 random inputs initialized by explicit seed; timings remain variable']
+elif args.mode == 'frozen':
+    from tiny_perceptron.model import ModelConfig, TinyLM
+
+    path = 'docs/course-experiments/results/moe.json'
+    frozen_raw = (ROOT / path).read_bytes()
+    frozen = json.loads(frozen_raw)
+    dense = frozen['results']['variants']['dense_active_top1']
+    cfg = dense['model']['config']
+    model = TinyLM(ModelConfig(**cfg))
+    parameter_shapes = {name: {'shape': list(p.shape), 'numel': p.numel()} for name, p in model.named_parameters()}
+    each_ffn = [sum(p.numel() for p in block.ffn.parameters()) for block in model.blocks]
+    total = sum(p.numel() for p in model.parameters())
+    assert cfg['width'] == 64 and cfg['layers'] == 2 and cfg['experts'] == 0
+    assert each_ffn == [33088, 33088] and total == 141568
+    assert all(block.ffn.up.out_features == 256 for block in model.blocks)
+    fields = {}
+    for name in ['validation', 'test']:
+        held = dense['heldout'][name]
+        fields[name] = {key: held[key] for key in ['nll', 'nll_sum', 'effective_tokens', 'examples']}
+        fields[name]['records'] = frozen['results']['dataset'][name]['records']
+        fields[name]['recomputed_nll'] = held['nll_sum'] / held['effective_tokens']
+        fields[name]['rounded_5'] = f"{held['nll_sum'] / held['effective_tokens']:.5f}"
+        assert fields[name]['recomputed_nll'] == held['nll']
+    assert fields['validation']['rounded_5'] == '2.29999'
+    assert fields['test']['rounded_5'] == '2.32093'
+    assert [fields[n]['records'] for n in ['validation', 'test']] == [51, 52]
+    train = dense['training']
+    assert train['steps'] == train['optimizer_updates'] == train['requested_steps'] == 180
+    assert train['effective_tokens'] == 337761 and train['skipped_updates'] == 0
+    result.update(
+        frozen_source={'path': path, 'sha256': sha(frozen_raw), 'revision': frozen['revision'], 'original_environment': {key: frozen[key] for key in ['device', 'seed', 'torch_version', 'python_version', 'gpu', 'evidence_status', 'step_scale']}, 'hf': frozen['hf']},
+        config=cfg,
+        ffn_parameters_per_layer=each_ffn,
+        ffn_hidden_widths=[block.ffn.up.out_features for block in model.blocks],
+        total_parameters=total,
+        parameter_shapes=parameter_shapes,
+        training={key: train[key] for key in ['steps', 'optimizer_updates', 'requested_steps', 'effective_tokens', 'skipped_updates', 'batch_size', 'learning_rate', 'auxiliary_weight', 'status']},
+        heldout=fields,
+        runtime=frozen['results']['runtime'],
+        hand_parameter_derivation={'per_ffn': '64*256+256+256*64+64=33088', 'complete_model': '2*(33088+4*64*64+4*64)+264*64+128*64+2*64+64*264=141568'},
+    )
+    result['checks'] = ['current code initialized only, no update or saved checkpoint; frozen original report read directly and its complete denominators recomputed, no formal rerun']
+    print(json.dumps({key: result[key] for key in ['ffn_parameters_per_layer', 'ffn_hidden_widths', 'total_parameters', 'training', 'heldout']}, ensure_ascii=False, indent=2))
+outpath = ART / f'15.1-own-{args.mode}-execution.json'
+outpath.write_text(json.dumps(result, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+print('persisted', outpath.relative_to(ROOT), 'sha256', sha(outpath.read_bytes()))
