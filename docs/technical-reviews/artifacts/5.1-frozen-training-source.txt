@@ -1,0 +1,177 @@
+凍結實驗原始碼核對，親讀日期2026-10-03；檢視者/root/technical_round_coordinator/technical_5_1_fresh
+版本b52935d99f58b694cd932ac158c10c4d8d92d4c2。兩份全檔下载hash與正式results.code_sha256完全相符。
+以下截取必要小段；現行全檔因其他函數修改而不同，相關new_lm、text_examples、_nll、fit_lm與run_text_foundation函數逐字仍同凍結版。
+授權已親讀repository LICENSE：
+MIT License
+
+Copyright (c) 2026 birdhackor
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+
+URL：https://raw.githubusercontent.com/birdhackor/tiny-perceptron-vlm/b52935d99f58b694cd932ac158c10c4d8d92d4c2/scripts/course_experiments/common.py
+完整原始檔download_sha256：e79d98e82b60fd1bc738bf40f4eef1407cc6e3097f245ef82151ad429b063cb5
+原檔lines 45–47
+45: def new_lm(ctx, width=64, layers=2, max_length=128, **kwargs):
+46:     seed(ctx.seed)
+47:     return TinyLM(ModelConfig(width=width, layers=layers, max_length=max_length, **kwargs)).to(ctx.device)
+原檔lines 77–97
+77: def text_examples(records, mode="text", max_length=128, tokenizer=None):
+78:     tok = tokenizer or ByteTokenizer()
+79:     examples = []
+80:     for record in records:
+81:         if mode == "sft":
+82:             messages = record["messages"] if isinstance(record, dict) else record
+83:             x, y = render_chat(messages, tok)
+84:             if len(x) > max_length:
+85:                 raise ValueError(f"SFT record has {len(x)} tokens, exceeding {max_length}; crop explicitly upstream")
+86:             examples.append((x, y))
+87:         elif mode == "text":
+88:             text = record["text"] if isinstance(record, dict) else record
+89:             ids = [tok.bos_id] + tok.encode(text) + [tok.eos_id]
+90:             # Every next-token label appears once; chunk boundaries share only the preceding input token.
+91:             for start in range(0, len(ids) - 1, max_length):
+92:                 examples.append(shifted(ids[start : start + max_length + 1]))
+93:         else:
+94:             raise ValueError("mode must be text or sft")
+95:     if not examples:
+96:         raise ValueError("No examples to train or evaluate")
+97:     return examples
+原檔lines 105–202
+105: @torch.no_grad()
+106: def _nll(model, examples, batch_size=16):
+107:     was_training = model.training
+108:     model.eval()
+109:     device = next(model.parameters()).device
+110:     total, count = 0.0, 0
+111:     try:
+112:         for start in range(0, len(examples), batch_size):
+113:             x, y, valid = (t.to(device) for t in pad_batch(examples[start : start + batch_size]))
+114:             summed, n = loss_sum(model(x, valid=valid)["logits"], y)
+115:             total += float(summed)
+116:             count += int(n)
+117:     finally:
+118:         model.train(was_training)
+119:     return {"nll": total / count, "nll_sum": total, "effective_tokens": count, "examples": len(examples)}
+120:
+121:
+122: def fit_lm(
+123:     model, records, ctx, mode="text", steps=600, batch_size=16, lr=0.003, auxiliary=0.01, name="model", tokenizer=None
+124: ):
+125:     examples = text_examples(records, mode, model.config.max_length, tokenizer)
+126:     initial = _nll(model, examples)
+127:     optimizer = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=lr)
+128:     sampler = random.Random(ctx.seed)
+129:     history, effective_tokens = [], 0
+130:     model.train()
+131:     _sync(ctx.device)
+132:     started = time.perf_counter()
+133:     for step in range(steps):
+134:         batch = sampler.choices(examples, k=batch_size)
+135:         x, y, valid = (t.to(ctx.device) for t in pad_batch(batch))
+136:         optimizer.zero_grad(set_to_none=True)
+137:         result = model(x, valid=valid)
+138:         loss = masked_loss(result["logits"], y) + auxiliary * result["auxiliary"]
+139:         if not torch.isfinite(loss):
+140:             raise FloatingPointError(f"Nonfinite training loss at step {step + 1}")
+141:         loss.backward()
+142:         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0, error_if_nonfinite=True)
+143:         optimizer.step()
+144:         effective_tokens += int((y != IGNORE).sum())
+145:         if step == 0 or (step + 1) % max(1, steps // 10) == 0:
+146:             history.append({"step": step + 1, "batch_loss_before_update": float(loss.detach())})
+147:         if (step + 1) % max(1, steps // 4) == 0:
+148:             save_checkpoint(
+149:                 ctx.output / f"{name}-step-{step + 1}.pt",
+150:                 model,
+151:                 optimizer,
+152:                 step + 1,
+153:                 {
+154:                     "mode": mode,
+155:                     "schedule": "constant",
+156:                     "lr": lr,
+157:                     "records_sha256": records_sha256(records),
+158:                     "effective_tokens": effective_tokens,
+159:                 },
+160:                 training_state={
+161:                     "sampler_rng": sampler.getstate(),
+162:                     "batch_size": batch_size,
+163:                     "planned_steps": steps,
+164:                     "auxiliary": auxiliary,
+165:                 },
+166:             )
+167:     _sync(ctx.device)
+168:     seconds = time.perf_counter() - started
+169:     final = _nll(model, examples)
+170:     save_checkpoint(
+171:         ctx.output / f"{name}.pt",
+172:         model,
+173:         optimizer,
+174:         steps,
+175:         {
+176:             "mode": mode,
+177:             "schedule": "constant",
+178:             "lr": lr,
+179:             "seed": ctx.seed,
+180:             "records_sha256": records_sha256(records),
+181:             "effective_tokens": effective_tokens,
+182:         },
+183:         training_state={
+184:             "sampler_rng": sampler.getstate(),
+185:             "batch_size": batch_size,
+186:             "planned_steps": steps,
+187:             "auxiliary": auxiliary,
+188:         },
+189:     )
+190:     return {
+191:         "initial_loss": initial["nll"],
+192:         "final_loss": final["nll"],
+193:         "history": history,
+194:         "steps": steps,
+195:         "seconds": seconds,
+196:         "effective_tokens": effective_tokens,
+197:         "checkpoint": f"{name}.pt",
+198:         "parameters": sum(p.numel() for p in model.parameters()),
+199:         "trainable_parameters": sum(p.numel() for p in model.parameters() if p.requires_grad),
+200:         "records": len(records),
+201:         "records_sha256": records_sha256(records),
+202:     }
+
+URL：https://raw.githubusercontent.com/birdhackor/tiny-perceptron-vlm/b52935d99f58b694cd932ac158c10c4d8d92d4c2/scripts/course_experiments/text.py
+完整原始檔download_sha256：c3c98e1b2ff5dce288308afe105ed0307aabe473458cabfc0d66d99bef5a0c3c
+原檔lines 262–279
+262: def run_text_foundation(ctx):
+263:     records = generate_records("toy-text")
+264:     parts = split_records(records, seed=ctx.seed)
+265:     manifest = _save_splits(ctx, parts)
+266:     seed(ctx.seed)
+267:     model = new_lm(ctx, width=64, layers=2)
+268:     save_checkpoint(ctx.output / "start.pt", model, step=0, metadata={"seed": ctx.seed, "data": manifest})
+269:     before = _evaluations(model, parts, mode="text")
+270:     training = fit_lm(model, parts["train"], ctx, mode="text", steps=_steps(ctx, 600))
+271:     after = _evaluations(model, parts, mode="text")
+272:     probe = torch.tensor([[1, 10, 11, 12, 13]], device=ctx.device)
+273:     changed = probe.clone()
+274:     changed[0, -1] = 14
+275:     with torch.no_grad():
+276:         causal_difference = float((model(probe)["logits"][:, :-1] - model(changed)["logits"][:, :-1]).abs().max())
+277:     if causal_difference > 1e-6:
+278:         raise ValueError("future token affected past logits")
+279:     factorial = {}
+核對：new_lm是width64/layers2/max_length128；ModelConfig其他預設heads1/backend manual。fit_lm從同一examples做_nll前後平均，600步、batch16、constant lr0.003，optimizer.step真正更新。訓練前後完整評分不是抽樣批次history loss。正式結果hardware L4、seed42、321/35/70有效目標另見本輪CPU只讀核對artifact。

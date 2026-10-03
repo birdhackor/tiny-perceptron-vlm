@@ -1,0 +1,103 @@
+import contextlib
+import hashlib
+import io
+import json
+import platform
+import re
+from pathlib import Path
+
+import torch
+from torch import nn
+
+root = Path.cwd()
+raw = (root / 'course/chapters/05.md').read_bytes()
+start = re.search(rb'(?m)^## 5\.5 ', raw).start()
+next_heading = re.search(rb'(?m)^## ', raw[start + 1:])
+end = start + 1 + next_heading.start() if next_heading else len(raw)
+section = raw[start:end]
+code = re.search(rb'```python\n(.*?)```', section, re.S)[1].decode()
+results = {
+    'source_sha256': hashlib.sha256(section).hexdigest(),
+    'environment': {
+        'python': platform.python_version(), 'torch': str(torch.__version__),
+        'torch_git_version': str(torch.version.git_version),
+        'device': 'cpu', 'dtype': 'torch.float32',
+        'omp_threads': '1', 'mkl_threads': '1',
+    },
+    'cases': [],
+}
+
+def run_case(name, program, expected):
+    namespace = {}
+    stream = io.StringIO()
+    with contextlib.redirect_stdout(stream):
+        exec(compile(program, name, 'exec'), namespace)
+    w = namespace['w']
+    optimizer = namespace['optimizer']
+    state = optimizer.state.get(w, {})
+    observed = w.detach().item()
+    assert abs(observed - expected) <= 1e-6
+    results['cases'].append({
+        'case': name, 'expected': expected, 'observed': observed,
+        'stdout': stream.getvalue(), 'shape': list(w.shape),
+        'grad': None if w.grad is None else w.grad.tolist(),
+        'state': {k: v.item() for k, v in state.items()},
+        'assertions_passed': True,
+    })
+
+# Exact current lesson fence, then each exercise from a fresh w=2 and fresh optimizer.
+run_case('original', code, 1.96)
+exercise_zero = code.replace('weight_decay=0.2', 'weight_decay=0.0')
+exercise_zero = exercise_zero.replace('torch.tensor([1.96])', 'torch.tensor([2.0])')
+run_case('exercise_weight_decay_zero', exercise_zero, 2.0)
+exercise_none = code.replace('w.grad = torch.zeros_like(w)', 'w.grad = None')
+exercise_none = exercise_none.replace('torch.tensor([1.96])', 'torch.tensor([2.0])')
+run_case('exercise_grad_none', exercise_none, 2.0)
+
+# Bounded counterexample: decay can increase task loss at an optimum.
+w = nn.Parameter(torch.tensor([2.0]))
+optimizer = torch.optim.AdamW([w], lr=0.1, weight_decay=0.2)
+before_loss = (w.detach() - 2).square().item()
+w.grad = torch.zeros_like(w)
+optimizer.step()
+after_loss = (w.detach() - 2).square().item()
+assert after_loss > before_loss
+results['loss_counterexample'] = {'before': before_loss, 'after': after_loss}
+
+# Explicit groups can independently disable decay; names are not needed.
+a = nn.Parameter(torch.tensor([2.0]))
+b = nn.Parameter(torch.tensor([2.0]))
+grouped = torch.optim.AdamW([
+    {'params': [a], 'weight_decay': 0.2},
+    {'params': [b], 'weight_decay': 0.0},
+], lr=0.1)
+a.grad = torch.zeros_like(a)
+b.grad = torch.zeros_like(b)
+grouped.step()
+assert torch.allclose(a, torch.tensor([1.96]))
+assert torch.equal(b, torch.tensor([2.0]))
+results['groups'] = {'decay': a.item(), 'no_decay': b.item()}
+
+# A zero gradient is not a promise of zero Adam direction after old history.
+h = nn.Parameter(torch.tensor([2.0]))
+history = torch.optim.AdamW([h], lr=0.1, weight_decay=0.2)
+h.grad = torch.ones_like(h)
+history.step()
+before_zero = h.item()
+h.grad = torch.zeros_like(h)
+history.step()
+after_zero = h.item()
+assert abs(after_zero - before_zero * 0.98) > 1e-3
+step_before_none = history.state[h]['step'].item()
+h.grad = None
+history.step()
+assert h.item() == after_zero
+assert history.state[h]['step'].item() == step_before_none
+results['history_limit'] = {
+    'before_zero_gradient': before_zero, 'after_zero_gradient': after_zero,
+    'decay_only_comparison': before_zero * 0.98,
+    'after_none_gradient': h.item(),
+    'step_before_none': step_before_none,
+    'step_after_none': history.state[h]['step'].item(),
+}
+print(json.dumps(results, ensure_ascii=False, indent=2))

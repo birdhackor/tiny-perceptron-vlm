@@ -1,0 +1,37 @@
+import contextlib
+import io
+import json
+import math
+import platform
+import re
+from pathlib import Path
+import torch
+
+torch.set_num_threads(1)
+raw = Path('docs/technical-reviews/artifacts/5.3-source-raw.txt').read_bytes()
+code = re.search(rb'```python\n(.*?)```', raw, re.S)[1].decode('utf-8')
+results = []
+for coefficient, expected_v, expected_w in [
+    (0.0, [1.0, 1.0, -1.0], [-0.1, -0.2, -0.1]),
+    (0.5, [1.0, 1.5, -0.25], [-0.1, -0.25, -0.225]),
+]:
+    exercise_code = code.replace('0.9 * velocity', f'{coefficient} * velocity')
+    rows = []
+    def capture(*args):
+        print(*args)
+        rows.append({'gradient': args[1], 'velocity_display': args[3], 'position_display': args[5]})
+    namespace = {'print': capture}
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        exec(compile(exercise_code, f'5.3 exercise coefficient={coefficient}', 'exec'), namespace)
+    assert [row['velocity_display'] for row in rows] == expected_v
+    assert [row['position_display'] for row in rows] == expected_w
+    assert math.isclose(namespace['velocity'], expected_v[-1], rel_tol=0, abs_tol=1e-12)
+    assert math.isclose(namespace['position'], expected_w[-1], rel_tol=0, abs_tol=1e-12)
+    results.append({'coefficient': coefficient, 'only_change': '0.9 multiplier replaced in original fence',
+                    'stdout': output.getvalue(), 'rows': rows,
+                    'unrounded_final_velocity': namespace['velocity'],
+                    'unrounded_final_position': namespace['position'], 'assertions': 'passed'})
+print(json.dumps({'environment': {'python': platform.python_version(), 'torch': torch.__version__,
+    'torch_git_version': torch.version.git_version, 'device': 'cpu', 'OMP_NUM_THREADS': '1', 'MKL_NUM_THREADS': '1'},
+    'exercises': results}, ensure_ascii=False, indent=2))

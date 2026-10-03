@@ -1,0 +1,88 @@
+import contextlib
+import copy
+import hashlib
+import io
+import json
+import platform
+import runpy
+from pathlib import Path
+import torch
+
+original = Path("docs/technical-reviews/artifacts/5.4-original-code.txt")
+with contextlib.redirect_stdout(io.StringIO()):
+    ns = runpy.run_path(str(original))
+expected = {"g": [1.0, 100.0], "m": [0.1, 10.0], "v": [0.001, 10.0],
+            "m_hat": [1.0, 100.0], "v_hat": [1.0, 10000.0], "update": [0.001, 0.001]}
+for key, values in expected.items():
+    torch.testing.assert_close(ns[key], torch.tensor(values), rtol=1e-6, atol=1e-9)
+
+# Compare independently with this runtime's actual dense real Adam optimizer.
+p = torch.nn.Parameter(torch.zeros(2))
+opt = torch.optim.Adam([p], lr=0.001, foreach=False, fused=False)
+p.grad = ns["g"].clone()
+opt.step()
+torch.testing.assert_close(-p.detach(), ns["update"], rtol=1e-6, atol=1e-9)
+state = opt.state[p]
+torch.testing.assert_close(state["exp_avg"], ns["m"], rtol=1e-6, atol=1e-9)
+torch.testing.assert_close(state["exp_avg_sq"], ns["v"], rtol=1e-6, atol=1e-9)
+assert state["step"].item() == 1
+first = {"parameter": p.detach().tolist(), "m": state["exp_avg"].tolist(),
+         "v": state["exp_avg_sq"].tolist(), "step": state["step"].item()}
+
+# State-dict restoration versus resetting history, using one more given gradient.
+saved = copy.deepcopy(opt.state_dict())
+restored_p = torch.nn.Parameter(p.detach().clone())
+restored = torch.optim.Adam([restored_p], lr=0.001, foreach=False, fused=False)
+restored.load_state_dict(copy.deepcopy(saved))
+fresh_p = torch.nn.Parameter(p.detach().clone())
+fresh = torch.optim.Adam([fresh_p], lr=0.001, foreach=False, fused=False)
+next_g = torch.tensor([1.0, -1.0])
+before = p.detach().clone()
+for param, optimizer in [(p,opt),(restored_p,restored),(fresh_p,fresh)]:
+    param.grad = next_g.clone()
+    optimizer.step()
+assert torch.equal(p.detach(), restored_p.detach())
+assert not torch.equal(p.detach(), fresh_p.detach())
+second_update = before - p.detach()
+assert second_update[1].item() > 0 and next_g[1].item() < 0
+assert not torch.isclose(second_update[0],second_update[1],rtol=1e-3,atol=1e-9)
+second = {"given_gradient": next_g.tolist(), "m": opt.state[p]["exp_avg"].tolist(),
+          "v": opt.state[p]["exp_avg_sq"].tolist(), "step": opt.state[p]["step"].item(),
+          "amount_subtracted": second_update.tolist(), "state_restored_equal": True,
+          "history_reset_equal": False, "reset_parameter": fresh_p.detach().tolist()}
+
+# An epsilon prevents 0/0 when both moments and the gradient are zero.
+z = torch.zeros(2)
+zero_update = 0.001*z/(z.sqrt()+1e-8)
+assert torch.isfinite(zero_update).all() and torch.equal(zero_update,z)
+
+# A bounded counterexample to a universal one-step improvement claim.
+# Same scalar objective, initial point, given gradient and learning rate for Adam/SGD.
+target=0.003
+adam_p = torch.nn.Parameter(torch.tensor(0.0,dtype=torch.float64))
+sgd_p = torch.nn.Parameter(torch.tensor(0.0,dtype=torch.float64))
+adam = torch.optim.Adam([adam_p],lr=0.01,foreach=False,fused=False)
+sgd = torch.optim.SGD([sgd_p],lr=0.01)
+initial_loss = target**2
+for param, optimizer in [(adam_p,adam),(sgd_p,sgd)]:
+    loss=(param-target).square()
+    loss.backward()
+    optimizer.step()
+adam_after = (adam_p-target).square().item()
+sgd_after = (sgd_p-target).square().item()
+assert adam_after>initial_loss and sgd_after<initial_loss
+comparison={"objective":"(w - 0.003)^2", "initial_w":0.0,"lr":0.01,"gradient":-0.006,
+            "initial_loss":initial_loss,"adam_w":adam_p.item(),"adam_loss":adam_after,
+            "sgd_w":sgd_p.item(),"sgd_loss":sgd_after,"updates_each":1,
+            "scope":"一個解析反例，不是訓練品質排名或調參公平性的實驗。"}
+
+result={"command":"OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 CUDA_VISIBLE_DEVICES= .venv/bin/python docs/technical-reviews/artifacts/5.4-cpu-check-code.txt",
+        "environment":{"python":platform.python_version(),"torch":torch.__version__,"torch_git_version":torch.version.git_version,
+                       "device":"cpu","threads":str(torch.get_num_threads()),"original_dtype":str(ns["g"].dtype),"counterexample_dtype":"torch.float64"},
+        "original_code_sha256":hashlib.sha256(original.read_bytes()).hexdigest(),
+        "original_values":{key:ns[key].tolist() for key in expected},"original_expected":expected,
+        "original_comparison_tolerance":"rtol=1e-6, atol=1e-9", "official_adam_first_step":first,"official_adam_defaults":opt.defaults,
+        "later_history_and_resume":second,"saved_state_keys":sorted(saved["state"][0].keys()),
+        "zero_gradient_update":zero_update.tolist(),"non_universal_improvement_example":comparison,
+        "assertions":"所有數值、官方 Adam 對照、狀態恢復、反向歷史、零分母與單步反例檢查通過。"}
+print(json.dumps(result,ensure_ascii=False,indent=2))

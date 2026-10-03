@@ -1,0 +1,126 @@
+import contextlib
+import hashlib
+import io
+import json
+import math
+import platform
+from pathlib import Path
+
+import torch
+from scripts.prepare_data import generate_records
+from scripts.course_experiments.common import split_records, text_examples
+from tiny_perceptron.model import TinyLM, ModelConfig, masked_loss
+
+torch.set_num_threads(1)
+torch.manual_seed(42)
+root = Path.cwd()
+code = (root / 'docs/technical-reviews/artifacts/5.1-original-code.txt').read_text()
+exercise = code.replace('y = torch.tensor([[2, 3, 4]])', 'y = torch.tensor([[-100, -100, -100]])')
+assert exercise != code
+out = io.StringIO()
+exercise_result = {}
+try:
+    with contextlib.redirect_stdout(out):
+        exec(compile(exercise, '5.1-all-ignored-exercise', 'exec'), {})
+except ValueError as exc:
+    exercise_result = {'exception': type(exc).__name__, 'message': str(exc), 'stdout': out.getvalue()}
+else:
+    raise AssertionError('空目標練習應拒絕')
+assert '所有 labels 都被忽略' in exercise_result['message']
+assert exercise_result['stdout'] == ''
+
+torch.manual_seed(42)
+model = TinyLM(ModelConfig(vocab_size=5, width=8, max_length=8))
+x, y = torch.tensor([[1, 2, 3]]), torch.tensor([[2, 3, 4]])
+optimizer = torch.optim.AdamW(model.parameters(), lr=0.03, weight_decay=0.0)
+all_parameters = list(model.parameters())
+optimizer_parameters = [p for group in optimizer.param_groups for p in group['params']]
+assert {id(p) for p in all_parameters} == {id(p) for p in optimizer_parameters}
+saved = [p.detach().clone() for p in all_parameters]
+optimizer.zero_grad()
+assert all(p.grad is None for p in all_parameters)
+logits = model(x)['logits']
+loss = masked_loss(logits, y)
+loss.backward()
+assert all(torch.equal(p.detach(), q) for p, q in zip(all_parameters, saved, strict=True))
+gradient = model.embedding.weight.grad
+norm = gradient.norm().item()
+manual_norm = gradient.double().square().sum().sqrt().item()
+assert math.isclose(norm, manual_norm, rel_tol=1e-6)
+assert norm > 0
+optimizer.step()
+changed = sum(not torch.equal(p.detach(), q) for p, q in zip(all_parameters, saved, strict=True))
+assert changed > 0
+after_one_step = masked_loss(model(x)['logits'], y).item()
+optimizer.zero_grad()
+assert all(p.grad is None for p in all_parameters)
+length_8_shape = list(model(torch.ones((1, 8), dtype=torch.long))['logits'].shape)
+try:
+    model(torch.ones((1, 9), dtype=torch.long))
+except ValueError as exc:
+    length_9_error = str(exc)
+else:
+    raise AssertionError('超過上限應拒絕')
+partial_y = y.clone(); partial_y[0, 1] = -100
+partial = masked_loss(logits, partial_y)
+unreduced = torch.nn.functional.cross_entropy(logits.reshape(-1, 5), y.reshape(-1), reduction='none')
+assert torch.allclose(partial, unreduced[[0, 2]].mean())
+boundary = {
+    'input_dtype': str(x.dtype), 'target_dtype': str(y.dtype), 'input_shape': list(x.shape),
+    'embedding_weight_shape': list(model.embedding.weight.shape),
+    'logits_shape': list(logits.shape), 'parameter_tensors': len(all_parameters),
+    'optimizer_has_all_parameters': True, 'backward_leaves_parameters_unchanged': True,
+    'changed_parameter_tensors_after_step': changed,
+    'loss_before_one_step': loss.item(), 'loss_after_one_step': after_one_step,
+    'embedding_gradient_norm': norm, 'sqrt_sum_squares_float64': manual_norm,
+    'zero_grad_sets_all_to_none': True,
+    'length_8_logits_shape': length_8_shape, 'length_9_error': length_9_error,
+    'partial_mask_loss': partial.item(), 'partial_mask_effective_labels': 2,
+    'optimizer_lr': optimizer.param_groups[0]['lr'],
+    'optimizer_weight_decay': optimizer.param_groups[0]['weight_decay'],
+}
+
+report_path = root / 'docs/course-experiments/results/text_foundation.json'
+report = json.loads(report_path.read_bytes())
+parts = split_records(generate_records('toy-text'), seed=42)
+denominators = {}
+for split, rows in parts.items():
+    serialized = ''.join(json.dumps(row, ensure_ascii=False) + '\n' for row in rows).encode()
+    digest = hashlib.sha256(serialized).hexdigest()
+    assert digest == report['results']['data'][split]['sha256']
+    examples = text_examples(rows, mode='text', max_length=128)
+    count = sum(int((y != -100).sum()) for _, y in examples)
+    denominators[split] = {'records': len(rows), 'families': len({r['family'] for r in rows}),
+                           'effective_targets_including_eos': count, 'sha256': digest}
+assert [denominators[s]['effective_targets_including_eos'] for s in ('train','validation','test')] == [321,35,70]
+assert not set(r['family'] for r in parts['train']) & set(r['family'] for r in parts['validation'])
+training = report['results']['training']
+after_validation = report['results']['after']['validation']
+rounded = [f'{training[k]:.5f}' for k in ('initial_loss','final_loss')] + [f'{after_validation["nll"]:.5f}']
+assert rounded == ['5.79243','0.06352','0.96282']
+assert after_validation['nll'] == after_validation['nll_sum'] / after_validation['effective_tokens']
+checkpoint = torch.load(root / 'checkpoints/course/text_foundation/model.pt', map_location='cpu', weights_only=True)
+checkpoint_path = root / 'checkpoints/course/text_foundation/model.pt'
+checkpoint_sha = hashlib.sha256(checkpoint_path.read_bytes()).hexdigest()
+release = json.loads((root / 'docs/course-experiments/public-releases/text_foundation.json').read_bytes())
+declared_model = next(f for f in release['release']['public_manifest']['files'] if f['output'] == 'model.pt')
+assert checkpoint_sha == declared_model['sha256']
+checkpoint_summary = {'keys': list(checkpoint), 'config': checkpoint.get('config'),
+                      'step': checkpoint.get('step'), 'metadata': checkpoint.get('metadata')}
+formal = {
+    'report_path': str(report_path.relative_to(root)), 'report_sha256': hashlib.sha256(report_path.read_bytes()).hexdigest(),
+    'revision': report['revision'], 'device': report['device'], 'gpu': report['gpu'], 'seed': report['seed'],
+    'python_version': report['python_version'], 'torch_version': report['torch_version'],
+    'step_scale': report['step_scale'], 'training_steps': training['steps'],
+    'training_seen_effective_tokens': training['effective_tokens'], 'parameters': training['parameters'],
+    'training_initial_loss': training['initial_loss'], 'training_final_loss': training['final_loss'],
+    'validation_nll_after': after_validation['nll'], 'validation_nll_sum_after': after_validation['nll_sum'],
+    'rounded_to_five_decimals': rounded, 'denominators': denominators,
+    'local_checkpoint': checkpoint_summary,
+    'local_checkpoint_sha256': checkpoint_sha,
+    'public_release_revision': release['release']['revision'],
+    'verification_scope': '只讀凍結結果、公開checkpoint設定，重建既有12筆toy records核分母；未訓練、未重跑600步或任何正式排程。',
+}
+print(json.dumps({'environment': {'python': platform.python_version(), 'torch': torch.__version__,
+    'torch_git_version': torch.version.git_version, 'device': 'cpu', 'OMP_NUM_THREADS': '1', 'MKL_NUM_THREADS': '1'},
+    'exercise': exercise_result, 'boundary': boundary, 'formal': formal}, ensure_ascii=False, indent=2))

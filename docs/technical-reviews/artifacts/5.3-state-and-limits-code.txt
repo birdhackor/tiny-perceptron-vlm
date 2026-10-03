@@ -1,0 +1,68 @@
+import copy
+import json
+import platform
+import torch
+
+torch.set_num_threads(1)
+torch.set_default_device('cpu')
+torch.set_default_dtype(torch.float64)
+parameter = torch.nn.Parameter(torch.zeros(2))
+optimizer = torch.optim.SGD([parameter], lr=0.1, momentum=0.9, dampening=0, weight_decay=0,
+                            nesterov=False, foreach=False)
+rows = []
+for gradient in ([1., 2.], [1., -3.], [-1., 1.]):
+    parameter.grad = torch.tensor(gradient)
+    optimizer.step()
+    rows.append({'grad': parameter.grad.tolist(),
+                 'buffer': optimizer.state[parameter]['momentum_buffer'].tolist(),
+                 'parameter': parameter.tolist()})
+assert torch.allclose(parameter, torch.tensor([-.361, -.072]), rtol=0, atol=1e-12)
+saved_state = copy.deepcopy(optimizer.state_dict())
+restored = torch.nn.Parameter(parameter.detach().clone())
+fresh = torch.nn.Parameter(parameter.detach().clone())
+restored_optimizer = torch.optim.SGD([restored], lr=.1, momentum=.9, foreach=False)
+restored_optimizer.load_state_dict(saved_state)
+fresh_optimizer = torch.optim.SGD([fresh], lr=.1, momentum=.9, foreach=False)
+for p, opt in [(parameter, optimizer), (restored, restored_optimizer), (fresh, fresh_optimizer)]:
+    p.grad = torch.ones_like(p)
+    opt.step()
+assert torch.equal(parameter, restored)
+assert not torch.equal(parameter, fresh)
+sgd_parameter = torch.nn.Parameter(torch.zeros(2))
+sgd = torch.optim.SGD([sgd_parameter], lr=.1, momentum=0, foreach=False)
+sgd_parameter.grad = torch.ones(2)
+sgd.step()
+assert len(sgd.state) == 0
+adam_parameter = torch.nn.Parameter(torch.zeros(2))
+adam = torch.optim.Adam([adam_parameter], foreach=False)
+adam_parameter.grad = torch.ones(2)
+adam.step()
+adam_keys = sorted(adam.state[adam_parameter])
+assert adam_keys == ['exp_avg', 'exp_avg_sq', 'step']
+w = torch.nn.Parameter(torch.tensor(2.))
+(w.square()).backward()
+first = w.grad.item()
+(w.square()).backward()
+second = w.grad.item()
+w.grad = None
+(w.square()).backward()
+assert [first, second, w.grad.item(), w.item()] == [4., 8., 4., 2.]
+position, velocity = 1., 0.
+cost_rows = [{'step': 0, 'w': position, 'v': velocity, 'cost': .5 * position**2}]
+for step in range(1, 4):
+    gradient = position
+    velocity = .9 * velocity + gradient
+    position -= .6 * velocity
+    cost_rows.append({'step': step, 'gradient': gradient, 'v': velocity, 'w': position, 'cost': .5*position**2})
+assert cost_rows[3]['cost'] > cost_rows[2]['cost']
+assert cost_rows[2]['w'] < 0 < cost_rows[1]['w']
+print(json.dumps({'environment': {'python': platform.python_version(), 'torch': torch.__version__,
+    'torch_git_version': torch.version.git_version, 'device': 'cpu', 'dtype': 'torch.float64',
+    'OMP_NUM_THREADS': '1', 'MKL_NUM_THREADS': '1'},
+    'sgd_elementwise': rows,
+    'continuation': {'next_gradient': [1.,1.], 'with_history': parameter.tolist(),
+       'restored_history': restored.tolist(), 'without_history': fresh.tolist(), 'equal_when_restored': True},
+    'basic_sgd_state_entries': len(sgd.state), 'adam_state_keys': adam_keys,
+    'grad_accumulation': [first, second, w.grad.item(), w.item()],
+    'objective_counterexample': {'objective': 'f(w)=w^2/2', 'initial_w': 1., 'initial_v': 0.,
+          'mu': .9, 'eta': .6, 'rows': cost_rows}, 'assertions': 'passed'}, ensure_ascii=False, indent=2))
