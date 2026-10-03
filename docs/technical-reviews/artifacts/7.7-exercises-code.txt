@@ -1,0 +1,116 @@
+import hashlib
+import json
+import os
+from pathlib import Path
+import sys
+
+import torch
+from tiny_perceptron.attention import attention_mask, manual_attention
+from tiny_perceptron.data import pad_batch
+from tiny_perceptron.model import masked_loss
+
+def offline_guard(event, args):
+    if event in ('socket.connect', 'socket.getaddrinfo', 'socket.bind', 'socket.sendto',
+                 'subprocess.Popen', 'os.system', 'os.exec', 'os.posix_spawn'):
+        raise PermissionError('bounded offline CPU review blocks ' + event)
+
+sys.addaudithook(offline_guard)
+torch.set_num_threads(1)
+torch.set_default_device('cpu')
+assert torch.version.cuda is None
+root = Path.cwd()
+original = root / 'docs/technical-reviews/artifacts/7.7-original-code.txt'
+namespace = {'__name__': '__main__'}
+exec(compile(original.read_bytes(), str(original), 'exec'), namespace)
+model = namespace['model']
+base = namespace['base'].detach()
+ids, valid, positions = (namespace[k] for k in ('ids', 'valid', 'positions'))
+
+def parameter_digest():
+    digest = hashlib.sha256()
+    for name, parameter in model.state_dict().items():
+        digest.update(name.encode())
+        digest.update(parameter.detach().contiguous().numpy().tobytes())
+    return digest.hexdigest()
+
+parameter_before = parameter_digest()
+exercises = []
+for name, call in (
+    ('刪除 valid，保留 positions', 'model(ids, positions=positions)["logits"][:, 2:]'),
+    ('恢復 valid，刪除 positions', 'model(ids, valid=valid)["logits"][:, 2:]'),
+):
+    context = dict(model=model, ids=ids, valid=valid, positions=positions, base=base, torch=torch)
+    with torch.no_grad():
+        actual = eval(call, context)
+    difference = (base - actual).abs().max().item()
+    try:
+        assert torch.allclose(base, actual, atol=1e-6)
+    except AssertionError:
+        assertion = 'AssertionError（練習預期）'
+    else:
+        assertion = '通過'
+    exercises.append({'exercise': name, 'exact_call': call, 'max_abs_difference': difference,
+                      'allclose_atol': 1e-6, 'allclose_default_rtol': 1e-5, 'assert_result': assertion})
+
+with torch.no_grad():
+    restored = model(ids, valid=valid, positions=positions)['logits'][:, 2:]
+    arbitrary_pad_positions = positions.clone()
+    arbitrary_pad_positions[:, :2] = torch.tensor([7, 9])
+    changed_pad_positions = model(ids, valid=valid, positions=arbitrary_pad_positions)['logits'][:, 2:]
+    inputs = model.embedding(ids) + model.position(positions)
+    attention = model.blocks[0].attention
+    normalized = model.blocks[0].norm1(inputs)
+    q = attention.q(normalized).view(1, 5, 1, 8).transpose(1, 2)
+    k = attention.k(normalized).view(1, 5, 1, 8).transpose(1, 2)
+    v = attention.v(normalized).view(1, 5, 1, 8).transpose(1, 2)
+    allowed = attention_mask(torch.arange(5), torch.arange(5), valid)
+    attended, weights = manual_attention(q, k, v, allowed)
+    raw_empty_softmax = torch.full((1, 5), float('-inf')).softmax(-1)
+    padded_logits = model(ids, valid=valid, positions=positions)['logits']
+    loss_base = masked_loss(base, torch.tensor([[2, 3, 4]])).item()
+    loss_padded = masked_loss(padded_logits, torch.tensor([[-100, -100, 2, 3, 4]])).item()
+
+loss_input = padded_logits.detach().clone().requires_grad_()
+masked_loss(loss_input, torch.tensor([[-100, -100, 2, 3, 4]])).backward()
+batch = pad_batch([(torch.tensor([0, 1]), torch.tensor([1, 2])),
+                   (torch.tensor([2]), torch.tensor([3]))])
+comparison = {'input': torch.tensor([1.000005]), 'other': torch.tensor([1.0])}
+record = {
+    'environment': {'python': sys.version, 'torch': str(torch.__version__),
+                    'torch_git_version': str(torch.version.git_version), 'device': str(base.device),
+                    'dtype': str(base.dtype), 'OMP_NUM_THREADS': os.environ.get('OMP_NUM_THREADS'),
+                    'MKL_NUM_THREADS': os.environ.get('MKL_NUM_THREADS'),
+                    'offline_guard': '禁止 socket 網路與子程序；CPU wheel，無 CUDA build'},
+    'configuration': {'seed': 42, 'batch_size': 1, 'base_real_tokens': 3, 'padding_tokens': 2,
+                      'vocab_size': 10, 'width': 8, 'layers': 1, 'heads': 1,
+                      'rotary': False, 'backend': 'manual', 'updates': 0},
+    'parameter_sha256_before': parameter_before,
+    'parameter_sha256_after': parameter_digest(),
+    'exercises': exercises,
+    'diagnostics': {
+        'valid': valid.tolist(), 'positions': positions.tolist(), 'base_shape': list(base.shape),
+        'padded_shape': list(padded_logits.shape), 'allowed': allowed[0, 0].tolist(),
+        'restored_max_abs_difference': (base - restored).abs().max().item(),
+        'changing_only_pad_position_ids_max_abs_difference': (base - changed_pad_positions).abs().max().item(),
+        'empty_query_weights': weights[0, 0, :2].tolist(),
+        'empty_query_attention_outputs': attended[0, 0, :2].tolist(),
+        'real_queries_pad_key_max_abs_weight': weights[0, 0, 2:, :2].abs().max().item(),
+        'raw_all_negative_infinity_softmax_all_nan': bool(raw_empty_softmax.isnan().all()),
+        'all_full_logits_finite': bool(padded_logits.isfinite().all()),
+        'loss_base_3_valid_targets': loss_base, 'loss_padded_3_valid_targets': loss_padded,
+        'ignored_pad_logits_gradient_max_abs': loss_input.grad[:, :2].abs().max().item(),
+        'pad_batch_preserves_real_ID0_as_valid': {'ids': batch[0].tolist(), 'valid': batch[2].tolist()},
+        'allclose_default_relative_term_example': {
+            'difference': (comparison['input'] - comparison['other']).abs().item(),
+            'atol_1e_6_default_rtol_passes': torch.allclose(**comparison, atol=1e-6),
+            'atol_1e_6_rtol_0_passes': torch.allclose(**comparison, atol=1e-6, rtol=0),
+        },
+    },
+    'scope': '只驗證未訓練固定 seed 玩具模型、本節原例與兩個單項刪除練習；未重訓或重跑正式實驗。',
+}
+assert all(item['assert_result'].startswith('AssertionError') for item in exercises)
+assert record['parameter_sha256_before'] == record['parameter_sha256_after']
+assert record['diagnostics']['restored_max_abs_difference'] <= 1e-6
+assert record['diagnostics']['raw_all_negative_infinity_softmax_all_nan']
+assert record['diagnostics']['ignored_pad_logits_gradient_max_abs'] == 0
+print(json.dumps(record, ensure_ascii=False, indent=2, allow_nan=False))

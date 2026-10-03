@@ -1,0 +1,12 @@
+7.7 左填充等價的透明推導（審閱者自行推導，2026-10-03）
+
+1. 基底真實位置 i,j∈{0,1,2}。左補兩格後物理索引為 i+2,j+2。因果條件 j+2≤i+2 ⇔ j≤i；但單獨因果還允許前兩個 PAD key。
+2. allowed(i+2,k)=(k≤i+2) AND valid(k)。valid=[F,F,T,T,T] 後，真實 query 的有效 key 恰是原本可讀的真 token。前兩個 query 無有效 key。
+3. position_ids(i+2)=i，所以真 token 起始向量 e(ID_i)+p(i) 與 base 相同。若用預設物理位置則變 e(ID_i)+p(i+2)，learned p 的各列一般不同。
+4. 同一組真 query/key/value 相同，遮掉 PAD 後 softmax 分母 sum_{j≤i} exp(score_ij) 相同，因此 Attention_i=sum_{j≤i} weight_ij V_j 相同。這是實數計算的等價，浮點 kernel 可有捨入差。
+5. 本配置的 LayerNorm(width)、DenseFFN、residual 與 final projection 都只處理各 token 的特徵，沒有跨時間統計或 dropout；由上一步逐層維持真位置相同。這個證明適用本節 TinyLM 預設 manual/non-rotary/Dense/no-cache 配置，不宣稱所有模型或後端自動滿足。
+6. 全 -inf 未處理時 exp(-inf)=0，分布公式成 0/0；不得宣稱有效機率。manual_attention 將空行分數暫設 0，softmax 後再把權重設 0，因此有限 V 下權重乘 V 是全 0。零的是該注意力讀取輸出，不是 PAD 的 residual 向量或最終 logits。
+7. 有效 key mask 保證真 query 不讀 PAD hidden；labels=-100 則讓 PAD 的答案損失與其 logits 梯度為 0。PAD embedding 仍可存在且完整模型 PAD logits 不必為零；它沒有被賦予真實監督目標。
+8. 若取消 valid，有效 softmax 多出 PAD 分母與 value 項；除非偶然相消，結果會改。若只取消 positions，有效起始向量改為 p(2),p(3),p(4)，也沒有等價保證。固定同一模型才隔離這兩種改動。
+9. torch.allclose(base,actual,atol=1e-6) 的實際界限仍有預設 rtol=1e-5 相對項，即 |base_i-actual_i|≤1e-6+1e-5|actual_i|；正文的百萬分之一對應 atol 絕對容忍項。原例實測最大差 0，同時滿足純絕對界限。
+10. 注意力讀取的有效真 token 為3、PAD為2；附加 loss 核對分母為3，無參數更新。不同形狀的交叉熵 reduction 可有浮點捨入，這次兩個 loss 相差 2.384185791015625e-7，不能把浮點 bitwise equality 當一般要求。
