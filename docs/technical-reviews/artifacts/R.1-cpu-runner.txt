@@ -1,0 +1,71 @@
+from pathlib import Path
+import sys, re, json, hashlib, platform
+import torch
+
+root = Path.cwd()
+mode = sys.argv[1]
+assert torch.__version__ == '2.14.1+cpu'
+assert torch.version.git_version == '5c4886908584029761b579af026dcfb627c84070'
+torch.set_num_threads(1)
+torch.manual_seed(42)
+print(json.dumps({'mode':mode,'python':platform.python_version(),'torch':torch.__version__,'torch_git_version':torch.version.git_version,'device':'cpu','threads':torch.get_num_threads()},ensure_ascii=False))
+
+def section(path, identifier):
+    raw = (root/path).read_bytes()
+    headings = list(re.finditer(rb'(?m)^## ([A-Z\d]+\.\d+) [^\r\n]+',raw))
+    i = next(i for i,h in enumerate(headings) if h[1].decode() == identifier)
+    return raw[headings[i].start():headings[i+1].start() if i+1<len(headings) else len(raw)]
+
+selection = {'chars-original':('course/chapters/01.md','1.1'),'chars-reverse':('course/chapters/01.md','1.1'),'chars-bird':('course/chapters/01.md','1.1'),'chars-unknown':('course/chapters/01.md','1.1'),'warm-original':('course/first-steps.md','W.2'),'warm-birds':('course/first-steps.md','W.2'),'warm-caption':('course/first-steps.md','W.2'),'table-original':('course/chapters/01.md','1.6'),'table-dog':('course/chapters/01.md','1.6'),'loss-original':('course/chapters/01.md','1.8'),'loss-target0':('course/chapters/01.md','1.8'),'update-original':('course/chapters/01.md','1.12'),'update-0.6':('course/chapters/01.md','1.12'),'update-2':('course/chapters/01.md','1.12')}
+if mode in selection:
+    path,identifier = selection[mode]
+    raw = section(path,identifier)
+    code = '\n'.join(re.findall(r'```python\n(.*?)```',raw.decode(),re.S))
+    print(json.dumps({'source':path+'#'+identifier,'raw_sha256':hashlib.sha256(raw).hexdigest()},ensure_ascii=False))
+    if mode == 'chars-reverse': code=code.replace('chars = sorted(set(text))','chars = sorted(set(text), reverse=True)')
+    if mode == 'chars-bird': code=code.replace('貓看狗，狗看貓。','鳥看狗，狗看鳥。')
+    if mode in ['warm-birds','warm-caption']:
+        code=code.replace('animals = ["貓", "狗"]','animals = ["鳥", "貓", "狗"]').replace('assert len(animals) == 2','assert len(animals) == 3')
+    if mode == 'warm-caption': code=code.replace('"caption": "貓在睡覺"','"caption": "鳥在飛翔"')
+    if mode == 'table-dog': code=code.replace('    scores.weight[0, 1] = 2.0','    scores.weight[0, 1] = 2.0\n    scores.weight[2, 0] = 3.0')
+    if mode == 'loss-target0': code=code.replace('target = torch.tensor([1])','target = torch.tensor([0])').replace('probabilities[0, 1]','probabilities[0, 0]')
+    if mode.startswith('update-') and mode!='update-original': code=code.replace('w -= 0.1 * w.grad','w -= '+mode.split('-')[1]+' * w.grad')
+    print('executed_code_sha256='+hashlib.sha256(code.encode()).hexdigest())
+    namespace={'__name__':'__main__'}
+    try:
+        exec(compile(code,path+'#'+identifier,'exec'),namespace)
+        if mode=='chars-unknown':
+            try:
+                [namespace['to_id'][c] for c in '貓看鳥']
+            except KeyError as error: print('expected_KeyError='+str(error))
+            else: raise AssertionError('unknown character did not fail')
+        if mode.startswith('chars-'):
+            assert namespace['restored']==namespace['text']
+            if mode=='chars-original': assert namespace['ids']==[3,2,1,4,1,2,3,0]
+            if mode=='chars-reverse': assert namespace['ids']==[1,2,3,0,3,2,1,4]
+        if mode=='table-dog': assert torch.equal(namespace['output'],torch.tensor([[0.,2.,0.],[3.,0.,0.]]))
+        if mode=='loss-target0': assert abs(namespace['loss'].item()-2.2395448)<1e-6
+        if mode=='update-0.6': assert abs(namespace['after'].item()-0.16)<1e-6
+        print('verification=passed')
+    except AssertionError:
+        if mode!='update-2': raise
+        assert namespace['w'].item()==9.0 and namespace['after'].item()==36.0
+        print('expected_AssertionError: step 2 gives w=9, cost=36; original textbook assertion failed as intended')
+elif mode=='model-forward':
+    from tiny_perceptron.model import TinyLM,ModelConfig
+    from tiny_perceptron.multimodal import MultiModalLM,scene,tone
+    from tiny_perceptron.data import ByteTokenizer
+    tok=ByteTokenizer()
+    lm=TinyLM(ModelConfig(width=16,layers=1,heads=1,max_length=128))
+    model=MultiModalLM(lm)
+    model.eval()
+    with torch.no_grad():
+        text=lm(torch.arange(8,40).unsqueeze(0))['logits']
+        image=model(torch.tensor([tok.image_id,8,9]),image=scene())['logits']
+        audio=model(torch.tensor([tok.audio_id,8,9]),waveform=tone())['logits']
+    shapes={k:list(v.shape) for k,v in [('text',text),('image',image),('audio',audio)]}
+    assert shapes=={'text':[1,32,264],'image':[1,17,264],'audio':[1,12,264]}
+    assert all(torch.isfinite(v).all() for v in [text,image,audio])
+    print(json.dumps({'shapes':shapes,'trained':False,'scope':'CPU forward-path shape check; random parameters; no accuracy or long-context quality claim'},ensure_ascii=False))
+else:
+    raise ValueError(mode)

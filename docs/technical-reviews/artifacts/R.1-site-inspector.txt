@@ -1,0 +1,59 @@
+from pathlib import Path
+import json, hashlib, html, sys, urllib.request, platform, threading, functools
+from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
+from html.parser import HTMLParser
+import torch
+from scripts.export_course import checked_notebook
+
+site=Path(sys.argv[1]); root=Path.cwd()
+index=json.loads((root/'course/lesson-index.json').read_bytes())
+info=json.loads((site/'build-info.json').read_bytes())
+class Links(HTMLParser):
+    def __init__(self): super().__init__(); self.links=[]
+    def handle_starttag(self,tag,attrs):
+        attrs=dict(attrs)
+        if tag=='a' and 'href' in attrs: self.links.append(attrs['href'])
+records=[]; failures=[]; execution_cells=0; stream_outputs=0; matched_stream_outputs=0
+for item in index:
+    original=root/item['notebook']; download=site/item['notebook']; page=site/(item['id']+'.html')
+    executed=root/'outputs/notebooks-reader-round'/Path(item['notebook']).relative_to('notebooks')
+    notebook=json.loads(original.read_bytes())
+    run=checked_notebook(notebook,executed)
+    text=page.read_text(); links=Links(); links.feed(text)
+    visible=[c for c in run['cells'] if c['cell_type']=='code' and not c.get('metadata',{}).get('course_setup') and 'course_figure' not in c.get('metadata',{})]
+    record={'id':item['id'],'original_sha256':hashlib.sha256(original.read_bytes()).hexdigest(),'executed_sha256':hashlib.sha256(executed.read_bytes()).hexdigest(),'page_sha256':hashlib.sha256(page.read_bytes()).hexdigest(),'download_equal':original.read_bytes()==download.read_bytes(),'colab_same_revision':f'https://colab.research.google.com/github/birdhackor/tiny-perceptron-vlm/blob/{info["revision"]}/{item["notebook"]}' in links.links,'download_link':item['notebook'] in links.links,'outputs_label_count':text.count('實際執行結果 · CPU'),'warm_nav':any('first-steps.html' in link for link in links.links)}
+    execution_cells+=sum(c['cell_type']=='code' for c in run['cells'])
+    record['checked_current_cell_sources']=True
+    record['stream_outputs']=0; record['matched_stream_outputs']=0
+    for cell in visible:
+        for output in cell.get('outputs',[]):
+            if output['output_type']=='stream':
+                stream_outputs+=1; record['stream_outputs']+=1
+                joined=''.join(output['text']) if isinstance(output['text'],list) else output['text']
+                matched='<pre>'+html.escape(joined)+'</pre>' in text
+                matched_stream_outputs+=int(matched);record['matched_stream_outputs']+=int(matched)
+    if not all(record[key] for key in ['download_equal','colab_same_revision','download_link','warm_nav']): failures.append(item['id'])
+    if record['stream_outputs']!=record['matched_stream_outputs']: failures.append(item['id']+': stream mismatch')
+    records.append(record)
+all_pages=[]
+for page in site.glob('*.html'):
+    links=Links();links.feed(page.read_text())
+    all_pages.append({'name':page.name,'warm_nav':any('first-steps.html' in link for link in links.links)})
+reading=(site/'course.html').read_text()
+tokens=['不必先準備 GPU','貓看狗，狗看貓。','兩條路都會讀到同一份正文']
+main_source_tokens={token:token in reading for token in tokens}
+class QuietHandler(SimpleHTTPRequestHandler):
+    def log_message(self,*args): pass
+server=ThreadingHTTPServer(('127.0.0.1',0),functools.partial(QuietHandler,directory=str(site)))
+thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+http_url='http://127.0.0.1:'+str(server.server_port)+'/1.1.html'
+try:
+    with urllib.request.urlopen(http_url,timeout=10) as response:
+        response_bytes=response.read()
+    http={'url':http_url,'status':response.status,'sha256':hashlib.sha256(response_bytes).hexdigest(),'matches_file':response_bytes==(site/'1.1.html').read_bytes()}
+finally:
+    server.shutdown();server.server_close();thread.join()
+result={'scope':'本人離線核對當前本地網站草稿、既有222份CPU kernel原始產物與metadata；本人未啟動kernel、未Colab執行、未重新生成Notebook、未發布網站','command_arguments':sys.argv,'environment':{'python':platform.python_version(),'torch':str(torch.__version__),'torch_git_version':str(torch.version.git_version),'device':'cpu'},'build_info':info,'lessons':len(records),'executed_code_cells':execution_cells,'visible_stream_outputs':stream_outputs,'matched_stream_outputs':matched_stream_outputs,'pages':len(all_pages),'pages_missing_warm_nav':[p['name'] for p in all_pages if not p['warm_nav']],'main_source_tokens':main_source_tokens,'local_http':http,'failures':failures,'records':records}
+print(json.dumps({k:v for k,v in result.items() if k!='records'},ensure_ascii=False,indent=2))
+Path('docs/technical-reviews/artifacts/R.1-site-current-audit.json').write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\n')
+assert not failures and not result['pages_missing_warm_nav'] and all(main_source_tokens.values()) and http['matches_file']
