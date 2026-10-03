@@ -1,0 +1,161 @@
+"""13.6 獨立審閱：有界 CPU 原例、逐練習、API 與凍結結果核對；不訓練模型。"""
+import argparse
+import contextlib
+import hashlib
+import io
+import json
+import math
+import platform
+import re
+import sys
+from pathlib import Path
+
+import torch
+
+ROOT = Path.cwd()
+sys.path.insert(0, str(ROOT))
+from tiny_perceptron.alignment import dpo_loss
+
+
+def digest(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def original(section, exercise=False):
+    path = ROOT / "docs/technical-reviews/artifacts" / (
+        "13.6-raw-section.txt" if section == "13.6" else "13.6-prerequisite-13.5.txt"
+    )
+    raw = path.read_text()
+    code = re.search(r"```python\n(.*?)\n```", raw, re.S)[1]
+    if exercise:
+        old, new = ("[-2.0]", "[-6.0]") if section == "13.6" else ("[-4.0]", "[-5.0]")
+        # 13.5 只改第一個 chosen 初始化，不改固定參考。
+        code = code.replace(old, new, 1)
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        exec(compile(code, str(path), "exec"), {})
+    return {"section": section, "exercise": exercise, "source_sha256": digest(path), "code": code, "stdout": output.getvalue()}
+
+
+def probes():
+    rows = []
+    for margin in (2.0, -2.0, 0.0):
+        for beta in (0.1, 1.0, 5.0):
+            chosen = torch.tensor([margin - 4.0], requires_grad=True)
+            loss = dpo_loss(chosen, torch.tensor([-4.0]), torch.tensor([-3.0]), torch.tensor([-3.0]), beta=beta)
+            loss.backward()
+            expected_loss = math.log1p(math.exp(-beta * margin))
+            expected_grad = -beta / (1 + math.exp(beta * margin))
+            assert math.isclose(loss.item(), expected_loss, rel_tol=1e-6, abs_tol=1e-6)
+            assert math.isclose(chosen.grad.item(), expected_grad, rel_tol=1e-6, abs_tol=1e-6)
+            before = chosen.item()
+            with torch.no_grad():
+                chosen -= 0.1 * chosen.grad
+            rows.append({"margin": margin, "beta": beta, "loss": loss.item(), "gradient": chosen.grad.item(), "formula_loss": expected_loss, "formula_gradient": expected_grad, "gradient_descent_lr": 0.1, "absolute_update": abs(chosen.item() - before)})
+    rejects = []
+    for beta in (0.0, -0.1, -1.0):
+        try:
+            dpo_loss(*[torch.tensor([-3.0]) for _ in range(4)], beta=beta)
+        except ValueError as error:
+            rejects.append({"beta": beta, "type": type(error).__name__, "message": str(error)})
+        else:
+            raise AssertionError("非法 beta 未拒絕")
+    chosen = torch.tensor([-2.0], requires_grad=True)
+    values = []
+    for _ in range(2):
+        dpo_loss(chosen, torch.tensor([-4.0]), torch.tensor([-3.0]), torch.tensor([-3.0]), beta=1.0).backward()
+        values.append(chosen.grad.item())
+    assert math.isclose(values[1], 2 * values[0])
+    return {"derivatives": rows, "invalid_beta": rejects, "same_leaf_accumulation": values, "policy_probability_sum": math.exp(-2) + math.exp(-4), "exercise_probability_sum": math.exp(-6) + math.exp(-4), "reference_probability_sum": 2 * math.exp(-3)}
+
+
+def empirical():
+    from dataclasses import asdict
+    from tiny_perceptron.training import load_checkpoint
+    from scripts.course_experiments.common import evaluate_lm
+
+    dpath = ROOT / "docs/course-experiments/results/dpo.json"
+    spath = ROOT / "docs/course-experiments/results/style.json"
+    full = json.loads(dpath.read_text())
+    style = json.loads(spath.read_text())
+    raw = full["results"]
+    release = json.loads((ROOT / "docs/course-experiments/public-releases/dpo.json").read_text())
+    original = Path("/tmp/13.6-originals")
+    code_checked = {}
+    for local, key in (("formal-behavior.py", "scripts/course_experiments/behavior.py"), ("formal-common.py", "scripts/course_experiments/common.py"), ("formal-alignment.py", "tiny_perceptron/alignment.py")):
+        observed = digest(original / local)
+        assert observed == full["code_sha256"][key]
+        code_checked[key] = observed
+    assert digest(original / "style-behavior.py") == style["code_sha256"]["scripts/course_experiments/behavior.py"]
+    checks = {"before": {}, "runs": {}}
+    for split, p in raw["before"].items():
+        rows = p["samples"]
+        higher = sum(r["policy_chosen_logp"] > r["policy_rejected_logp"] for r in rows)
+        improved = sum(r["relative_margin"] > 0 for r in rows)
+        assert higher == p["chosen_higher_absolute_probability"]
+        assert improved == p["relative_preference_improved"]
+        checks["before"][split] = {"records": len(rows), "higher": higher, "improved": improved, "style_generation_matches": style["results"]["content_evaluation"][split]["matches"], "families": sorted({r["family"] for r in rows})}
+    for name in ("model", "beta1"):
+        run = raw["runs"][name]
+        one = {"beta": run["beta"], "steps": run["training"]["steps"], "effective_answer_tokens_both_sides": run["training"]["effective_answer_tokens_both_sides"], "splits": {}}
+        for split in ("validation", "test"):
+            pref, gen = run["preference"][split], run["arithmetic"][split]
+            rows = pref["samples"]
+            for row in rows:
+                m = row["policy_chosen_logp"] - row["policy_rejected_logp"]
+                assert math.isclose(m, row["policy_margin"], abs_tol=1e-12)
+                assert math.isclose(m - row["reference_margin"], row["relative_margin"], abs_tol=1e-12)
+                assert row["chosen_answer_tokens"] == row["rejected_answer_tokens"] == 2
+            higher = sum(row["policy_margin"] > 0 for row in rows)
+            improved = sum(row["relative_margin"] > 0 for row in rows)
+            mean = sum(row["relative_margin"] for row in rows) / len(rows)
+            samples = gen["samples"]
+            matches = sum(row["exact"] for row in samples)
+            ended = sum(row["eos"] for row in samples)
+            assert pref["records"] == gen["records"] == len(rows) == len(samples)
+            assert higher == pref["chosen_higher_absolute_probability"]
+            assert improved == pref["relative_preference_improved"]
+            assert math.isclose(mean, pref["mean_relative_margin"], abs_tol=1e-12)
+            assert matches == gen["matches"] == 0
+            assert ended == len(samples)
+            one["splits"][split] = {"records": len(rows), "higher": higher, "improved": improved, "mean_relative_margin": mean, "matches": matches, "eos": ended, "families": sorted({row["family"] for row in rows}), "generation_samples": samples, "preference_samples": rows}
+        p = ROOT / "checkpoints/course/dpo" / f"{name}.pt"
+        pin = next(f for f in release["release"]["public_manifest"]["files"] if f["output"] == p.name)
+        assert digest(p) == pin["sha256"]
+        model, payload = load_checkpoint(p, device="cpu")
+        model.eval()
+        count = sum(p.numel() for p in model.parameters())
+        assert model.config.width == 64 and model.config.layers == 2 and count == 141568
+        one["checkpoint"] = {"sha256": digest(p), "bytes": p.stat().st_size, "public_url": "https://huggingface.co/birdhackor/tiny-perceptron-course-models/resolve/" + release["release"]["weights_revision"] + "/course/course-v1/dpo/" + p.name, "config": asdict(model.config), "parameter_count": count, "metadata": payload.get("metadata"), "model_tensor_shapes": {k: list(v.shape) for k,v in payload["model"].items()}}
+        one["cpu_replay"] = {}
+        for split in ("validation", "test"):
+            records = [{"messages": [*r["messages"], {"role": "assistant", "content": r["expected"]}]} for r in run["arithmetic"][split]["samples"]]
+            replay = evaluate_lm(model, records, mode="sft", tokens=32)
+            expected = run["arithmetic"][split]
+            assert replay["matches"] == expected["matches"] == 0
+            assert replay["eos_rate"] == expected["eos_rate"] == 1
+            for observed, frozen in zip(replay["samples"], expected["samples"], strict=True):
+                assert observed["generated_ids"] == frozen["generated_ids"]
+            one["cpu_replay"][split] = replay
+        checks["runs"][name] = one
+    return {"frozen_result_sha256": digest(dpath), "frozen_style_sha256": digest(spath), "training_revision": full["revision"], "style_training_revision": style["revision"], "formal_environment": {k: full[k] for k in ("seed", "device", "gpu", "torch_version", "python_version", "step_scale")}, "data": raw["data"], "code_hashes_match_original_commit": code_checked, "reference_unchanged": raw["reference_unchanged"], "reference_sha256": raw["reference_sha256"], "checks": checks}
+
+
+parser = argparse.ArgumentParser()
+parser.add_argument("mode", choices=("example", "exercise", "prerequisite-example", "prerequisite-exercise", "probes", "empirical"))
+args = parser.parse_args()
+torch.set_num_threads(1)
+environment = {"python": platform.python_version(), "torch": torch.__version__, "device": "cpu", "threads": str(torch.get_num_threads()), "platform": platform.platform(), "alignment_sha256": digest(ROOT / "tiny_perceptron/alignment.py")}
+if args.mode == "example":
+    result = original("13.6")
+elif args.mode == "exercise":
+    result = original("13.6", True)
+elif args.mode == "prerequisite-example":
+    result = original("13.5")
+elif args.mode == "prerequisite-exercise":
+    result = original("13.5", True)
+elif args.mode == "probes":
+    result = probes()
+else:
+    result = empirical()
+print(json.dumps({"mode": args.mode, "environment": environment, "result": result}, ensure_ascii=False, indent=2, allow_nan=False))

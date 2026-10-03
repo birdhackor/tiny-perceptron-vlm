@@ -1,0 +1,53 @@
+"""CPU 親核原始加法起點等於 DPO 固定參考；只評估，不更新。"""
+import hashlib
+import json
+import math
+import platform
+import sys
+from dataclasses import asdict
+from pathlib import Path
+
+import torch
+
+ROOT = Path.cwd()
+sys.path.insert(0, str(ROOT))
+from scripts.course_experiments.behavior import _preference_evaluate
+from scripts.course_experiments.common import evaluate_lm
+from tiny_perceptron.training import load_checkpoint
+
+torch.set_num_threads(1)
+path = ROOT / "checkpoints/course/style/content.pt"
+frozen = json.loads((ROOT / "docs/course-experiments/results/dpo.json").read_text())["results"]
+style = json.loads((ROOT / "docs/course-experiments/results/style.json").read_text())
+release = json.loads((ROOT / "docs/course-experiments/public-releases/style.json").read_text())["release"]
+pin = next(r for r in release["public_manifest"]["files"] if r["output"] == "content.pt")
+sha = hashlib.sha256(path.read_bytes()).hexdigest()
+assert sha == pin["sha256"]
+model, payload = load_checkpoint(path, device="cpu")
+model.eval()
+hasher = hashlib.sha256()
+for name, value in sorted(model.state_dict().items()):
+    hasher.update(name.encode())
+    hasher.update(str(tuple(value.shape)).encode())
+    hasher.update(value.detach().cpu().contiguous().numpy().tobytes())
+state_sha = hasher.hexdigest()
+assert state_sha == frozen["reference_sha256"]
+assert model.config.width == 64 and model.config.layers == 2
+assert sum(p.numel() for p in model.parameters()) == 141568
+splits = {}
+for split, source in frozen["before"].items():
+    rows = source["samples"]
+    pref = _preference_evaluate(model, model, rows)
+    assert pref["records"] == source["records"]
+    assert pref["chosen_higher_absolute_probability"] == source["chosen_higher_absolute_probability"]
+    assert pref["relative_preference_improved"] == source["relative_preference_improved"] == 0
+    maximum_error = max(abs(a["policy_chosen_logp"] - b["policy_chosen_logp"]) for a,b in zip(pref["samples"],rows,strict=True))
+    assert maximum_error < 1e-4
+    records = [{"messages": [{"role": "user", "content": r["prompt"]}, {"role": "assistant", "content": r["chosen"]}]} for r in rows]
+    generated = evaluate_lm(model, records, mode="sft", tokens=32)
+    expected = style["results"]["content_evaluation"][split]
+    assert generated["matches"] == expected["matches"] == 0
+    for observed, original in zip(generated["samples"],expected["samples"],strict=True):
+        assert observed["generated_ids"] == original["generated_ids"]
+    splits[split] = {"max_CPU_vs_formal_chosen_logp_error": maximum_error, "preference": pref, "generation": generated}
+print(json.dumps({"environment": {"python": platform.python_version(), "torch": torch.__version__, "device": "cpu", "threads": "1"}, "checkpoint": {"sha256": sha, "public_url": "https://huggingface.co/birdhackor/tiny-perceptron-course-models/resolve/" + release["weights_revision"] + "/course/course-v1/style/content.pt", "config": asdict(model.config), "parameters": sum(p.numel() for p in model.parameters()), "metadata": payload.get("metadata"), "state_sha256": state_sha}, "formal_reference_state_sha256": frozen["reference_sha256"], "splits": splits}, ensure_ascii=False, indent=2))
