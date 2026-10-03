@@ -1,0 +1,40 @@
+import sys, json, os, codecs, platform, torch, tokenizers
+
+def offline_guard(event, args):
+    if event.startswith("socket.") or event in {"subprocess.Popen", "os.system", "os.posix_spawn", "os.posix_spawnp"}:
+        raise RuntimeError("offline bounded review guard: " + event)
+sys.addaudithook(offline_guard)
+assert torch.version.cuda is None
+print(json.dumps({"python":sys.version,"torch":torch.__version__,"tokenizers":tokenizers.__version__,"device":"cpu","OMP_NUM_THREADS":os.environ.get("OMP_NUM_THREADS"),"MKL_NUM_THREADS":os.environ.get("MKL_NUM_THREADS"),"guard":"network and child process calls rejected"},ensure_ascii=False))
+from tokenizers import Tokenizer, models, pre_tokenizers, trainers
+
+tok = Tokenizer(models.BPE(unk_token="[UNK]"))
+tok.pre_tokenizer = pre_tokenizers.Whitespace()
+tok.train_from_iterator(
+    ["hello hello hello"],
+    trainers.BpeTrainer(vocab_size=20, special_tokens=["[UNK]"], show_progress=False),
+)
+model=json.loads(tok.to_str())["model"]
+print(json.dumps({"vocab_size":tok.get_vocab_size(),"vocab":model["vocab"],"merges":model["merges"],"unk_id":tok.token_to_id("[UNK]"),"unseen_z":tok.encode("z").tokens,"pretokenize":tok.pre_tokenizer.pre_tokenize_str("hello hello"),"space_only":tok.encode(" ").ids},ensure_ascii=False))
+assert tok.encode("z").tokens == ["[UNK]"]
+assert tok.encode(" ").ids == []
+from tokenizers import decoders
+byte_tok=Tokenizer(models.BPE())
+byte_tok.pre_tokenizer=pre_tokenizers.ByteLevel(add_prefix_space=False)
+byte_tok.decoder=decoders.ByteLevel()
+byte_tok.train_from_iterator(["hello hello hello"],trainers.BpeTrainer(vocab_size=280,initial_alphabet=pre_tokenizers.ByteLevel.alphabet(),show_progress=False))
+bwhole=byte_tok.encode("hello hello")
+ba=byte_tok.encode("hello ")
+bb=byte_tok.encode("hello")
+print(json.dumps({"byte_alphabet_size":len(pre_tokenizers.ByteLevel.alphabet()),"byte_pretokenize":byte_tok.pre_tokenizer.pre_tokenize_str("hello hello"),"byte_whole_ids":bwhole.ids,"byte_whole_tokens":bwhole.tokens,"byte_chunk_ids":ba.ids+bb.ids,"byte_chunk_tokens":ba.tokens+bb.tokens,"byte_different":bwhole.ids!=ba.ids+bb.ids},ensure_ascii=False))
+assert bwhole.ids != ba.ids+bb.ids
+raw="貓🙂".encode("utf-8")
+inc=codecs.getincrementaldecoder("utf-8")("strict")
+first=inc.decode(raw[:1],final=False)
+pending=list(inc.getstate()[0])
+second=inc.decode(raw[1:],final=True)
+separate=raw[:1].decode("utf-8",errors="replace")+raw[1:].decode("utf-8",errors="replace")
+print(json.dumps({"raw_bytes":list(raw),"first_output":first,"pending_bytes":pending,"second_output":second,"incremental_joined":first+second,"separate_replace":separate,"separate_changed":separate!=raw.decode("utf-8"),"replacement_roundtrip_bytes":list(separate.encode("utf-8"))},ensure_ascii=False))
+assert first == "" and pending == [232]
+assert first+second == "貓🙂" and separate != "貓🙂"
+print("context assertions passed")
