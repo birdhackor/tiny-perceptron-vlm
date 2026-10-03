@@ -1,0 +1,83 @@
+import hashlib
+import json
+import os
+import platform
+import re
+from pathlib import Path
+
+import torch
+from scripts.course_experiments.applications import _grounding
+
+path = Path('docs/course-experiments/results/rag.json')
+manifest = json.loads(path.read_text())
+paths = [
+    'scripts/course_experiments/applications.py',
+    'scripts/course_experiments/common.py',
+    'scripts/course_experiments/run.py',
+    'tiny_perceptron/retrieval.py',
+]
+pins = {}
+for code_path in paths:
+    actual = hashlib.sha256(Path(code_path).read_bytes()).hexdigest()
+    expected = manifest['code_sha256'][code_path]
+    assert actual == expected, code_path
+    pins[code_path] = {'actual_sha256': actual, 'manifest_sha256': expected, 'matches': True}
+
+rows = []
+metrics = {}
+for mode in ['correct_with_distractor', 'distractor_only']:
+    selected = [row for row in manifest['results']['samples'] if row['mode'] == mode]
+    assert len(selected) == 12
+    recomputed = []
+    for row in selected:
+        sample = row['generation']['samples'][0]
+        generated = sample['generated']
+        parsed = re.fullmatch(r'([A-E][0-9])\[(D[0-9])\]', generated)
+        address = parsed[1] if parsed else None
+        citation = parsed[2] if parsed else None
+        clean = not sample['invalid_special_tokens']
+        independent = {
+            'citation_valid': bool(clean and parsed and any(d['id'] == citation for d in row['documents'])),
+            'supported_by_cited_source': bool(clean and parsed and any(d['id'] == citation and f'address={address}' in d['text'] for d in row['documents'])),
+            'fact_answer_correct': bool(clean and generated == f"{row['fact']['address']}[{row['fact']['source']}]"),
+            'address_matches_original_fact': bool(clean and address == row['fact']['address']),
+        }
+        pinned_helper = _grounding(sample, row['documents'], row['expected'])
+        for field in ['citation_valid', 'supported_by_cited_source', 'fact_answer_correct']:
+            assert independent[field] == row[field]
+        for field in ['citation_valid', 'supported_by_cited_source']:
+            assert independent[field] == pinned_helper[field]
+        assert generated == row['generation']['samples'][0]['generated']
+        rows.append({
+            'mode': mode,
+            'key': row['fact']['key'],
+            'original_fact': row['fact'],
+            'documents': row['documents'],
+            'generated': generated,
+            'invalid_special_tokens': sample['invalid_special_tokens'],
+            'sample_temperature': row['generation']['temperature'],
+            'max_new_tokens': row['generation']['max_new_tokens'],
+            'parsed_address': address,
+            'parsed_citation': citation,
+            'recomputed': independent,
+        })
+        recomputed.append(independent)
+    metrics[mode] = {}
+    for field in recomputed[0]:
+        n = sum(row[field] for row in recomputed)
+        metrics[mode][field] = {'numerator': n, 'denominator': len(selected), 'rate': n / len(selected)}
+        if field != 'address_matches_original_fact':
+            assert metrics[mode][field] == manifest['results']['metrics'][mode][field]
+
+out = {
+    'purpose': '只離線重算保存的24份生成評分；沒有執行run_rag、模型生成、訓練或CUDA。',
+    'environment': {'python': platform.python_version(), 'torch': torch.__version__, 'torch_git_version': torch.version.git_version, 'device': 'cpu', 'OMP_NUM_THREADS': os.environ['OMP_NUM_THREADS'], 'MKL_NUM_THREADS': os.environ['MKL_NUM_THREADS']},
+    'formal_manifest': {'path': str(path), 'sha256': hashlib.sha256(path.read_bytes()).hexdigest(), **{k: manifest[k] for k in ['revision', 'device', 'seed', 'torch_version', 'python_version', 'step_scale']}},
+    'formal_training': {k: manifest['results']['training'][k] for k in ['steps', 'planned_steps', 'records', 'records_sha256', 'effective_tokens', 'parameters']},
+    'formal_split': manifest['results']['split'],
+    'verified_code_pins': pins,
+    'metrics': metrics,
+    'rows': rows,
+    'assertions': '24 rows: independently recomputed values match stored fields and pinned _grounding; aggregate values match frozen metrics.',
+}
+print(json.dumps(out, ensure_ascii=False, indent=2))
