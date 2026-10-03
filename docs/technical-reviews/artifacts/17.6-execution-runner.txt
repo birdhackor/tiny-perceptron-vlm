@@ -1,0 +1,22 @@
+import sys, json, platform, hashlib
+from pathlib import Path
+import torch
+from tiny_perceptron.quantization import quantize_symmetric
+
+def offline(event, args):
+    if event in ("socket.connect", "socket.bind", "subprocess.Popen", "os.system"):
+        raise RuntimeError("離線有界審閱禁止網路與子程序")
+sys.addaudithook(offline)
+torch.set_num_threads(1)
+source=Path(sys.argv[1])
+raw=source.read_bytes()
+namespace={"__name__":"__main__"}
+exec(compile(raw,str(source),"exec"),namespace)
+w=namespace["w"]
+rows=[]
+for bits in (8,4):
+    q,scale=quantize_symmetric(w,bits)
+    restored=q.float()*scale
+    error=(w-restored).abs()
+    rows.append({"bits":bits,"q":q.tolist(),"q_dtype":str(q.dtype),"q_shape":list(q.shape),"scale":scale.item(),"scale_dtype":str(scale.dtype),"scale_bytes":scale.numel()*scale.element_size(),"restored":restored.tolist(),"errors":error.tolist(),"mae":error.mean().item(),"max_error":error.max().item(),"mean_shape":list(error.mean().shape),"max_shape":list(error.max().shape),"ideal_bytes":(w.numel()*bits+7)//8,"q_bytes":q.numel()*q.element_size(),"numel":q.numel(),"element_size":q.element_size()})
+print("INSPECTION",json.dumps({"source_sha256":hashlib.sha256(raw).hexdigest(),"environment":{"python":platform.python_version(),"torch":torch.__version__,"torch_git_version":torch.version.git_version,"device":str(w.device),"dtype":str(w.dtype),"default_dtype":str(torch.get_default_dtype()),"num_threads":str(torch.get_num_threads()),"omp_num_threads":"1","mkl_num_threads":"1","offline_guard":"socket/connect/bind/subprocess/system denied"},"w":w.tolist(),"w_shape":list(w.shape),"results":rows},ensure_ascii=False))

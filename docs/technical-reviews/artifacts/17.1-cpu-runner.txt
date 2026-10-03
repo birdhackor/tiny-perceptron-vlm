@@ -1,0 +1,121 @@
+from pathlib import Path
+import hashlib
+import json
+import os
+import re
+import subprocess
+import sys
+
+ROOT = Path.cwd()
+ART = ROOT / "docs/technical-reviews/artifacts"
+
+def raw_section(path, identifier):
+    raw = (ROOT / path).read_bytes()
+    start = re.search(rb"^## " + re.escape(identifier.encode()) + rb"(?:\s|\b)", raw, re.M)
+    following = re.search(rb"^## ", raw[start.end():], re.M)
+    end = start.end() + following.start() if following else len(raw)
+    return raw[start.start():end]
+
+def example(path, identifier):
+    raw = raw_section(path, identifier)
+    fences = re.findall(r"```python\n(.*?)```", raw.decode(), re.S)
+    return raw, "\n\n".join(fences)
+
+bootstrap = '''import json, platform, socket, torch
+torch.set_num_threads(1)
+def deny_network(*args, **kwargs):
+    raise RuntimeError("17.1 offline CPU verification denies network")
+socket.create_connection = deny_network
+socket.socket.connect = deny_network
+print("ENVIRONMENT", json.dumps({"python":platform.python_version(), "torch":torch.__version__, "device":"cpu", "threads":torch.get_num_threads(), "default_dtype":str(torch.get_default_dtype()), "OMP_NUM_THREADS":"1", "MKL_NUM_THREADS":"1"}))
+'''
+
+jobs = []
+def add(label, path, identifier, old=None, new=None):
+    raw, code = example(path, identifier)
+    if old is not None:
+        assert old in code
+        code = code.replace(old, new, 1)
+    jobs.append((label, path + "#" + identifier, hashlib.sha256(raw).hexdigest(), code, None if old is None else {"old":old,"new":new}))
+
+add("original", "course/chapters/17.md", "17.1")
+add("exercise", "course/chapters/17.md", "17.1", "torch.zeros(64, 32)", "torch.zeros(128, 32)")
+add("W5-original", "course/first-steps.md", "W.5")
+add("W5-exercise", "course/first-steps.md", "W.5", "torch.tensor([5.0, 0.0])", "torch.tensor([8.0, 0.0])")
+add("W6-original", "course/first-steps.md", "W.6")
+add("W6-exercise-06", "course/first-steps.md", "W.6", "0.1 * w.grad", "0.6 * w.grad")
+add("W6-exercise-11", "course/first-steps.md", "W.6", "0.1 * w.grad", "1.1 * w.grad")
+add("cache-original", "course/chapters/16.md", "16.3")
+add("cache-exercise-last", "course/chapters/16.md", "16.3", "[[1, 2, 3, 4]]", "[[1, 2, 3, 5]]")
+add("cache-exercise-prefix", "course/chapters/16.md", "16.3", "[[1, 2, 3, 4]]", "[[5, 2, 3, 4]]")
+for identifier, label, old, new in [
+    ("17.2", "grid", "scale = 0.5", "scale = 0.25"),
+    ("17.8", "packing", "7, 2, 3]", "7, 2, 3, 4]"),
+    ("17.10", "reference", "bits=4", "bits=8"),
+    ("17.14", "qat", "y.sum().backward()", "y.square().sum().backward()"),
+]:
+    add(label + "-original", "course/chapters/17.md", identifier)
+    add(label + "-exercise", "course/chapters/17.md", identifier, old, new)
+
+probe = '''from tiny_perceptron.model import ModelConfig, TinyLM, generate
+from tiny_perceptron.quantization import replace_linear_layers
+from torch import nn
+import copy
+torch.manual_seed(0)
+model = TinyLM(ModelConfig(width=8)).eval()
+original = model.forward
+for cached in (False, True):
+    calls = []
+    def traced(ids=None, **kwargs):
+        cache = kwargs.get("cache")
+        calls.append({"input_length":int(ids.shape[1]),"cache_argument_is_none":cache is None})
+        return original(ids, **kwargs)
+    model.forward = traced
+    result = generate(model, torch.tensor([[1,2,3]]), max_new_tokens=3, eos_id=None, use_cache=cached)
+    print("GENERATION", cached, json.dumps(calls), result.tolist())
+model.forward = original
+x = torch.tensor([0.7,0.0,-0.7])
+print("DIRECT_CAST", x.to(torch.int8).tolist(), "same_dtype_identity", x.to(x.dtype) is x)
+report = json.loads(Path("docs/course-experiments/results/quantization.json").read_text())
+config = ModelConfig(**report["results"]["teacher_provenance"]["config"])
+model = TinyLM(config).eval()
+linear = [(name,layer) for name,layer in model.named_modules() if isinstance(layer, nn.Linear)]
+count = sum(p.numel() for p in model.parameters())
+coeff = sum(layer.weight.numel() for name,layer in linear)
+bias = sum(0 if layer.bias is None else layer.bias.numel() for name,layer in linear)
+scales = sum(layer.weight.shape[0] for name,layer in linear)
+print("MODEL_COUNTS", json.dumps({"parameters":count,"Linear_weights":coeff,"Linear_bias":bias,"retained_nonLinear":count-coeff-bias,"scales":scales,"Linear_modules":len(linear)}))
+for bits in (4,8):
+    compressed = replace_linear_layers(copy.deepcopy(model), bits)
+    actual = sum(p.numel()*p.element_size() for p in compressed.parameters()) + sum(b.numel()*b.element_size() for b in compressed.buffers())
+    print("MODEL_STORAGE", bits, actual)
+release = json.loads(Path("docs/course-experiments/public-releases/quantization.json").read_text())
+manifest = release["release"]["public_manifest"]
+inspection = {"immutable_revision":manifest["revision"], "repo":manifest["repo"], "files":[]}
+for entry in manifest["files"]:
+    if not entry["output"].endswith(".pt"):
+        continue
+    path = Path("checkpoints/course/quantization") / entry["output"]
+    raw = path.read_bytes()
+    sha = hashlib.sha256(raw).hexdigest()
+    assert sha == entry["sha256"] and len(raw) == entry["bytes"]
+    payload = torch.load(path, map_location="cpu", weights_only=True)
+    tensors = {k:{"shape":list(v.shape),"dtype":str(v.dtype),"elements":v.numel(),"bytes":v.numel()*v.element_size()} for k,v in payload["model"].items()}
+    record = {"local_input":str(path),"url":"https://huggingface.co/"+manifest["repo"]+"/resolve/"+manifest["revision"]+"/"+entry["path"],"sha256":sha,"file_bytes":len(raw),"format_version":payload["format_version"],"payload_keys":list(payload),"optimizer_is_none":payload.get("optimizer") is None,"rng_keys":[k for k in payload if "rng" in k.lower()],"config":payload["config"],"tensor_bytes":sum(v["bytes"] for v in tensors.values()),"tensors":tensors}
+    inspection["files"].append(record)
+    print("PUBLIC_CHECKPOINT", json.dumps({k:v for k,v in record.items() if k!="tensors"}))
+Path("docs/technical-reviews/artifacts/17.1-public-tensors.json").write_text(json.dumps(inspection,ensure_ascii=False,indent=2)+"\\n")
+'''
+probe = "from pathlib import Path\nimport hashlib\n" + probe
+jobs.append(("inspection", "必要程式與既有公開模型CPU核對", None, probe, None))
+
+env = os.environ.copy()
+env.update(OMP_NUM_THREADS="1", MKL_NUM_THREADS="1", CUDA_VISIBLE_DEVICES="", HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1")
+for label, source, sha, code, modifier in jobs:
+    command = [str(ROOT / ".venv/bin/python"), "-c", bootstrap + "from pathlib import Path\n" + code]
+    result = subprocess.run(command, cwd=ROOT, env=env, capture_output=True, text=True, timeout=30)
+    record = {"source":source,"section_sha256":sha,"modification":modifier,"code_sha256":hashlib.sha256(code.encode()).hexdigest(),"executed_code":code,"command":command,"returncode":result.returncode,"stdout":result.stdout,"stderr":result.stderr,"environment":{"python":"3.13.5","torch":"2.14.1+cpu","device":"cpu","OMP_NUM_THREADS":"1","MKL_NUM_THREADS":"1","threads":"1"},"scope":"原教學例／單變因練習；不得外推GPU時間或完整任務品質"}
+    (ART / ("17.1-" + label + "-execution.json")).write_text(json.dumps(record,ensure_ascii=False,indent=2)+"\n")
+    print(label, result.returncode, result.stdout, result.stderr, flush=True)
+    if result.returncode:
+        raise RuntimeError(label + " failed")

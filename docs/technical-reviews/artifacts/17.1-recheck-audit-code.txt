@@ -1,0 +1,51 @@
+from pathlib import Path
+import hashlib
+import json
+import platform
+import re
+
+A = Path("docs/technical-reviews/artifacts")
+sha = lambda raw: hashlib.sha256(raw).hexdigest()
+previous = json.loads((A / "17.1-original-revise-report-44f0fc.json").read_text())
+old = (A / "17.1-old-whole-source-57270e.txt").read_bytes()
+new = Path("course/chapters/17.md").read_bytes()
+assert new == (A / "17.1-new-whole-source-7618dc.txt").read_bytes()
+old_intro = old.split(b"## ", 1)[0]
+new_intro = new.split(b"## ", 1)[0]
+assert old_intro == new_intro == (A / "17.1-intro.txt").read_bytes()
+def section(raw, identifier):
+    match = re.search(rb"^## " + re.escape(identifier.encode()) + rb"(?:\s|\b)", raw, re.M)
+    following = re.search(rb"^## ", raw[match.end():], re.M)
+    end = match.end() + following.start() if following else len(raw)
+    return raw[match.start():end]
+fences = lambda raw: re.findall(rb"```python\n(.*?)```", raw, re.S)
+newprimary = section(new, "17.1")
+oldprimary = section(old, "17.1")
+assert fences(newprimary) == fences(oldprimary)
+assert sha(newprimary) == "6b1f0f001f6b86735da47bca0e10819272018f5924ee5253615f80d28a943e5f"
+support = json.loads((A / "17.1-supporting-book.json").read_text())
+support_checks = []
+for item in support:
+    path, identifier = item["source"].split("#")
+    current = section(Path(path).read_bytes(), identifier)
+    assert current.decode() == item["raw_utf8"]
+    support_checks.append({"source":item["source"], "sha256":sha(current), "raw_bytes_identical":True})
+unchanged_artifacts = []
+for artifact in previous["artifacts"]:
+    assert sha(Path(artifact["path"]).read_bytes()) == artifact["sha256"]
+    unchanged_artifacts.append({"id":artifact["id"],"path":artifact["path"],"sha256":artifact["sha256"]})
+source_checks = []
+for source in previous["sources"]:
+    if source["kind"] == "repository_code" and source["id"] != "s_book":
+        assert sha(Path(source["path"]).read_bytes()) == source["sha256"]
+        source_checks.append({"id":source["id"],"path":source["path"],"sha256":source["sha256"],"unchanged":True})
+for path, expected in previous["figure_sha256"].items():
+    assert sha(Path(path).read_bytes()) == expected
+cache_original = Path("/tmp/17.1-originals/cache-explanation.md").read_bytes()
+assert sha(cache_original) == "50131d48d5931ece3674e5d9fcb10c3ba07820ac717868956b742d3e950ece6c"
+counterexample = json.loads((A / "17.1-inspection-execution.json").read_text())
+trace = [line for line in counterexample["stdout"].splitlines() if line.startswith("GENERATION")]
+summary = {"old_primary_sha256":sha(oldprimary),"new_primary_sha256":sha(newprimary),"old_whole_sha256":sha(old),"new_whole_sha256":sha(new),"intro_sha256":sha(new_intro),"primary_python_fences_unchanged":True,"supporting_materials":support_checks,"unchanged_prior_artifacts":unchanged_artifacts,"unchanged_other_repository_source_pins":source_checks,"roadmap_headings":[line for line in new.decode().splitlines() if line.startswith("## ")],"original_cpu_trace_reused":trace,"original_authority_cache_sha256":sha(cache_original),"scope":"本人親讀current完整17.1＋導言、17.2/17.8/17.10/17.14必要完整材料與16.3；親讀完整old/new whole與primary diff，只見17.1一段修改。來源identity s_book所涉其他必要scope逐raw比對未變；未給其他primary判定。","model_cpu_runs_in_this_recheck":0,"reused_model_cpu_runs":19,"figure_renders_in_this_recheck":0,"reused_personally_rendered_and_viewed_figures":4,"recheck_conclusion":"採KV cache時跨步保存K/V；也可整段重算而不跨步保存快取。修文與原官方來源及既有真CPU兩路trace一致，不把不用快取讀成沒有當次臨時K/V。"}
+record = {"command":"OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 .venv/bin/python -c 'from pathlib import Path; exec(Path(\"docs/technical-reviews/artifacts/17.1-recheck-audit-code.txt\").read_text())'","returncode":0,"result":summary,"environment":{"python":platform.python_version(),"torch":"2.14.1+cpu（原19次執行；本次只作檔案核對）","device":"cpu","OMP_NUM_THREADS":"1","MKL_NUM_THREADS":"1"},"result_note":"只新跑raw/hash/fence身份檢查，未重跑模型例／練習／訓練。新增重算條件使用本人未改原碼及真實trace核對。"}
+(A / "17.1-recheck-audit-execution.json").write_text(json.dumps(record,ensure_ascii=False,indent=2) + "\n")
+print(json.dumps({"new_source_sha256":sha(newprimary),"intro_unchanged":True,"supporting_sections_unchanged":len(support_checks),"prior_artifacts_unchanged":len(unchanged_artifacts),"other_source_pins_unchanged":len(source_checks),"model_runs_reused":19,"new_model_runs":0,"new_figure_renders":0},ensure_ascii=False))

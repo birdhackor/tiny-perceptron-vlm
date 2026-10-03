@@ -1,0 +1,30 @@
+from pathlib import Path
+import ast
+import hashlib
+import json
+import platform
+import torch
+
+root = Path("docs/technical-reviews/artifacts")
+source = Path("docs/course-experiments/results/quantization.json")
+frozen = json.loads(source.read_text())
+prior = json.loads((root / "17.1-frozen-source-inspection.json").read_text())
+assert hashlib.sha256(source.read_bytes()).hexdigest() == prior["original_sha256"]
+functions = ["_storage", "_save_float", "_packed", "_timing", "run_quantization"]
+def selected(text):
+    nodes = ast.parse(text)
+    return {node.name:ast.get_source_segment(text, node) for node in nodes.body if isinstance(node, ast.FunctionDef) and node.name in functions}
+original = Path("/tmp/17.1-originals/formal-compression.py").read_text()
+current = Path("scripts/course_experiments/compression.py").read_text()
+same = {name:selected(original)[name] == selected(current)[name] for name in functions}
+assert all(same.values())
+summary = {"original_result_sha256":prior["original_sha256"],"frozen_revision":frozen["revision"],"relevant_current_and_frozen_functions_identical":same,"current_compression_sha256":hashlib.sha256(current.encode()).hexdigest(),"runs":{},"headings":[line for line in Path("course/chapters/17.md").read_text().splitlines() if line.startswith("## ")]}
+for name, run in frozen["results"]["runs"].items():
+    storage = run["storage"]
+    totals = {suffix:sum(value for key,value in storage["buffers"].items() if key.endswith("." + suffix)) for suffix in ("values", "scale", "bias")}
+    assert storage["parameter_tensor_bytes"] + sum(storage["buffers"].values()) == storage["tensor_bytes"]
+    assert storage["tensor_bytes"] + storage["file_overhead_bytes"] == storage["file_bytes"]
+    summary["runs"][name] = {"storage":storage,"buffer_totals":totals,"timing":run["timing"],"generation":run["test"]["generation"]}
+record = {"command":"OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 .venv/bin/python -c 'from pathlib import Path; exec(Path(\"docs/technical-reviews/artifacts/17.1-frozen-audit-code.txt\").read_text())'","returncode":0,"result":summary,"environment":{"python":platform.python_version(),"torch":torch.__version__,"device":"cpu（只讀JSON／原碼，未執行GPU實驗）","OMP_NUM_THREADS":"1","MKL_NUM_THREADS":"1"},"scope":"本次親跑凍結JSON加總與來源hash／必要函數比較。GPU時間、私有檔案bytes以原始固定實報與私有artifact manifest為證，不冒稱本次CPU重測。"}
+(root / "17.1-frozen-inspection-execution.json").write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n")
+print(json.dumps({"same_functions":same,"tensor_bytes":{name:run["storage"]["tensor_bytes"] for name,run in summary["runs"].items()}},ensure_ascii=False))

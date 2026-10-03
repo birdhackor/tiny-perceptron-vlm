@@ -1,0 +1,21 @@
+import json,sys,torch
+from unittest.mock import patch
+from torch import nn
+from tiny_perceptron.quantization import QuantizedLinear
+from tiny_perceptron.training import load_checkpoint
+l=nn.Linear(2,2,bias=False)
+with torch.no_grad():l.weight.copy_(torch.tensor([[0.7,0.2],[-0.7,1.2]]))
+c=QuantizedLinear(l,4);x=torch.tensor([[1.,1.]])
+seen=[];linear=torch.nn.functional.linear
+def record(input,weight,bias=None):
+ seen.append(weight)
+ return linear(input,weight,bias)
+with patch('tiny_perceptron.quantization.F.linear',record):
+ c(x);c(x)
+rejection=None
+try:load_checkpoint('checkpoints/course/quantization/model.pt','cpu',restore_rng=True)
+except ValueError as e:rejection=str(e)
+assert rejection=='量化 checkpoint 是參考推論格式，不能 resume 訓練'
+assert [str(w.dtype) for w in seen]==['torch.float32','torch.float32']
+assert seen[0].data_ptr()!=seen[1].data_ptr()
+print(json.dumps({'environment':{'python':sys.version.split()[0],'torch':torch.__version__,'device':'cpu','threads':str(torch.get_num_threads())},'forward_calls':2,'dequantized_weight_dtypes':[str(w.dtype) for w in seen],'dequantized_weight_shapes':[list(w.shape) for w in seen],'separate_live_float_weight_storage':seen[0].data_ptr()!=seen[1].data_ptr(),'dequantized_weight_bytes':[w.numel()*w.element_size() for w in seen],'restore_rng_rejection':rejection,'scope':'短CPU觀察普通F.linear的實際浮點weight與參考checkpoint拒絕訓練resume；不量測執行峰值、速度或品質'},ensure_ascii=False,indent=2))
