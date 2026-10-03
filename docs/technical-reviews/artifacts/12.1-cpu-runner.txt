@@ -1,0 +1,136 @@
+import argparse
+import contextlib
+import hashlib
+import io
+import json
+import os
+import platform
+import re
+import sys
+import time
+from pathlib import Path
+
+root = Path.cwd()
+sys.path.insert(0, str(root))
+import torch
+
+torch.set_num_threads(1)
+parser = argparse.ArgumentParser()
+parser.add_argument('mode', choices=['original', 'exercise', 'intro', 'prerequisites', 'receipts'])
+parser.add_argument('output')
+args = parser.parse_args()
+
+def sha(raw):
+    return hashlib.sha256(raw).hexdigest()
+
+def section(path, identifier):
+    raw = (root / path).read_bytes()
+    headers = list(re.finditer(rb'(?m)^## ([A-Z\d]+\.\d+) [^\r\n]+', raw))
+    index = next(i for i, h in enumerate(headers) if h[1].decode() == identifier)
+    end = headers[index + 1].start() if index + 1 < len(headers) else len(raw)
+    return raw[headers[index].start():end]
+
+def code(path, identifier):
+    raw = section(path, identifier)
+    return raw, '\n'.join(re.findall(r'```python\n(.*?)```', raw.decode(), re.S))
+
+environment = {'python': platform.python_version(), 'torch': str(torch.__version__),
+               'torch_git_version': str(torch.version.git_version), 'device': 'cpu',
+               'OMP_NUM_THREADS': os.environ.get('OMP_NUM_THREADS', ''),
+               'MKL_NUM_THREADS': os.environ.get('MKL_NUM_THREADS', ''),
+               'threads': str(torch.get_num_threads())}
+record = {'mode': args.mode, 'environment': environment, 'runs': []}
+
+def deny_network(event, arguments):
+    if event in {'socket.connect', 'socket.connect_ex', 'socket.getaddrinfo', 'subprocess.Popen'}:
+        raise RuntimeError('offline bounded review prohibits network/subprocess: ' + event)
+
+sys.addaudithook(deny_network)
+
+def run(label, path, identifier, transform=None):
+    raw, snippet = code(path, identifier)
+    if transform:
+        snippet = transform(snippet)
+    namespace = {'__name__': '__review_example__'}
+    torch.manual_seed(42)
+    output = io.StringIO()
+    started = time.monotonic()
+    with contextlib.redirect_stdout(output):
+        exec(compile(snippet, label, 'exec'), namespace)
+    result = {'label': label, 'source': path + '#' + identifier,
+              'source_sha256': sha(raw), 'executed_code': snippet,
+              'code_sha256': sha(snippet.encode()), 'stdout': output.getvalue(),
+              'elapsed_seconds': time.monotonic() - started, 'exit_code': 0}
+    if identifier == '12.1':
+        wave = namespace['wave']
+        frequency = 880.0 if transform else 440.0
+        expected = 0.5 * torch.sin(2 * torch.pi * frequency * torch.arange(1600) / 16000)
+        result['checks'] = {'shape': list(wave.shape), 'dtype': str(wave.dtype),
+                            'device': str(wave.device), 'first3': wave[:3].tolist(),
+                            'minimum': wave.min().item(), 'maximum': wave.max().item(),
+                            'cycles_in_0.1s': frequency * 0.1,
+                            'formula_max_error': (wave - expected).abs().max().item()}
+        assert wave.shape == (1600,) and wave.device.type == 'cpu'
+        # Algebraically equivalent float32 multiplication/division orders lose
+        # different low bits at phase angles up to about 553 radians.
+        result['checks']['formula_tolerance'] = 1e-4
+        assert torch.allclose(wave, expected, atol=1e-4, rtol=0)
+        assert abs(wave.max().item() - 0.5) < 1e-5 and abs(wave.min().item() + 0.5) < 1e-5
+    record['runs'].append(result)
+
+if args.mode == 'original':
+    run('12.1 original', 'course/chapters/12.md', '12.1')
+elif args.mode == 'exercise':
+    run('12.1 exercise 880 Hz', 'course/chapters/12.md', '12.1', lambda s: s.replace('tone(440.0)', 'tone(880.0)'))
+elif args.mode == 'intro':
+    # These exact chapter snippets are read only to establish the introduction's
+    # offline-example claim. No judgement is issued for other sections.
+    for number in range(1, 13):
+        run('intro supporting original ' + str(number), 'course/chapters/12.md', '12.' + str(number))
+elif args.mode == 'prerequisites':
+    run('W.3 original', 'course/first-steps.md', 'W.3')
+    run('W.3 exercise', 'course/first-steps.md', 'W.3', lambda s: s.replace('[60.0, 70.0, 80.0]', '[60.0, 70.0, 110.0]'))
+    run('12.8 original', 'course/chapters/12.md', '12.8')
+    run('12.8 width exercise', 'course/chapters/12.md', '12.8', lambda s: s.replace('width=8', 'width=12'))
+    run('12.8 bands exercise', 'course/chapters/12.md', '12.8', lambda s: s.replace('AudioEncoder(bands=16', 'AudioEncoder(bands=32'))
+    run('12.8 matched display extension', 'course/chapters/12.md', '12.8', lambda s: s.replace('AudioEncoder(bands=16', 'AudioEncoder(bands=32').replace('spectrogram = log_mel(wave)', 'spectrogram = log_mel(wave, bands=32)'))
+elif args.mode == 'receipts':
+    for name, branch in [('real_modal', 'fsdd'), ('encoders', 'audio'), ('audio', None)]:
+        path = 'docs/course-experiments/results/' + name + '.json'
+        raw = (root / path).read_bytes()
+        source = json.loads(raw)
+        result = source['results'][branch] if branch else source['results']
+        training = result['training']
+        splits = result['data']['splits']
+        item = {'source': path, 'source_sha256': sha(raw), 'frozen_revision': source['revision'],
+                'seed': source['seed'], 'device': source['device'],
+                'torch_version': source['torch_version'], 'python_version': source['python_version'],
+                'hf': source.get('hf'), 'modal': source.get('modal'),
+                'training': {k: v for k, v in training.items() if k not in ['history']},
+                'history_entries': len(training['history']),
+                'history_target_sum': sum(h['effective_targets'] for h in training['history']),
+                'split_policy': result['data']['split_policy'], 'splits': splits, 'evaluation': {}}
+        assert len(training['history']) == training['steps']
+        assert item['history_target_sum'] == training['effective_targets']
+        for split in ['validation', 'test']:
+            evaluation = result[split]
+            samples = evaluation['samples']
+            successes = sum(row.get('exact_match', row.get('correct')) for row in samples)
+            assert successes == evaluation['correct']
+            item['evaluation'][split] = {'count': len(samples), 'recounted_correct': successes,
+                                         'samples': samples, 'eos_count': sum(row.get('eos', False) for row in samples)}
+        if name == 'real_modal':
+            item['resampling'] = result['resampling']
+            speakers = {}
+            for split, rows in splits.items():
+                rows = rows.get('records', rows) if isinstance(rows, dict) else rows
+                speakers[split] = sorted({row['family'].split('_')[1] for row in rows})
+            item['speakers'] = speakers
+            assert speakers == {'train': ['jackson'], 'validation': ['nicolas'], 'test': ['theo']}
+            assert len(result['resampling']) == 60
+        record['runs'].append(item)
+
+record['loaded_optional_audio_packages'] = [name for name in ['whisper', 'torchaudio'] if name in sys.modules]
+assert not record['loaded_optional_audio_packages']
+Path(args.output).write_text(json.dumps(record, ensure_ascii=False, indent=2, allow_nan=False) + '\n')
+print(json.dumps({'mode': args.mode, 'runs': len(record['runs']), 'environment': environment, 'output': args.output}, ensure_ascii=False))
