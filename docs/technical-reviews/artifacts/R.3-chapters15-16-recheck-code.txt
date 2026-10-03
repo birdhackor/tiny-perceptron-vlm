@@ -1,0 +1,54 @@
+from pathlib import Path
+import re,json,hashlib,platform
+root=Path("docs/technical-reviews/artifacts")
+sha=lambda b:hashlib.sha256(b).hexdigest()
+prior=json.loads((root/"R.3-before-chapter15-recheck-report.json").read_text())
+original_receipt=json.loads((root/"R.3-directory-snapshot.json").read_text())
+def sections(raw):
+    heads=list(re.finditer(rb"(?m)^## ([A-Z\d]+\.\d+) [^\r\n]+",raw))
+    return {h[1].decode():{"raw":raw[h.start():heads[i+1].start() if i+1<len(heads) else len(raw)],"start_line":raw[:h.start()].count(b"\n")+1} for i,h in enumerate(heads)},raw[:heads[0].start()]
+checks=[]
+for chapter,expected_old,expected_new,necessary,expected_changes in [
+    ("15","04cb4e9cd87e6b1d170cd2f1b054e3eafe24d7a3d14eb1f5a1bc7867ce2971e5","55dda9f5851aa43ded13bda2bad646c50d013e845c841f0e7ba7bd9b608e56f3",["15.1","15.4"],["15.8","15.11"]),
+    ("16","78149cab1683387266a69dd25716b930987da0ec83fe2e552b628bf6aaa9b517","bbeafa87829558c74543be6476f3210e0dd01d04fa3572bc82abd9b97707a016",["16.1","16.3","16.9"],["16.1"])
+]:
+    old=(root/f"R.3-chapter{chapter}-old-source.txt").read_bytes()
+    new=Path(f"course/chapters/{chapter}.md").read_bytes()
+    stored=(root/f"R.3-chapter{chapter}-current-source.txt").read_bytes()
+    assert old and new==stored
+    assert sha(old)==expected_old and sha(new)==expected_new
+    assert next(s for s in prior["sources"] if s["id"]=="s_ch_"+chapter)["sha256"]==sha(old)
+    old_sections,old_intro=sections(old);new_sections,new_intro=sections(new)
+    assert old_sections.keys()==new_sections.keys()
+    changed=[sid for sid in old_sections if old_sections[sid]["raw"]!=new_sections[sid]["raw"]]
+    assert changed==expected_changes,(chapter,changed)
+    assert old_intro==new_intro
+    old_fences=re.findall(rb"```[^\n]*\n[\s\S]*?```",old)
+    new_fences=re.findall(rb"```[^\n]*\n[\s\S]*?```",new)
+    assert old_fences==new_fences
+    assert re.findall(r"(?m)^練習[^\n]*",old.decode())==re.findall(r"(?m)^練習[^\n]*",new.decode())
+    assert re.findall(rb"!\[[^\]]*\]\(([^)]+\.svg)\)",old)==re.findall(rb"!\[[^\]]*\]\(([^)]+\.svg)\)",new)
+    receipt=next(s for s in original_receipt["sources"] if s["path"]==f"course/chapters/{chapter}.md")
+    assert receipt["sha256"]==sha(old)
+    original_ranges=receipt["inspected_heading_and_opening_prose"]+receipt.get("additional_read_scope",[])
+    compared=[]
+    for part in original_ranges:
+        old_text="\n".join(old.decode().splitlines()[part["first_line"]-1:part["last_line"]])+"\n"
+        assert old_text==part["text"]
+        assert old_text.encode() in new
+        start=new.index(old_text.encode())
+        compared.append({"original_first_line":part["first_line"],"original_last_line":part["last_line"],"current_first_line":new[:start].count(b"\n")+1,"current_last_line":new[:start].count(b"\n")+old_text.count("\n"),"original_required_scope_sha256":sha(old_text.encode()),"current_required_scope_sha256":sha(old_text.encode()),"required_scope_byte_identical":True})
+    necessary_info=[]
+    for sid in necessary:
+        a=old_sections[sid];b=new_sections[sid]
+        opening_a=b"\n\n".join(a["raw"].split(b"\n\n",2)[:2])+b"\n"
+        opening_b=b"\n\n".join(b["raw"].split(b"\n\n",2)[:2])+b"\n"
+        assert opening_a==opening_b
+        necessary_info.append({"section":sid,"old_first_line":a["start_line"],"current_first_line":b["start_line"],"old_raw_sha256":sha(a["raw"]),"current_raw_sha256":sha(b["raw"]),"whole_section_byte_identical":a["raw"]==b["raw"],"opening_paragraph_byte_identical":True})
+    checks.append({"chapter":chapter,"old_full_sha256":sha(old),"new_full_sha256":sha(new),"old_bytes":len(old),"new_bytes":len(new),"changed_sections":[{"id":sid,"old_raw_sha256":sha(old_sections[sid]["raw"]),"current_raw_sha256":sha(new_sections[sid]["raw"])} for sid in changed],"introduction_byte_identical":True,"intro_sha256":sha(new_intro),"all_code_fences_byte_identical":True,"all_exercise_opening_lines_byte_identical":True,"all_SVG_reference_paths_identical":True,"original_read_receipt_sha256":sha((root/"R.3-directory-snapshot.json").read_bytes()),"required_ranges":compared,"necessary_sections":necessary_info})
+raw=Path("course/README.md").read_bytes(); primary=sections(raw)[0]["R.3"]["raw"]
+assert sha(primary)==prior["source_sha256"] and primary==(root/"R.3-source.txt").read_bytes()
+for artifact in prior["artifacts"]:
+    assert sha(Path(artifact["path"]).read_bytes())==artifact["sha256"],artifact["id"]
+for path,digest in prior["figure_sha256"].items():assert sha(Path(path).read_bytes())==digest,path
+print(json.dumps({"environment":{"python":platform.python_version(),"device":"cpu","OMP_NUM_THREADS":"1","MKL_NUM_THREADS":"1","torch":"未使用；原文／身份讀取"},"primary_sha256_unchanged":sha(primary),"prior_complete_report_sha256":sha((root/"R.3-before-chapter15-recheck-report.json").read_bytes()),"chapter_identity_and_required_scope_checks":checks,"all_18_prior_artifact_sha256_unchanged":True,"all_4_prior_necessary_figure_sha256_unchanged":True,"scope":"只核對15/16完整來源身份、完整diff所涉及小節及R.3實際必要支持；沒有重跑既有教學/導航CPU或render圖，沒有為15.8/15.11/16.1其他primary下判詞。"},ensure_ascii=False,indent=2))
