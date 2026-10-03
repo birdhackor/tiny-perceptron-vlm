@@ -1,0 +1,55 @@
+import hashlib,json,platform
+from collections import Counter
+from pathlib import Path
+import torch
+
+root=Path('.');out=root/'docs/technical-reviews/artifacts'
+def sha(path): return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+def load(name): return json.loads((root/f'docs/course-experiments/results/{name}.json').read_text())
+def metadata(d): return {k:d[k] for k in ('revision','device','seed','torch_version','python_version','evidence_status','status')}
+def training(t): return {k:v for k,v in t.items() if k not in ('history','seconds','elapsed')}
+def summarize(e): return {k:v for k,v in e.items() if k!='samples'}
+audio=load('audio');real=load('real_modal');a=audio['results'];f=real['results']['fsdd']
+paths=['scripts/course_experiments/modalities.py','tiny_perceptron/multimodal.py']
+code_versions={p:{'current_sha256':sha(p),'audio_frozen_sha256':audio['code_sha256'][p],'real_frozen_sha256':real['code_sha256'][p]} for p in paths}
+for x in code_versions.values(): assert len(set(x.values()))==1
+rows=a['data']['splits']['test']['records'];old=[r['answer'] for r in rows]
+assert len(rows)==14 and [r['frequency'] for r in rows]==[200,200,280,280,290,290,300,300,310,310,320,320,400,400]
+assert Counter(old)=={'low':8,'high':6}
+for side in a['data']['splits'].values():
+ assert all(r['answer']==('high' if r['frequency']>300 else 'low') for r in side['records'])
+families={side:{r['family'] for r in s['records']} for side,s in a['data']['splits'].items()}
+assert all(not families[x]&families[y] for x,y in [('train','validation'),('train','test'),('validation','test')])
+test=a['test']['samples'];blank=a['blank']['samples'];shuffle=a['shuffle']['samples']
+assert sum(s['generated']==old[s['row']] for s in test)==a['test']['correct']==11
+assert len(test)==len(blank)==len(shuffle)==14
+assert all(s['generated']=='high' for s in blank)
+assert sum(s['generated']==old[s['row']] for s in blank)==a['blank']['correct']==6
+pairs=[]
+for s in shuffle:
+ i=s['row'];j=s['donor_row'];assert j==(i+7)%14
+ pairs.append({'row':i,'original_frequency':rows[i]['frequency'],'original_label':old[i],'donor_row':j,'donor_frequency':rows[j]['frequency'],'donor_amplitude':rows[j]['amplitude'],'donor_seconds':rows[j]['seconds'],'donor_label':old[j],'generated':s['generated'],'correct_original':s['generated']==old[i],'correct_donor':s['generated']==old[j],'class_should_change':old[i]!=old[j],'generated_matches_original_test_of_donor':s['generated_ids']==test[j]['generated_ids']})
+assert sorted(p['donor_row'] for p in pairs)==list(range(14))
+assert sum(p['correct_original'] for p in pairs)==3==a['shuffle']['correct']
+assert sum(p['correct_donor'] for p in pairs)==11
+assert sum(p['class_should_change'] for p in pairs)==12
+assert all(p['generated_matches_original_test_of_donor'] for p in pairs)
+assert sum(s['effective_targets'] for s in a['training']['history'])==5409==a['training']['effective_targets']
+assert len(a['training']['history'])==a['training']['steps']==300
+assert len(f['training']['history'])==f['training']['steps']==250
+assert sum(s['effective_targets'] for s in f['training']['history'])==f['training']['effective_targets']==2000
+assert all(c['source_rate']==8000 and c['target_rate']==16000 and c['samples_after']==2*c['samples_before'] for c in f['resampling'])
+assert len(f['resampling'])==60
+speech_splits={k:[{'family':r['family'],'answer':r['answer'],'question':r['question']} for r in s['records']] for k,s in f['data']['splits'].items()}
+assert all(len(r)==20 for r in speech_splits.values())
+assert {r['family'].split('_')[1] for r in speech_splits['train']}=={'jackson'}
+assert {r['family'].split('_')[1] for r in speech_splits['validation']}=={'nicolas'}
+assert {r['family'].split('_')[1] for r in speech_splits['test']}=={'theo'}
+assert Counter(r['answer'] for r in speech_splits['test'])=={str(i):2 for i in range(10)}
+assert sum(s['generated']==s['target'] for s in f['test']['samples'])==f['test']['correct']==3
+assert len(f['test']['samples'])==20
+assert not {'blank','shuffle'}&set(f)
+assert f['training']['nonzero_gradient_seen'] and f['training']['weights_changed']
+result={'command':"OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 CUDA_VISIBLE_DEVICES='' HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1 TRANSFORMERS_OFFLINE=1 .venv/bin/python docs/technical-reviews/artifacts/12.10-frozen-audit-code.txt",'exit_code':0,'environment':{'python':platform.python_version(),'torch':str(torch.__version__),'torch_git_version':torch.version.git_version,'device':'cpu','omp_threads':'1','mkl_threads':'1'},'scope':'獨立離線解析凍結結果與逐題重算；未重新訓練、未推論模型、未以 CPU 重算稱作 GPU 實測。','inputs':{f'docs/course-experiments/results/{n}.json':sha(f'docs/course-experiments/results/{n}.json') for n in ['audio','real_modal']},'code_versions':code_versions,'audio':{'metadata':metadata(audio),'training':training(a['training']),'data':a['data'],'test':a['test'],'blank':a['blank'],'shuffle':a['shuffle'],'majority_baseline':8/14,'text_only_majority_accuracy':a['text_only_majority_accuracy'],'derived_shuffle_pairs':pairs,'recomputed':{'test_correct':11,'blank_original_correct':6,'shuffle_original_correct':3,'shuffle_donor_correct':11,'donors_used_once':True,'class_should_change':12,'ideal_donor_correct_model_original_correct':2,'train_validation_test_frequency_families_disjoint':True}},'fsdd':{'metadata':metadata(real),'training':training(f['training']),'data_split_policy':f['data']['split_policy'],'split_records':speech_splits,'test':f['test'],'resampling_count':60,'resampling_rates_samples_verified_all':True,'resampling_first':f['resampling'][0],'resampling_last':f['resampling'][-1],'result_keys':list(f),'recomputed_test_correct':3,'recomputed_test_denominator':20,'no_blank_or_shuffle_result':True}}
+(out/'12.10-frozen-audit-execution.json').write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\n')
+print(json.dumps({'status':'passed','audio_original':'11/14','audio_blank_original':'6/14','audio_shuffle_original':'3/14','audio_shuffle_donor':'11/14','changed_label_pairs':'12/14','ideal_original':'2/14','fsdd_test':'3/20','code_hashes_match_frozen':True},ensure_ascii=False))
