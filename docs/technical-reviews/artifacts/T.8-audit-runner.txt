@@ -1,0 +1,34 @@
+import ast,hashlib,json,os,platform,re,statistics,subprocess
+from pathlib import Path
+import torch
+from tiny_perceptron.model import ModelConfig,TinyLM
+from tiny_perceptron.modern import rope,DenseFFN
+root=Path.cwd();art=root/'docs/technical-reviews/artifacts';out={'environment':{'python':platform.python_version(),'torch':str(torch.__version__),'torch_git_version':torch.version.git_version,'device':'cpu'},'scope':'離線CPU讀取並重算既有凍結實報，不執行正式排程或GPU。', 'cli':{},'assertions':[], 'parameter_counts':{}}
+env=dict(os.environ,OMP_NUM_THREADS='1',MKL_NUM_THREADS='1',CUDA_VISIBLE_DEVICES='')
+for script in ['scripts/prepare_data.py','scripts/train.py','scripts/evaluate.py','scripts/fetch_training_assets.py','module-run']:
+ args=['.venv/bin/python',script,'--help'] if script!='module-run' else ['.venv/bin/python','-m','scripts.course_experiments.run','--help'];r=subprocess.run(args,capture_output=True,text=True,env=env,timeout=30);assert r.returncode==0;out['cli'][script]={'command':' '.join(args),'returncode':r.returncode,'help':r.stdout}
+for n,c in [('baseline',{}),('rope',{'rotary':True}),('rmsnorm',{'norm':'rms'}),('relu2',{'activation':'relu2'}),('swiglu',{'activation':'swiglu'}),('tied',{'tied':True})]:out['parameter_counts'][n]=sum(p.numel() for p in TinyLM(ModelConfig(width=64,layers=2,heads=4,**c)).parameters())
+old=Path('/tmp/T8-original-sources/formal-architecture.txt').read_text();new=Path('scripts/course_experiments/architecture.py').read_text();oldfunc={n.name:ast.dump(n,include_attributes=False) for n in ast.parse(old).body if isinstance(n,ast.FunctionDef)};newfunc={n.name:ast.dump(n,include_attributes=False) for n in ast.parse(new).body if isinstance(n,ast.FunctionDef)};assert all(newfunc[n]==v for n,v in oldfunc.items());out['formal_function_equivalence']={'all_old_functions_ast_identical':True,'functions':list(oldfunc),'old_sha256':hashlib.sha256(old.encode()).hexdigest(),'new_sha256':hashlib.sha256(new.encode()).hexdigest()}
+for name in ['modern','moe','efficiency','precision','flash_probe']:
+ d=json.loads(Path(f'docs/course-experiments/results/{name}.json').read_text());r=d['results'];assert d['evidence_status']=='complete_run' and d['step_scale']==1 and not d['unfinished_schedules'];out['assertions'].append(f'{name}:complete_run/step_scale=1/no_unfinished')
+ if name in ('modern','moe','precision'):
+  for vname,v in r['variants'].items():
+   train=v['training'];assert train['steps']==train['requested_steps']==train['optimizer_updates'];assert train['skipped_updates']==0
+   for split,e in v['heldout'].items():assert abs(e['nll_sum']/e['effective_tokens']-e['nll'])<1e-12
+   if name=='modern':assert out['parameter_counts'][vname]==v['model']['parameters']
+  out['assertions'].append(f'{name}:每組完整更新/無跳過/NLL總和除有效目標一致')
+ if name=='modern':
+  out['modern_table']={n:{'parameters':v['model']['parameters'],'validation_nll_5dp':f"{v['heldout']['validation']['nll']:.5f}",'test_nll_5dp':f"{v['heldout']['test']['nll']:.5f}",'median_ms_3dp':f"{v['training']['warm_step_median_seconds']*1000:.3f}"} for n,v in r['variants'].items()}
+ if name=='flash_probe':
+  out['flash_numbers']={}
+  for n,v in r['routes'].items():
+   assert v['all_checks_finite'] and v['all_comparisons_within_tolerance'];assert all(z['flash_cuda_verified'] for z in v['profiles'].values())
+   out['flash_numbers'][n]={}
+   for route,m in v['measurements']['forward_backward'].items():
+    assert len(m['samples_seconds'])==9 and m['warmup_calls']==3 and statistics.median(m['samples_seconds'])==m['median_seconds'];assert m['allocated_before_bytes']+m['additional_peak_allocated_bytes']==m['peak_allocated_bytes'];out['flash_numbers'][n][route]={'median_ms':m['median_seconds']*1000,'baseline_MiB':m['allocated_before_bytes']/1048576,'additional_MiB':m['additional_peak_allocated_bytes']/1048576,'total_MiB':m['peak_allocated_bytes']/1048576}
+x=torch.tensor([[-2.,0.,3.]]);out['relu2_example']=torch.relu(x).square().tolist();assert out['relu2_example']==[[0.,0.,9.]]
+q=torch.tensor([[[[1.,2.,3.,4.]]]]);out['rope_norm_error']=float((q.norm()-rope(q,torch.tensor([7])).norm()).abs());assert out['rope_norm_error']<1e-6
+out['fair_comparison_derivation']='令結果R=f(A,D,S,W,U)，若同時改A與D，差值f(A1,D1,...)-f(A0,D0,...)無法唯一分解為A效果；固定D/S/W/U只解讀本次沿A方向的差，不消除互動或跨seed不確定性。'
+out['parameter_derivation']={'baseline':'264*64*2+128*64+2*(4*64*64+2*64*256+256+64+4*64)+2*64=141568','rope_removed':'128*64=8192','rms_removed_bias':'(2*2+1)*64=320','swiglu_added_gate':'2*(64*256+256)=33280','tied_removed_output':'264*64=16896','moe_expert_total':'2*4*(2*64*256+256+64)=264704','moe_nonexpert':'340608-264704=75904','moe_active_top2':'75904+264704*2/4=208256','budget_gaps':'207680-208256=-576;329888-340608=-10720','mib':'MiB=bytes/2**20;2130944/1048576=2.0322265625'}
+d=json.loads(Path('docs/course-experiments/results/sft.json').read_text());out['sft_startpoint']={'source':'docs/course-experiments/results/sft.json','sha256':hashlib.sha256(Path('docs/course-experiments/results/sft.json').read_bytes()).hexdigest(),'revision':d['revision'],'result_keys':list(d['results'])};out['sft_result']={'training':d['results']['training'],'after':d['results']['after'],'checkpoint':d['results']['checkpoint']}
+(art/'T.8-audit.json').write_text(json.dumps(out,ensure_ascii=False,indent=2)+'\n');print(json.dumps({k:v for k,v in out.items() if k not in ('cli','sft_result')},ensure_ascii=False,indent=2))

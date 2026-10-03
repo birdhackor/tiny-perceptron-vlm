@@ -1,0 +1,29 @@
+import hashlib,json,os,platform,subprocess,sys,time
+from pathlib import Path
+import torch
+root=Path('/workspace/tiny-perceptron-vlm'); temp=Path('/tmp/T8-own-run'); art=root/'docs/technical-reviews/artifacts'
+env=dict(os.environ,OMP_NUM_THREADS='1',MKL_NUM_THREADS='1',CUDA_VISIBLE_DEVICES='',HF_HUB_OFFLINE='1',TRANSFORMERS_OFFLINE='1')
+def sha(p):return hashlib.sha256(Path(p).read_bytes()).hexdigest()
+def run(args):
+ r=subprocess.run([str(root/'.venv/bin/python'),*args],cwd=root,env=env,capture_output=True,text=True,timeout=90)
+ assert r.returncode==0,(args,r.stderr)
+ return {'command':'OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 '+ ' '.join([str(root/'.venv/bin/python'),*args]),'returncode':r.returncode,'stderr':r.stderr,'stdout':r.stdout}
+def train(name,norm='layer',experts=0):
+ p=temp/f'{name}.pt';args=['scripts/train.py','--task','text','--data',str(temp/'data/toy-text/train.jsonl'),'--train','--steps','200','--seed','42','--device','cpu','--output',str(p)]
+ if norm!='layer':args+=['--norm',norm]
+ if experts:args+=['--experts',str(experts),'--top-k','2']
+ r=run(args);rep=json.loads(p.with_suffix('.json').read_text());hist=rep.pop('history');rep['history_evidence']={'entries':len(hist),'steps':[hist[0]['step'],hist[-1]['step']],'all_finite':all(all(torch.isfinite(torch.tensor(x[k])).item() for k in ('loss','grad_norm')) for x in hist),'initial':hist[0],'final':hist[-1],'total_effective_tokens':sum(x['effective_tokens'] for x in hist),'raw_report_sha256':sha(p.with_suffix('.json'))};rep['checkpoint_sha256']=sha(p)
+ ev=run(['scripts/evaluate.py',str(p),'--data',str(temp/'data/toy-text/validation.jsonl'),'--mode','text','--tokens','32','--device','cpu','--output',str(temp/f'{name}-validation.json')]);return {'train_command':r['command'],'train_returncode':0,'train_stderr':r['stderr'],'training_report':rep,'evaluation_command':ev['command'],'evaluation_returncode':0,'evaluation_stderr':ev['stderr'],'evaluation_report':json.loads((temp/f'{name}-validation.json').read_text())}
+prep=run(['scripts/prepare_data.py','--kind','toy-text','--seed','42','--output',str(temp/'data')]);manifest=json.loads(prep['stdout']);rows={n:[json.loads(x) for x in (temp/f'data/toy-text/{n}.jsonl').read_text().splitlines()] for n in ('train','validation','test')};fam=[set(x['family'] for x in rows[n]) for n in rows];assert all(not a&b for i,a in enumerate(fam) for b in fam[i+1:])
+base={'date_utc':time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()),'environment':{'python':platform.python_version(),'torch':str(torch.__version__),'device':'cpu','OMP_NUM_THREADS':'1','MKL_NUM_THREADS':'1'},'scope':'原命令只替換獨立暫存資料/輸出路徑並明示CPU；維持seed42、200步、原CLI預設模型與學習率。不跑正式實驗。'}
+original={**base,'prepare_command':prep['command'],'prepare_returncode':0,'manifest':manifest,'data_rows':rows,'family_overlap':False,'runs':{}}
+for name,norm,experts in [('baseline','layer',0),('rms','rms',0),('moe','layer',4)]:
+ original['runs'][name]=train('example-'+name,norm,experts);print('completed original',name,flush=True)
+(art/'T.8-original-example.json').write_text(json.dumps(original,ensure_ascii=False,indent=2)+'\n')
+exercise={**base,'hypothesis':'只換RMS正規化，這一筆留出故事的平均下一byte代價會降低。','fixed':'同一train/validation原bytes、seed42、200步、寬32一層單頭、batch4、峰值lr0.001；norm是唯一模型配置改動。','runs':{}}
+for name,norm in [('baseline','layer'),('rms','rms')]:
+ exercise['runs'][name]=train('exercise-'+name,norm,0);print('completed exercise',name,flush=True)
+a,b=[exercise['runs'][n]['evaluation_report']['mean_token_nll'] for n in ('baseline','rms')];exercise['difference_rms_minus_baseline']=b-a;exercise['conclusion']='這次CPU單seed單題支持假設' if b<a else '這次CPU單seed單題不支持假設';exercise['cost_scope']='各支seconds與parameters另保存；未測FLOPs或GPU成本；不可外推一般品質或速度。'
+(art/'T.8-exercise.json').write_text(json.dumps(exercise,ensure_ascii=False,indent=2)+'\n')
+for name in ('original-example','exercise'):
+ p=art/f'T.8-{name}.json'; print(p.name,sha(p),flush=True)
