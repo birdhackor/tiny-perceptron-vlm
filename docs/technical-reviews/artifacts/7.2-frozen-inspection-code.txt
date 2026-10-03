@@ -1,0 +1,37 @@
+import json, hashlib, sys
+from pathlib import Path
+import torch
+from tiny_perceptron.data import ByteTokenizer
+
+def sha(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+tok=ByteTokenizer()
+result_path=Path("docs/course-experiments/results/sft.json")
+record=json.loads(result_path.read_text()); r=record["results"]
+release_path=Path("docs/course-experiments/public-releases/sft.json")
+release=json.loads(release_path.read_text())["release"]
+checks=[]
+branches=[("from_random_sft",r["after"]),("pretrain_stage",r["pretrain_then_sft"]["before_sft"]),("pretrain_then_sft",r["pretrain_then_sft"]["after_sft"])]
+for branch,report in branches:
+    for split in ["validation","test"]:
+        data=report[split]; samples=data["samples"]
+        denominator=sum(len(tok.encode(s["expected"]))+1 for s in samples)
+        matches=sum(s["generated_ids"][:s["generated_ids"].index(tok.eos_id)]==tok.encode(s["expected"]) if tok.eos_id in s["generated_ids"] else s["generated_ids"]==tok.encode(s["expected"]) for s in samples)
+        ended=sum(tok.eos_id in s["generated_ids"] for s in samples)
+        assert denominator==data["effective_tokens"]
+        assert len(samples)==data["records"]==data["examples"]
+        assert matches==data["matches"] and matches/len(samples)==data["exact_match"]
+        assert ended/len(samples)==data["eos_rate"]
+        assert abs(data["nll_sum"]/denominator-data["nll"])<1e-12
+        checks.append({"branch":branch,"split":split,"aggregate":{k:v for k,v in data.items() if k!="samples"},"recount":{"effective_tokens":denominator,"matches":matches,"eos_count":ended,"records":len(samples)},"failed_examples":samples[:1] if not samples[0]["exact"] else [s for s in samples if not s["exact"]][:1]})
+files={x["output"]:x for x in release["public_manifest"]["files"]}
+weights=[]
+for filename in ["model.pt","pretrain.pt","pretrain-sft.pt"]:
+    path=Path("checkpoints/course/sft")/filename
+    digest=sha(path); assert digest==files[filename]["sha256"]
+    payload=torch.load(path,map_location="cpu",weights_only=True)
+    weights.append({"filename":filename,"sha256":digest,"url":"https://huggingface.co/birdhackor/tiny-perceptron-course-models/resolve/"+release["weights_revision"]+"/course/course-v1/sft/"+filename,"config":payload["config"],"tokenizer":payload["tokenizer"],"metadata":payload["metadata"],"scope":"只載入既有小型 CPU checkpoint 的凍結配置，沒有 forward、生成或訓練。"})
+card=Path("checkpoints/course/sft/README.md"); assert sha(card)==files["README.md"]["sha256"]
+summary={"original_result":{"path":str(result_path),"sha256":sha(result_path),"revision":record["revision"],"seed":record["seed"],"device":record["device"],"torch_version":record["torch_version"],"python_version":record["python_version"],"gpu":record["gpu"],"data":r["data"],"steps":{"random_sft":r["training"]["steps"],"pretraining":r["pretrain_then_sft"]["pretraining"]["steps"],"continued_sft":r["pretrain_then_sft"]["sft"]["steps"]},"training_loss":{"initial":r["training"]["initial_loss"],"final":r["training"]["final_loss"]}},"checks":checks,"weights":weights,"public_release":{"path":str(release_path),"sha256":sha(release_path),"revision":release["revision"],"weights_revision":release["weights_revision"]},"model_card":{"url":"https://huggingface.co/birdhackor/tiny-perceptron-course-models/resolve/"+release["revision"]+"/course/course-v1/sft/README.md","sha256":sha(card),"own_note":"親讀有限屬性任務 12 組合、45/5/10 題與 9/1/2 家族限制，完全匹配與 EOS 分開，單 seed 結果不能支持一般對話或所有新組合能力。"},"inspection_date":"2026-10-03","environment":{"python":sys.version,"torch":torch.__version__,"device":"cpu","OMP_NUM_THREADS":"1","MKL_NUM_THREADS":"1"},"scope":"這是既有原始結果的算術重核與配置檢視，並非重新執行正式實驗；7.2 無引用表內具體品質數字，只用它核對格式不能保證內容正確的限制。"}
+print(json.dumps(summary,ensure_ascii=False,indent=2))
