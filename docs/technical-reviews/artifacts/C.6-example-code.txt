@@ -1,0 +1,9 @@
+import re
+
+answers = ["3", "4", "5", "答案是4"]
+truth = 4
+for text in answers:
+    clean = text.strip()
+    parsed = int(clean) if re.fullmatch(r"-?[0-9]+", clean) else None
+    reward = float(parsed == truth)
+    print(repr(text), "解析值", parsed, "reward", reward)

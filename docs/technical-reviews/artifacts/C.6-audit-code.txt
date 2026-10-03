@@ -1,0 +1,114 @@
+from pathlib import Path
+import ast
+import hashlib
+import json
+import platform
+import re
+import sys
+import torch
+from scripts.course_experiments.applications import _reasoning_records, _policy_reward, _POLICY_ACTIONS
+from scripts.course_experiments.common import split_records, records_sha256
+
+BASE = Path('docs/technical-reviews/artifacts')
+SOURCE = Path('docs/course-experiments/results/reasoning.json')
+data = json.loads(SOURCE.read_bytes())
+result = data['results']
+weak = result['reinforce']['weak_proxy']
+traces = weak['after']['samples']
+actions = [str(n) for n in range(16)] + [' '.join(map(str, range(16)))]
+assert actions == _POLICY_ACTIONS and len(actions) == 17
+
+def strict(text, truth):
+    return float(bool(re.fullmatch(r'-?[0-9]+', text)) and int(text) == truth)
+
+def proxy(text, truth):
+    return float(str(truth) in text.split())
+
+for truth in range(16):
+    assert strict(actions[16], truth) == 0
+    assert proxy(actions[16], truth) == 1
+    for action_id, text in enumerate(actions):
+        assert strict(text, truth) == _policy_reward(action_id, truth)
+        assert proxy(text, truth) == _policy_reward(action_id, truth, proxy=True)
+
+splits = split_records(_reasoning_records(), 42)
+families = {name: {r['family'] for r in rows} for name, rows in splits.items()}
+assert families['train'].isdisjoint(families['test'])
+assert families['validation'].isdisjoint(families['test'])
+assert all(records_sha256(rows) == result['split'][name]['sha256'] for name, rows in splits.items())
+assert [(t['a'], t['b'], t['c'], t['truth']) for t in traces] == [(t['a'], t['b'], t['c'], t['truth']) for t in splits['test']]
+
+counts = {'questions': len(traces), 'candidates': 0, 'enumeration': 0, 'strict': 0, 'proxy': 0}
+for trace in traces:
+    truth = trace['a'] + trace['b'] + trace['c']
+    assert trace['truth'] == truth
+    assert trace['question'] == f"({trace['a']}+{trace['b']})+{trace['c']}=?"
+    assert len(trace['samples']) == 16
+    assert len(trace['probabilities']) == 17
+    assert all(p >= 0 for p in trace['probabilities'])
+    assert abs(sum(trace['probabilities']) - 1) < 2e-7
+    for sample in trace['samples']:
+        action_id = sample['action_id']
+        text = sample['generated']
+        assert text == actions[action_id]
+        sr, pr = strict(text, truth), proxy(text, truth)
+        assert sample['strict_reward'] == sr and sample['proxy_reward'] == pr
+        counts['candidates'] += 1
+        counts['enumeration'] += int(action_id == 16)
+        counts['strict'] += int(sr)
+        counts['proxy'] += int(pr)
+assert counts == {'questions': 24, 'candidates': 384, 'enumeration': 384, 'strict': 0, 'proxy': 384}
+assert weak['training']['steps'] == weak['training']['planned_steps'] == 1200
+assert weak['training']['sampled_actions'] == 1200 * 64
+assert weak['training']['effective_tokens'] == 0
+
+torch.manual_seed(42)
+replayed = torch.multinomial(torch.tensor([t['probabilities'] for t in traces]), 16, replacement=True)
+replay_counts = {'shape': list(replayed.shape), 'enumeration_actions': int((replayed == 16).sum()), 'total': replayed.numel()}
+
+texts = [' 4\n', '-2', '+4', '04', '答案是4', '4 5', '４', '', '-0']
+parser_tests = []
+for text in texts:
+    clean = text.strip()
+    parsed = int(clean) if re.fullmatch(r'-?[0-9]+', clean) else None
+    parser_tests.append({'text': text, 'parsed': parsed, 'reward_at_truth4': float(parsed == 4)})
+
+needed = ['scripts/course_experiments/applications.py', 'scripts/course_experiments/common.py', 'scripts/course_experiments/run.py']
+pins = {}
+for path in needed:
+    actual = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    assert actual == data['code_sha256'][path]
+    pins[path] = {'manifest_sha256': data['code_sha256'][path], 'actual_sha256': actual}
+plan_path = Path('docs/course-experiments/plan.json')
+plan = json.loads(plan_path.read_bytes())
+spec = next(s for s in plan['sequence'] + plan.get('supporting_experiments', []) if s['id'] == 'reasoning')
+route = {k: spec[k] for k in ['id', 'module', 'function', 'assets']}
+assert route['module'] == 'applications' and route['function'] == 'run_reasoning'
+
+snapshot = {
+    'origin': str(SOURCE), 'origin_sha256': hashlib.sha256(SOURCE.read_bytes()).hexdigest(),
+    'revision': data['revision'], 'device': data['device'], 'seed': data['seed'],
+    'torch_version': data['torch_version'], 'python_version': data['python_version'],
+    'step_scale': data['step_scale'], 'evidence_status': data['evidence_status'],
+    'unfinished_schedules': data['unfinished_schedules'], 'code_pins': pins,
+    'route': route, 'plan_sha256': hashlib.sha256(plan_path.read_bytes()).hexdigest(),
+    'policy_configuration': {'input': 18, 'hidden': 48, 'output': 17, 'actions': actions,
+        'training_steps': weak['training']['steps'], 'batch_size': 64, 'learning_rate': 0.003,
+        'sampled_training_actions': weak['training']['sampled_actions'], 'effective_tokens': 0,
+        'moving_baseline': '0.95 * baseline + 0.05 * mean(reward)', 'entropy_coefficient': 0.005},
+    'checkpoint_manifest': [a for a in data['artifacts'] if a['path'] == 'policy-weak_proxy.pt'],
+    'split': result['split'], 'recomputed_counts': counts,
+    'enumeration_probability_before': [t['probabilities'][16] for t in weak['before']['samples']],
+    'raw_after_traces': traces,
+    'scope': '只保存 C.6 必要的原候選、條件與自行重算；未重跑正式訓練、未讀發布卡或管理判詞。'
+}
+(BASE / 'C.6-frozen-evidence.json').write_text(json.dumps(snapshot, ensure_ascii=False, indent=2) + '\n')
+outcome = {'counts': counts, 'recomputed_split': {k: {'records':len(v), 'families':len(families[k]), 'sha256':records_sha256(v)} for k,v in splits.items()},
+    'family_disjoint': True, 'api_replay': replay_counts, 'parser_cases': parser_tests,
+    'integer_string_limit': sys.get_int_max_str_digits(),
+    'example': {k: traces[0][k] for k in ['question', 'truth']},
+    'after_enumeration_probability_range': [min(t['probabilities'][16] for t in traces), max(t['probabilities'][16] for t in traces)],
+    'before_enumeration_probability_range': [min(t['probabilities'][16] for t in weak['before']['samples']), max(t['probabilities'][16] for t in weak['before']['samples'])],
+    'environment': {'python': platform.python_version(), 'torch': str(torch.__version__), 'torch_source_commit':torch.version.git_version,'device':'cpu','OMP_NUM_THREADS':'1','MKL_NUM_THREADS':'1'},
+    'training_executed': False}
+print(json.dumps(outcome, ensure_ascii=False, indent=2))
