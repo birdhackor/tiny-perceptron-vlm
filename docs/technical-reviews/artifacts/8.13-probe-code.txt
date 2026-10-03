@@ -1,0 +1,98 @@
+import copy
+import hashlib
+import json
+import os
+import platform
+import tempfile
+from pathlib import Path
+
+import torch
+from torch import nn
+
+from tiny_perceptron.adapters import base_state_sha256, load_lora_adapter
+from tiny_perceptron.alignment import LoRALinear
+from tiny_perceptron.model import ModelConfig, TinyLM
+
+torch.set_num_threads(1)
+root = Path.cwd()
+sha = lambda p: hashlib.sha256(Path(p).read_bytes()).hexdigest()
+environment = {"python": platform.python_version(), "torch": torch.__version__, "torch_commit": torch.version.git_version, "device": "cpu", "threads": str(torch.get_num_threads()), "OMP_NUM_THREADS": os.environ["OMP_NUM_THREADS"], "MKL_NUM_THREADS": os.environ["MKL_NUM_THREADS"]}
+torch.manual_seed(0)
+layer = LoRALinear(nn.Linear(4, 3), rank=2, alpha=2)
+initial_b_zero = bool((layer.b == 0).all())
+with torch.no_grad():
+    layer.b.fill_(1)
+before = {"a": layer.a.detach().clone(), "b": layer.b.detach().clone(), "w": layer.base.weight.detach().clone()}
+delta1 = layer.merged_weight() - layer.base.weight
+layer.alpha = 4
+delta2 = layer.merged_weight() - layer.base.weight
+mechanism = {
+    "base_shape": list(layer.base.weight.shape), "a_shape": list(layer.a.shape), "b_shape": list(layer.b.shape),
+    "initial_b_zero": initial_b_zero, "nonzero_delta": bool((delta1 != 0).any()),
+    "a_b_w_unchanged": all(torch.equal(before[k], t) for k, t in [("a", layer.a), ("b", layer.b), ("w", layer.base.weight)]),
+    "base_requires_grad": layer.base.weight.requires_grad, "a_requires_grad": layer.a.requires_grad, "b_requires_grad": layer.b.requires_grad,
+    "delta_doubling_max_error": (delta2 - 2 * delta1).abs().max().item(),
+    "delta_doubling_allclose": torch.allclose(delta2, 2 * delta1, atol=1e-6, rtol=0),
+    "whole_weight_doubling_max_error": (layer.merged_weight() - 2 * (before["w"] + delta1)).abs().max().item(),
+    "merge_formula_max_error": (layer.merged_weight() - (layer.base.weight + (layer.b @ layer.a) * (layer.alpha / layer.rank))).abs().max().item(),
+    "no_gradients_created": all(p.grad is None for p in layer.parameters()),
+}
+atol_probe = {
+    "exact_boundary": torch.allclose(torch.tensor([0.0], dtype=torch.float64), torch.tensor([1e-6], dtype=torch.float64), atol=1e-6, rtol=0),
+    "above_boundary": torch.allclose(torch.tensor([0.0], dtype=torch.float64), torch.tensor([1.1e-6], dtype=torch.float64), atol=1e-6, rtol=0),
+}
+formal = json.loads((root / "docs/course-experiments/results/lora.json").read_text())
+public = json.loads((root / "docs/course-experiments/public-releases/lora.json").read_text())
+base_path = root / "checkpoints/course/style/content.pt"
+base_payload = torch.load(base_path, map_location="cpu", weights_only=True)
+base_state = base_payload["model"]
+base_digest = base_state_sha256(base_state)
+native = TinyLM(ModelConfig(**base_payload["config"]))
+native.load_state_dict(base_state)
+native.eval()
+public_files = {x["output"]: x for x in public["release"]["public_manifest"]["files"]}
+records = []
+models = []
+for name in ["adapter-concise.pt", "adapter-vivid.pt"]:
+    path = root / "checkpoints/course/lora" / name
+    payload = torch.load(path, map_location="cpu", weights_only=True)
+    model = copy.deepcopy(native)
+    info = load_lora_adapter(model, path, base_state=base_state)
+    models.append(model.eval())
+    tensor_records = []
+    for module_name, entry in payload["adapter"].items():
+        tensor_records.append({"path": module_name, "rank": entry["rank"], "alpha": entry["alpha"], "a_shape": list(entry["a"].shape), "b_shape": list(entry["b"].shape), "a_tensor_sha256": hashlib.sha256(entry["a"].contiguous().numpy().tobytes()).hexdigest(), "b_tensor_sha256": hashlib.sha256(entry["b"].contiguous().numpy().tobytes()).hexdigest()})
+    records.append({"file": name, "file_sha256": sha(path), "matches_public_manifest": sha(path) == public_files[name]["sha256"], "immutable_url": "https://huggingface.co/" + public["release"]["repo"] + "/resolve/" + public["release"]["weights_revision"] + "/" + public_files[name]["path"], "format_version": payload["format_version"], "config": payload["config"], "scaling": payload["scaling"], "base_sha256": payload["base_sha256"], "loader": info, "tensor_metadata": tensor_records})
+probe = torch.tensor([[1, 3, 57, 51, 57, 69, 71, 2, 4]])
+with torch.no_grad():
+    logits = [m(probe)["logits"] for m in models]
+logit_difference = (logits[0] - logits[1]).abs().max().item()
+rejections = []
+original = torch.load(root / "checkpoints/course/lora/adapter-concise.pt", map_location="cpu", weights_only=True)
+for field, value in [("scaling", "alpha/sqrt(rank)"), ("base_sha256", "0" * 64)]:
+    mutated = copy.deepcopy(original)
+    mutated[field] = value
+    with tempfile.TemporaryDirectory(prefix="8.13-") as temp:
+        file = Path(temp) / "mutated.pt"
+        torch.save(mutated, file)
+        model = copy.deepcopy(native)
+        try:
+            load_lora_adapter(model, file, base_state=base_state)
+        except ValueError as error:
+            rejections.append({"field": field, "message": str(error), "model_unchanged": all(torch.equal(v, native.state_dict()[k]) for k, v in model.state_dict().items())})
+        else:
+            raise AssertionError("incompatible adapter accepted")
+checks = json.loads((root / "docs/course-experiments/student-checks/lora.20261002T220931752556Z.json").read_text())
+formal_inspection = {
+    "result_file_sha256": sha(root / "docs/course-experiments/results/lora.json"), "revision": formal["revision"], "seed": formal["seed"], "device": formal["device"], "torch": formal["torch_version"], "rank": formal["results"]["rank"], "alpha": formal["results"]["alpha"], "scaling": formal["results"]["scaling"],
+    "runs": {name: {"steps": run["training"]["steps"], "effective_tokens": run["training"]["effective_tokens"], "layers": run["layers"], "base_parameters_unchanged": run["base_parameters_unchanged"], "data": run["data"]} for name, run in formal["results"]["runs"].items()},
+    "student_check_sha256": sha(root / "docs/course-experiments/student-checks/lora.20261002T220931752556Z.json"), "student_checked_at": checks["checked_at"],
+    "student_adapter_commands": [{"command": x["command"], "returncode": x["returncode"], "adapter": x["output"]["adapter"]} for x in checks["commands"] if "adapter" in x.get("output", {})],
+}
+assert mechanism["initial_b_zero"] and mechanism["nonzero_delta"] and mechanism["a_b_w_unchanged"] and mechanism["delta_doubling_allclose"]
+assert atol_probe == {"exact_boundary": True, "above_boundary": False}
+assert base_digest == formal["results"]["base_sha256"]
+assert all(x["matches_public_manifest"] and all(e["rank"] == 4 and e["alpha"] == 4 for e in x["tensor_metadata"]) for x in records)
+assert all(x["model_unchanged"] for x in rejections) and logit_difference > 0
+out = {"environment": environment, "mechanism": mechanism, "allclose_boundaries": atol_probe, "formal_inspection": formal_inspection, "base": {"file_sha256": sha(base_path), "state_sha256": base_digest, "immutable_url": "https://huggingface.co/birdhackor/tiny-perceptron-course-models/resolve/23b58c077a2da2ec6b94f4902e88510c0364e3fc/course/course-v1/style/content.pt", "names_are_sorted_for_digest": True, "tensors": len(base_state), "buffer_names": list(dict(native.named_buffers()))}, "adapters": records, "nine_token_probe": {"ids": probe.tolist(), "logit_shape": list(logits[0].shape), "max_difference": logit_difference, "scope": "單一固定輸入的 CPU 前向差異；沒有訓練、生成或品質評估。"}, "incompatible_rejections": rejections, "model_card": {"path": "checkpoints/course/lora/README.md", "sha256": sha(root / "checkpoints/course/lora/README.md"), "matches_public_manifest": sha(root / "checkpoints/course/lora/README.md") == public_files["README.md"]["sha256"], "immutable_url": "https://huggingface.co/birdhackor/tiny-perceptron-course-models/resolve/1bfb0ed028d3a980711a29cb38a993f58d127d02/course/course-v1/lora/README.md", "inspection_note": "親讀固定卡片：rank 4、alpha 4、alpha/rank；兩套模板 adapter、單 seed 與 450 步，沒有 rank 或縮放公式掃描。它未把 0/7 算術答對說成能力成功。"}}
+print(json.dumps(out, ensure_ascii=False, indent=2))
