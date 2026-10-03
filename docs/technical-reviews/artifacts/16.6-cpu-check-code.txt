@@ -1,0 +1,165 @@
+import hashlib
+import json
+import os
+import sys
+from pathlib import Path
+
+import torch
+from tiny_perceptron.data import IGNORE, ByteTokenizer, pad_batch, render_chat
+from tiny_perceptron.model import loss_sum
+
+
+def offline_guard(event, args):
+    if event.startswith("socket.") or event in ("subprocess.Popen", "os.system"):
+        raise RuntimeError("Offline bounded CPU review forbids " + event)
+
+
+sys.addaudithook(offline_guard)
+torch.set_num_threads(1)
+torch.manual_seed(42)
+root = Path.cwd()
+environment = {
+    "python": sys.version,
+    "torch": str(torch.__version__),
+    "torch_git": torch.version.git_version,
+    "device": "cpu",
+    "platform": " ".join(os.uname()),
+    "threads": str(torch.get_num_threads()),
+    "OMP_NUM_THREADS": os.environ["OMP_NUM_THREADS"],
+    "MKL_NUM_THREADS": os.environ["MKL_NUM_THREADS"],
+}
+output = {"environment": environment, "scope": "離線短 CPU 核對；無正式訓練、GPU、下載或發布。"}
+
+x = torch.tensor([1.0, 2.0, 3.0])
+whole = torch.tensor(1.0, requires_grad=True)
+accumulated = torch.tensor(1.0, requires_grad=True)
+wrong = torch.tensor(1.0, requires_grad=True)
+(whole * x).square().mean().backward()
+contributions = []
+for part in (x[:1], x[1:]):
+    before = 0.0 if accumulated.grad is None else accumulated.grad.item()
+    ((accumulated * part).square().sum() / len(x)).backward()
+    contributions.append(accumulated.grad.item() - before)
+    ((wrong * part).square().mean() / 2).backward()
+assert len({whole.data_ptr(), accumulated.data_ptr(), wrong.data_ptr()}) == 3
+assert all(v.item() == 1.0 for v in (whole, accumulated, wrong))
+output["original_details"] = {
+    "parts": [x[:1].tolist(), x[1:].tolist()],
+    "loss": (x.square().mean()).item(),
+    "part_sums": [x[:1].square().sum().item(), x[1:].square().sum().item()],
+    "gradient_contributions": contributions,
+    "gradients": [whole.grad.item(), accumulated.grad.item(), wrong.grad.item()],
+    "weights_after_backward": [v.item() for v in (whole, accumulated, wrong)],
+    "separate_leaf_storage": True,
+}
+
+ones = torch.ones(11)
+counter_whole = torch.tensor(1.0, requires_grad=True)
+counter_mean = torch.tensor(1.0, requires_grad=True)
+(counter_whole * ones).square().mean().backward()
+for part in (ones[:1], ones[1:]):
+    ((counter_mean * part).square().mean() / 2).backward()
+assert abs(counter_whole.grad.item() - 2.0) < 1e-6
+assert abs(counter_mean.grad.item() - 2.0) < 1e-6
+output["unequal_count_counterexample"] = {
+    "counts": [1, 10],
+    "per_group_mean_loss_at_w_1": [1.0, 1.0],
+    "whole_mean_loss": 1.0,
+    "mean_of_means_loss": 1.0,
+    "whole_gradient": counter_whole.grad.item(),
+    "mean_of_means_gradient": counter_mean.grad.item(),
+    "gradient_tolerance": 1e-6,
+    "meaning": "不同有效數仍可相等；相同有效數是對任意損失保證相等的條件，非個別資料相等的必要條件。",
+}
+
+big = torch.nn.Parameter(torch.tensor(1.0))
+micro_step = torch.nn.Parameter(torch.tensor(1.0))
+opt_big = torch.optim.SGD([big], lr=0.1)
+opt_micro = torch.optim.SGD([micro_step], lr=0.1)
+opt_big.zero_grad(set_to_none=True)
+(big * x).square().mean().backward()
+opt_big.step()
+micro_weights = []
+for part in (x[:1], x[1:]):
+    opt_micro.zero_grad(set_to_none=True)
+    ((micro_step * part).square().sum() / len(x)).backward()
+    opt_micro.step()
+    micro_weights.append(micro_step.item())
+assert abs(big.item() - micro_step.item()) > 0.01
+output["step_order"] = {"one_step_weight": big.item(), "per_micro_step_weights": micro_weights}
+
+p = torch.nn.Parameter(torch.tensor([0.0, 0.0]))
+p.grad = torch.tensor([3.0, 4.0])
+norm = torch.nn.utils.clip_grad_norm_([p], 1.0)
+assert norm.item() == 5.0
+assert torch.allclose(p.grad, torch.tensor([0.6, 0.8]), atol=1e-6)
+output["clipping"] = {"global_norm_before": norm.item(), "grad_after": p.grad.tolist()}
+
+bn = torch.nn.BatchNorm1d(1, affine=False, track_running_stats=False).train()
+input_bn = torch.arange(1.0, 5.0)[:, None]
+batch_bn = bn(input_bn)
+micro_bn = torch.cat([bn(input_bn[:2]), bn(input_bn[2:])])
+assert not torch.allclose(batch_bn, micro_bn)
+output["batch_statistics"] = {"whole": batch_bn.flatten().tolist(), "micro": micro_bn.flatten().tolist()}
+dropout = torch.nn.Dropout(0.5).train()
+masks = [dropout(torch.ones(32)).tolist(), dropout(torch.ones(32)).tolist()]
+assert masks[0] != masks[1]
+output["dropout"] = {"separate_forward_masks_differ": True, "nonzero_counts": [sum(v != 0 for v in m) for m in masks]}
+
+examples = [render_chat([{"role": "user", "content": "問"}, {"role": "assistant", "content": s}]) for s in ["答", "答案", "OK"]]
+ids, labels, valid = pad_batch(examples)
+counts = [int((y != IGNORE).sum()) for _, y in examples]
+assert counts == [4, 7, 3]
+logits = torch.zeros((*labels.shape, 264), requires_grad=True)
+total, count = loss_sum(logits, labels)
+assert count.item() == sum(counts) == 14
+total.backward()
+assert bool((logits.grad[labels == IGNORE] == 0).all())
+output["effective_targets"] = {"counts": counts, "effective_total": count.item(), "padded_table_positions": labels.numel(), "input_valid_positions": int(valid.sum()), "ignored_logit_gradient_zero": True}
+
+result_path = root / "docs/course-experiments/results/efficiency.json"
+result_raw = result_path.read_bytes()
+result = json.loads(result_raw)
+r = result["results"]
+manifest_path = root / "checkpoints/course/efficiency/download-manifest.json"
+manifest_raw = manifest_path.read_bytes()
+manifest = json.loads(manifest_raw)
+release = json.loads((root / "docs/course-experiments/public-releases/efficiency.json").read_bytes())
+assert manifest["revision"] == release["release"]["weights_revision"] == "8cff2ecbb5b46b5de9f93c81cfd9953887244a5c"
+expected_hash = {f["output"]: f["sha256"] for f in manifest["files"]}
+loaded, pins = {}, []
+for name in ["ordinary", "accumulated"]:
+    fn = name + ".pt"
+    path = root / "checkpoints/course/efficiency" / fn
+    raw = path.read_bytes()
+    digest = hashlib.sha256(raw).hexdigest()
+    assert digest == expected_hash[fn]
+    checkpoint = torch.load(path, map_location="cpu", weights_only=True)
+    loaded[name] = checkpoint
+    pins.append({"original_path": str(path.relative_to(root)), "sha256": digest, "bytes": len(raw), "url": "https://huggingface.co/" + manifest["repo"] + "/resolve/" + manifest["revision"] + "/course/course-v1/efficiency/" + fn, "config": checkpoint["config"], "metadata": checkpoint["metadata"], "tensor_count": len(checkpoint["model"]), "parameter_elements": sum(t.numel() for t in checkpoint["model"].values()), "dtypes": sorted(set(str(t.dtype) for t in checkpoint["model"].values()))})
+assert loaded["ordinary"]["config"] == loaded["accumulated"]["config"]
+assert loaded["ordinary"]["model"].keys() == loaded["accumulated"]["model"].keys()
+weight_error = max((loaded["ordinary"]["model"][k] - loaded["accumulated"]["model"][k]).abs().max().item() for k in loaded["ordinary"]["model"])
+assert weight_error == r["update_variants"]["accumulated"]["weight_max_error_from_ordinary_after_updates"]
+assert r["accumulation"]["effective_token_counts"] == [7, 13]
+assert sum(r["accumulation"]["effective_token_counts"]) == r["accumulation"]["shared_denominator"] == 20
+output["frozen_result_checks"] = {"source_sha256": hashlib.sha256(result_raw).hexdigest(), "declared_gpu_runtime": {k: result[k] for k in ["revision", "device", "seed", "torch_version", "python_version", "gpu"]}, "weights": pins, "weight_max_error": weight_error, "accumulation": r["accumulation"], "branches": {}}
+tok = ByteTokenizer()
+for name in ["ordinary", "accumulated"]:
+    branch = r["update_variants"][name]
+    train, test = branch["training"], branch["heldout"]["test"]
+    assert train["optimizer_updates"] == train["steps"] == train["requested_steps"] == 40
+    assert train["effective_tokens"] == 2328 and train["batch_size"] == 8
+    assert train["peak_memory_allocated_bytes"] - train["memory_allocated_before_bytes"] == train["peak_additional_allocated_bytes"]
+    expected_tokens = sum(len(tok.encode(s["expected"])) + 1 for s in test["samples"])
+    exact = []
+    for s in test["samples"]:
+        sequence = s["generated_ids"]
+        sequence = sequence[:sequence.index(tok.eos_id)] if tok.eos_id in sequence else sequence
+        exact.append(sequence == tok.encode(s["expected"]))
+    assert exact == [s["exact"] for s in test["samples"]]
+    assert sum(exact) == test["matches"] == 5 and test["records"] == len(test["samples"]) == 10
+    assert expected_tokens == test["effective_tokens"] == 69
+    assert abs(test["nll_sum"] / test["effective_tokens"] - test["nll"]) < 1e-12
+    output["frozen_result_checks"]["branches"][name] = {"updates": train["optimizer_updates"], "effective_training_targets": train["effective_tokens"], "micro_sizes": train["micro_batch_sizes"], "test_targets_from_full_answers_and_EOS": expected_tokens, "test_nll_sum": test["nll_sum"], "test_nll_recomputed": test["nll_sum"] / expected_tokens, "matches_recounted": sum(exact), "test_records": len(exact), "median_ms": train["warm_step_median_seconds"] * 1000, "memory_MiB": {k: train[k] / (2 ** 20) for k in ["memory_allocated_before_bytes", "peak_memory_allocated_bytes", "peak_additional_allocated_bytes"]}}
+print(json.dumps(output, ensure_ascii=False, indent=2))

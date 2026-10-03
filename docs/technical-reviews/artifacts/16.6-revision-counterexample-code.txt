@@ -1,0 +1,57 @@
+import json
+import os
+import sys
+
+import torch
+
+
+def offline_guard(event, args):
+    if event.startswith("socket.") or event in ("subprocess.Popen", "os.system"):
+        raise RuntimeError("Offline revision check forbids " + event)
+
+
+sys.addaudithook(offline_guard)
+torch.set_num_threads(1)
+losses = torch.ones(11, dtype=torch.float64)
+groups = (losses[:1], losses[1:])
+group_means = [g.mean().item() for g in groups]
+mean_of_means = sum(group_means) / 2
+whole_mean = losses.mean().item()
+shared_denominator_mean = sum(g.sum().item() / losses.numel() for g in groups)
+assert [g.numel() for g in groups] == [1, 10]
+assert group_means == [1.0, 1.0]
+assert mean_of_means == whole_mean == shared_denominator_mean == 1.0
+
+changed = losses.clone()
+changed[0] = 4.0
+changed_groups = (changed[:1], changed[1:])
+changed_mean_of_means = sum(g.mean().item() for g in changed_groups) / 2
+changed_whole_mean = changed.mean().item()
+changed_shared_denominator = sum(g.sum().item() / changed.numel() for g in changed_groups)
+assert changed_mean_of_means == 2.5
+assert abs(changed_whole_mean - 14 / 11) < 1e-15
+assert abs(changed_shared_denominator - changed_whole_mean) < 1e-15
+assert changed_mean_of_means != changed_whole_mean
+print(json.dumps({
+    "environment": {
+        "python": sys.version,
+        "torch": str(torch.__version__),
+        "torch_git": torch.version.git_version,
+        "device": str(losses.device),
+        "dtype": str(losses.dtype),
+        "threads": str(torch.get_num_threads()),
+        "OMP_NUM_THREADS": os.environ["OMP_NUM_THREADS"],
+        "MKL_NUM_THREADS": os.environ["MKL_NUM_THREADS"],
+    },
+    "counts": [g.numel() for g in groups],
+    "all_one_losses": losses.tolist(),
+    "group_means": group_means,
+    "mean_of_means": mean_of_means,
+    "whole_mean": whole_mean,
+    "shared_denominator_mean": shared_denominator_mean,
+    "changed_batch_losses": changed.tolist(),
+    "changed_mean_of_means": changed_mean_of_means,
+    "changed_whole_mean": changed_whole_mean,
+    "changed_shared_denominator_mean": changed_shared_denominator,
+    "scope": "只核新增inline算例與換資料無保證；無模型訓練、參數更新、GPU、網路或下載。",
+}, ensure_ascii=False, indent=2))
