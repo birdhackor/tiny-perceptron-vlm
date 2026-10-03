@@ -1,0 +1,92 @@
+import argparse
+import contextlib
+import dataclasses
+import hashlib
+import io
+import json
+import math
+import os
+import platform
+import runpy
+from pathlib import Path
+
+import torch
+
+parser = argparse.ArgumentParser()
+parser.add_argument('mode', choices=['example', 'exercise', 'repository'])
+args = parser.parse_args()
+root = Path(__file__).resolve().parents[3]
+artifacts = root / 'docs/technical-reviews/artifacts'
+result = {
+    'mode': args.mode,
+    'environment': {
+        'python': platform.python_version(),
+        'torch': torch.__version__,
+        'torch_git_version': torch.version.git_version,
+        'device': 'cpu',
+        'default_dtype': str(torch.get_default_dtype()),
+        'OMP_NUM_THREADS': os.environ.get('OMP_NUM_THREADS'),
+        'MKL_NUM_THREADS': os.environ.get('MKL_NUM_THREADS'),
+    },
+}
+if args.mode in ('example', 'exercise'):
+    path = artifacts / f'14.3-{args.mode}-code.txt'
+    captured = io.StringIO()
+    with contextlib.redirect_stdout(captured):
+        namespace = runpy.run_path(str(path))
+    q, k, raw, unit = (namespace[name] for name in ('q', 'k', 'raw', 'unit'))
+    expected_raw = [[1.0, 100.0 if args.mode == 'example' else 0.1]]
+    assert torch.allclose(raw, torch.tensor(expected_raw), atol=0, rtol=0)
+    assert q.shape == (1, 2) and k.shape == (2, 2)
+    assert raw.shape == unit.shape == (1, 2)
+    assert torch.allclose(unit, torch.full((1, 2), 1 / math.sqrt(2)), atol=1e-7, rtol=0)
+    assert unit.softmax(-1).tolist() == [[0.5, 0.5]]
+    result.update({
+        'original_code_sha256': hashlib.sha256(path.read_bytes()).hexdigest(),
+        'stdout': captured.getvalue(),
+        'shapes': {name: list(namespace[name].shape) for name in ('q', 'k', 'raw', 'unit')},
+        'dtype': str(q.dtype),
+        'normalized_q': namespace['F'].normalize(q, dim=-1).tolist(),
+        'normalized_k': namespace['F'].normalize(k, dim=-1).tolist(),
+        'raw_scores': raw.tolist(),
+        'raw_weights': raw.softmax(-1).tolist(),
+        'unit_scores': unit.tolist(),
+        'unit_weights': unit.softmax(-1).tolist(),
+        'softmax_1_0': torch.tensor([1.0, 0.0]).softmax(-1).tolist(),
+        'softmax_scale4': torch.tensor([1.0, 0.0]).mul(4).softmax(-1).tolist(),
+        'checks': '原例或單一數字改動練習的分數、形狀及正規化權重核對通過；無任何參數更新。',
+    })
+else:
+    from tiny_perceptron.model import ModelConfig
+
+    report_path = root / 'docs/course-experiments/results/modern.json'
+    report = json.loads(report_path.read_text())
+    variants = report['results']['variants']
+    fields = [field.name for field in dataclasses.fields(ModelConfig)]
+    assert list(variants) == ['baseline', 'rope', 'rmsnorm', 'relu2', 'swiglu', 'tied']
+    assert not any('qk' in name.lower() for name in fields)
+    observed = {}
+    for name, branch in variants.items():
+        training = branch['training']
+        observed[name] = {
+            'config': branch['model']['config'],
+            'changes': branch['changes'],
+            'training': {key: training[key] for key in training if key in (
+                'steps', 'requested_steps', 'status', 'effective_tokens',
+                'successful_optimizer_updates', 'completed_attempts', 'skipped_updates',
+                'batch_size', 'learning_rate', 'timing', 'seed'
+            )},
+            'heldout_denominators': {
+                side: branch['heldout'][side]['effective_tokens'] for side in ('validation', 'test')
+            },
+        }
+    result.update({
+        'modern_report_sha256': hashlib.sha256(report_path.read_bytes()).hexdigest(),
+        'modern_report_revision': report['revision'],
+        'formal_environment': {key: report[key] for key in ('device', 'seed', 'torch_version', 'python_version', 'gpu', 'step_scale')},
+        'formal_dataset': report['results']['dataset'],
+        'model_config_fields': fields,
+        'variants': observed,
+        'checks': '只解析凍結報告與現行 ModelConfig；未排程、未載入或訓練權重。正式組沒有 QK normalization 分支。',
+    })
+print(json.dumps(result, ensure_ascii=False, indent=2))
