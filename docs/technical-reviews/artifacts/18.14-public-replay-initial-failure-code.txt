@@ -1,0 +1,55 @@
+import copy
+import hashlib
+import json
+import platform
+from pathlib import Path
+
+import torch
+
+from tiny_perceptron.data import ByteTokenizer, pad_batch, render_chat
+from tiny_perceptron.model import generate, loss_sum
+from tiny_perceptron.quantization import replace_linear_layers
+from tiny_perceptron.training import load_checkpoint
+
+root = Path("checkpoints/course/distillation")
+formal = json.loads(Path("docs/course-experiments/results/distillation.json").read_bytes())
+exports = json.loads((root / "export-manifest.json").read_bytes())
+export_by_name = {r["output"]: r for r in exports["files"]}
+names = ["sft-teacher.pt", "sft-w32-ce.pt", "sft-w32-ce_kl.pt", "sft-w32-ce_kl-packed4.pt", "moe-w32-ce.pt", "moe-w32-ce_kl.pt", "moe-w32-ce_kl-packed4.pt"]
+models = {}
+result = {"environment": {"python": platform.python_version(), "torch": str(torch.__version__), "torch_git": torch.version.git_version, "device": "cpu", "threads": str(torch.get_num_threads())}, "weights": {}, "attribute_evaluation": {}}
+for name in names:
+    path = root / name
+    sha = hashlib.sha256(path.read_bytes()).hexdigest()
+    assert sha == export_by_name[name]["sha256"]
+    model, payload = load_checkpoint(path, "cpu")
+    model.eval()
+    models[name] = model
+    tensors = [{"name": n, "kind": kind, "shape": list(t.shape), "dtype": str(t.dtype), "numel": t.numel(), "element_size": t.element_size(), "bytes": t.numel() * t.element_size()} for kind, iterator in [("parameter", model.named_parameters()), ("buffer", model.named_buffers())] for n, t in iterator]
+    result["weights"][name] = {"sha256": sha, "file_bytes": path.stat().st_size, "config": payload["config"], "format_version": payload["format_version"], "tensor_bytes": sum(t["bytes"] for t in tensors), "tensors": tensors, "removed_state_keys": [k for k in ["optimizer", "torch_rng", "python_rng", "cuda_rng", "mps_rng"] if k not in payload]}
+
+for prefix in ["sft", "moe"]:
+    reconstructed = replace_linear_layers(copy.deepcopy(models[prefix + "-w32-ce_kl.pt"]), bits=4)
+    actual = models[prefix + "-w32-ce_kl-packed4.pt"]
+    assert reconstructed.state_dict().keys() == actual.state_dict().keys()
+    comparisons = {n: torch.equal(t, actual.state_dict()[n]) for n, t in reconstructed.state_dict().items()}
+    assert all(comparisons.values())
+    result[prefix + "_packed_matches_direct_KL_conversion"] = comparisons
+
+task = formal["results"]["tasks"]["attributes"]
+rows = task["teacher_test"]["generated_samples"]
+tok = ByteTokenizer()
+examples = [render_chat([{"role": "user", "content": row["question"]}, {"role": "assistant", "content": row["expected"]}]) for row in rows]
+x, y, valid = pad_batch(examples)
+for name in names[:4]:
+    model = models[name]
+    samples = []
+    with torch.no_grad():
+        nll, count = loss_sum(model(x, valid=valid)["logits"], y)
+        for row in rows:
+            prompt = torch.tensor([[tok.bos_id, tok.user_id] + tok.encode(row["question"]) + [tok.eos_id, tok.assistant_id]])
+            ids = generate(model, prompt, max_new_tokens=24, temperature=0, use_cache=False)[0, prompt.shape[1]:].tolist()
+            answer_ids = ids[:ids.index(tok.eos_id)] if tok.eos_id in ids else ids
+            samples.append({"question": row["question"], "generated_ids": ids, "answer": tok.decode(answer_ids), "exact": answer_ids == tok.encode(row["expected"]), "eos": tok.eos_id in ids, "invalid_control_ids": [i for i in ids if i < 8 and i != tok.eos_id]})
+    result["attribute_evaluation"][name] = {"supervised_tokens": int(count), "nll_sum": float(nll), "answer_nll": float(nll) / int(count), "correct": sum(s["exact"] for s in samples), "eos_count": sum(s["eos"] for s in samples), "examples": len(samples), "greedy": True, "max_new_tokens": 24, "samples": samples}
+print(json.dumps(result, ensure_ascii=False, indent=2))

@@ -1,0 +1,43 @@
+import hashlib
+import json
+from pathlib import Path
+
+paths = ["docs/course-experiments/results/distillation.json", "docs/course-experiments/releases/distillation.json", "docs/course-experiments/public-releases/distillation.json", "docs/course-experiments/student-checks/distillation.20261002T221133313058Z.json"]
+originals = {p: json.loads(Path(p).read_bytes()) for p in paths}
+formal = originals[paths[0]]
+out = {"source_files": {p: hashlib.sha256(Path(p).read_bytes()).hexdigest() for p in paths}, "formal_environment": {k: formal[k] for k in ["revision", "device", "seed", "torch_version", "python_version", "gpu", "step_scale"]}, "private_source": formal["hf"], "code_pins": {p: formal["code_sha256"][p] for p in ["scripts/course_experiments/compression.py", "scripts/course_experiments/common.py", "scripts/course_experiments/run.py", "tiny_perceptron/model.py", "tiny_perceptron/quantization.py", "tiny_perceptron/training.py", "tiny_perceptron/data.py"]}, "attributes": {}, "moe_to_dense": {}}
+for task_name in ["attributes", "moe_to_dense"]:
+    task = formal["results"]["tasks"][task_name]
+    out[task_name]["data"] = task["data"]
+    out[task_name]["runs"] = {}
+    if task_name == "attributes":
+        out[task_name]["runs"]["teacher"] = {"storage": task["teacher_storage"], "test": {k: v for k, v in task["teacher_test"].items() if k != "generated_samples"}}
+    for name in ["w32_ce", "w32_ce_kl", "w32_ce_kl_packed4"]:
+        run = task["runs"][name]
+        test = run["test"]
+        assert abs(test["answer_nll"] - test["nll_sum"] / test["supervised_tokens"]) < 1e-12
+        samples = test["generated_samples"]
+        assert len(samples) == test["examples"]
+        assert sum(s["exact"] for s in samples) == test["correct"]
+        assert sum(s["ended_with_eos"] for s in samples) == test["eos_count"]
+        invalid = sum(i < 8 and i != 2 for s in samples for i in s["generated_ids"])
+        out[task_name]["runs"][name] = {"storage": run["storage"], "training": {k: v for k, v in run.get("training", {}).items() if k != "loss_trace"}, "test": {k: v for k, v in test.items() if k != "generated_samples"}, "invalid_control_ids": invalid}
+        if task_name == "attributes":
+            out[task_name]["runs"][name]["color_blue_circle_low"] = next({k: s[k] for k in ["generated", "generated_ids", "exact", "ended_with_eos"]} for s in samples if s["question"] == "color=blue;shape=circle;pitch=low;color?")
+        else:
+            # Save hashes/indices and generated repetition diagnostics, not private source documents.
+            repeated = [i for i, s in enumerate(samples) if "the the" in s["generated"]]
+            out[task_name]["runs"][name]["consecutive_the_repetition_indices"] = repeated
+            out[task_name]["runs"][name]["first_generated_only"] = samples[0]["generated"]
+    if task_name == "attributes":
+        samples = task["teacher_test"]["generated_samples"]
+        out[task_name]["runs"]["teacher"]["invalid_control_ids"] = sum(i < 8 and i != 2 for s in samples for i in s["generated_ids"])
+
+out["ratios_percent"] = {"student_to_teacher": 134528 / 566272 * 100, "packed_to_student": 64160 / 134528 * 100, "packed_to_teacher": 64160 / 566272 * 100}
+out["original_artifacts"] = [a for a in formal["artifacts"] if a["path"] in ["sft-teacher.pt", "sft-w32-ce.pt", "sft-w32-ce_kl.pt", "sft-w32-ce_kl-packed4.pt", "moe-w32-ce.pt", "moe-w32-ce_kl.pt", "moe-w32-ce_kl-packed4.pt"]]
+pub = originals[paths[2]]["release"]
+student = originals[paths[3]]
+out["public_release"] = {k: v for k, v in pub.items() if k != "public_manifest"}
+out["public_student_runtime"] = {"source": student["public_source"], "environment": student["environment"], "scope": student["scope"], "weights": [w for w in student["weights"] if w["output"] in [a["path"] for a in out["original_artifacts"]]]}
+out["formal_memory"] = {k: formal[k] for k in ["peak_allocated_bytes", "peak_memory_scope"]}
+print(json.dumps(out, ensure_ascii=False, indent=2))
