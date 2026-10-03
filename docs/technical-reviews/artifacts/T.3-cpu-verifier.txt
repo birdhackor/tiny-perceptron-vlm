@@ -1,0 +1,141 @@
+"""T.3 本人離線 CPU 核對；不執行正式訓練、下載、Git 或雲端。"""
+import hashlib
+import json
+import os
+import platform
+import re
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+import torch
+
+ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(ROOT))
+ART = ROOT / "docs/technical-reviews/artifacts"
+ENV = os.environ.copy()
+ENV.update(OMP_NUM_THREADS="1", MKL_NUM_THREADS="1", CUDA_VISIBLE_DEVICES="", HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1", PYTHONPATH=str(ROOT))
+PYTHON = ROOT / ".venv/bin/python"
+torch.set_num_threads(1)
+environment = {"python": platform.python_version(), "torch": str(torch.__version__), "torch_commit": torch.version.git_version, "device": "cpu", "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"}
+
+
+def sha(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def section(path, identifier):
+    raw = (ROOT / path).read_bytes()
+    headings = list(re.finditer(rb"(?m)^## ([A-Z\d]+\.\d+) [^\r\n]+", raw))
+    index = next(i for i, h in enumerate(headings) if h[1].decode() == identifier)
+    end = headings[index + 1].start() if index + 1 < len(headings) else len(raw)
+    return raw[headings[index].start():end]
+
+
+def run(label, code=None, args=None, cwd=ROOT, scope=""):
+    command = [str(PYTHON), "-c", code] if code is not None else [str(PYTHON), *args]
+    process = subprocess.run(command, cwd=cwd, env=ENV, capture_output=True, text=True, timeout=45)
+    return {"label": label, "command": command, "cwd": str(cwd), "code": code, "code_sha256": sha(code.encode()) if code is not None else None, "returncode": process.returncode, "stdout": process.stdout, "stderr": process.stderr, "environment": environment, "scope": scope}
+
+
+records = []
+prerequisites = [("course/chapters/01.md", "1.5"), ("course/chapters/01.md", "1.8"), ("course/chapters/02.md", "2.2"), ("course/chapters/02.md", "2.3"), ("course/chapters/02.md", "2.5"), ("course/chapters/05.md", "5.7")]
+for path, identifier in prerequisites:
+    raw = section(path, identifier)
+    code = re.findall(r"```python\n(.*?)\n```", raw.decode(), re.S)[0]
+    base = run(identifier + " 原短例", code=code, scope="T.3 直接必要前置之原短例，未跑其正式實驗")
+    base["source"] = path + "#" + identifier
+    base["source_sha256"] = sha(raw)
+    records.append(base)
+    if identifier == "1.5":
+        changed = code.replace("torch.ones(len(chars), len(chars))", "torch.full((len(chars), len(chars)), 0.1)")
+    elif identifier == "1.8":
+        changed = code.replace("torch.tensor([1])", "torch.tensor([0])").replace("probabilities[0, 1]", "probabilities[0, 0]")
+    elif identifier == "2.2":
+        changed = code.replace("[[1, 2, 3], [3, 2, 1]]", "[[2, 1, 3], [3, 2, 1]]")
+    elif identifier == "2.3":
+        changed = code.replace("[1.0, 0.0, 2.0]", "[1.0, 0.0, 3.0]")
+    elif identifier == "2.5":
+        changed = code.replace("紅色物體是", "紅色的小小物體是").replace("藍色物體是", "藍色的小小物體是").replace("[1, 3, 5]", "[1, 3, 5, 8, 7]")
+    else:
+        changed = code.replace('    restored_optimizer.load_state_dict(payload["optimizer"])', '    # 練習：省略恢復 optimizer 歷史')
+    records.append(run(identifier + " 練習", code=changed, scope="依該前置練習只修改指定輸入；5.7 第二次 assert 失敗是預測現象"))
+
+t3 = section("course/training.md", "T.3")
+fences = re.findall(r"```python\n(.*?)\n```", t3.decode(), re.S)
+records.append(run("T.3 原短例：文件切分", code=fences[0], scope="原 fence 原樣執行"))
+for model, args in [("bigram", ["--model", "bigram"]), ("mlp3", ["--model", "mlp", "--context", "3", "--width", "16"])]:
+    records.append(run("T.3 開始基準 " + model, args=["scripts/train_simple.py", *args, "--seed", "42", "--device", "cpu"], scope="僅原 dry-run；一次 backward、零次 optimizer.step，stdout 捕獲等價於 > 報告；沒有正式 200 步訓練"))
+
+frozen = json.loads((ROOT / "docs/course-experiments/results/simple_models.json").read_text())
+for label, key in [("bigram", "bigram"), ("mlp", "mlp3")]:
+    row = frozen["results"]["runs"][key]
+    baseline = {"mode": "dry-run-no-weight-update", "model": label, "parameters": row["parameters"], "split_unit": "whole deduplicated document", "train_loss": row["before_nll"]["train"], "validation_loss": row["before_nll"]["validation"]}
+    after = {"mode": "train", "model": label, "parameters": row["parameters"], "split_unit": "whole deduplicated document", "train_loss": row["after_nll_same_post_update_time"]["train"], "validation_loss": row["after_nll_same_post_update_time"]["validation"]}
+    code = fences[1] if label == "bigram" else fences[1].replace("bigram-", "mlp-")
+    with tempfile.TemporaryDirectory(prefix="T.3-comparison-") as directory:
+        outputs = Path(directory) / "outputs"
+        outputs.mkdir()
+        (outputs / f"{label}-before.json").write_text(json.dumps(baseline))
+        (outputs / f"{label}-after.json").write_text(json.dumps(after))
+        record = run("T.3 比較程式練習 " + label, code=code, cwd=directory, scope="原 comparison fence；MLP 依練習替换三個路徑。輸入是明示由凍結正式 result 抽取的比較 fixture，並非本人的 train_simple 200 步結果")
+        record["fixture_before"] = baseline
+        record["fixture_after"] = after
+        record["written_comparison"] = json.loads((outputs / f"{label}-comparison.json").read_text())
+        records.append(record)
+records.append(run("T.3 遮住留出欄選模型練習", code='import json\nfrom pathlib import Path\nr=json.loads(Path("docs/course-experiments/results/simple_models.json").read_text())["results"]["runs"]\npicked=min(r,key=lambda k:r[k]["after_nll_same_post_update_time"]["train"])\nprint("只按 train 選",picked)\nfor side in ["validation","test"]:\n print(side,"mlp5",r["mlp5"]["after_nll_same_post_update_time"][side],"mlp3",r["mlp3"]["after_nll_same_post_update_time"][side])\n assert r["mlp5"]["after_nll_same_post_update_time"][side]>r["mlp3"]["after_nll_same_post_update_time"][side]', scope="原文紙上練習的有界數值核對，沒有另寫成訓練"))
+records.append(run("T.3 公開既有 text_foundation 原推論命令", args=["scripts/infer.py", "checkpoints/course/text_foundation/model.pt", "--prompt", "color=blue;shape=circle;", "--tokens", "32", "--device", "cpu", "--json"], scope="使用既有 pinned weight，HF_HUB_OFFLINE=1，未執行 fetch/check_course_models 的下载命令"))
+
+from tiny_perceptron.data import split_documents, toy_documents
+from scripts.train_simple import examples
+from scripts.infer_simple import load_simple_checkpoint, generate_simple
+parts = split_documents(toy_documents(), seed=42)
+vocabulary = {char: index + 2 for index, char in enumerate(sorted(set("".join(parts["train"]))))}
+replay = {"environment": environment, "source_result_sha256": sha((ROOT / "docs/course-experiments/results/simple_models.json").read_bytes()), "documents": parts, "vocabulary": vocabulary, "runs": {}}
+published = json.loads((ROOT / "docs/course-experiments/public-models.json").read_text())
+simple_spec = next(s for s in published["models"] if s["id"] == "simple_models")
+simple_exports = json.loads((ROOT / "checkpoints/course/simple_models/export-manifest.json").read_text())
+replay["discarded_mutable_local_weights"] = []
+for name, context in [("bigram", 1), ("mlp1", 1), ("mlp3", 3), ("mlp5", 5)]:
+    checkpoint = ROOT / "checkpoints/course/simple_models" / f"{name}.pt"
+    expected = next(x for x in frozen["artifacts"] if x["path"] == checkpoint.name)
+    public_file = next(x for x in simple_spec["files"] if x["output"] == checkpoint.name)
+    export_file = next(x for x in simple_exports["files"] if x["output"] == checkpoint.name)
+    assert export_file["source_sha256"] == expected["sha256"]
+    assert sha(checkpoint.read_bytes()) == public_file["sha256"]
+    discarded = ROOT / "outputs/course-experiments/course-v1/simple_models" / checkpoint.name
+    replay["discarded_mutable_local_weights"].append({"path": str(discarded.relative_to(ROOT)), "observed_sha256": sha(discarded.read_bytes()), "frozen_original_sha256": expected["sha256"], "used_as_evidence_input": False})
+    model, saved, vocab = load_simple_checkpoint(checkpoint, "cpu")
+    assert vocab == vocabulary
+    row = {"public_weight_sha256": sha(checkpoint.read_bytes()), "frozen_original_sha256_from_export_provenance": expected["sha256"], "immutable_public_revision": simple_spec["revision"], "kind": saved["kind"], "context": saved["context"], "width": saved["width"], "parameter_count": sum(p.numel() for p in model.parameters()), "state_shapes": {k:list(v.shape) for k,v in saved["model"].items()}, "splits": {}}
+    with torch.no_grad():
+        for side, documents in parts.items():
+            x, y = examples(documents, vocabulary, context)
+            value = torch.nn.functional.cross_entropy(model(x), y).item()
+            expected_nll = frozen["results"]["runs"][name]["after_nll_same_post_update_time"][side]
+            assert abs(value-expected_nll)<2e-6
+            row["splits"][side] = {"records":len(documents), "targets_including_eos":y.numel(), "dtype":str(y.dtype), "input_shape":list(x.shape), "loss":value, "frozen_loss":expected_nll}
+    row["sample"] = generate_simple(model, vocab, context, "顏色=", 24)
+    replay["runs"][name] = row
+payloads = []
+for spec in published["models"]:
+    for item in spec["files"]:
+        if Path(item["output"]).suffix != ".pt":
+            continue
+        path = ROOT / "checkpoints/course" / spec["id"] / item["output"]
+        assert path.is_file()
+        assert sha(path.read_bytes())==item["sha256"]
+        saved = torch.load(path, map_location="cpu", weights_only=True)
+        from scripts.check_course_models import check_payload
+        fmt = check_payload(saved)
+        payloads.append({"model_group":spec["id"], "file":item["output"], "sha256":item["sha256"], "bytes":path.stat().st_size, "public_url":f'https://huggingface.co/{spec["repo"]}/resolve/{spec["revision"]}/{item["path"]}', "revision":spec["revision"], "format_version":fmt, "keys":sorted(saved), "training_only_fields_absent":True})
+text_spec = next(s for s in published["models"] if s["id"] == "text_foundation")
+text_path=ROOT / "checkpoints/course/text_foundation/model.pt"
+text_payload=torch.load(text_path,map_location="cpu",weights_only=True)
+replay["published_payloads"] = {"groups":len(published["models"]), "weights":len(payloads), "inspected_existing_files_only":True, "items":payloads, "text_foundation_config":text_payload["config"], "text_foundation_tokenizer":text_payload["tokenizer"]}
+(ART / "T.3-cpu-execution.json").write_text(json.dumps({"reviewer_task":"/root/technical_round_coordinator/technical_t_3_fresh", "checked_on":"2026-10-03", "environment":environment, "records":records, "formal_commands_not_executed":["train_simple --train --steps 200", "course_experiments.run --experiment simple_models", "fetch_course_models --model text_foundation", "check_course_models --model text_foundation"]},ensure_ascii=False,indent=2)+"\n")
+(ART / "T.3-pinned-replay.json").write_text(json.dumps(replay,ensure_ascii=False,indent=2)+"\n")
+for record in records:
+    print(record["label"], "exit", record["returncode"], record["stdout"].strip(), record["stderr"].strip()[-180:])
+print("既有權重 CPU replay",len(replay["runs"]),"模型；公開包",len(published["models"]),"組",len(payloads),"權重的真 hash 與已移除訓練欄位")
