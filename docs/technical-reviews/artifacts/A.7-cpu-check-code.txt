@@ -1,0 +1,86 @@
+from pathlib import Path
+import ast
+import contextlib
+import hashlib
+import io
+import json
+import os
+import platform
+import re
+import torch
+from tiny_perceptron.data import ByteTokenizer
+from scripts.course_experiments.applications import _grounding, _prompt_ids, _rag_question
+
+root = Path(__file__).resolve().parents[3]
+artifact = root / "docs/technical-reviews/artifacts"
+def digest(raw):
+    return hashlib.sha256(raw).hexdigest()
+
+source_path = root / "course/chapters/0A.md"
+raw = source_path.read_bytes()
+headings = list(re.finditer(rb"(?m)^## ([A-Z\d]+\.\d+) [^\r\n]+", raw))
+n = next(i for i, heading in enumerate(headings) if heading[1] == b"A.7")
+section = raw[headings[n].start():headings[n + 1].start() if n + 1 < len(headings) else len(raw)]
+assert digest(section) == "dac8ad66687c90227c59c0627bc71e076649552be9c5f7ba818be3c39d323b75"
+(artifact / "A.7-source-raw.txt").write_bytes(section)
+code = re.search(r"```python\n(.*?)\n```", section.decode(), re.S)[1]
+environment = {"python": platform.python_version(), "torch": str(torch.__version__), "torch_git": torch.version.git_version, "torch_file": torch.__file__, "device": "cpu", "OMP_NUM_THREADS": os.environ.get("OMP_NUM_THREADS"), "MKL_NUM_THREADS": os.environ.get("MKL_NUM_THREADS"), "torch_threads": str(torch.get_num_threads())}
+outputs = []
+for name, program, expected in [
+    ("原例", code, "輸入 75 答案預留 25\n總預算 100 放得下 True\n歷史變長後 130 超出 30\n"),
+    ("練習：只改 retrieval 40→10，保留 history += 30", code.replace('"retrieval": 40', '"retrieval": 10'), "輸入 45 答案預留 25\n總預算 70 放得下 True\n歷史變長後 100 超出 0\n"),
+]:
+    stream = io.StringIO()
+    namespace = {}
+    with contextlib.redirect_stdout(stream):
+        exec(compile(program, name, "exec"), namespace)
+    actual = stream.getvalue()
+    assert actual == expected
+    outputs.append({"case": name, "code": program, "stdout": actual, "expected": expected, "budget_final": namespace["budget"], "used_final": namespace["used"], "stderr": "", "exit_code": 0, "assertion_passed": True})
+record_path = root / "docs/course-experiments/results/rag.json"
+record_bytes = record_path.read_bytes()
+record = json.loads(record_bytes)
+rows = record["results"]["samples"]
+tokenizer = ByteTokenizer()
+assert len(rows) == 84
+config = record["results"]["model"]["config"]
+assert config["max_length"] == 160
+pins = {}
+for path in ["scripts/course_experiments/applications.py", "scripts/course_experiments/common.py", "scripts/course_experiments/run.py", "tiny_perceptron/retrieval.py", "tiny_perceptron/data.py", "tiny_perceptron/model.py"]:
+    current = digest((root / path).read_bytes())
+    original = record["code_sha256"][path]
+    assert current == original
+    pins[path] = {"current_sha256": current, "actual_run_sha256": original, "matches": True}
+checks = []
+for row in rows:
+    generation = row["generation"]
+    messages = generation["messages"]
+    assert len(messages) == 1 and messages[0]["role"] == "user"
+    assert messages[0]["content"] == _rag_question(row["fact"]["key"], row["documents"])
+    prompt = _prompt_ids(messages, tokenizer)
+    assert prompt == generation["input_ids"]
+    assert len(prompt) == generation["input_tokens"]
+    assert generation["max_new_tokens"] == 16
+    assert len(prompt) + generation["max_new_tokens"] <= config["max_length"]
+    sample = generation["samples"][0]
+    ids = sample["generated_ids"]
+    eos = bool(ids and ids[-1] == tokenizer.eos_id)
+    content = ids[:-1] if eos else ids
+    invalid = [i for i in content if i < 8]
+    assert eos == sample["eos"] and eos
+    assert invalid == sample["invalid_special_tokens"] and invalid == []
+    assert sample["generated_tokens"] == len(ids) <= 16
+    assert tokenizer.decode(content) == sample["generated"]
+    assert ids.count(tokenizer.eos_id) == 1
+    result = _grounding(sample, row["documents"], row["expected"])
+    for field, value in result.items():
+        assert value == row[field], (row["family"], row["mode"], field)
+    checks.append({"family": row["family"], "mode": row["mode"], "input_tokens": len(prompt), "input_ids_sha256": digest(json.dumps(prompt, separators=(",", ":")).encode()), "messages_and_documents_intact": True, "full_serialization_ids_equal": True, "input_plus_reserved": len(prompt) + 16, "generated_ids": ids, "eos": eos, "invalid_control_ids": invalid, "generated": sample["generated"], "expected": row["expected"], "exact_match": row["exact_match"]})
+lengths = [row["input_tokens"] for row in checks]
+assert min(lengths) == 58 and max(lengths) == 94
+modes = {mode: sum(row["mode"] == mode for row in checks) for mode in sorted({row["mode"] for row in checks})}
+assert set(modes.values()) == {12} and len(modes) == 7
+summary = {"rows": len(rows), "families": len({row["family"] for row in rows}), "modes": modes, "input_token_range": [min(lengths), max(lengths)], "reservation": 16, "max_input_plus_reserved": max(lengths) + 16, "max_positions": 160, "eos_count": sum(row["eos"] for row in checks), "invalid_control_count": sum(bool(row["invalid_control_ids"]) for row in checks), "exact_matches": sum(row["exact_match"] for row in checks), "exact_match_failures": sum(not row["exact_match"] for row in checks), "all_messages_single_user_without_long_history_or_summary": True, "all_input_ids_match_complete_documents_and_serialization": True}
+result = {"reviewed_at_utc": "2026-10-03", "environment": environment, "raw_source_sha256": digest(section), "code_sha256": digest(Path(__file__).read_bytes()), "original_example_and_exercise": outputs, "formal_record": {"path": str(record_path.relative_to(root)), "sha256": digest(record_bytes), "revision": record["revision"], "device": record["device"], "seed": record["seed"], "torch": record["torch_version"], "python": record["python_version"], "model_config": config, "training_steps": record["results"]["training"]["steps"], "actual_codepin_comparison": pins}, "formal_row_summary": summary, "formal_row_checks": checks, "scope": "親跑原例與唯一練習；對固定正式結果逐筆重建完整輸入 ID、核原始生成 ID 與評分，不重跑訓練或正式生成，無 GPU／雲端／網路。"}
+(artifact / "A.7-cpu-output.json").write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+print(json.dumps({"original_example_and_exercise": outputs, "formal_row_summary": summary, "environment": environment}, ensure_ascii=False, indent=2))
