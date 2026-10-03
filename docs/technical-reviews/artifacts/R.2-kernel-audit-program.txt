@@ -1,0 +1,137 @@
+"""Verify current notebook bytes against receipts from real CPU kernel runs."""
+
+import argparse
+import hashlib
+import json
+import platform
+import subprocess
+from datetime import UTC, datetime
+from pathlib import Path
+
+ROOT = Path('/workspace/tiny-perceptron-vlm')
+ARTIFACTS = ROOT / 'docs/validation-artifacts'
+EXECUTED = ROOT / 'outputs/notebooks-reader-round'
+
+
+def sha(raw):
+    return hashlib.sha256(raw).hexdigest()
+
+
+def require(condition, message):
+    if not condition:
+        raise ValueError(message)
+
+
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--output', type=Path)
+args = parser.parse_args()
+baseline_path = ARTIFACTS / 'reader-round-notebook-kernels.json'
+baseline_raw = baseline_path.read_bytes()
+baseline = json.loads(baseline_raw)
+require(baseline['status'] == 'passed', 'The whole-run baseline did not pass')
+require(baseline['result']['total'] == baseline['result']['passed'] == 222,
+        'Expected the recorded actual whole run of 222 notebooks')
+require(baseline['result']['failed'] == 0 and not baseline['result']['failures'],
+        'Baseline contains failures')
+
+receipts = {
+    str(baseline_path.relative_to(ROOT)): {
+        'sha256': sha(baseline_raw),
+        'checked_at': baseline['checked_at'],
+        'result': baseline['result'],
+        'scope': baseline['scope'],
+    }
+}
+candidates = {}
+for record in baseline['records']:
+    candidates.setdefault(record['notebook'], []).append({
+        **record,
+        'receipt': str(baseline_path.relative_to(ROOT)),
+        'receipt_sha256': sha(baseline_raw),
+        'receipt_checked_at': baseline['checked_at'],
+        'execution_scope': 'actual whole run before subsequent factual corrections',
+    })
+
+for path in sorted(ARTIFACTS.glob('technical-revision-*-kernel.json')):
+    raw = path.read_bytes()
+    receipt = json.loads(raw)
+    result = receipt['result']
+    require(result['mode'] == 'kernel' and result['total'] == result['passed'] == 1,
+            f'Invalid single-lesson kernel receipt: {path.name}')
+    require(result['failed'] == 0 and not result['failures'],
+            f'Failed single-lesson kernel receipt: {path.name}')
+    relative = str(path.relative_to(ROOT))
+    receipts[relative] = {
+        'sha256': sha(raw), 'checked_at': receipt['checked_at'],
+        'result': result, 'scope': receipt['scope'],
+    }
+    candidates.setdefault(receipt['notebook'], []).append({
+        'notebook': receipt['notebook'],
+        'input_sha256': receipt['input_sha256'],
+        'executed_sha256': receipt['executed_sha256'],
+        'receipt': relative, 'receipt_sha256': sha(raw),
+        'receipt_checked_at': receipt['checked_at'],
+        'execution_scope': 'actual fresh kernel rerun after a factual correction',
+    })
+
+inputs = sorted((ROOT / 'notebooks').rglob('*.ipynb'))
+require(len(inputs) == 222, f'Expected 222 current notebooks, found {len(inputs)}')
+require({str(p.relative_to(ROOT)) for p in inputs} == set(candidates),
+        'Current notebook paths do not match recorded kernel receipt paths')
+records = []
+for path in inputs:
+    relative = str(path.relative_to(ROOT))
+    executed_path = EXECUTED / path.relative_to(ROOT / 'notebooks')
+    original_raw = path.read_bytes()
+    executed_raw = executed_path.read_bytes()
+    input_sha, executed_sha = sha(original_raw), sha(executed_raw)
+    matches = [r for r in candidates[relative]
+               if r['input_sha256'] == input_sha and r['executed_sha256'] == executed_sha]
+    require(bool(matches), f'Current input/output lacks a matching actual kernel receipt: {relative}')
+    origin = max(matches, key=lambda r: r['receipt_checked_at'])
+    original, executed = json.loads(original_raw), json.loads(executed_raw)
+    require(len(original['cells']) == len(executed['cells']), f'Cell count changed: {relative}')
+    code_cells = output_blocks = 0
+    for number, (a, b) in enumerate(zip(original['cells'], executed['cells'], strict=True)):
+        require(a['cell_type'] == b['cell_type'] and a['source'] == b['source'],
+                f'Current cell source differs from executed output: {relative}:{number}')
+        if a['cell_type'] == 'code':
+            code_cells += 1
+            require(isinstance(b['execution_count'], int) and b['execution_count'] > 0,
+                    f'Code cell was not executed: {relative}:{number}')
+            require(all(o['output_type'] != 'error' for o in b.get('outputs', [])),
+                    f'Code cell has error output: {relative}:{number}')
+            output_blocks += len(b.get('outputs', []))
+    records.append({**origin, 'code_cells': code_cells, 'output_blocks': output_blocks,
+                    'cell_sources_match_current': True, 'no_error_outputs': True})
+
+for record in records:
+    require(sha((ROOT / record['notebook']).read_bytes()) == record['input_sha256'],
+            f'Input changed during verification: {record["notebook"]}')
+    require(sha((EXECUTED / Path(record['notebook']).relative_to('notebooks')).read_bytes())
+            == record['executed_sha256'],
+            f'Executed output changed during verification: {record["notebook"]}')
+
+report = {
+    'schema_version': 1, 'checked_at': datetime.now(UTC).isoformat(),
+    'reviewer_task': '/root/technical_round_coordinator/technical_r_2_fresh',
+    'identity_note': '本次只讀SHA及cells原材料核對，未執行Git、未重跑kernel。',
+    'status': 'passed',
+    'scope': 'Read-only verification of every current notebook and executed output against '
+             'receipts from the actual whole CPU kernel run and actual corrected-lesson '
+             'reruns. This program does not execute kernels, judge factual correctness or '
+             'claim remote Colab execution.',
+    'verification_environment': {'python': platform.python_version()},
+    'notebooks': len(records), 'code_cells': sum(r['code_cells'] for r in records),
+    'output_blocks': sum(r['output_blocks'] for r in records),
+    'corrected_lessons': sorted(Path(r['notebook']).stem for r in records
+                                if r['receipt'] != str(baseline_path.relative_to(ROOT))),
+    'receipts': receipts, 'records': records,
+    'verification_program': Path(__file__).read_text(),
+    'verification_command': 'OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 .venv/bin/python /tmp/R.2-kernel-audit.py --output docs/technical-reviews/artifacts/R.2-kernel-audit.json',
+}
+if args.output:
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2) + '\n')
+print(json.dumps({k: report[k] for k in ('status', 'notebooks', 'code_cells',
+                                       'output_blocks', 'corrected_lessons')}))

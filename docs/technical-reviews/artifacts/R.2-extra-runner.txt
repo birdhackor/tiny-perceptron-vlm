@@ -1,0 +1,30 @@
+import re,json,pathlib,hashlib,subprocess,os,sys
+root=pathlib.Path('/workspace/tiny-perceptron-vlm');art=root/'docs/technical-reviews/artifacts'
+items=[('01.md','1.10'),('01.md','1.11'),('01.md','1.15'),('05.md','5.6'),('06.md','6.7'),('06.md','6.9')]
+variants={
+'1.10':[('u=3w',[('u = 2 * w','u = 3 * w'),('2 * u.detach().item(), 2','2 * u.detach().item(), 3'),('== 24','== 54')])],
+'1.11':[('第二成本係數2',[('0.5 * w[1]','2 * w[1]'),('[-4.0, 2.0]','[-4.0, 8.0]')])],
+'1.15':[('末分數2',[('[3.0, 1.0, 0.0]','[3.0, 1.0, 2.0]')])],
+'5.6':[('暖身10',[('warmup=5','warmup=10')])],
+'6.7':[('前三byte',[('raw[:1]','raw[:3]')]),('前四byte',[('raw[:1]','raw[:4]')])],
+'6.9':[('空白邊界',[('tok.encode("hello").ids','tok.encode("hello hello").ids'),('tok.encode("hel").ids + tok.encode("lo").ids','tok.encode("hello ").ids + tok.encode("hello").ids'),('assert whole != chunks','assert whole == chunks')])]
+}
+def section(path,id):
+ raw=(root/path).read_bytes();m=re.search(rb'(?m)^## '+re.escape(id.encode())+rb' [^\r\n]+',raw);n=re.search(rb'(?m)^## ',raw[m.end():]);return raw[m.start():m.end()+n.start() if n else len(raw)]
+runs=[];snaps=[];env={**os.environ,'OMP_NUM_THREADS':'1','MKL_NUM_THREADS':'1','HF_HUB_OFFLINE':'1','TRANSFORMERS_OFFLINE':'1','CUDA_VISIBLE_DEVICES':''}
+for f,id in items:
+ path='course/chapters/'+f;raw=section(path,id);s=raw.decode();code='\n'.join(re.findall(r'```python\n(.*?)```',s,re.S));snaps.append({'source':path+'#'+id,'raw_sha256':hashlib.sha256(raw).hexdigest(),'raw_utf8':s})
+ cases=[('原例',code)]
+ for name,replacements in variants[id]:
+  v=code
+  for a,b in replacements:assert a in v;v=v.replace(a,b)
+  cases.append(('練習:'+name,v))
+ for name,s in cases:
+  program='import torch\ntorch.set_num_threads(1)\ntorch.manual_seed(42)\n'+s;command=[str(root/'.venv/bin/python'),'-c',program]
+  p=subprocess.run(command,cwd=root,env=env,capture_output=True,text=True,timeout=40);record={'source':id,'case':name,'command':command,'code':program,'exit_code':p.returncode,'stdout':p.stdout,'stderr':p.stderr};runs.append(record);print(json.dumps({k:record[k] for k in ('source','case','exit_code','stdout','stderr')},ensure_ascii=False),flush=True)
+raw=section('course/first-steps.md','W.1');snaps.append({'source':'course/first-steps.md#W.1','raw_sha256':hashlib.sha256(raw).hexdigest(),'raw_utf8':raw.decode()})
+base='\n'.join(re.findall(r'```python\n(.*?)```',section('course/chapters/01.md','1.1').decode(),re.S))
+s=base.replace('貓看狗，狗看貓。','鳥看狗，狗看鳥。');command=[str(root/'.venv/bin/python'),'-c',s];p=subprocess.run(command,cwd=root,env=env,capture_output=True,text=True,timeout=40);runs.append({'source':'W.1','case':'練習鳥文本','command':command,'code':s,'exit_code':p.returncode,'stdout':p.stdout,'stderr':p.stderr})
+import torch
+out={'reviewer_task':'/root/technical_round_coordinator/technical_r_2_fresh','scope':'R.2必要全課前置links原材料核查的追加精確scope，僅對R.2下判定；W.1環境語義親讀，未執行安装/Colab/浏览器。','environment':{'python':sys.version,'torch':torch.__version__,'device':'cpu','threads':'OMP_NUM_THREADS=1 MKL_NUM_THREADS=1'},'snapshots':snaps,'runs':runs}
+(art/'R.2-extra-execution.json').write_text(json.dumps(out,ensure_ascii=False,indent=2)+'\n');(art/'R.2-extra-runner.txt').write_bytes(pathlib.Path(__file__).read_bytes())

@@ -1,0 +1,63 @@
+import os, re, json, hashlib, pathlib, subprocess, sys, platform
+root=pathlib.Path('/workspace/tiny-perceptron-vlm')
+art=root/'docs/technical-reviews/artifacts'
+art.mkdir(exist_ok=True)
+items=[('course/chapters/01.md','1.1'),('course/chapters/01.md','1.8'),('course/chapters/07.md','7.3'),('course/chapters/07.md','7.1'),('course/chapters/08.md','8.1'),('course/chapters/09.md','9.1'),('course/chapters/13.md','13.1'),('course/chapters/02.md','2.1'),('course/first-steps.md','W.3'),('course/chapters/10.md','10.1'),('course/chapters/12.md','12.1'),('course/chapters/04.md','4.5'),('course/chapters/14.md','14.1'),('course/chapters/15.md','15.1'),('course/chapters/05.md','5.9'),('course/chapters/16.md','16.1'),('course/chapters/17.md','17.1'),('course/chapters/18.md','18.1'),('course/chapters/0A.md','A.2'),('course/chapters/0B.md','B.1'),('course/chapters/0C.md','C.3')]
+def section(path,ident):
+    data=(root/path).read_bytes()
+    m=re.search(rb'(?m)^## '+re.escape(ident.encode())+rb' [^\r\n]+',data)
+    next_m=re.search(rb'(?m)^## ',data[m.end():])
+    end=m.end()+next_m.start() if next_m else len(data)
+    return data[m.start():end]
+raw=section('course/README.md','R.2')
+(art/'R.2-source.txt').write_bytes(raw)
+snapshots=[]; runs=[]
+variants={
+'1.1':[('反向字表',[('sorted(set(text))','sorted(set(text), reverse=True)')])],
+'1.8':[('答案索引0',[('torch.tensor([1])','torch.tensor([0])'),('probabilities[0, 1]','probabilities[0, 0]')])],
+'7.3':[('答案兩中文',[('"content": "答"','"content": "答案"')]),('答案OK',[('"content": "答"','"content": "OK"')])],
+'7.1':[('問題改2+1',[('"content": "1+1=?"','"content": "2+1=?"')])],
+'8.1':[('海比喻',[('4，就像兩雙筷子共有四根。','4，像一片深邃的海'),('"正確": True, "貼切比喻": True','"正確": True, "貼切比喻": False')])],
+'9.1':[('回答0通過安全',[('"回答0安全": False','"回答0安全": True')])],
+'13.1':[('移除prompt格式限制',[('"prompt": "只回數字：2+2=?"','"prompt": "2+2=?"')])],
+'2.1':[('三位置同ID1',[('[[1, 2, 1]]','[[1, 1, 1]]')])],
+'W.3':[('首同學末考110',[('[60.0, 70.0, 80.0]','[60.0, 70.0, 110.0]')])],
+'10.1':[('藍方塊',[('scene("red", "square")','scene("blue", "square")')])],
+'12.1':[('880Hz',[('tone(440.0)','tone(880.0)')])],
+'4.5':[('一筆輸入',[('torch.randn(2, 3, 8)','torch.randn(1, 3, 8)')]),('四位置輸入',[('torch.randn(2, 3, 8)','torch.randn(2, 4, 8)')])],
+'14.1':[('共同位移22/25',[('score(3, 5)','score(22, 25)')]),('間隔四格22/26',[('score(3, 5)','score(22, 26)')])],
+'15.1':[('六列',[('torch.cat([x, x], dim=0)','torch.cat([x, x, x], dim=0)')])],
+'5.9':[('六位置',[('[[1, 2, 3]]','[[1, 2, 3, 1, 2, 3]]')])],
+'16.1':[('十二位置',[('torch.tensor([[1, 2, 3]])','torch.arange(1, 13)[None]')])],
+'17.1':[('行數128',[('torch.zeros(64, 32)','torch.zeros(128, 32)')])],
+'18.1':[('只印答案',[('print("回答", answer, "分布", prob.tolist())','print("回答", answer)')])],
+'A.2':[('紅街地址',[('"address": "青街8號"','"address": "紅街9號"')])],
+'B.1':[('問題46參數仍45',[('"user": "123乘45"','"user": "123乘46"')]),('問題參數皆46',[('"user": "123乘45"','"user": "123乘46"'),('"b": 45','"b": 46')])],
+'C.3':[('全部3',[('candidates = [3, 4, 3, 5]','candidates = [3, 3, 3, 3]')])]
+}
+env={**os.environ,'OMP_NUM_THREADS':'1','MKL_NUM_THREADS':'1','HF_HUB_OFFLINE':'1','TRANSFORMERS_OFFLINE':'1','CUDA_VISIBLE_DEVICES':''}
+setup='import torch\ntorch.set_num_threads(1)\ntorch.manual_seed(42)\n'
+for path,ident in items:
+    data=section(path,ident);text=data.decode('utf-8')
+    snippets=re.findall(r'```python\n(.*?)```',text,re.S)
+    code='\n'.join(snippets)
+    snapshots.append({'source':path+'#'+ident,'section_sha256':hashlib.sha256(data).hexdigest(),'file_sha256':hashlib.sha256((root/path).read_bytes()).hexdigest(),'raw_utf8':text,'python_fences':snippets})
+    cases=[('原例',code)]
+    for name,replacements in variants[ident]:
+        variant=code
+        for old,new in replacements:
+            assert old in variant,(ident,old)
+            variant=variant.replace(old,new)
+        cases.append(('練習:'+name,variant))
+    for name,source in cases:
+        executable=setup+source
+        command=[str(root/'.venv/bin/python'),'-c',executable]
+        p=subprocess.run(command,cwd=root,env=env,text=True,capture_output=True,timeout=40)
+        record={'section':ident,'case':name,'command':command,'code_sha256':hashlib.sha256(executable.encode()).hexdigest(),'code':executable,'exit_code':p.returncode,'stdout':p.stdout,'stderr':p.stderr,'offline':True,'device':'cpu','timeout_seconds':40}
+        runs.append(record)
+        print(json.dumps({'section':ident,'case':name,'exit_code':p.returncode,'stdout':p.stdout,'stderr':p.stderr},ensure_ascii=False),flush=True)
+(art/'R.2-prerequisites.json').write_text(json.dumps(snapshots,ensure_ascii=False,indent=2)+'\n')
+import torch
+result={'reviewer_task':'/root/technical_round_coordinator/technical_r_2_fresh','accessed_on':'2026-10-03','environment':{'python':sys.version,'torch':torch.__version__,'torch_git_version':torch.version.git_version,'device':'cpu','platform':platform.platform(),'threads':'OMP_NUM_THREADS=1 MKL_NUM_THREADS=1; torch.set_num_threads(1)'},'runs':runs,'not_executed':'正式training bash、Colab、Notebook kernel、GPU；R.2無程式fence，本節導覽練習選17.1並親讀其前置。'}
+(art/'R.2-execution.json').write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\n')
+(art/'R.2-runner.txt').write_bytes(pathlib.Path(__file__).read_bytes())

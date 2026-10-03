@@ -1,0 +1,155 @@
+import contextlib
+import hashlib
+import io
+import json
+import os
+import platform
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+import torch
+
+ROOT = Path.cwd()
+ART = ROOT / "docs/technical-reviews/artifacts"
+torch.set_num_threads(1)
+torch.manual_seed(42)
+
+
+def sha(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def section(path, lesson):
+    raw = (ROOT / path).read_bytes()
+    matches = list(re.finditer(rb"(?m)^## ([A-Z\d]+\.\d+) [^\r\n]+", raw))
+    i = next(i for i, m in enumerate(matches) if m[1].decode() == lesson)
+    end = matches[i + 1].start() if i + 1 < len(matches) else len(raw)
+    return raw[matches[i].start():end]
+
+
+result = {
+    "reviewer_task": "/root/technical_round_coordinator/technical_r_4_fresh",
+    "environment": {
+        "python": platform.python_version(),
+        "torch": torch.__version__,
+        "torch_git": torch.version.git_version,
+        "device": "cpu",
+        "platform": platform.platform(),
+        "OMP_NUM_THREADS": os.environ["OMP_NUM_THREADS"],
+        "MKL_NUM_THREADS": os.environ["MKL_NUM_THREADS"],
+    },
+    "command": "OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 .venv/bin/python docs/technical-reviews/artifacts/R.4-cpu-driver.txt",
+    "runs": [],
+}
+raw = section("course/README.md", "R.4")
+assert hashlib.sha256(raw).hexdigest() == "cac87bd3f05456164a804eb57a76f7d7e55100baefba9186d20b39ff331e023d"
+(ART / "R.4-source-raw.txt").write_bytes(raw)
+result["R.4"] = {
+    "raw_sha256": hashlib.sha256(raw).hexdigest(),
+    "code_fences": len(re.findall(rb"(?m)^```", raw)) // 2,
+    "exercises": "沒有要求執行的程式或練習；以下只核 R.4 直接必要前置。",
+}
+t3 = section("course/training.md", "T.3")
+(ART / "R.4-prerequisite-T.3-raw.txt").write_bytes(t3)
+
+for path, lesson in [("course/chapters/02.md", "2.1"), ("course/chapters/03.md", "3.1"), ("course/chapters/15.md", "15.4")]:
+    raw = section(path, lesson)
+    (ART / f"R.4-prerequisite-{lesson}-raw.txt").write_bytes(raw)
+    code = re.findall(r"```python\n(.*?)```", raw.decode(), re.S)[0]
+    variants = [("original", code)]
+    if lesson == "2.1":
+        variants.append(("exercise", code.replace("[[1, 2, 1]]", "[[1, 1, 1]]") + "\nassert torch.equal(x, torch.tensor([[[1.,0.,0.],[1.,0.,0.],[1.,0.,0.]]]))\n"))
+    if lesson == "3.1":
+        variants.append(("exercise", code.replace("[0.9, 0.1]", "[0.1, 0.9]").replace("[1.8, 0.4]", "[0.2, 3.6]")))
+    if lesson == "15.4":
+        variants.append(("exercise-reorder", code.replace("[0.1, 0.7, 0.2]", "[0.1, 0.2, 0.7]") + "\nassert prob[0].topk(2).indices.tolist() == [2,1]\n"))
+        variants.append(("exercise-k3", code.replace("for k in (2, 1):", "for k in (3,):") + "\nassert torch.allclose(weights.sum(-1), torch.ones(2))\n"))
+    for name, text in variants:
+        out = io.StringIO()
+        namespace = {"__name__": "__main__"}
+        with contextlib.redirect_stdout(out):
+            exec(compile(text, f"{path}#{lesson}:{name}", "exec"), namespace)
+        result["runs"].append({"source": path + "#" + lesson, "source_sha256": hashlib.sha256(raw).hexdigest(), "variant": name, "code": text, "stdout": out.getvalue(), "status": "passed"})
+
+prompt = "color=blue;shape=circle;"
+argv = [".venv/bin/python", "scripts/infer.py", "checkpoints/course/text_foundation/model.pt", "--prompt", prompt, "--tokens", "32", "--device", "cpu", "--json"]
+run = subprocess.run(argv, capture_output=True, text=True, timeout=60, check=False)
+assert run.returncode == 0, run.stderr
+report = json.loads(run.stdout)
+assert report["answer"] == "side=right." and report["eos"] is True
+result["runs"].append({"source": "course/training.md#T.3", "variant": "existing-pinned-weight-inference-only", "argv": argv, "returncode": run.returncode, "stdout": run.stdout, "stderr": run.stderr, "status": "passed"})
+public = json.loads((ROOT / "docs/course-experiments/public-models.json").read_text())
+spec = next(s for s in public["models"] if s["id"] == "text_foundation")
+weights = []
+for f in spec["files"]:
+    if not f["output"].endswith(".pt"):
+        continue
+    p = ROOT / "checkpoints/course/text_foundation" / f["output"]
+    assert p.is_file() and sha(p) == f["sha256"] and p.stat().st_size == f["bytes"]
+    saved = torch.load(p, map_location="cpu", weights_only=True)
+    forbidden = [k for k in saved if k in ("optimizer", "torch_rng", "python_rng", "cuda_rng", "mps_rng", "training_state", "step")]
+    assert forbidden == []
+    weights.append({"output": f["output"], "sha256": sha(p), "bytes": p.stat().st_size, "keys": sorted(saved), "config": saved.get("config"), "tokenizer": saved.get("tokenizer"), "training_keys": forbidden, "state_tensor_count": len(saved["model"])})
+result["public_weights"] = {
+    "original_kind": "existing ignored inference checkpoints; not tracked repository code",
+    "repository": spec["repo"],
+    "revision": spec["revision"],
+    "immutable_model_url": f"https://huggingface.co/{spec['repo']}/resolve/{spec['revision']}/course/course-v1/text_foundation/model.pt",
+    "weights": weights,
+    "scope": "親讀此組六份公開權重與固定匯出器；沒有下载、更新參數或續訓。",
+}
+
+formal = json.loads((ROOT / "docs/course-experiments/results/vision_ablation.json").read_text())
+interventions = formal["results"]["interventions"]
+for name, d in interventions.items():
+    assert len(d["samples"]) == d["examples"] == 12
+    assert sum(s["exact_match"] for s in d["samples"]) == d["correct"]
+    assert d["exact_match"] == d["correct"] / d["examples"]
+    assert not d["skipped"]
+result["formal_denominator_check"] = {
+    "path": "docs/course-experiments/results/vision_ablation.json",
+    "sha256": sha(ROOT / "docs/course-experiments/results/vision_ablation.json"),
+    "configuration": {k: formal[k] for k in ("revision", "device", "seed", "step_scale", "evidence_status", "torch_version")},
+    "training": {k: v for k, v in formal["results"]["training"].items() if k != "history"},
+    "split_policy": formal["results"]["data"]["split_policy"],
+    "splits": {k: {"count": v["count"], "sha256": v["sha256"], "families": sorted(set(r["family"] for r in v["records"]))} for k, v in formal["results"]["data"]["splits"].items()},
+    "interventions": {name: {"correct": d["correct"], "examples": d["examples"], "effective_tokens": d["effective_tokens"], "eos_rate": d["eos_rate"], "exact_match": d["exact_match"], "failed_rows": [s["row"] for s in d["samples"] if not s["exact_match"]], "donor_rows": [s["donor_row"] for s in d["samples"]]} for name, d in interventions.items()},
+    "frozen_code_matches_current": sha(ROOT / "scripts/course_experiments/modalities.py") == formal["code_sha256"]["scripts/course_experiments/modalities.py"],
+    "scope": "只核凍結報告分母與失敗保存；未重跑正式訓練，未主張 CPU 推論支持 GPU 速度或一般品質。",
+}
+assert result["formal_denominator_check"]["frozen_code_matches_current"]
+
+for argv in [
+    [".venv/bin/python", "scripts/fetch_course_models.py", "--list"],
+    [".venv/bin/python", "scripts/train_simple.py", "--model", "bigram", "--seed", "42", "--device", "cpu"],
+]:
+    run = subprocess.run(argv, capture_output=True, text=True, timeout=60, check=False)
+    assert run.returncode == 0, run.stderr
+    if "train_simple.py" in argv[1]:
+        d = json.loads(run.stdout)
+        assert d["mode"] == "dry-run-no-weight-update"
+    result["runs"].append({"source": "course/training.md#T.3", "variant": "offline-list" if "fetch_course" in argv[1] else "dry-run-no-update", "argv": argv, "returncode": run.returncode, "stdout": run.stdout, "stderr": run.stderr, "status": "passed"})
+
+paths = ["LICENSE", "assets/training/manifest.json", "assets/training/README.md", "docs/course-experiments/README.md", "course/README.md", "course/training.md", "tiny_perceptron/model.py", "tiny_perceptron/training.py", "tiny_perceptron/multimodal.py", "scripts/course_release.py", "scripts/fetch_course_models.py", "scripts/infer.py", "scripts/train_simple.py", "scripts/course_experiments/text.py", "scripts/course_experiments/common.py", "scripts/course_experiments/modalities.py", "scripts/export_course.py", "scripts/check_notebooks.py", ".github/workflows/pages.yml", "docs/course-experiments/results/simple_models.json", "docs/course-experiments/results/text_foundation.json", "docs/course-experiments/results/vision_ablation.json", "docs/course-experiments/public-models.json", "docs/course-experiments/public-releases/text_foundation.json", "docs/course-experiments/student-checks/text_foundation.20261002T220855362946Z.json"]
+result["current_source_sha256"] = {p: sha(ROOT / p) for p in paths}
+manifest = json.loads((ROOT / "assets/training/manifest.json").read_text())
+result["data_packages"] = {"release": manifest["release"], "scope": manifest["scope"], "assets": [{"id": a["id"], "license": a["license"], "training_records": a["training_records"], "archive_sha256": a["archive_sha256"], "file_paths": [f["path"] for f in a["files"]]} for a in manifest["assets"]]}
+assert all(not p.endswith((".pt", ".pth", ".ckpt", ".safetensors")) for a in result["data_packages"]["assets"] for p in a["file_paths"])
+result["project_license"] = {"header": (ROOT / "LICENSE").read_text().splitlines()[0], "sha256": sha(ROOT / "LICENSE"), "inspection": "親讀 MIT 全文，程式與相關文件可使用、修改、散布，需保留版權與授權通知；上游資料依自己的條款。"}
+
+simple = json.loads((ROOT / "docs/course-experiments/results/simple_models.json").read_text())
+result["simple_formal"] = {"revision": simple["revision"], "seed": simple["seed"], "device": simple["device"], "data": simple["results"]["data"], "scope": simple["results"]["scope"], "runs": {name: {k: r[k] for k in ("context", "parameters", "steps", "before_nll", "after_nll_same_post_update_time", "samples")} for name, r in simple["results"]["runs"].items()}, "code_sha256": {p: simple["code_sha256"][p] for p in ("scripts/course_experiments/text.py", "scripts/course_experiments/common.py")}}
+for p, s in result["simple_formal"]["code_sha256"].items():
+    assert sha(ROOT / p) == s
+from tiny_perceptron.data import split_documents, toy_documents
+
+result["simple_formal"]["target_counts_including_eos"] = {name: sum(len(t) + 1 for t in docs) for name, docs in split_documents(toy_documents(), seed=42).items()}
+assert result["simple_formal"]["target_counts_including_eos"] == {"train": 103, "validation": 11, "test": 22}
+
+from tiny_perceptron.multimodal import patchify, tone, log_mel
+
+result["torch_preprocessing"] = {"patchify_shape": list(patchify(torch.zeros(1, 3, 16, 16)).shape), "log_mel_shape": list(log_mel(tone()).shape), "device": "cpu"}
+(ART / "R.4-cpu-execution.json").write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+print(json.dumps({"R.4": result["R.4"], "runs": [{"source": r["source"], "variant": r["variant"], "status": r["status"], "stdout": r["stdout"]} for r in result["runs"]], "public_weights": len(weights), "formal_denominator_check": "passed", "environment": result["environment"]}, ensure_ascii=False, indent=2))
