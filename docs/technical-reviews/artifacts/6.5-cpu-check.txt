@@ -1,0 +1,126 @@
+import hashlib
+import json
+import math
+import os
+import platform
+from pathlib import Path
+
+import torch
+from tiny_perceptron.data import IGNORE, ByteTokenizer, shifted
+from tiny_perceptron.model import ModelConfig, TinyLM, generate, loss_sum
+
+torch.set_num_threads(1)
+print(json.dumps({"python": platform.python_version(), "torch": torch.__version__,
+                  "torch_git_version": torch.version.git_version, "device": "cpu",
+                  "OMP_NUM_THREADS": os.environ.get("OMP_NUM_THREADS"),
+                  "MKL_NUM_THREADS": os.environ.get("MKL_NUM_THREADS")}, ensure_ascii=False))
+
+def values(raw, costs):
+    count = len(raw.encode("utf-8"))
+    return [nll / (count * math.log(2)) for nll in costs]
+
+baseline = values("貓🙂", [5.0, 4.0])
+print("original", json.dumps({"raw": "貓🙂", "raw_bytes": list("貓🙂".encode("utf-8")),
+                              "count": 7, "bpb": baseline}, ensure_ascii=False))
+doubled_nll = values("貓🙂", [10.0, 8.0])
+print("exercise_1", json.dumps({"raw": "貓🙂", "total_nll": [10.0, 8.0],
+                                "bpb": doubled_nll, "ratios": [a / b for a, b in zip(doubled_nll, baseline)]}, ensure_ascii=False))
+assert doubled_nll == [2 * x for x in baseline]
+assert doubled_nll[0] > doubled_nll[1]
+doubled_raw = values("貓🙂貓🙂", [5.0, 4.0])
+print("exercise_2", json.dumps({"raw": "貓🙂貓🙂", "raw_byte_count": 14,
+                                "total_nll": [5.0, 4.0], "bpb": doubled_raw,
+                                "ratios": [a / b for a, b in zip(doubled_raw, baseline)]}, ensure_ascii=False))
+assert doubled_raw == [x / 2 for x in baseline]
+assert doubled_raw[0] > doubled_raw[1]
+print("intro_average_example", {"A_total_nll": 10 * 0.6, "B_total_nll": 5 * 1.0})
+product = 0.5 * 0.25
+summed = -math.log(0.5) - math.log(0.25)
+print("conditional_chain", {"joint_given_A": product, "negative_log_product": -math.log(product), "sum_nll": summed})
+assert math.isclose(summed, -math.log(product), abs_tol=1e-14)
+
+# Two valid next-token labels and one excluded position: no model update.
+logits = torch.tensor([[[0.0, 1.0], [2.0, 0.0], [100.0, -100.0]]], dtype=torch.float64)
+labels = torch.tensor([[1, 0, IGNORE]])
+summed_tensor, count_tensor = loss_sum(logits, labels)
+manual = -logits.log_softmax(-1)[0, 0, 1] - logits.log_softmax(-1)[0, 1, 0]
+print("effective_target_mask", {"labels": labels.tolist(), "count": count_tensor.item(),
+                               "total_nll": summed_tensor.item(), "manual_nll": manual.item()})
+assert count_tensor.item() == 2
+assert torch.allclose(summed_tensor, manual, atol=1e-14, rtol=0)
+
+tok = ByteTokenizer()
+content = tok.encode("貓🙂")
+x, y = shifted([tok.bos_id] + content + [tok.eos_id])
+print("boundary_encoding", {"bos_id": tok.bos_id, "eos_id": tok.eos_id,
+                            "content_ids": content, "input": x.tolist(), "targets": y.tolist(),
+                            "raw_byte_count": 7, "effective_target_count_including_eos": len(y)})
+assert all(i >= 8 for i in content)
+assert len(y) == 8 and y[-1].item() == tok.eos_id
+assert tok.bos_id not in y
+
+# Deterministic tiny module to test the repository generator's cap and EOS,
+# without a training update or a claim about generated-text quality.
+class ConstantNext(torch.nn.Module):
+    def __init__(self, next_id):
+        super().__init__()
+        self.config = ModelConfig(vocab_size=3, max_length=384)
+        self.next_id = next_id
+
+    def forward(self, ids, cache=None):
+        logits = torch.full((*ids.shape, 3), -10.0)
+        logits[..., self.next_id] = 10.0
+        return {"logits": logits, "cache": None}
+
+prefix = torch.tensor([[1]], dtype=torch.long)
+capped = generate(ConstantNext(0), prefix, max_new_tokens=32, eos_id=2)
+stopped = generate(ConstantNext(2), prefix, max_new_tokens=32, eos_id=2)
+print("repository_generate_contract", {"new_tokens_at_cap": capped.shape[1] - prefix.shape[1],
+                                        "new_tokens_until_eos": stopped.shape[1] - prefix.shape[1]})
+assert capped.shape[1] - prefix.shape[1] == 32
+assert stopped.shape[1] - prefix.shape[1] == 1
+
+result_path = Path("docs/course-experiments/results/tokenizer.json")
+raw_result = result_path.read_bytes()
+j = json.loads(raw_result)
+print("frozen_result_identity", json.dumps({"path": str(result_path), "sha256": hashlib.sha256(raw_result).hexdigest(),
+      **{k:j[k] for k in ["revision", "seed", "device", "torch_version", "python_version", "gpu", "step_scale", "status"]}}, ensure_ascii=False))
+print("frozen_data", json.dumps(j["results"]["data"], ensure_ascii=False))
+print("matched_contract", json.dumps({k:j["results"][k] for k in ["matched_budget", "raw_document_schedule_sha256", "scope"]}, ensure_ascii=False))
+for name, run in j["results"]["runs"].items():
+    print("run", name, {"parameters":run["parameters"], "vocab":run["vocab_size_including_8_specials"],
+                         "steps":run["training"]["steps"], "training_raw_utf8_bytes_exposed":run["training_raw_utf8_bytes_exposed"]})
+    assert run["training"]["steps"] == 400
+    assert run["training_raw_utf8_bytes_exposed"] == 664759
+    model = TinyLM(ModelConfig(vocab_size=run["vocab_size_including_8_specials"], width=32, layers=1, max_length=384))
+    params = sum(p.numel() for p in model.parameters())
+    print("cpu_parameter_count_only", name, params)
+    assert params == run["parameters"]
+    for stage in ["before", "after"]:
+        for split, measurement in run[stage].items():
+            total_nll = measurement["mean_token_nll"] * measurement["effective_tokens"]
+            bpb = total_nll / (measurement["raw_utf8_bytes"] * math.log(2))
+            print("frozen_measurement_recalculation", name, stage, split,
+                  json.dumps({"records":measurement["records"], "effective_tokens":measurement["effective_tokens"],
+                      "raw_utf8_bytes":measurement["raw_utf8_bytes"], "mean_token_nll":measurement["mean_token_nll"],
+                      "reconstructed_total_nll":total_nll, "bpb":bpb,
+                      "recorded_bpb":measurement["bpb_including_eos_boundary_targets"],
+                      "difference":bpb-measurement["bpb_including_eos_boundary_targets"],
+                      "samples_count":len(measurement["samples"]), "skipped":measurement["skipped"]}, ensure_ascii=False))
+            assert abs(bpb - measurement["bpb_including_eos_boundary_targets"]) < 1e-12
+            assert len(measurement["samples"]) == measurement["records"]
+    n = sum(run["validation_text_token_lengths"])
+    assert n + j["results"]["data"]["validation"]["records"] == run["after"]["validation"]["effective_tokens"]
+    print("validation_text_plus_eos", name, {"ordinary_tokens":n, "EOS_targets":19, "total":n+19})
+    print("frozen_source_code_digest_comparison", {p:{"frozen":j["code_sha256"][p], "current":hashlib.sha256(Path(p).read_bytes()).hexdigest()}
+          for p in ["scripts/course_experiments/text.py", "scripts/course_experiments/common.py", "tiny_perceptron/data.py", "tiny_perceptron/model.py"]})
+
+# This observes saved, decoded generation strings; it does not reproduce GPU generation.
+by = j["results"]["runs"]["byte256"]["after"]["test"]["samples"]
+bp = j["results"]["runs"]["bpe512"]["after"]["test"]["samples"]
+comparison = [{"row":a["row"], "same_prompt":a["prompt"]==b["prompt"],
+               "byte_decoded_characters":len(a["generated"]), "bpe_decoded_characters":len(b["generated"])}
+              for a,b in zip(by,bp,strict=True)]
+print("saved_decoded_generation_lengths", json.dumps(comparison, ensure_ascii=False))
+print("bpe_more_decoded_characters_test_samples", sum(x["bpe_decoded_characters"]>x["byte_decoded_characters"] for x in comparison), "/", len(comparison))
+print("PASS: bounded CPU examples, exercises, masked-target calculation, parameter count, and frozen-result arithmetic; no training, no schedule replay, no GPU")

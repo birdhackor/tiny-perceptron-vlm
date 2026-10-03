@@ -1,0 +1,32 @@
+import tempfile
+from pathlib import Path
+import numpy as np
+import soundfile as sf
+from PIL import Image
+import torch
+from tiny_perceptron.modal_data import modal_example
+from tiny_perceptron.model import TinyLM, ModelConfig
+from tiny_perceptron.multimodal import MultiModalLM
+
+torch.set_num_threads(1)
+torch.manual_seed(0)
+with tempfile.TemporaryDirectory(prefix="6.6-modal-contract-") as directory:
+    Image.fromarray(np.zeros((16,16,3),dtype=np.uint8)).save(Path(directory)/"image.png")
+    sf.write(Path(directory)/"audio.wav",np.zeros(1600,dtype=np.float32),16000)
+    record={"image":"image.png","audio":"audio.wav","question":"<image>","answer":"ok"}
+    ids,labels,image,waveform=modal_example(record,directory,"joint",device="cpu")
+    assert ids.tolist()[:4] == [1,3,5,6]
+    assert ids.tolist().count(5) == 1 and ids.tolist().count(6) == 1
+    print("modal_record",{"ids":ids.tolist(),"image_shape":list(image.shape),"waveform_shape":list(waveform.shape)})
+    model=MultiModalLM(TinyLM(ModelConfig(width=8,max_length=64)),vision_width=8,audio_width=8).eval()
+    try:
+        model(ids)
+    except ValueError as error:
+        print("missing_modal_input",str(error))
+    else:
+        raise AssertionError("marker must require paired modality data")
+    with torch.no_grad():
+        result=model(ids,labels,image=image,waveform=waveform)
+    assert torch.isfinite(result["logits"]).all()
+    print("paired_inputs",{"logits_shape":list(result["logits"].shape),"finite":True,"device":str(result["logits"].device)})
+print("scope","Synthetic interface forward only; random model, no parameter updates, no accuracy inference")

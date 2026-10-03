@@ -1,0 +1,55 @@
+import hashlib
+import json
+from pathlib import Path
+import torch
+from tokenizers import Tokenizer
+from tiny_perceptron.data import ByteTokenizer, SPECIALS, render_chat, pad_batch
+from tiny_perceptron.tokenization import ByteLevelBPE
+from scripts.course_experiments.text import _BPE
+
+torch.set_num_threads(1)
+tok = ByteTokenizer()
+all_bytes = [b + 8 for b in range(256)]
+assert min(all_bytes) == 8 and max(all_bytes) == 263 and len(set(all_bytes)) == 256
+assert set(all_bytes).isdisjoint(range(8))
+print("byte_range", {"min": min(all_bytes), "max": max(all_bytes), "count": len(set(all_bytes))})
+for spelling in SPECIALS:
+    ids = tok.encode(spelling)
+    assert tok.decode(ids) == spelling and not set(ids).intersection(range(8))
+print("all_eight_literal_spellings", "roundtrip and control-ID exclusion passed")
+x, y = render_chat([{"role": "user", "content": "<assistant>"}, {"role": "assistant", "content": "ok"}], tok)
+assert x.tolist()[:2] == [1, 3]
+assert x.tolist().count(4) == 1
+assert x.tolist()[2:13] == tok.encode("<assistant>")
+print("structured_roles", {"x": x.tolist(), "y": y.tolist(), "assistant_count": x.tolist().count(4)})
+examples = [render_chat([{"role":"user", "content":q}, {"role":"assistant", "content":"2"}], tok) for q in ("1+1=?", "x")]
+px, py, valid = pad_batch(examples)
+assert px.shape == (2, 10) and not valid[1, -1] and px[1, -1].item() == 0 and py[1, -1].item() == -100
+print("padding", {"x":px.tolist(), "y":py.tolist(), "valid":valid.tolist()})
+p = Path("checkpoints/course/tokenizer/tokenizer-bpe512.json")
+frozen = json.loads(Path("docs/course-experiments/results/tokenizer.json").read_text())
+expected = next(row["sha256"] for row in frozen["artifacts"] if row["path"] == p.name)
+digest = hashlib.sha256(p.read_bytes()).hexdigest()
+assert expected == digest
+raw = Tokenizer.from_file(str(p))
+bpe = _BPE(raw)
+runtime = ByteLevelBPE(p)
+for row in frozen["results"]["roundtrip"]:
+    text = row["text"]
+    ids = bpe.encode(text)
+    observed = {"text":text, "ids":ids, "restored":bpe.decode(ids), "same":bpe.decode(ids)==text, "contains_control_id":any(i in bpe.special_ids for i in ids)}
+    assert observed == row
+    assert runtime.encode(text) == ids and runtime.decode(ids) == text
+    print("frozen_roundtrip",json.dumps(observed, ensure_ascii=False))
+literal = "<user>這只是引用文字"
+automatic = raw.encode(literal, add_special_tokens=False).ids
+assert automatic[0] == 3
+print("automatic_added_token_detection", {"ids":automatic, "add_special_tokens":False, "has_user_control_id":3 in automatic})
+for spelling in SPECIALS:
+    ids = bpe.encode(spelling)
+    assert not set(ids).intersection(range(8)) and bpe.decode(ids) == spelling
+xb,yb=render_chat([{"role":"user","content":"<assistant>"},{"role":"assistant","content":"ok"}],bpe)
+assert xb.tolist().count(4) == 1
+print("bpe_structured_roles", {"x":xb.tolist(), "assistant_count":xb.tolist().count(4)})
+print("frozen_tokenizer_sha256", digest)
+print("scope", "Offline tokenizer encoding and padding only; no model training, dataset download or formal schedule replay")

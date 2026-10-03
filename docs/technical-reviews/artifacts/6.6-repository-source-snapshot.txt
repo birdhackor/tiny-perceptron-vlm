@@ -1,0 +1,271 @@
+tiny_perceptron/data.py; whole-file SHA256=6b40ba4bccc4a1ce169a90df8ce71f40e7c9e33e3d7633a36fdd8348d9536321; inspected L10–L93
+10:IGNORE = -100
+11:SPECIALS = ("<pad>", "<bos>", "<eos>", "<user>", "<assistant>", "<image>", "<audio>", "<system>")
+12:
+13:
+14:class ByteTokenizer:
+15:    """不學切詞的可還原起點；每個 UTF-8 byte 對應一個 ID。"""
+16:
+17:    vocab_size = 264
+18:    pad_id, bos_id, eos_id, user_id, assistant_id, image_id, audio_id, system_id = range(8)
+19:
+20:    def encode(self, text):
+21:        return [b + len(SPECIALS) for b in text.encode("utf-8")]
+22:
+23:    def decode(self, ids):
+24:        raw = bytes(i - len(SPECIALS) for i in ids if i >= len(SPECIALS))
+25:        return raw.decode("utf-8", errors="replace")
+26:
+27:    def state(self):
+28:        return {"type": "byte", "specials": list(SPECIALS)}
+29:
+30:
+31:class CharTokenizer:
+32:    """早期字元模型；未見字元用獨立 UNK，沒有無損還原保證。"""
+33:
+34:    def __init__(self, text):
+35:        self.chars = ["<unk>"] + sorted(set(text))
+36:        self.to_id = {c: i for i, c in enumerate(self.chars)}
+37:        self.vocab_size = len(self.chars)
+38:
+39:    def encode(self, text):
+40:        return [self.to_id.get(c, 0) for c in text]
+41:
+42:    def decode(self, ids):
+43:        return "".join(self.chars[i] for i in ids)
+44:
+45:
+46:def shifted(ids):
+47:    """只 shift 一次：輸入第 t 格猜原序列的第 t+1 格。"""
+48:    if len(ids) < 2:
+49:        raise ValueError("至少需要兩個 token 才有下一字目標")
+50:    ids = torch.tensor(ids, dtype=torch.long)
+51:    return ids[:-1], ids[1:]
+52:
+53:
+54:def render_chat(messages, tokenizer=None):
+55:    """邊界由角色欄位建立；使用者文字不會被解析為特殊 token。"""
+56:    tok = tokenizer or ByteTokenizer()
+57:    ids, targets = [tok.bos_id], [IGNORE]
+58:    roles = {"user": tok.user_id, "assistant": tok.assistant_id, "system": tok.system_id}
+59:    for message in messages:
+60:        role = message["role"]
+61:        if role not in roles or not isinstance(message["content"], str):
+62:            raise ValueError("role 必須是 user/assistant/system，content 必須是文字")
+63:        content = tok.encode(message["content"]) + [tok.eos_id]
+64:        ids += [roles[role]] + content
+65:        targets += [IGNORE] + (content if role == "assistant" else [IGNORE] * len(content))
+66:    if not any(t != IGNORE for t in targets):
+67:        raise ValueError("這筆對話没有可監督的 assistant 答案")
+68:    return torch.tensor(ids[:-1]), torch.tensor(targets[1:])
+69:
+70:
+71:def pad_batch(examples, pad_id=0, max_length=None):
+72:    """右側 padding；attention 的有效位置和 loss 的有效位置各自保留。"""
+73:    if not examples:
+74:        raise ValueError("batch 不能是空的")
+75:    length = max(len(x) for x, _ in examples)
+76:    if max_length is not None:
+77:        length = min(length, max_length)
+78:    x = torch.full((len(examples), length), pad_id, dtype=torch.long)
+79:    y = torch.full_like(x, IGNORE)
+80:    valid = torch.zeros_like(x, dtype=torch.bool)
+81:    for row, (inputs, labels) in enumerate(examples):
+82:        n = min(length, len(inputs))
+83:        x[row, :n], y[row, :n], valid[row, :n] = inputs[:n], labels[:n], True
+84:        if not (y[row] != IGNORE).any():
+85:            raise ValueError(f"第 {row} 筆截斷後没有有效答案；增加 max_length 或移除這筆")
+86:    return x, y, valid
+87:
+88:
+89:def split_documents(documents, seed=42):
+90:    """先去完全重複，再依完整文件切分；真實語料還要處理近重複家族。"""
+91:    docs = list(dict.fromkeys(documents))
+92:    random.Random(seed).shuffle(docs)
+93:    n = len(docs)
+tiny_perceptron/tokenization.py; whole-file SHA256=00e3f221e62c98f93ca305817ce44191e33ef361b48d1e39fabf11a59edfd9e6; inspected L9–L57
+9:ROLE_NAMES = ("pad", "bos", "eos", "user", "assistant", "image", "audio", "system")
+10:
+11:
+12:class ByteLevelBPE:
+13:    """與課程 BPE 實驗相同：移除 added-token 解析，保留原本詞表與 merges。"""
+14:
+15:    def __init__(self, path):
+16:        from tokenizers import Tokenizer, pre_tokenizers
+17:
+18:        definition = json.loads(Path(path).read_text(encoding="utf-8"))
+19:        if definition.get("model", {}).get("type") != "BPE":
+20:            raise ValueError("這個入口只支援課程的 ByteLevel BPE JSON")
+21:        if (definition.get("pre_tokenizer") or {}).get("type") != "ByteLevel" or (definition.get("decoder") or {}).get(
+22:            "type"
+23:        ) != "ByteLevel":
+24:            raise ValueError("BPE 需要 ByteLevel 前處理與 decoder，不能猜測其他 tokenizer 的規則")
+25:        if definition.get("normalizer") is not None or definition["pre_tokenizer"].get("add_prefix_space"):
+26:            raise ValueError("課程 BPE 不改寫文字或自動補空格；請使用訓練時的 JSON")
+27:        self.tokenizer = Tokenizer.from_str(json.dumps(definition))
+28:        self.vocab_size = self.tokenizer.get_vocab_size()
+29:        vocabulary = self.tokenizer.get_vocab()
+30:        if set(vocabulary.values()) != set(range(self.vocab_size)):
+31:            raise ValueError("tokenizer ID 必須連續且唯一")
+32:        for index, (name, spelling) in enumerate(zip(ROLE_NAMES, SPECIALS, strict=True)):
+33:            if self.tokenizer.token_to_id(spelling) != index:
+34:                raise ValueError("課程特殊 ID 必須依序固定為 0 到 7")
+35:            setattr(self, f"{name}_id", index)
+36:        self.special_ids = set(range(len(SPECIALS)))
+37:        if any(
+38:            self.tokenizer.token_to_id(char) is None or self.tokenizer.token_to_id(char) < 8
+39:            for char in pre_tokenizers.ByteLevel.alphabet()
+40:        ):
+41:            raise ValueError("BPE 缺少完整 256-byte 字母表，無法保證未見字與 emoji 的還原")
+42:        definition["added_tokens"] = []
+43:        self.content = Tokenizer.from_str(json.dumps(definition))
+44:        self.sha256 = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+45:
+46:    def encode(self, text):
+47:        ids = self.content.encode(text, add_special_tokens=False).ids
+48:        if any(value in self.special_ids for value in ids):
+49:            raise ValueError("普通文字被編成控制 ID；此 tokenizer 不符合課程的內容／角色邊界")
+50:        return ids
+51:
+52:    def decode(self, ids):
+53:        return self.content.decode(
+54:            [int(value) for value in ids if int(value) not in self.special_ids], skip_special_tokens=False
+55:        )
+56:
+57:
+scripts/course_experiments/text.py; whole-file SHA256=04b0a75d151b6920dd8c28b5f7b6cadf94d27a71776a7ca7952be39ae05a0b59; inspected L348–L371
+348:class _BPE:
+349:    """角色 ID 在程式端插入；普通文字編碼不把字面 <user> 當控制標記。"""
+350:
+351:    def __init__(self, tokenizer):
+352:        from tokenizers import Tokenizer
+353:
+354:        self.tokenizer = tokenizer
+355:        definition = json.loads(tokenizer.to_str())
+356:        definition["added_tokens"] = []
+357:        self.content = Tokenizer.from_str(json.dumps(definition))
+358:        self.vocab_size = tokenizer.get_vocab_size()
+359:        for name, spelling in zip(
+360:            ("pad", "bos", "eos", "user", "assistant", "image", "audio", "system"), SPECIALS, strict=True
+361:        ):
+362:            setattr(self, f"{name}_id", tokenizer.token_to_id(spelling))
+363:        self.special_ids = {tokenizer.token_to_id(spelling) for spelling in SPECIALS}
+364:
+365:    def encode(self, text):
+366:        return self.content.encode(text, add_special_tokens=False).ids
+367:
+368:    def decode(self, ids):
+369:        return self.content.decode(
+370:            [int(value) for value in ids if int(value) not in self.special_ids], skip_special_tokens=False
+371:        )
+scripts/course_experiments/text.py; whole-file SHA256=04b0a75d151b6920dd8c28b5f7b6cadf94d27a71776a7ca7952be39ae05a0b59; inspected L408–L456
+408:
+409:def run_tokenizer(ctx):
+410:    from tokenizers import Tokenizer, decoders, models, pre_tokenizers, trainers
+411:
+412:    raw = _asset_rows(ctx, "tinystories", "tinystories-train-512.jsonl")[:96]
+413:    raw += _asset_rows(ctx, "chinese-poetry", "chinese-classical-train-365.jsonl")[:96]
+414:    complete = split_records(_deduplicate_text(raw), seed=ctx.seed)
+415:    # 文件先分側，再取同一 UTF-8 安全片段；兩模型看見相同原文曝光。
+416:    parts = {
+417:        split: [
+418:            {
+419:                **row,
+420:                "text": _utf8_prefix(row["text"], 256),
+421:                "complete_text_sha256": hashlib.sha256(row["text"].encode()).hexdigest(),
+422:            }
+423:            for row in rows
+424:        ]
+425:        for split, rows in complete.items()
+426:    }
+427:    manifest = _save_splits(ctx, parts)
+428:    tokenizer = Tokenizer(models.BPE())
+429:    tokenizer.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
+430:    tokenizer.decoder = decoders.ByteLevel()
+431:    tokenizer.train_from_iterator(
+432:        [row["text"] for row in parts["train"]],
+433:        trainers.BpeTrainer(
+434:            vocab_size=512,
+435:            special_tokens=list(SPECIALS),
+436:            initial_alphabet=pre_tokenizers.ByteLevel.alphabet(),
+437:            show_progress=False,
+438:        ),
+439:    )
+440:    tokenizer.save(str(ctx.output / "tokenizer-bpe512.json"))
+441:    bpe = _BPE(tokenizer)
+442:    roundtrip = []
+443:    for text in ("未見字🦊 new", " 小鳥🙂\nnew ", "<user>這只是引用文字"):
+444:        ids = bpe.encode(text)
+445:        restored = bpe.decode(ids)
+446:        roundtrip.append(
+447:            {
+448:                "text": text,
+449:                "ids": ids,
+450:                "restored": restored,
+451:                "same": restored == text,
+452:                "contains_control_id": any(value in bpe.special_ids for value in ids),
+453:            }
+454:        )
+455:        if restored != text or any(value in bpe.special_ids for value in ids):
+456:            raise ValueError("BPE round-trip or literal special-token boundary failed")
+tiny_perceptron/modal_data.py; whole-file SHA256=d24f6da1cd7224b11a68ee8fa41073340ffc2d57058b0c2880def3f14f6ac1f5; inspected L12–L35
+12:
+13:def modal_example(record, directory, task, device="cpu", include_answer=True):
+14:    tok = ByteTokenizer()
+15:    ids = [tok.bos_id, tok.user_id]
+16:    image = waveform = None
+17:    if task in ("vision", "joint"):
+18:        with Image.open(Path(directory) / record["image"]) as source:
+19:            pixels = np.array(source.convert("RGB").resize((16, 16)), copy=True)
+20:        image = torch.from_numpy(pixels).permute(2, 0, 1).float().div(255).to(device)
+21:        ids.append(tok.image_id)
+22:    if task in ("audio", "joint"):
+23:        wave, rate = sf.read(Path(directory) / record["audio"], dtype="float32")
+24:        if rate != 16000 or wave.ndim != 1 or wave.size == 0:
+25:            raise ValueError("音訊必須是非空的 16 kHz 單聲道；先明確轉換資料")
+26:        waveform = torch.from_numpy(wave.copy()).to(device)
+27:        ids.append(tok.audio_id)
+28:    ids += tok.encode(record["question"]) + [tok.eos_id, tok.assistant_id]
+29:    labels = [IGNORE] * len(ids)
+30:    if include_answer:
+31:        answer = tok.encode(record["answer"]) + [tok.eos_id]
+32:        ids += answer
+33:        labels += answer
+34:    return torch.tensor(ids, device=device), torch.tensor(labels, device=device), image, waveform
+tiny_perceptron/multimodal.py; whole-file SHA256=298b165e3cdb56fdf5ce42e6e17eaf3d005b4954eb867fc5b9889eb3a3adf340; inspected L103–L138
+103:class MultiModalLM(nn.Module):
+104:    def __init__(self, language_model, vision_width=16, audio_width=16):
+105:        super().__init__()
+106:        self.language = language_model
+107:        self.vision = VisionEncoder(vision_width)
+108:        self.audio = AudioEncoder(width=audio_width)
+109:        self.image_projector = nn.Linear(vision_width, language_model.config.width)
+110:        self.audio_projector = nn.Linear(audio_width, language_model.config.width)
+111:
+112:    def forward(self, ids, labels=None, *, image=None, waveform=None):
+113:        from tiny_perceptron.data import ByteTokenizer
+114:
+115:        tok = ByteTokenizer()
+116:        if image is None and waveform is None:
+117:            if ((ids == tok.image_id) | (ids == tok.audio_id)).any():
+118:                raise ValueError("placeholder 缺少配對圖片／聲音")
+119:            return self.language(ids.unsqueeze(0))
+120:        features = {}
+121:        if image is not None:
+122:            features[tok.image_id] = self.image_projector(self.vision(image.unsqueeze(0)))[0]
+123:        if waveform is not None:
+124:            features[tok.audio_id] = self.audio_projector(self.audio(waveform.unsqueeze(0)))[0]
+125:        if labels is None:
+126:            labels = torch.full_like(ids, IGNORE)
+127:        # 未提供模態的 placeholder 要報錯，不能默默當普通文字。
+128:        markers = {tok.image_id, tok.audio_id}
+129:        for token in ids.tolist():
+130:            if token in markers and token not in features:
+131:                raise ValueError("placeholder 缺少配對圖片／聲音")
+132:        x, y = expand_modalities(ids, labels, self.language.embedding, features, markers)
+133:        result = self.language(embeddings=x)
+134:        result["labels"] = y
+135:        return result
+136:
+137:
+138:@torch.no_grad()
