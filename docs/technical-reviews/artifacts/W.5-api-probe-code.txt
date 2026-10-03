@@ -1,0 +1,92 @@
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+import torch
+from torch import nn
+
+def offline_guard(event, arguments):
+    if event in {"socket.connect", "socket.getaddrinfo", "socket.bind", "socket.sendto", "subprocess.Popen", "os.system", "os.exec", "os.posix_spawn"}:
+        raise PermissionError("bounded offline CPU probe blocked " + event)
+
+sys.addaudithook(offline_guard)
+assert torch.version.cuda is None
+assert not torch.cuda.is_available()
+torch.set_num_threads(1)
+torch.set_default_device("cpu")
+recipes = torch.tensor([[2.0, 1.0, 0.0], [1.0, 2.0, 1.0]])
+weights = torch.tensor([[10.0, 0.0], [20.0, 1.0], [30.0, 4.0]])
+result = recipes @ weights
+manual = torch.stack([torch.stack([torch.dot(row, column) for column in weights.T]) for row in recipes])
+assert torch.equal(result, manual)
+modified = recipes.clone()
+modified[0, 0] = 7
+modified_result = modified @ weights
+assert torch.equal(modified_result[1], result[1])
+try:
+    recipes @ weights[:2]
+except RuntimeError as exc:
+    mismatch = str(exc)
+else:
+    raise AssertionError("incompatible inner dimensions were accepted")
+layer = nn.Linear(3, 2)
+assert tuple(layer.weight.shape) == (2, 3)
+assert tuple(layer.bias.shape) == (2,)
+before_id = id(layer.weight)
+with torch.no_grad():
+    returned = layer.weight.copy_(weights.T)
+    layer.bias.copy_(torch.tensor([5.0, 0.0]))
+    grad_enabled_inside = torch.is_grad_enabled()
+assert returned is layer.weight
+assert id(layer.weight) == before_id
+assert torch.equal(layer.weight, weights.T)
+assert layer.weight.requires_grad
+assert layer.weight.grad_fn is None
+forward = layer(recipes)
+assert torch.equal(forward, recipes @ layer.weight.T + layer.bias)
+assert forward.tolist() == [[45.0, 1.0], [85.0, 6.0]]
+assert torch.equal(forward, torch.tensor(forward.tolist()))
+with torch.no_grad():
+    x = torch.tensor(1.0, requires_grad=True)
+    no_grad_output = x * 2
+assert not no_grad_output.requires_grad
+assert torch.is_grad_enabled()
+scores = torch.tensor([[60.0, 70.0, 80.0], [80.0, 90.0, 100.0]])
+assert scores.mean(dim=1).tolist() == [70.0, 90.0]
+assert scores.mean(dim=0).tolist() == [70.0, 80.0, 90.0]
+print(json.dumps({
+    "python": sys.version,
+    "torch": str(torch.__version__),
+    "torch_git_version": str(torch.version.git_version),
+    "device": str(recipes.device),
+    "dtype": str(recipes.dtype),
+    "threads": torch.get_num_threads(),
+    "recipes_shape": list(recipes.shape),
+    "weights_shape": list(weights.shape),
+    "weights_T_shape": list(weights.T.shape),
+    "weights_T": weights.T.tolist(),
+    "result_shape": list(result.shape),
+    "matmul": result.tolist(),
+    "dot_reconstruction": manual.tolist(),
+    "changed_first_row": modified_result.tolist(),
+    "shape_mismatch_error": mismatch,
+    "nn_module": nn.__name__,
+    "layer_weight_shape": list(layer.weight.shape),
+    "layer_bias_shape": list(layer.bias.shape),
+    "copy_returned_same_tensor": returned is layer.weight,
+    "parameter_identity_preserved": id(layer.weight) == before_id,
+    "copied_weight": layer.weight.tolist(),
+    "parameter_requires_grad_after_no_grad": layer.weight.requires_grad,
+    "parameter_grad_fn_after_copy": str(layer.weight.grad_fn),
+    "grad_enabled_inside_no_grad": grad_enabled_inside,
+    "grad_enabled_after_no_grad": torch.is_grad_enabled(),
+    "computed_output_requires_grad_inside_no_grad": no_grad_output.requires_grad,
+    "forward": forward.tolist(),
+    "explicit_linear_formula": (recipes @ layer.weight.T + layer.bias).tolist(),
+    "tolist_type": type(forward.tolist()).__name__,
+    "tolist_row_type": type(forward.tolist()[0]).__name__,
+    "tolist_scalar_type": type(forward.tolist()[0][0]).__name__,
+    "W.3_figure_row_means": scores.mean(dim=1).tolist(),
+    "W.3_figure_column_means": scores.mean(dim=0).tolist(),
+}, ensure_ascii=False, indent=2))
