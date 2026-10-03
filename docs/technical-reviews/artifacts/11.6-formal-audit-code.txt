@@ -1,0 +1,97 @@
+import hashlib
+import json
+import platform
+import random
+from pathlib import Path
+import torch
+
+root = Path(__file__).resolve().parents[3]
+
+def read(path):
+    p = root / path
+    raw = p.read_bytes()
+    return json.loads(raw), hashlib.sha256(raw).hexdigest()
+
+vqa, vqa_sha = read("docs/course-experiments/results/vqa.json")
+projector, projector_sha = read("docs/course-experiments/results/projector.json")
+v = vqa["results"]
+p = projector["results"]
+checks = []
+traces = {}
+for name, training, records in [
+    ("alignment", v["two_stage_alignment_training"], p["data"]["splits"]["train"]["records"]),
+    ("two_stage_qa", v["variants"]["all"]["training"], v["data"]["splits"]["train"]["records"]),
+    ("direct_qa", v["variants"]["direct_vqa"]["training"], v["data"]["splits"]["train"]["records"]),
+]:
+    counts = [row["effective_targets"] for row in training["history"]]
+    independently_counted = []
+    for step in range(training["steps"]):
+        rng = random.Random(vqa["seed"] + step)
+        sampled = []
+        for _ in range(4):
+            if name == "two_stage_qa":
+                # 正式 all 分支傳入 replay 清單；比率0仍消耗此亂數。
+                rng.random()
+            sampled.append(rng.choice(records))
+        independently_counted.append(sum(len(row["answer"].encode("utf-8")) + 1 for row in sampled))
+    assert counts == independently_counted
+    assert len(counts) == training["steps"]
+    assert sum(counts) == training["effective_targets"] == training["effective_tokens"]
+    traces[name] = {"steps": len(counts), "batch": 4, "effective_targets": sum(counts), "target_counts_each_step": counts, "counts_recomputed_from_seed_records_and_utf8": True, "replay_gate_rng_draw": name == "two_stage_qa", "last_batch_targets": counts[-1]}
+    checks.append(name + "逐步有效目標與原始抽樣演算法相同")
+assert p["training"] == v["two_stage_alignment_training"]
+budget = traces["alignment"]["effective_targets"] + traces["two_stage_qa"]["effective_targets"]
+direct = traces["direct_qa"]["effective_targets"]
+assert budget == v["direct_vs_two_stage_budget"]["target_effective_tokens"] == 18238
+assert direct == 18256
+assert direct - traces["direct_qa"]["last_batch_targets"] == 18235 < budget <= direct
+checks.append("18235 < 18238 <= 18256；最後一批21目標，超額18")
+samples = {}
+for variant, expected in [("all", 9), ("direct_vqa", 10)]:
+    samples[variant] = {}
+    for split in ["validation", "test"]:
+        evaluation = v["variants"][variant][split]
+        all_samples = evaluation["samples"]
+        for s in all_samples:
+            ids = s["generated_ids"]
+            raw = ids[:ids.index(2)] if 2 in ids else ids
+            encoded = [b + 8 for b in s["target"].encode("utf-8")]
+            assert (raw == encoded) == s["exact_match"]
+        correct = sum(s["exact_match"] for s in all_samples)
+        assert len(all_samples) == evaluation["examples"] == 12
+        assert correct == evaluation["correct"] == (12 if split == "validation" else expected)
+        assert evaluation["effective_tokens"] == sum(len(s["target"].encode("utf-8")) + 1 for s in all_samples) == 72
+        samples[variant][split] = evaluation
+splits = v["data"]["splits"]
+for a, b in [("train", "validation"), ("train", "test"), ("validation", "test")]:
+    assert not {r["family"] for r in splits[a]["records"]} & {r["family"] for r in splits[b]["records"]}
+text = {}
+for name, variant in v["variants"].items():
+    fields = [k for k in variant if k.startswith("text_")]
+    text[name] = {"fields": fields}
+    if name == "direct_vqa":
+        assert not fields
+    else:
+        before, after = variant["text_before"], variant["text_after"]
+        assert before["records"] == after["records"] == 10
+        text[name].update(before={k: x for k, x in before.items() if k != "samples"}, after={k: x for k, x in after.items() if k != "samples"})
+report = {
+    "reviewer_task": "/root/technical_round_coordinator/technical_11_6_fresh",
+    "environment": {"python": platform.python_version(), "torch": str(torch.__version__), "torch_commit": str(torch.version.git_version), "device": "cpu", "threads": torch.get_num_threads()},
+    "scope": "只讀凍結結果，重算抽樣目標與既有答案判分；未做正式訓練或推論",
+    "formal_run": {k: vqa[k] for k in ["revision", "device", "seed", "torch_version", "python_version", "gpu", "evidence_status"]},
+    "input_sha256": {"docs/course-experiments/results/vqa.json": vqa_sha, "docs/course-experiments/results/projector.json": projector_sha},
+    "formal_code_sha256": {key: vqa["code_sha256"][key] for key in ["scripts/course_experiments/modalities.py", "scripts/course_experiments/common.py", "tiny_perceptron/data.py", "tiny_perceptron/model.py", "tiny_perceptron/training.py", "scripts/course_experiments/text.py"]},
+    "data": v["data"],
+    "projector_train_config": {k: x for k, x in p["training"].items() if k != "history"},
+    "vqa_train_config": {name: {k: x for k, x in v["variants"][name]["training"].items() if k != "history"} for name in ["all", "direct_vqa"]},
+    "budget": {"alignment": 14408, "two_stage_qa": 3830, "two_stage_total": budget, "direct_total": direct, "excess": direct - budget},
+    "traces": traces,
+    "scored_samples": samples,
+    "direct_errors": [s for s in samples["direct_vqa"]["test"]["samples"] if not s["exact_match"]],
+    "projector_test": p["test"],
+    "text_evaluation_presence": text,
+    "checks": checks,
+    "status": "passed"
+}
+print(json.dumps(report, ensure_ascii=False, indent=2))

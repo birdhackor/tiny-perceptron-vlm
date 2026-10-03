@@ -1,0 +1,62 @@
+import copy
+import hashlib
+import json
+import platform
+import sys
+from pathlib import Path
+import torch
+root = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(root))
+from scripts.course_experiments.modalities import _modal, _freeze
+from tiny_perceptron.training import seed_everything, load_checkpoint
+
+torch.set_num_threads(1)
+class CPUContext:
+    device = "cpu"
+    seed = 42
+    def dependency(self, name, file="model.pt"):
+        return root / "checkpoints" / "course" / name / file
+ctx = CPUContext()
+inputs = []
+for name, files in [("sft", ["model.pt"]), ("encoders", ["vision.pt", "audio.pt"]), ("projector", ["model.pt"])]:
+    folder = root / "checkpoints/course" / name
+    manifest = json.loads((folder / "download-manifest.json").read_text())
+    selected = []
+    for file in files:
+        item = next(f for f in manifest["files"] if f["output"] == file)
+        raw = (folder / file).read_bytes()
+        digest = hashlib.sha256(raw).hexdigest()
+        assert digest == item["sha256"]
+        payload = torch.load(folder / file, map_location="cpu", weights_only=True)
+        selected.append({"file": file, "sha256": digest, "bytes": len(raw), "immutable_url": "https://huggingface.co/" + manifest["repo"] + "/resolve/" + manifest["revision"] + "/" + item["path"], "top_level_keys": list(payload), "config": payload.get("config"), "modal_config": payload.get("modal_config")})
+    inputs.append({"bundle": name, "manifest_revision": manifest["revision"], "manifest_sha256": hashlib.sha256((folder / "download-manifest.json").read_bytes()).hexdigest(), "files": selected})
+seed_everything(42)
+a = _modal(ctx)
+seed_everything(42)
+b = _modal(ctx)
+def identical(x, y):
+    return x.keys() == y.keys() and all(torch.equal(x[k], y[k]) for k in x)
+assert identical(a.state_dict(), b.state_dict())
+projector, payload = load_checkpoint(ctx.dependency("projector"), "cpu")
+assert identical(a.language.state_dict(), projector.language.state_dict())
+assert identical(a.vision.state_dict(), projector.vision.state_dict())
+assert not identical(a.image_projector.state_dict(), projector.image_projector.state_dict())
+second_stage = copy.deepcopy(projector)
+assert identical(second_stage.image_projector.state_dict(), projector.image_projector.state_dict())
+_freeze(a, "projector")
+_freeze(b, "all")
+_freeze(second_stage, "all")
+counts = {"projector_only": sum(p.numel() for p in a.parameters() if p.requires_grad), "direct_all": sum(p.numel() for p in b.parameters() if p.requires_grad), "staged_all": sum(p.numel() for p in second_stage.parameters() if p.requires_grad)}
+assert counts == {"projector_only": 1088, "direct_all": 145664, "staged_all": 145664}
+def state_digest(model):
+    digest = hashlib.sha256()
+    for name, tensor in model.state_dict().items():
+        digest.update(name.encode())
+        digest.update(str(tensor.dtype).encode())
+        digest.update(str(list(tensor.shape)).encode())
+        digest.update(tensor.detach().cpu().contiguous().numpy().tobytes())
+    return digest.hexdigest()
+card = root / "checkpoints/course/projector/README.md"
+assert hashlib.sha256(card.read_bytes()).hexdigest() == "b249d0cf8f0626e01344736d1c6b383512149671ee46e265706b028bc27e2d10"
+result = {"reviewer_task": "/root/technical_round_coordinator/technical_11_6_fresh", "environment": {"python": platform.python_version(), "torch": str(torch.__version__), "torch_commit": str(torch.version.git_version), "device": "cpu", "threads": "1"}, "input_artifacts": inputs, "projector_card": {"local_path": "checkpoints/course/projector/README.md", "sha256": hashlib.sha256(card.read_bytes()).hexdigest(), "immutable_url": "https://huggingface.co/birdhackor/tiny-perceptron-course-models/resolve/6d115860fc0af4669fccaa44bcdf2fad7c97e91e/course/course-v1/projector/README.md", "own_inspection_note": "完整親讀：接頭分支凍結SFT語言與合成編碼器，只更新image projector；公開推論權重移除optimizer/RNG，不能用作精確訓練resume。卡片之描述0/6與固定原始結果一致。"}, "assertions": {"two_fresh_initial_states_exactly_equal": True, "aligned_language_exactly_matches_direct_sft": True, "aligned_vision_exactly_matches_trained_encoder": True, "aligned_projector_changed_from_seed42_initial": True, "second_stage_keeps_aligned_projector": True}, "trainable_counts": counts, "initial_state_tensor_digest": state_digest(a), "aligned_state_tensor_digest": state_digest(projector), "projector_tensor_shapes": {name: list(t.shape) for name,t in a.image_projector.state_dict().items()}, "scope": "載入既有公開固定權重、比較初始化/交接/訓練範圍；無下載、無參數更新、無正式訓練、未以CPU推估GPU速度或能力成績", "status": "passed"}
+print(json.dumps(result, ensure_ascii=False, indent=2))

@@ -1,0 +1,63 @@
+"""以透明像素規則給出反例；沒有訓練或下載資料。"""
+import hashlib
+import json
+import platform
+from pathlib import Path
+import torch
+
+ROOT = Path(__file__).resolve().parents[3]
+ART = ROOT / 'docs/technical-reviews/artifacts'
+fragments = json.loads((ART / '11.4-frozen-functions.json').read_text())
+ns = {'torch': torch}
+item = next(x for x in fragments if x['function'] == 'scene')
+exec(compile('\n'.join(item['lines']) + '\n', 'frozen_scene', 'exec'), ns)
+scene = ns['scene']
+manifest_path = ROOT / 'docs/course-experiments/results/vqa.json'
+d = json.loads(manifest_path.read_text())['results']['data']['splits']
+train_combos = {(r['color'], r['shape']) for r in d['train']['records']}
+test = d['test']['records']
+assert all((r['color'], r['shape']) in train_combos for r in test)
+
+def pixel_answer(image, question):
+    occupied = image.sum(0) > 0
+    # 固定size16完整未截斷scene：圓49像素、方81像素。
+    count = int(occupied.sum())
+    shape = {49: 'circle', 81: 'square'}[count]
+    color = ['red', 'green', 'blue'][int(image.sum((1, 2)).argmax())]
+    return {'shape?': shape, 'color?': color}[question]
+
+samples = []
+for row in test:
+    image = scene(row['color'], row['shape'], offset=row['offset'])
+    answer = pixel_answer(image, row['question'])
+    samples.append({'family': row['family'], 'question': row['question'], 'target': row['answer'], 'answer': answer, 'correct': answer == row['answer']})
+assert all(x['correct'] for x in samples)
+shape_pairs = []
+for row in test:
+    if row['question'] != 'shape?': continue
+    new_shape = {'circle': 'square', 'square': 'circle'}[row['shape']]
+    image = scene(row['color'], row['shape'], offset=2)
+    swapped = scene(row['color'], new_shape, offset=2)
+    a = pixel_answer(image, 'shape?')
+    b = pixel_answer(swapped, 'shape?')
+    assert a == row['shape'] and b == new_shape and a != b
+    assert (row['color'], new_shape) in train_combos
+    shape_pairs.append({'family':row['family'], 'original': a, 'new_target':new_shape, 'swapped_answer':b, 'both_correct':True})
+question_pairs = []
+for color, shape in sorted(train_combos):
+    image = scene(color, shape, offset=2)
+    a = pixel_answer(image, 'shape?')
+    b = pixel_answer(image, 'color?')
+    assert a == shape and b == color
+    question_pairs.append({'color':color,'shape':shape,'shape_answer':a,'color_answer':b,'both_correct':True})
+result = {
+ 'command': "timeout 30s env OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1 TRANSFORMERS_OFFLINE=1 CUDA_VISIBLE_DEVICES='' .venv/bin/python docs/technical-reviews/artifacts/11.4-necessity-counterexample-code.txt",
+ 'exit_code':0,
+ 'environment':{'python':platform.python_version(),'torch':torch.__version__,'torch_git_version':torch.version.git_version,'device':'cpu','OMP_NUM_THREADS':'1','MKL_NUM_THREADS':'1'},
+ 'original_manifest_sha256':hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
+ 'test_combinations_all_seen':True, 'samples':samples,'shape_swap_pairs':shape_pairs,'same_image_question_pairs':question_pairs,
+ 'counts':{'original_correct':12,'questions':12,'shape_pair_both_correct':6,'shape_pairs':6,'question_pair_both_correct':6,'question_pairs':6},
+ 'scope':'此為固定合成圖片的可追蹤演算法反例，不是學習模型能力實驗。只反駁「未見組合留作測試是同時檢查題意選擇及用圖的必要條件」。未見組合仍適合另驗组合泛化。'
+}
+(ART/'11.4-necessity-counterexample-execution.json').write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\n')
+print(json.dumps({'counts':result['counts'],'test_combinations_all_seen':True},ensure_ascii=False))

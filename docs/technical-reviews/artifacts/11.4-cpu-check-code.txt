@@ -1,0 +1,114 @@
+import ast
+import hashlib
+import json
+import platform
+import random
+from pathlib import Path
+from types import SimpleNamespace
+
+import torch
+from tiny_perceptron.data import ByteTokenizer
+from tiny_perceptron.model import ModelConfig, TinyLM, masked_loss
+from tiny_perceptron.multimodal import MultiModalLM, scene as current_scene
+
+ROOT = Path(__file__).resolve().parents[3]
+ART = ROOT / 'docs/technical-reviews/artifacts'
+def sha(p): return hashlib.sha256(p.read_bytes()).hexdigest()
+
+# 僅執行已親讀的四個固定純資料／圖片函式；不啟動實驗排程。
+fragments = json.loads((ART / '11.4-frozen-functions.json').read_text())
+namespace = {'torch': torch, 'ByteTokenizer': ByteTokenizer}
+for name in ['scene', '_vision_records', '_media', '_sequence']:
+    item = next(x for x in fragments if x['function'] == name)
+    exec(compile('\n'.join(item['lines']) + '\n', f"{item['original_file']}:{item['start_line']}", 'exec'), namespace)
+scene = namespace['scene']
+records = namespace['_vision_records'](('shape?', 'color?'))
+manifest_path = ROOT / 'docs/course-experiments/results/vqa.json'
+manifest = json.loads(manifest_path.read_text())
+ctx = SimpleNamespace(device='cpu', seed=42)
+summary = {}
+all_pixel_sets = {}
+for split, rows in records.items():
+    fixed = manifest['results']['data']['splits'][split]
+    assert rows == fixed['records']
+    canonical = json.dumps(rows, ensure_ascii=False, sort_keys=True).encode()
+    digest = hashlib.sha256(canonical).hexdigest()
+    assert digest == fixed['sha256']
+    groups = {}
+    pixels = {}
+    for row in rows:
+        groups.setdefault(row['family'], []).append(row)
+        image, wave = namespace['_media'](row, ctx)
+        assert image.shape == (3, 16, 16) and wave is None
+        assert torch.equal(image, current_scene(row['color'], row['shape'], offset=row['offset']))
+        ph = hashlib.sha256(image.numpy().tobytes()).hexdigest()
+        pixels.setdefault(row['family'], set()).add(ph)
+        ids, labels, count = namespace['_sequence'](row, ctx)
+        tok = ByteTokenizer()
+        assert ids.tolist().count(tok.image_id) == 1
+        assert labels[labels != -100].tolist() == tok.encode(row['answer']) + [tok.eos_id]
+        assert count == len(row['answer'].encode('utf-8')) + 1
+    for family, pair in groups.items():
+        assert len(pair) == 2 and {x['question'] for x in pair} == {'shape?', 'color?'}
+        assert len(pixels[family]) == 1
+    all_pixel_sets[split] = set.union(*pixels.values())
+    summary[split] = {'questions': len(rows), 'images': len(groups), 'offsets': sorted({r['offset'] for r in rows}),
+                      'combinations': sorted({r['color'] + ':' + r['shape'] for r in rows}),
+                      'records_sha256': digest, 'paired_families': len(groups),
+                      'pixel_sha256_by_family': {k: next(iter(v)) for k, v in pixels.items()}}
+for left, right in [('train', 'validation'), ('train', 'test'), ('validation', 'test')]:
+    assert not (all_pixel_sets[left] & all_pixel_sets[right])
+assert summary['train']['combinations'] == summary['validation']['combinations'] == summary['test']['combinations']
+
+# 同環境亂數重播；scene 本身不消耗RNG。
+rng = random.Random(42)
+choices = [rng.randrange(-4, 5) for _ in range(5)]
+rng = random.Random(42)
+assert choices == [rng.randrange(-4, 5) for _ in range(5)]
+random.seed(7)
+torch.manual_seed(7)
+before = torch.get_rng_state().clone()
+im1 = scene('red', 'circle', size=16, offset=0)
+assert torch.equal(before, torch.get_rng_state())
+random.seed(999)
+torch.manual_seed(999)
+im2 = scene('red', 'circle', size=16, offset=0)
+assert torch.equal(im1, im2)
+
+# 說明性小模型只forward兩筆，不更新、不訓練；核對相同masked_loss接口。
+torch.manual_seed(42)
+model = MultiModalLM(TinyLM(ModelConfig(width=8)))
+mask_checks = []
+for row in records['train'][:2]:
+    ids, labels, count = namespace['_sequence'](row, ctx)
+    image, _ = namespace['_media'](row, ctx)
+    with torch.no_grad():
+        output = model(ids, labels, image=image)
+        observed = masked_loss(output['logits'], output['labels'])
+        expected = torch.nn.functional.cross_entropy(output['logits'].reshape(-1, 264), output['labels'].reshape(-1), ignore_index=-100)
+    assert int((output['labels'] != -100).sum()) == count
+    assert torch.allclose(expected, observed, rtol=0, atol=1e-6)
+    mask_checks.append({'question': row['question'], 'answer': row['answer'], 'effective_targets': count,
+                        'loss': float(observed), 'independent_mean_ce': float(expected), 'logits_shape': list(output['logits'].shape)})
+
+# 任務格式比contains更嚴格；同圖只有兩問不能排除文字捷徑。
+text_only = {'什麼顏色？': '紅', '什麼形狀？': '圓形'}
+shortcut_success = sum(text_only[q] == target for q, target in [('什麼顏色？', '紅'), ('什麼形狀？', '圓形')])
+assert shortcut_success == 2
+assert '紅' in '紅色圓形' and '紅色圓形' != '紅'
+assert '圓形' in '紅色圓形' and '紅色圓形' != '圓形'
+result = {
+ 'command': "timeout 60s env OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1 TRANSFORMERS_OFFLINE=1 CUDA_VISIBLE_DEVICES='' .venv/bin/python docs/technical-reviews/artifacts/11.4-cpu-check-code.txt",
+ 'exit_code': 0,
+ 'environment': {'python': platform.python_version(), 'torch': torch.__version__, 'torch_git_version': torch.version.git_version, 'device': 'cpu', 'OMP_NUM_THREADS': '1', 'MKL_NUM_THREADS': '1'},
+ 'manifest_sha256': sha(manifest_path), 'formal_revision': manifest['revision'], 'formal_seed': manifest['seed'],
+ 'formal_environment': {k: manifest[k] for k in ['python_version', 'torch_version', 'device', 'gpu']},
+ 'formal_data': manifest['results']['data'], 'computed_splits': summary,
+ 'pixel_overlap_across_splits': False, 'all_splits_same_six_color_shape_combinations': True,
+ 'scene_seed_independence': True, 'scene_rng_unchanged': True, 'same_seed_same_call_order_offsets': choices,
+ 'mask_checks': mask_checks, 'text_only_shortcut_correct': shortcut_success,
+ 'scope': '僅讀取固定結果並重算資料、像素與遮罩；小模型forward不證明訓練品質；未重跑正式訓練。',
+ 'local_source_sha256': {p:sha(ROOT/p) for p in ['tiny_perceptron/multimodal.py','tiny_perceptron/model.py','tiny_perceptron/data.py']},
+}
+(ART / '11.4-cpu-check-execution.json').write_text(json.dumps(result, ensure_ascii=False, indent=2) + '\n')
+print(json.dumps({'split_counts': {k:{'images':v['images'],'questions':v['questions']} for k,v in summary.items()}, 'mask_checks': mask_checks, 'all_assertions_passed': True}, ensure_ascii=False))
