@@ -1,0 +1,59 @@
+[
+  {
+    "source_id": "s12",
+    "path": "tiny_perceptron/data.py",
+    "sha256": "6b40ba4bccc4a1ce169a90df8ce71f40e7c9e33e3d7633a36fdd8348d9536321",
+    "locator": "IGNORE L10；ByteTokenizer L14–21；render_chat L54–68",
+    "inspection_note": "原始序列保留所有role／content／EOS。targets 對role marker設IGNORE，僅assistant content加EOS有效，最後分別回傳ids[:-1]及targets[1:]。沒有查答案的語义正確性。",
+    "excerpts": [
+      {
+        "first_line": 10,
+        "last_line": 28,
+        "text": "IGNORE = -100\nSPECIALS = (\"<pad>\", \"<bos>\", \"<eos>\", \"<user>\", \"<assistant>\", \"<image>\", \"<audio>\", \"<system>\")\n\n\nclass ByteTokenizer:\n    \"\"\"不學切詞的可還原起點；每個 UTF-8 byte 對應一個 ID。\"\"\"\n\n    vocab_size = 264\n    pad_id, bos_id, eos_id, user_id, assistant_id, image_id, audio_id, system_id = range(8)\n\n    def encode(self, text):\n        return [b + len(SPECIALS) for b in text.encode(\"utf-8\")]\n\n    def decode(self, ids):\n        raw = bytes(i - len(SPECIALS) for i in ids if i >= len(SPECIALS))\n        return raw.decode(\"utf-8\", errors=\"replace\")\n\n    def state(self):\n        return {\"type\": \"byte\", \"specials\": list(SPECIALS)}"
+      },
+      {
+        "first_line": 46,
+        "last_line": 68,
+        "text": "def shifted(ids):\n    \"\"\"只 shift 一次：輸入第 t 格猜原序列的第 t+1 格。\"\"\"\n    if len(ids) < 2:\n        raise ValueError(\"至少需要兩個 token 才有下一字目標\")\n    ids = torch.tensor(ids, dtype=torch.long)\n    return ids[:-1], ids[1:]\n\n\ndef render_chat(messages, tokenizer=None):\n    \"\"\"邊界由角色欄位建立；使用者文字不會被解析為特殊 token。\"\"\"\n    tok = tokenizer or ByteTokenizer()\n    ids, targets = [tok.bos_id], [IGNORE]\n    roles = {\"user\": tok.user_id, \"assistant\": tok.assistant_id, \"system\": tok.system_id}\n    for message in messages:\n        role = message[\"role\"]\n        if role not in roles or not isinstance(message[\"content\"], str):\n            raise ValueError(\"role 必須是 user/assistant/system，content 必須是文字\")\n        content = tok.encode(message[\"content\"]) + [tok.eos_id]\n        ids += [roles[role]] + content\n        targets += [IGNORE] + (content if role == \"assistant\" else [IGNORE] * len(content))\n    if not any(t != IGNORE for t in targets):\n        raise ValueError(\"這筆對話没有可監督的 assistant 答案\")\n    return torch.tensor(ids[:-1]), torch.tensor(targets[1:])"
+      }
+    ]
+  },
+  {
+    "source_id": "s13",
+    "path": "tiny_perceptron/model.py",
+    "sha256": "176e3a2c305f3ec509934abe41a1e8e48c5a76de8e9b0cea5c41eefd5a9adf69",
+    "locator": "TinyLM L53–86；loss_sum／masked_loss L92–105",
+    "inspection_note": "forward 的 ids 經 embedding，不收 labels；labels 只在loss函式交給cross_entropy。求和代價除以labels!=-100數量，與4個有效目標分母一致。",
+    "excerpts": [
+      {
+        "first_line": 53,
+        "last_line": 86,
+        "text": "class TinyLM(nn.Module):\n    def __init__(self, config=None):\n        super().__init__()\n        self.config = config or ModelConfig()\n        c = self.config\n        if c.norm not in (\"layer\", \"rms\") or c.layers < 1 or c.max_length < 1:\n            raise ValueError(\"無效的 norm/layers/max_length 設定\")\n        self.embedding = nn.Embedding(c.vocab_size, c.width)\n        self.position = None if c.rotary else nn.Embedding(c.max_length, c.width)\n        self.blocks = nn.ModuleList([Block(c) for _ in range(c.layers)])\n        self.final_norm = nn.LayerNorm(c.width) if c.norm == \"layer\" else RMSNorm(c.width)\n        self.output = nn.Linear(c.width, c.vocab_size, bias=False)\n        if c.tied:\n            self.output.weight = self.embedding.weight\n\n    def forward(self, ids=None, *, embeddings=None, valid=None, positions=None, segments=None, cache=None):\n        if (ids is None) == (embeddings is None):\n            raise ValueError(\"必須恰好提供 ids 或 embeddings 其中之一\")\n        x = self.embedding(ids) if embeddings is None else embeddings\n        b, t, _ = x.shape\n        offset = 0 if cache is None else cache[0][0].shape[2]\n        if offset + t > self.config.max_length:\n            raise ValueError(\"序列超過 max_length；增加配置或明確截斷，不能默默重用位置\")\n        if positions is None:\n            positions = torch.arange(offset, offset + t, device=x.device)\n        if self.position is not None:\n            x = x + self.position(positions)\n        caches, auxiliary = [], x.new_zeros(())\n        for i, block in enumerate(self.blocks):\n            x, state, aux = block(x, valid, positions, segments, None if cache is None else cache[i])\n            caches.append(state)\n            auxiliary = auxiliary + aux\n        logits = self.output(self.final_norm(x))\n        return {\"logits\": logits, \"cache\": caches, \"auxiliary\": auxiliary}"
+      },
+      {
+        "first_line": 92,
+        "last_line": 105,
+        "text": "def loss_sum(logits, labels):\n    \"\"\"先求和再數有效 token，才能正確合併長短不同的 micro-batch。\"\"\"\n    count = (labels != IGNORE).sum()\n    if count.item() == 0:\n        raise ValueError(\"所有 labels 都被忽略：没有可學習的答案\")\n    loss = F.cross_entropy(\n        logits.reshape(-1, logits.shape[-1]), labels.reshape(-1), ignore_index=IGNORE, reduction=\"sum\"\n    )\n    return loss, count\n\n\ndef masked_loss(logits, labels):\n    total, count = loss_sum(logits, labels)\n    return total / count"
+      }
+    ]
+  },
+  {
+    "source_id": "s14",
+    "path": "tiny_perceptron/attention.py",
+    "sha256": "edb29d24392f1b7aedf04890b106add669bc0e31bfde7fde7f80ad190b007c15",
+    "locator": "attention_mask L10–18；manual_attention L21–28；CausalAttention.forward L48–79",
+    "inspection_note": "因果可讀條件為key<=query，與label無關。manual_attention把非法匹配設-inf，正常可讀位置仍讀全部合法前文，後面的answer可透過value與key讀user。",
+    "excerpts": [
+      {
+        "first_line": 10,
+        "last_line": 28,
+        "text": "def attention_mask(query_positions, key_positions, valid=None, segments=None):\n    \"\"\"True 代表可以看：因果、PAD、文件邊界是三個獨立條件。\"\"\"\n    allowed = key_positions[None, :] <= query_positions[:, None]\n    allowed = allowed[None, None]\n    if valid is not None:\n        allowed = allowed & valid[:, None, None, :]\n    if segments is not None:\n        allowed = allowed & (segments[:, None, :, None] == segments[:, None, None, :])\n    return allowed\n\n\ndef manual_attention(q, k, v, allowed):\n    scores = q @ k.transpose(-2, -1) / math.sqrt(q.shape[-1])\n    scores = scores.masked_fill(~allowed, float(\"-inf\"))\n    # 全 PAD 的 query 沒有可見 key；softmax(-inf,...) 會 NaN，要明確改成零。\n    empty = ~allowed.any(dim=-1, keepdim=True)\n    scores = scores.masked_fill(empty, 0.0)\n    weights = scores.softmax(dim=-1).masked_fill(empty, 0.0)\n    return weights @ v, weights"
+      },
+      {
+        "first_line": 48,
+        "last_line": 79,
+        "text": "    def forward(self, x, valid=None, positions=None, segments=None, cache=None):\n        from tiny_perceptron.modern import rope\n\n        b, t, d = x.shape\n        q = self.q(x).view(b, t, self.heads, self.head_dim).transpose(1, 2)\n        k = self.k(x).view(b, t, self.kv_heads, self.head_dim).transpose(1, 2)\n        v = self.v(x).view(b, t, self.kv_heads, self.head_dim).transpose(1, 2)\n        offset = 0 if cache is None else cache[0].shape[2]\n        pos = torch.arange(offset, offset + t, device=x.device) if positions is None else positions\n        if self.rotary:\n            q, k = rope(q, pos), rope(k, pos)\n        if cache is not None:\n            if valid is not None or segments is not None:\n                raise ValueError(\"最小 cache 路線只接受無 padding、無 packing 的單長度 batch\")\n            k, v = torch.cat((cache[0], k), 2), torch.cat((cache[1], v), 2)\n        new_cache = (k, v)  # 儲存未擴張的 KV heads，GQA 才能縮小 cache。\n        keys = torch.arange(k.shape[2], device=x.device)\n        queries = torch.arange(offset, offset + t, device=x.device)\n        allowed = attention_mask(queries, keys, valid, segments)\n        repeat = self.heads // self.kv_heads\n        k, v = k.repeat_interleave(repeat, dim=1), v.repeat_interleave(repeat, dim=1)\n        if self.backend == \"manual\":\n            out, _ = manual_attention(q, k, v, allowed)\n        else:\n            out = F.scaled_dot_product_attention(q, k, v, attn_mask=allowed, dropout_p=0.0)\n        out = out.transpose(1, 2).contiguous().view(b, t, d)\n        return self.out(out), new_cache"
+      }
+    ]
+  }
+]

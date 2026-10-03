@@ -1,0 +1,54 @@
+import json, platform
+import torch
+from torch.nn import functional as F
+from tiny_perceptron.data import ByteTokenizer, render_chat
+from tiny_perceptron.model import TinyLM, ModelConfig, masked_loss, loss_sum
+from tiny_perceptron.attention import attention_mask
+
+torch.set_num_threads(1)
+torch.set_num_interop_threads(1)
+torch.manual_seed(7)
+x,y=render_chat([{"role":"user","content":"問"},{"role":"assistant","content":"答"}])
+tok=ByteTokenizer()
+valid=y!=-100
+assert valid.dtype == torch.bool
+assert valid.sum().dtype == torch.int64 and isinstance(valid.sum().item(),int)
+statuses=["學下一項" if label!=-100 else "忽略直接loss" for label in y.tolist()]
+assert statuses == ["忽略直接loss"]*6+["學下一項"]*4
+logits=torch.zeros(len(y),tok.vocab_size,dtype=torch.float64,requires_grad=True)
+unreduced=F.cross_entropy(logits,y,ignore_index=-100,reduction="none")
+assert torch.equal(unreduced[~valid],torch.zeros(6,dtype=torch.float64))
+sum_loss,count=loss_sum(logits,y)
+assert count.item()==4
+assert torch.allclose(masked_loss(logits,y),torch.log(torch.tensor(264.0,dtype=torch.float64)))
+sum_loss.backward()
+assert logits.grad[~valid].abs().max().item()==0
+assert logits.grad[valid].abs().max().item()>0
+perturbed=logits.detach().clone();perturbed[~valid]=torch.linspace(-10,10,264,dtype=torch.float64)
+assert torch.equal(masked_loss(perturbed,y),masked_loss(logits.detach(),y))
+model=TinyLM(ModelConfig(width=8,layers=1,heads=1,max_length=32))
+model.eval()
+output=model(x[None])['logits'];output.retain_grad()
+model_loss=masked_loss(output,y[None]);model_loss.backward()
+assert output.grad[0,~valid].abs().max().item()==0
+question_grad=model.embedding.weight.grad[x[2:5]].norm().item()
+assert question_grad>0
+changed=x.clone();changed[2:5]=torch.tensor(tok.encode("門"))
+with torch.no_grad():
+    changed_output=model(changed[None])['logits']
+    question_effect=(output.detach()[0,6]-changed_output[0,6]).abs().max().item()
+    future=x.clone();future[7:]=torch.tensor([8,9,10])
+    future_output=model(future[None])['logits']
+assert question_effect>0
+assert torch.equal(output.detach()[0,6],future_output[0,6])
+allowed=attention_mask(torch.arange(len(x)),torch.arange(len(x)))
+assert allowed[0,0,6,2:5].all() and not allowed[0,0,6,7:].any()
+try:
+    model.embedding(torch.tensor([-100]))
+except IndexError as exc:
+    negative_id_error=type(exc).__name__+": "+str(exc)
+else:
+    raise AssertionError("-100 must not be a vocabulary ID")
+wrong_x,wrong_y=render_chat([{"role":"user","content":"1+1=?"},{"role":"assistant","content":"3"}])
+assert wrong_y[wrong_y!=-100].tolist()==tok.encode("3")+[2]
+print(json.dumps({"python":platform.python_version(),"torch":torch.__version__,"torch_git_version":torch.version.git_version,"device":str(x.device),"intra_threads":torch.get_num_threads(),"interop_threads":torch.get_num_interop_threads(),"x":x.tolist(),"y":y.tolist(),"bool_dtype":str(valid.dtype),"sum_dtype":str(valid.sum().dtype),"item_type":type(valid.sum().item()).__name__,"statuses":statuses,"unreduced_loss":unreduced.detach().tolist(),"valid_count":count.item(),"sum_loss":sum_loss.item(),"mean_loss":masked_loss(logits.detach(),y).item(),"ignored_logits_gradient_max":logits.grad[~valid].abs().max().item(),"effective_logits_gradient_max":logits.grad[valid].abs().max().item(),"ignored_model_logits_gradient_max":output.grad[0,~valid].abs().max().item(),"question_embedding_gradient_norm":question_grad,"first_answer_logits_difference_after_question_change":question_effect,"first_answer_logits_unchanged_after_future_change":torch.equal(output.detach()[0,6],future_output[0,6]),"embedding_negative_id_error":negative_id_error,"wrong_answer_still_supervised":wrong_y[wrong_y!=-100].tolist(),"training_updates":0,"seed":7},ensure_ascii=False,indent=2))

@@ -1,0 +1,56 @@
+import json
+import platform
+import torch
+from torch.nn import functional as F
+from tiny_perceptron.data import ByteTokenizer, render_chat
+from tiny_perceptron.model import ModelConfig, TinyLM, masked_loss
+
+torch.set_num_threads(1)
+torch.manual_seed(42)
+tok = ByteTokenizer()
+x, y = render_chat([{"role": "user", "content": "Q"}, {"role": "assistant", "content": "A"}])
+model = TinyLM(ModelConfig(vocab_size=264, width=8, max_length=32)).cpu()
+embeddings = model.embedding(x[None]).detach().requires_grad_(True)
+logits = model(embeddings=embeddings)["logits"]
+logits.retain_grad()
+actual = masked_loss(logits, y[None])
+expected = F.cross_entropy(logits[0, 4:6], torch.tensor([73, 2]))
+assert torch.equal(actual, expected)
+actual.backward()
+direct_grads = logits.grad.abs().sum(-1)[0]
+input_grads = embeddings.grad.abs().sum(-1)[0]
+assert torch.equal(direct_grads[:4], torch.zeros(4))
+assert bool((input_grads[:4] > 0).all())
+with torch.no_grad():
+    before = model(x[None])["logits"]
+    future = x.clone()
+    future[5] = 74
+    future_difference = (before[:, :5] - model(future[None])["logits"][:, :5]).abs().max().item()
+    assert future_difference == 0.0
+    question = x.clone()
+    question[2] = 90
+    question_difference = (before[:, 4] - model(question[None])["logits"][:, 4]).abs().max().item()
+    assert question_difference > 0.0
+print(json.dumps({"python": platform.python_version(), "torch": torch.__version__, "torch_git_version": torch.version.git_version, "device": "cpu", "threads": torch.get_num_threads(), "config": model.description(), "logits_shape": list(logits.shape), "effective_targets": [73, 2], "valid_count": 2, "masked_loss": actual.item(), "same_position_cross_entropy": expected.item(), "direct_logit_gradient_l1_by_position": direct_grads.tolist(), "input_embedding_gradient_l1_by_position": input_grads.tolist(), "future_change_max_difference_positions_0_to_4": future_difference, "question_change_max_difference_at_answer_position_4": question_difference}, ensure_ascii=False))
+
+# Add later user context so dropping the final ignored target preserves both valid targets.
+# This bounded diagnostic exhibits why valid-count equality alone cannot detect a raw, unshifted mask.
+raw = [1, 3, 89, 2, 4, 73, 2, 3, 90, 2]
+targets = [-100, -100, -100, -100, -100, 73, 2, -100, -100, -100]
+input_ids = torch.tensor(raw[:-1])
+correct = torch.tensor(targets[1:])
+unshifted = torch.tensor(targets[:-1])
+assert (correct != -100).sum().item() == (unshifted != -100).sum().item() == 2
+assert correct[4].item() == 73 and unshifted[4].item() == -100
+assert input_ids[5].item() == unshifted[5].item() == 73
+print(json.dumps({"case": "未移標籤：有效數不變仍學錯事件", "raw": raw, "x": input_ids.tolist(), "correct_y": correct.tolist(), "wrong_unshifted_y": unshifted.tolist(), "correct_events": [[i, input_ids[i].item(), correct[i].item()] for i in range(len(correct)) if correct[i].item() != -100], "wrong_events": [[i, input_ids[i].item(), unshifted[i].item()] for i in range(len(unshifted)) if unshifted[i].item() != -100], "valid_count_both": 2}, ensure_ascii=False))
+
+# A prefix image ID changes the location but preserves the assistant-to-first-byte event.
+image_raw = [1, 3, 5, 89, 2, 4, 73, 2]
+image_targets = [-100, -100, -100, -100, -100, -100, 73, 2]
+image_x = torch.tensor(image_raw[:-1])
+image_y = torch.tensor(image_targets[1:])
+first = (image_y != -100).nonzero()[0].item()
+assert first == 5 and image_x[first].item() == 4 and image_y[first].item() == 73
+print(json.dumps({"case": "前文插入image標記的對齊機制", "x": image_x.tolist(), "y": image_y.tolist(), "first": first, "input_at_first": image_x[first].item(), "target_at_first": image_y[first].item()}, ensure_ascii=False))
+print("全部機制核對通過；未訓練、未更新參數，不支持品質或速度外推。")
