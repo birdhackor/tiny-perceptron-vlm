@@ -1,0 +1,60 @@
+import json, sys, warnings
+import torch
+from tiny_perceptron.data import render_chat
+from tiny_perceptron.model import TinyLM, ModelConfig, masked_loss
+from tiny_perceptron.attention import attention_mask, manual_attention
+
+def offline_guard(event,args):
+    if event.startswith('socket.') or event in ('subprocess.Popen','os.system','os.posix_spawn'):
+        raise RuntimeError('offline CPU review forbids network and subprocesses')
+sys.addaudithook(offline_guard)
+assert torch.version.cuda is None
+results=[]
+for case in ('baseline','detach_Q','block_Q_key','no_retain','same_ID_both_roles'):
+    torch.manual_seed(42)
+    answer='Q' if case=='same_ID_both_roles' else 'A'
+    x,y=render_chat([{'role':'user','content':'Q'},{'role':'assistant','content':answer}])
+    model=TinyLM(ModelConfig(width=8))
+    emb=model.embedding(x[None])
+    emb.retain_grad()
+    model_input=emb
+    if case=='detach_Q':
+        model_input=torch.stack([emb[:,i].detach() if i==2 else emb[:,i] for i in range(x.numel())],dim=1)
+    valid=torch.ones((1,x.numel()),dtype=torch.bool)
+    if case=='block_Q_key': valid[0,2]=False
+    logits=model(embeddings=model_input,valid=valid)['logits']
+    if case!='no_retain': logits.retain_grad()
+    loss=masked_loss(logits,y[None])
+    loss.backward()
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter('always')
+        logit_grad=logits.grad
+    logit_norms=None if logit_grad is None else logit_grad[0].norm(dim=-1).tolist()
+    expected=torch.zeros_like(logits)
+    for t in (y!=-100).nonzero().flatten().tolist():
+        expected[0,t]=logits.detach()[0,t].softmax(-1)
+        expected[0,t,int(y[t])]-=1
+    expected/=int((y!=-100).sum())
+    analytic_error=None if logit_grad is None else float((expected-logit_grad).abs().max())
+    if logit_grad is not None:
+        assert torch.allclose(expected,logit_grad,atol=1e-7,rtol=1e-6)
+        assert torch.equal(logit_grad[0,:4],torch.zeros_like(logit_grad[0,:4]))
+    row=model.embedding.weight.grad[89]
+    selected=emb.grad[0,x==89].sum(0)
+    assert torch.equal(row,selected)
+    if case in ('detach_Q','block_Q_key'): assert row.norm().item()==0
+    else: assert row.norm().item()>0
+    if case=='no_retain': assert logit_grad is None and captured
+    initial=emb.detach()+model.position(torch.arange(x.numel())).detach()
+    z=model.blocks[0].norm1(initial)
+    attn=model.blocks[0].attention
+    q=attn.q(z).view(1,x.numel(),1,8).transpose(1,2)
+    k=attn.k(z).view(1,x.numel(),1,8).transpose(1,2)
+    v=attn.v(z).view(1,x.numel(),1,8).transpose(1,2)
+    allowed=attention_mask(torch.arange(x.numel()),torch.arange(x.numel()),valid)
+    _,weights=manual_attention(q,k,v,allowed)
+    if case=='same_ID_both_roles': assert torch.equal(emb[0,2],emb[0,5])
+    manual_norm=float(row.square().sum().sqrt())
+    assert abs(manual_norm-float(row.norm()))<1e-8
+    results.append({'case':case,'x':x.tolist(),'y':y.tolist(),'effective_targets':int((y!=-100).sum()),'loss':float(loss.detach()),'logits_shape':list(logits.shape),'logits_is_leaf':str(logits.is_leaf),'embedding_is_leaf':str(model.embedding.weight.is_leaf),'logits_grad_norms':logit_norms,'Q_row_grad_norm':float(row.norm()),'Q_input_grad_norms':emb.grad[0,x==89].norm(dim=-1).tolist(),'embedding_grad_shape':list(model.embedding.weight.grad.shape),'unused_row_88_grad_norm':float(model.embedding.weight.grad[88].norm()),'Q_row_equals_sum_of_occurrence_grads':str(torch.equal(row,selected)),'Q_same_initial_input_for_both_roles':str(torch.equal(emb[0,2],emb[0,5])) if case=='same_ID_both_roles' else 'not_applicable','attention_to_Q_from_answer_positions':weights.detach()[0,0,4:6,2].tolist(),'analytic_logits_grad_max_abs_error':analytic_error,'manual_norm':manual_norm,'no_retain_warning_count':len(captured),'config':model.description()['config']})
+print(json.dumps({'scope':'5個單次反向CPU機制核對，沒有optimizer/update、沒有正式實驗、沒有語言品質量測','environment':{'python':sys.version,'torch':str(torch.__version__),'torch_git_version':str(torch.version.git_version),'device':'cpu','OMP_NUM_THREADS':'1','MKL_NUM_THREADS':'1','network':'audit guard blocks sockets and subprocesses'},'results':results,'exit_code':0},ensure_ascii=False,indent=2))
