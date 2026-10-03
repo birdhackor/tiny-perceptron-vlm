@@ -1,0 +1,54 @@
+import hashlib
+import json
+import platform
+from pathlib import Path
+
+root = Path('.')
+path = root / 'docs/course-experiments/results/audio.json'
+raw = path.read_bytes()
+formal = json.loads(raw)
+results = formal['results']
+checks = {}
+for condition in ('test', 'blank', 'shuffle'):
+    result = results[condition]
+    samples = result['samples']
+    correct = sum(row['generated'] == row['target'] for row in samples)
+    targets = sum(len(row['target'].encode()) + 1 for row in samples)
+    assert correct == result['correct'] == sum(row['exact_match'] for row in samples)
+    assert len(samples) == result['examples'] == 14
+    assert targets == result['effective_tokens'] == 62
+    assert all(row['question'] == 'pitch?' for row in samples)
+    checks[condition] = {
+        'recomputed_correct': correct,
+        'examples': len(samples),
+        'effective_targets': targets,
+        'samples': [{key: row[key] for key in ('row', 'family', 'target', 'generated', 'donor_row', 'exact_match')} for row in samples],
+    }
+splits = results['data']['splits']
+for split in splits.values():
+    assert split['count'] == len(split['records'])
+    for row in split['records']:
+        assert row['modality'] == 'audio' and row['question'] == 'pitch?'
+        assert row['answer'] == ('high' if row['frequency'] > 300 else 'low')
+        assert 'transcript' not in row
+assert not ({row['frequency'] for row in splits['train']['records']} & {row['frequency'] for row in splits['test']['records']})
+code_matches = {name: hashlib.sha256((root / name).read_bytes()).hexdigest() == formal['code_sha256'][name] for name in ('scripts/course_experiments/modalities.py', 'tiny_perceptron/multimodal.py')}
+assert all(code_matches.values())
+record = {
+    'kind': 'reviewer_executed_frozen_result_verification',
+    'scope': '本人重算固定正式記錄的分母與逐題答案，不重跑訓練或正式評估；不宣稱CPU重播GPU結果。',
+    'command': "OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 CUDA_VISIBLE_DEVICES='' HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1 TRANSFORMERS_OFFLINE=1 .venv/bin/python docs/technical-reviews/artifacts/12.11-frozen-check-code.txt",
+    'environment': {'python': platform.python_version(), 'device': 'cpu', 'OMP_NUM_THREADS': '1', 'MKL_NUM_THREADS': '1'},
+    'input': {'path': str(path), 'sha256': hashlib.sha256(raw).hexdigest()},
+    'formal_run': {key: formal[key] for key in ('experiment_id', 'revision', 'device', 'seed', 'torch_version', 'python_version', 'gpu', 'step_scale', 'evidence_status')},
+    'training': {key: results['training'][key] for key in ('config', 'modal_config', 'steps', 'effective_targets', 'parameters')},
+    'split_policy': results['data']['split_policy'],
+    'splits': {name: {'count': split['count'], 'frequency_families': sorted({row['frequency'] for row in split['records']}), 'variants': sorted({(row['amplitude'], row['seconds']) for row in split['records']})} for name, split in splits.items()},
+    'result_scope': results['scope'],
+    'checks': checks,
+    'current_code_matches_formal_hash': code_matches,
+    'all_assertions_passed': True,
+}
+output = root / 'docs/technical-reviews/artifacts/12.11-frozen-check.json'
+output.write_text(json.dumps(record, ensure_ascii=False, indent=2) + '\n')
+print(json.dumps({'correct': {name: result['recomputed_correct'] for name, result in checks.items()}, 'examples_per_condition': 14, 'targets_per_condition': 62, 'all_assertions_passed': True}))

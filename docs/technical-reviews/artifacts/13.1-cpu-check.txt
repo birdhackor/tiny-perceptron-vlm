@@ -1,0 +1,121 @@
+import ast
+import contextlib
+import hashlib
+import io
+import json
+import math
+import random
+import re
+import sys
+from pathlib import Path
+
+import torch
+
+ROOT = Path.cwd()
+ART = ROOT / "docs/technical-reviews/artifacts"
+
+
+def sha(raw):
+    return hashlib.sha256(raw).hexdigest()
+
+
+def section(path, lesson):
+    raw = (ROOT / path).read_bytes()
+    headings = list(re.finditer(rb"(?m)^## ([A-Z\d]+\.\d+) [^\r\n]+", raw))
+    i = next(i for i, heading in enumerate(headings) if heading[1].decode() == lesson)
+    end = headings[i + 1].start() if i + 1 < len(headings) else len(raw)
+    body = raw[headings[i].start():end]
+    first = raw[:headings[i].start()].count(b"\n") + 1
+    return body, raw[:headings[0].start()], first
+
+
+def code(path, lesson):
+    raw, _, first = section(path, lesson)
+    fences = re.findall(rb"(?ms)^```python\n(.*?)^```", raw)
+    assert len(fences) == 1
+    return fences[0].decode(), {"source": path + "#" + lesson, "source_sha256": sha(raw), "first_line": first}
+
+
+def run(name, source, provenance, modify=None):
+    actual = modify(source) if modify else source
+    out = io.StringIO()
+    namespace = {"__name__": "__review_example__"}
+    torch.manual_seed(42)
+    with contextlib.redirect_stdout(out):
+        exec(compile(actual, name, "exec"), namespace)
+    row = {"name": name, **provenance, "code": actual, "code_sha256": sha(actual.encode()), "stdout": out.getvalue(), "exit_code": 0}
+    checks.append(row)
+    return namespace, row
+
+
+torch.set_num_threads(1)
+environment = {"python": sys.version.split()[0], "torch": str(torch.__version__), "torch_git_version": str(torch.version.git_version), "device": "cpu", "omp_threads": "1", "mkl_threads": "1"}
+checks = []
+raw, intro, _ = section("course/chapters/13.md", "13.1")
+assert sha(raw) == "e1428e8776edca41e78a0e253957198fffd4a1b1e9d3e9ba41e784a49780d960"
+(ART / "13.1-primary-raw.txt").write_bytes(raw)
+(ART / "13.1-intro-raw.txt").write_bytes(intro)
+source, provenance = code("course/chapters/13.md", "13.1")
+original, row = run("13.1 原例", source, provenance)
+assert original["chosen"] == "A"
+assert row["stdout"] == "條件 只回數字：2+2=?\n比較 4 ／ 4，就像兩雙筷子共有四根。\n理由 先正確，再遵循只回數字 選擇 A\n"
+exercise, row = run("13.1 練習：只移除 prompt 限制", source, provenance, lambda x: x.replace('"prompt": "只回數字：2+2=?"', '"prompt": "2+2=?"'))
+assert exercise["chosen"] == "A"
+assert exercise["pair"]["A"] == original["pair"]["A"] and exercise["pair"]["B"] == original["pair"]["B"]
+relabel, row = run("13.1 練習：明確改規則與標記", source, provenance, lambda x: x.replace('"prompt": "只回數字：2+2=?"', '"prompt": "2+2=?"').replace('rule = "先正確，再遵循只回數字"', 'rule = "先正確，再偏好能說明兩組各兩個的比喻"').replace('chosen = "A"', 'chosen = "B"'))
+assert relabel["chosen"] == "B" and relabel["pair"] == exercise["pair"]
+
+for path, lesson in [("course/chapters/07.md", "7.11"), ("course/chapters/08.md", "8.1"), ("course/chapters/08.md", "8.5"), ("course/chapters/08.md", "8.3"), ("course/chapters/09.md", "9.1"), ("course/chapters/13.md", "13.2"), ("course/chapters/13.md", "13.3"), ("course/chapters/13.md", "13.4"), ("course/chapters/13.md", "13.5"), ("course/chapters/13.md", "13.7")]:
+    source, provenance = code(path, lesson)
+    ns, row = run("必要材料原例 " + lesson, source, provenance)
+    if lesson == "7.11":
+        assert ns["x"].shape == (2, 10) and int((ns["y"] != -100).sum()) == 4
+        assert any(p.grad is not None for p in ns["model"].parameters())
+    elif lesson == "13.3":
+        expected = 2 * (2 - math.log(math.exp(2) + 2))
+        assert math.isclose(float(ns["score"].detach()), expected, abs_tol=1e-6)
+    elif lesson == "13.4":
+        assert torch.equal(ns["before"], ns["reference"].embedding.weight)
+        assert not ns["scores"].requires_grad
+    elif lesson == "13.5":
+        assert abs(ns["chosen"].grad.item() + 0.05) < 1e-7
+        assert abs(ns["rejected"].grad.item() - 0.05) < 1e-7
+
+formal = json.loads((ART / "13.1-formal-functions.json").read_text())
+ns = {"json": json, "hashlib": hashlib, "random": random}
+for item in formal["files"]:
+    for name, function in item["functions"].items():
+        exec(compile(function["code"], item["url"], "exec"), ns)
+records = ns["arithmetic_records"]()
+arithmetic = ns["split_records"](records, seed=42)
+pairs = ns["_preference_parts"](arithmetic)
+dpo = json.loads((ROOT / "docs/course-experiments/results/dpo.json").read_text())
+style = json.loads((ROOT / "docs/course-experiments/results/style.json").read_text())
+summary = {}
+groups = {split: {r["family"] for r in rows} for split, rows in arithmetic.items()}
+assert len(records) == 64 and len({r["family"] for r in records}) == 36
+assert not groups["train"] & groups["validation"] and not groups["train"] & groups["test"] and not groups["validation"] & groups["test"]
+for split, rows in arithmetic.items():
+    def serialized_sha(data):
+        return sha("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in data).encode())
+    row = {"records": len(rows), "families": len(groups[split]), "family_ids": sorted(groups[split]), "sft_jsonl_sha256": serialized_sha(rows), "dpo_jsonl_sha256": serialized_sha(pairs[split])}
+    assert row["sft_jsonl_sha256"] == style["results"]["arithmetic_data"][split]["sha256"]
+    assert row["dpo_jsonl_sha256"] == dpo["results"]["data"][split]["sha256"]
+    assert row["records"] == dpo["results"]["data"][split]["records"]
+    for p in pairs[split]:
+        a, b = map(int, p["prompt"].removesuffix("=?").split("+"))
+        assert p["chosen"] == str(a + b) and p["rejected"] == str(a + b + 1)
+    summary[split] = row
+assert [summary[s]["records"] for s in ["train", "validation", "test"]] == [49, 8, 7]
+twotwo = next((split, p) for split, rows in pairs.items() for p in rows if p["prompt"] == "2+2=?")
+assert twotwo[1]["chosen"] == "4" and twotwo[1]["rejected"] == "5"
+assert dpo["results"]["reference_unchanged"] is True
+format_data = dpo["results"]["format_only"]["data"]
+for split, rows in pairs.items():
+    transformed = [{**p, "rejected": p["chosen"] + "; answer complete"} for p in rows]
+    assert serialized_sha(transformed) == format_data[split]["sha256"]
+formal_check = {"source_revision": formal["source_revision"], "seed": 42, "records_total": len(records), "families_total": len(set.union(*groups.values())), "splits": summary, "family_overlap": False, "2+2_pair": twotwo, "content_formula": "chosen=a+b; rejected=a+b+1", "format_formula": "chosen=a+b; rejected=chosen+'; answer complete'", "format_manifest_matches": True, "dpo_result_sha256": sha((ROOT / "docs/course-experiments/results/dpo.json").read_bytes()), "style_result_sha256": sha((ROOT / "docs/course-experiments/results/style.json").read_bytes()), "scope": "僅離線重播資料建構、家族切分與凍結報告的一致性；未重跑正式訓練、GPU或品質測量。"}
+
+result = {"schema_version": 1, "reviewer_task": "/root/technical_round_coordinator/technical_13_1_fresh", "accessed_on": "2026-10-03", "environment": environment, "primary_sha256": sha(raw), "intro_sha256": sha(intro), "checks": checks, "formal_split_replay": formal_check, "result": "全部斷言通過；13.1 原例及兩個練習分支各自執行，必要材料僅支持導言與指定主張。"}
+(ART / "13.1-cpu-results.json").write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n")
+print(json.dumps({"environment": environment, "runs": [{"name": c["name"], "stdout": c["stdout"]} for c in checks], "formal_split_replay": formal_check, "result": result["result"]}, ensure_ascii=False, indent=2))
