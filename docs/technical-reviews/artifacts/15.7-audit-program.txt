@@ -1,0 +1,58 @@
+import hashlib
+import json
+import math
+import platform
+from pathlib import Path
+
+import torch
+from tiny_perceptron.data import ByteTokenizer, pad_batch
+from tiny_perceptron.model import ModelConfig, TinyLM, loss_sum
+from scripts.course_experiments.common import text_examples
+
+report_path = Path('docs/course-experiments/results/moe.json')
+report = json.loads(report_path.read_text())
+v = report['results']['variants']['top1_aux0']
+assert v['model']['config']['top_k'] == 1
+assert v['model']['config']['layers'] == 2
+assert v['model']['config']['max_length'] == 128
+assert v['training']['auxiliary_weight'] == 0.0
+assert v['training']['optimizer_updates'] == 180
+assert v['training']['steps'] == 180
+for when, expected in [('before', [0.00668, 0.00658]), ('after', [0.02446, 0.01400])]:
+    values = v[f'router_gradients_{when}']
+    assert values['effective_targets'] == 1004
+    actual = values['task_gradient_norms']
+    assert [round(x, 5) for x in actual] == expected
+    assert all(x > 0 for x in actual)
+    print(when, json.dumps(values))
+for p in ['tiny_perceptron/modern.py', 'tiny_perceptron/data.py', 'tiny_perceptron/model.py', 'scripts/course_experiments/common.py']:
+    h = hashlib.sha256(Path(p).read_bytes()).hexdigest()
+    assert h == report['code_sha256'][p]
+    print('frozen_code_hash', p, h)
+print('frozen_report_sha256', hashlib.sha256(report_path.read_bytes()).hexdigest())
+print('fixed_architecture_pin', report['revision'], report['code_sha256']['scripts/course_experiments/architecture.py'])
+tok = ByteTokenizer()
+assert tok.encode('Aé') == [73, 203, 177]
+assert tok.decode(tok.encode('Aé')) == 'Aé'
+examples = text_examples([{'text': 'A' * 130}], max_length=128)
+x, y, valid = pad_batch(examples)
+assert [len(a) for a, _ in examples] == [128, 3]
+assert int((y != -100).sum()) == 131
+assert int(valid.sum()) == 131
+print('bounded_utf8_padding_check', {'encoded_Aé': tok.encode('Aé'), 'input_shape': list(x.shape), 'window_lengths': [len(a) for a, _ in examples], 'effective_targets': int((y != -100).sum()), 'final_target_is_eos': int(examples[-1][1][-1]) == tok.eos_id})
+# A small forward/backward check exercises project top-1 and top-2 gates.
+# It does not load checkpoints, train, or rerun the formal schedule.
+torch.manual_seed(42)
+for k in [1, 2]:
+    model = TinyLM(ModelConfig(width=4, layers=2, heads=1, max_length=8, experts=3, top_k=k))
+    rows = text_examples([{'text': 'abc'}, {'text': 'A'}], max_length=8)
+    px, py, pv = pad_batch(rows)
+    result = model(px, valid=pv)
+    total, count = loss_sum(result['logits'], py)
+    gradients = torch.autograd.grad(total / count, [b.ffn.router.weight for b in model.blocks])
+    assert all(torch.isfinite(g).all() and g.norm() > 0 for g in gradients)
+    print('bounded_project_gate_backward', k, {'targets': int(count), 'norms': [float(g.norm()) for g in gradients]})
+print('sqrt_3_4', math.sqrt(3**2 + 4**2))
+print('environment', json.dumps({'python': platform.python_version(), 'torch': str(torch.__version__), 'torch_git_version': torch.version.git_version, 'device': 'cpu', 'threads': torch.get_num_threads()}))
+
+print("math_softmax_check", {"e": math.e, "log2": math.log(2), "exp_log2": math.exp(math.log(2)), "exp0": math.exp(0), "probability": torch.tensor([math.log(2), 0.0]).softmax(-1).tolist(), "selected_top1": torch.tensor([math.log(2), 0.0]).softmax(-1).topk(1).indices.tolist()})
