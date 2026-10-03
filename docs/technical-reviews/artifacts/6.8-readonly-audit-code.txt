@@ -1,0 +1,52 @@
+import sys
+sys.path.insert(0, '/workspace/tiny-perceptron-vlm')
+import hashlib,json,math,platform
+from pathlib import Path
+import torch, tokenizers
+from tiny_perceptron.data import ByteTokenizer, shifted, IGNORE, pad_batch
+from scripts.course_experiments.text import _BPE
+from tokenizers import Tokenizer
+repo=Path('/workspace/tiny-perceptron-vlm')
+a=repo/'docs/technical-reviews/artifacts'
+sha=lambda p:hashlib.sha256(p.read_bytes()).hexdigest()
+result=json.loads((repo/'docs/course-experiments/results/tokenizer.json').read_text())
+code_files=['tiny_perceptron/data.py','scripts/course_experiments/text.py','scripts/course_experiments/common.py']
+code_matches={name:sha(repo/name)==result['code_sha256'][name] for name in code_files}
+assert all(code_matches.values())
+runs=result['results']['runs']; schedule=result['results']['raw_document_schedule_sha256']
+assert result['step_scale']==1.0 and result['seed']==42
+assert runs['byte256']['training']['steps']==runs['bpe512']['training']['steps']==400
+assert runs['byte256']['training_raw_utf8_bytes_exposed']==runs['bpe512']['training_raw_utf8_bytes_exposed']==664759
+bound={'maximum_raw_bytes':256,'maximum_content_tokens':256,'BOS_EOS_ids':2,'maximum_shifted_input_positions':257,'model_max_length':384}
+assert bound['maximum_shifted_input_positions']<=bound['model_max_length']
+formal={}
+for name,run in runs.items():
+ formal[name]={'steps':run['training']['steps'],'raw_bytes_exposed':run['training_raw_utf8_bytes_exposed'],'validation_max_content_tokens':max(run['validation_text_token_lengths']),'validation_max_shifted_input_positions':max(run['validation_text_token_lengths'])+1,'after':{}}
+ for side,expected_records,expected_raw in [('validation',19,3894),('test',20,4193)]:
+  measurement=run['after'][side]; nll=measurement['mean_token_nll']*measurement['effective_tokens']; computed=nll/(measurement['raw_utf8_bytes']*math.log(2))
+  assert measurement['records']==expected_records and measurement['raw_utf8_bytes']==expected_raw
+  assert math.isclose(computed,measurement['bpb_including_eos_boundary_targets'],rel_tol=1e-12)
+  formal[name]['after'][side]={key:measurement[key] for key in ['records','effective_tokens','raw_utf8_bytes','mean_token_nll','bpb_including_eos_boundary_targets']}
+  formal[name]['after'][side]['recomputed_bpb']=computed
+s=json.loads((repo/'docs/course-experiments/results/simple_models.json').read_text())
+simple={name:{'context':v['context'],'parameters':v['parameters'],'steps':v['steps'],'post_update_nll':v['after_nll_same_post_update_time']} for name,v in s['results']['runs'].items() if name in ['mlp1','mlp3','mlp5']}
+assert [simple[k]['parameters'] for k in ['mlp1','mlp3','mlp5']]==[833,1345,1857]
+assert [round(simple[k]['post_update_nll']['train'],3) for k in ['mlp1','mlp3','mlp5']]==[.334,.213,.199]
+assert [round(simple[k]['post_update_nll']['validation'],3) for k in ['mlp1','mlp3','mlp5']]==[.431,.306,.513]
+ids=list(range(10));segments=[ids[start:start+4] for start in [0,3,6]]
+targets=[shifted(row)[1].tolist() for row in segments]
+assert targets==[[1,2,3],[4,5,6],[7,8,9]] and len({v for row in targets for v in row})==9
+boundary_pair=list(zip(*[t.tolist() for t in shifted([0,1]+[8,9])]))
+assert (1,8) in boundary_pair
+x,y=shifted([6,7,8,9]); padded_x,padded_y,valid=pad_batch([(x,y)],max_length=4)
+# pad_batch 依當次 batch 最大長度，不假裝已補成 context 4。
+assert len(x)==len(y)==3 and padded_x.shape==(1,3)
+manual_y=torch.tensor([[7,8,9,IGNORE]])
+assert int((manual_y!=IGNORE).sum())==3
+frozen=a/'6.8-frozen-bpe-tokenizer.json';tok=_BPE(Tokenizer.from_file(str(frozen)));byte=ByteTokenizer()
+sample='Once upon a time, there was a little girl. '*64
+encoded_byte=byte.encode(sample);encoded_bpe=tok.encode(sample)
+coverage={name:len(t.decode(ids[:256]).encode('utf-8')) for name,t,ids in [('byte',byte,encoded_byte),('bpe',tok,encoded_bpe)]}
+assert coverage['bpe']>coverage['byte']==256
+value={'reviewer_task':'/root/technical_round_coordinator/technical_6_8_fresh','environment':{'python':platform.python_version(),'torch':str(torch.__version__),'torch_git_version':str(torch.version.git_version),'tokenizers':tokenizers.__version__,'device':'cpu','OMP_NUM_THREADS':'1','MKL_NUM_THREADS':'1'},'operation':'離線讀取凍結結果、檢查程式 SHA、算術重算與合成資料取段；沒有正式排程重播、模型更新或訓練資料下載。','formal_revision':result['revision'],'code_hashes_match_formal':code_matches,'raw_document_schedule_sha256':schedule,'formal_data':result['results']['data'],'capacity_derivation':bound,'formal_runs':formal,'simple_models_revision':s['revision'],'prerequisite_window_figure_data':simple,'overlap':{'segments':segments,'targets':targets,'common_raw_boundary_ids':[3,6],'duplicate_target_ids':[]},'cross_document_naive_pairs':boundary_pair,'tail_effective_targets':3,'fixed_256_tokens_synthetic_utf8_bytes':coverage,'frozen_bpe_sha256':sha(frozen),'scope':'正式品質結果只轉錄當次凍結測量；本次CPU執行僅支持算術與資料契約。合成字串曝光示例不代表所有語料。'}
+print(json.dumps(value,ensure_ascii=False,indent=2))
