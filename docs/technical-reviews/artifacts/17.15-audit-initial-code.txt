@@ -1,0 +1,73 @@
+import hashlib,json,os,platform,sys
+from pathlib import Path
+import torch
+sys.path.insert(0,str(Path.cwd()))
+from tiny_perceptron.data import ByteTokenizer
+from tiny_perceptron.tokenization import generation_report
+
+root=Path.cwd()
+def sha(p): return hashlib.sha256(Path(p).read_bytes()).hexdigest()
+def read(p): return json.loads(Path(p).read_text())
+environment={'python':platform.python_version(),'torch':torch.__version__,'torch_git':torch.version.git_version,'platform':platform.platform(),'device':'cpu','threads':str(torch.get_num_threads()),'OMP_NUM_THREADS':os.environ.get('OMP_NUM_THREADS',''),'MKL_NUM_THREADS':os.environ.get('MKL_NUM_THREADS','')}
+assert torch.get_num_threads()==1
+assert torch.version.git_version=='5c4886908584029761b579af026dcfb627c84070'
+mode=sys.argv[1]
+result={}
+if mode=='frozen':
+ for exp,names in [('quantization',['fp32','packed4','packed8']),('qat',['matched_ptq4','qat_packed4'])]:
+  p=f'docs/course-experiments/results/{exp}.json';d=read(p);r=d['results']
+  item={'source_path':p,'source_sha256':sha(p),'revision':d['revision'],'environment':{k:d[k] for k in ['device','gpu','seed','torch_version','python_version','step_scale']},'data':r['data'],'teacher':r['teacher_provenance'],'training':r['training'],'runs':{},'code_pin_checks':{}}
+  for code in ['scripts/course_experiments/compression.py','tiny_perceptron/model.py','tiny_perceptron/data.py','tiny_perceptron/training.py','tiny_perceptron/quantization.py','tiny_perceptron/tokenization.py']:
+   actual=sha(code);pin=d['code_sha256'][code];assert actual==pin
+   item['code_pin_checks'][code]={'current_sha256':actual,'frozen_sha256':pin,'match':actual==pin}
+  for name in names:
+   item['runs'][name]={}
+   for split in ['validation','test']:
+    z=r['runs'][name][split];samples=z['generated_samples'];tok=ByteTokenizer()
+    denominator=sum(len(tok.encode(s['expected']))+1 for s in samples)
+    correct=completed=eos=invalid=0
+    for s in samples:
+     g=generation_report(tok,s['generated_ids']);raw=s['generated_ids'][:s['generated_ids'].index(tok.eos_id)] if tok.eos_id in s['generated_ids'] else s['generated_ids']
+     exact=raw==tok.encode(s['expected'])
+     assert exact==s['exact'];assert g['answer']==s['generated'];assert g['eos']==s['ended_with_eos']
+     correct+=exact;completed+=exact and g['eos'];eos+=g['eos'];invalid+=len(g['invalid_special_tokens'])
+    nll=z['nll_sum']/denominator
+    assert denominator==z['supervised_tokens'];assert abs(nll-z['answer_nll'])<1e-12
+    assert (correct,completed,eos)==(z['correct'],z['completed_correct'],z['eos_count'])
+    item['runs'][name][split]={'recount':{'correct':correct,'completed':completed,'eos':eos,'examples':len(samples),'supervised_targets':denominator,'invalid_control_ids':invalid,'answer_nll':nll},'frozen_metrics':{k:v for k,v in z.items() if k not in ['generated_samples','seconds']},'generated_samples':samples}
+  if exp=='quantization':
+   item['test_generated_ids_equal']=all(r['runs']['fp32']['test']['generated_samples'][i]['generated_ids']==r['runs']['packed4']['test']['generated_samples'][i]['generated_ids']==r['runs']['packed8']['test']['generated_samples'][i]['generated_ids'] for i in range(10))
+   assert item['test_generated_ids_equal']
+  else:
+   a,b=r['training']['fp_finetuning'],r['training']['qat']
+   assert a['initialization_sha256']==b['initialization_sha256'];assert a['batch_plan_sha256']==b['batch_plan_sha256']
+   item['same_initialization_and_batch_plan']=True
+  result[exp]=item
+elif mode=='seed':
+ for seed in [0,1,2]:
+  torch.manual_seed(seed);a=torch.multinomial(torch.tensor([.25,.75]),12,replacement=True)
+  torch.manual_seed(seed);b=torch.multinomial(torch.tensor([.25,.75]),12,replacement=True)
+  assert torch.equal(a,b)
+  result[str(seed)]={'first':a.tolist(),'reset':b.tolist(),'equal':bool(torch.equal(a,b))}
+ index=torch.tensor([1.,1.005]).argmax()
+ assert index.dtype==torch.int64 and isinstance(index.item(),int)
+ result['argmax_item']={'dtype':str(index.dtype),'scalar_type':type(index.item()).__name__,'index':index.item()}
+elif mode=='probe':
+ from tiny_perceptron.model import generate
+ from tiny_perceptron.training import load_checkpoint
+ from scripts.course_experiments.compression import _prompt
+ targets=[('quantization','fp32.pt','color=blue;shape=circle;pitch=low;color?','re'),('quantization','model.pt','color=blue;shape=circle;pitch=low;color?','re'),('quantization','packed8.pt','color=blue;shape=circle;pitch=low;color?','re'),('qat','matched_ptq4.pt','color=red;shape=square;pitch=high;describe','square'),('qat','model.pt','color=red;shape=square;pitch=high;describe','circle')]
+ for exp,file,prompt,expected in targets:
+  release=read(f'docs/course-experiments/public-releases/{exp}.json')['release']
+  pinned=next(x for x in release['public_manifest']['files'] if x['output']==file)
+  path=root/'checkpoints/course'/exp/file
+  assert path.is_file(),str(path)
+  assert sha(path)==pinned['sha256']
+  model,payload=load_checkpoint(path,'cpu');model.eval()
+  x=_prompt({'question':prompt,'answer':''},model.config.max_length)
+  ids=generate(model,x[None],max_new_tokens=24,temperature=0,use_cache=False)[0,len(x):].tolist()
+  observed=generation_report(ByteTokenizer(),ids)
+  assert observed['answer']==expected and observed['eos'] and observed['valid_answer_tokens']
+  result[exp+'/'+file]={'original_path':str(path.relative_to(root)),'sha256':sha(path),'bytes':path.stat().st_size,'immutable_url':f"https://huggingface.co/{release['repo']}/resolve/{release['revision']}/{pinned['path']}",'revision':release['revision'],'format_version':payload['format_version'],'config':payload['config'],'prompt':prompt,'max_new_tokens':24,'temperature':0,'use_cache':False,'observed':observed}
+else: raise ValueError(mode)
+print(json.dumps({'mode':mode,'environment':environment,'scope':'離線短CPU核對；frozen只讀固定實報計算分母，probe僅五次既有權重推論；未訓練、未重跑正式排程，不能作GPU速度或通用品質證據。','result':result},ensure_ascii=False,indent=2))

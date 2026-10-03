@@ -1,0 +1,369 @@
+原始程式不可變URL：https://raw.githubusercontent.com/birdhackor/tiny-perceptron-vlm/5af615e5d7c9642afee800390fa072257f895d0c/scripts/course_experiments/compression.py
+全檔SHA256：28d8ce258369672d71a24f7efbcbf68f3e5e8114e073620aba91c4d807043a44
+以下是本節相關函式小份摘錄；全檔差異另存lossless JSON。
+
+MIT License
+
+Copyright (c) 2026 birdhackor
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+def _prompt(record, maximum=None):
+    tok = ByteTokenizer()
+    messages = _chat(record)
+    ids = [tok.bos_id]
+    roles = {"user": tok.user_id, "assistant": tok.assistant_id, "system": tok.system_id}
+    # 最後一個 assistant 是待生成答案，其餘前文皆保留。
+    for message in messages[:-1]:
+        ids += [roles[message["role"]]] + tok.encode(message["content"]) + [tok.eos_id]
+    ids.append(tok.assistant_id)
+    if maximum is not None and len(ids) >= maximum:
+        raise ValueError("prompt 沒有留下答案空間")
+    return torch.tensor(ids, dtype=torch.long)
+
+
+def _dataset(ctx, identifier):
+    path = ctx.dependency(identifier, "dataset.json")
+    parts = json.loads(path.read_text(encoding="utf-8"))
+    families = {}
+    for split in ("train", "validation", "test"):
+        if not parts.get(split):
+            raise ValueError(f"{identifier}/{split} 沒有紀錄")
+        families[split] = {str(row["family"]) for row in parts[split]}
+    for left, right in (("train", "validation"), ("train", "test"), ("validation", "test")):
+        if families[left] & families[right]:
+            raise ValueError(f"{identifier}: {left}/{right} family 洩漏")
+    return parts, {
+        "source": str(path),
+        "sha256": _sha(path),
+        "split_unit": "teacher's original families, unchanged",
+        "counts": {split: len(parts[split]) for split in families},
+        "families": {split: len(families[split]) for split in families},
+        "family_intersections": 0,
+    }
+
+
+def _packed(ctx, source, name, bits, provenance=None):
+    model = replace_linear_layers(copy.deepcopy(source).eval(), bits)
+    was_tied = model.config.tied
+    model.config = copy.deepcopy(model.config)
+    model.config.tied = False
+    path = Path(ctx.output) / f"{name}.pt"
+    torch.save(
+        {
+            "format_version": "quantized-v1",
+            "config": asdict(model.config),
+            "bits": bits,
+            "model": model.state_dict(),
+            "optimizer": None,
+            "tokenizer": ByteTokenizer().state(),
+            "metadata": {
+                "source": provenance or {},
+                "input_output_sharing_removed": was_tied,
+                "quantization": "symmetric signed, per output channel, maxabs / (2**(bits-1)-1)",
+                "scope": "Linear weight-only; embedding/norm/bias remain FP32; reference dequantized forward",
+            },
+        },
+        path,
+    )
+    reloaded, _ = load_checkpoint(path, ctx.device)
+    return reloaded.eval(), path
+
+
+def _evaluate(model, records, device, tokens=24):
+    model.eval()
+    tok = ByteTokenizer()
+    total, count, correct, completed, eos_count, byte_count = 0.0, 0, 0, 0, 0, 0
+    answers = []
+    start = time.perf_counter()
+    examples = _examples(records, model.config.max_length)
+    for offset in range(0, len(examples), 16):
+        x, y, valid = (t.to(device) for t in pad_batch(examples[offset : offset + 16]))
+        nll, denominator = loss_sum(model(x, valid=valid)["logits"], y)
+        total += float(nll)
+        count += int(denominator)
+    for record in records:
+        is_text = "text" in record
+        if is_text:
+            raw_text = tok.encode(record["text"])
+            prefix = raw_text[:24]
+            prompt = torch.tensor([tok.bos_id] + prefix, device=device)
+            expected_ids = raw_text[len(prefix) : len(prefix) + tokens]
+            expected = tok.decode(expected_ids)
+            byte_count += len(record["text"].encode())
+        else:
+            prompt = _prompt(record, model.config.max_length).to(device)
+            expected = _answer(record)
+            expected_ids = tok.encode(expected)
+            byte_count += len(expected.encode())
+        ids = generate(model, prompt[None], max_new_tokens=tokens, temperature=0, use_cache=False)
+        new = ids[0, len(prompt) :].tolist()
+        raw = new[: new.index(tok.eos_id)] if tok.eos_id in new else new
+        response = tok.decode(raw)
+        hit = raw == expected_ids
+        correct += hit
+        completed += hit and tok.eos_id in new
+        eos_count += tok.eos_id in new
+        answers.append(
+            {
+                "family": record.get("family"),
+                "question": tok.decode(prefix) if is_text else _chat(record)[-2]["content"],
+                "expected": expected,
+                "generated": response,
+                "generated_ids": new,
+                "exact": hit,
+                "ended_with_eos": tok.eos_id in new,
+            }
+        )
+    _sync(device)
+    return {
+        "nll_sum": total,
+        "supervised_tokens": count,
+        "nll_sequence_chunks": len(examples),
+        "answer_nll": total / count,
+        "answer_bytes": byte_count,
+        "answer_bpb": total / max(1, byte_count) / math.log(2),
+        "bpb_includes_eos_nll": True,
+        "correct": correct,
+        "examples": len(records),
+        "exact_match": correct / len(records),
+        "completed_correct": completed,
+        "completed_exact_match": completed / len(records),
+        "eos_count": eos_count,
+        "eos_rate": eos_count / len(records),
+        "generation": "greedy, full recompute, no KV cache",
+        "max_new_tokens": tokens,
+        "exact_match_definition": "fixed reference continuation"
+        if "text" in records[0]
+        else "raw answer token identity",
+        "seconds": time.perf_counter() - start,
+        "generated_samples": answers,
+    }
+
+
+def _fit_text(ctx, model, records, name, steps=200, teacher_cache=None, alpha=0.5, temperature=2.0):
+    """相同 seed／init／batch plan；KL 只比較同一 gold answer 前文的有效位置。"""
+    seed_everything(ctx.seed)
+    model.train().requires_grad_(True)
+    examples = _examples(records, model.config.max_length)
+    before = _parameter_hash(model)
+    rng = random.Random(ctx.seed)
+    plan = [[rng.randrange(len(examples)) for _ in range(16)] for _ in range(steps)]
+    optimizer = torch.optim.AdamW(model.parameters(), lr=0.003, weight_decay=0.01)
+    trace, initial_gradient, effective = [], None, 0
+    _sync(ctx.device)
+    start = time.perf_counter()
+    for step, indices in enumerate(plan):
+        x, y, valid = pad_batch([examples[i] for i in indices])
+        x, y, valid = x.to(ctx.device), y.to(ctx.device), valid.to(ctx.device)
+        logits = model(x, valid=valid)["logits"]
+        ce = masked_loss(logits, y)
+        kl = ce.new_zeros(())
+        if teacher_cache is not None:
+            selected = logits[y != IGNORE][None]
+            targets = torch.cat([teacher_cache[i] for i in indices]).to(ctx.device)[None]
+            labels = y[y != IGNORE][None]
+            kl = distillation_kl(selected, targets, labels, temperature)
+        loss = (1 - alpha) * ce + alpha * kl if teacher_cache is not None else ce
+        if not torch.isfinite(loss):
+            raise FloatingPointError(f"{name}: nonfinite loss at {step + 1}")
+        optimizer.zero_grad(set_to_none=True)
+        loss.backward()
+        if step == 0:
+            initial_gradient = float(model.output.weight.grad.norm())
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0, error_if_nonfinite=True)
+        optimizer.step()
+        effective += int((y != IGNORE).sum())
+        if step in (0, steps - 1) or (step + 1) % 50 == 0:
+            trace.append(
+                {"step": step + 1, "loss": float(loss.detach()), "ce": float(ce.detach()), "kl": float(kl.detach())}
+            )
+    _sync(ctx.device)
+    elapsed = time.perf_counter() - start
+    after = _parameter_hash(model)
+    report = {
+        "steps": steps,
+        "optimizer_updates": steps,
+        "batch_size": 16,
+        "learning_rate": 0.003,
+        "seconds": elapsed,
+        "initialization_sha256": before,
+        "final_sha256": after,
+        "weights_changed": before != after,
+        "first_output_weight_gradient_norm": initial_gradient,
+        "batch_plan_sha256": hashlib.sha256(json.dumps(plan).encode()).hexdigest(),
+        "training_examples": len(records),
+        "training_sequence_chunks": len(examples),
+        "effective_supervised_tokens": effective,
+        "training_checkpoint": f"{name}-training.pt",
+        "objective": "(1-alpha)*CE + alpha*KL(teacher||student)*T²" if teacher_cache is not None else "CE",
+        "alpha": alpha if teacher_cache is not None else 0,
+        "temperature": temperature,
+        "temperature_squared_applied_once": teacher_cache is not None,
+        "loss_trace": trace,
+    }
+    if any(isinstance(layer, _QATLinear) for layer in model.modules()):
+        report["training_forward"] = (
+            "restore _QATLinear wrappers before resuming; native state stores float master weights"
+        )
+    save_checkpoint(Path(ctx.output) / f"{name}-training.pt", model, optimizer, steps, report)
+    path = _save_float(ctx, model, name, steps, report)
+    return model.eval(), path, report
+
+
+class _QATLinear(nn.Linear):
+    """與 QuantizedLinear 同一個 per-channel 規則，僅 backward 採 STE。"""
+
+    def __init__(self, source, bits=4):
+        super().__init__(source.in_features, source.out_features, source.bias is not None)
+        self.weight = source.weight
+        self.bias = source.bias
+        self.bits = bits
+
+    def forward(self, x):
+        integers, scale = quantize_symmetric(self.weight.detach(), self.bits, per_channel=True)
+        restored = integers * scale
+        simulated = self.weight + (restored - self.weight).detach()
+        return F.linear(x, simulated, self.bias)
+
+
+def run_quantization(ctx):
+    """FP32 教師繼續真實訓練後，同一權重轉換為 packed4／packed8。"""
+    Path(ctx.output).mkdir(parents=True, exist_ok=True)
+    began = time.perf_counter()
+    source, provenance = _teacher(ctx, "sft")
+    parts, data = _dataset(ctx, "sft")
+    model, fp_path, training = _fit_text(ctx, source, parts["train"], "fp32", _steps(ctx, 120))
+    variants = {"fp32": (model, fp_path)}
+    variants["packed4"] = _packed(ctx, model, "model", 4, provenance)
+    variants["packed8"] = _packed(ctx, model, "packed8", 8, provenance)
+    reports = {}
+    for name, (candidate, path) in variants.items():
+        reports[name] = {
+            "storage": _storage(candidate, path),
+            "validation": _evaluate(candidate, parts["validation"], ctx.device),
+            "test": _evaluate(candidate, parts["test"], ctx.device),
+            "timing": _timing(candidate, parts["test"][0], ctx.device),
+        }
+    for name in ("packed4", "packed8"):
+        reports[name]["file_bytes_ratio_to_fp32"] = (
+            reports[name]["storage"]["file_bytes"] / reports["fp32"]["storage"]["file_bytes"]
+        )
+        reports[name]["tensor_bytes_ratio_to_fp32"] = (
+            reports[name]["storage"]["tensor_bytes"] / reports["fp32"]["storage"]["tensor_bytes"]
+        )
+        reports[name]["test_nll_delta"] = reports[name]["test"]["answer_nll"] - reports["fp32"]["test"]["answer_nll"]
+        reports[name]["test_exact_match_delta"] = (
+            reports[name]["test"]["exact_match"] - reports["fp32"]["test"]["exact_match"]
+        )
+    return {
+        "experiment": "quantization",
+        "sections": ["17.1", "17.5", "17.7", "17.8", "17.9", "17.10", "17.15"],
+        "teacher_provenance": provenance,
+        "data": data,
+        "training": training,
+        "runs": reports,
+        "same_fp32_source": True,
+        "reloaded_packed_checkpoints_before_evaluation": True,
+        "checkpoint": "model.pt",
+        "seconds": time.perf_counter() - began,
+        "limitations": [
+            "weight-only per-channel Linear quantization; no activation calibration",
+            "packed storage is real; forward dequantizes to FP32 and uses ordinary Linear",
+            "reported timings and allocator probes do not establish low-bit kernel speed or RAM savings",
+            "synthetic heldout attribute families; no broad language quality claim",
+        ],
+    }
+
+
+def run_qat(ctx):
+    """同一 init／batch plan 的 FP 微調與 STE QAT，再各自真的打包。"""
+    Path(ctx.output).mkdir(parents=True, exist_ok=True)
+    began = time.perf_counter()
+    source, provenance = _teacher(ctx, "sft")
+    if source.config.tied:
+        raise ValueError("此 matched QAT 教學要求 untied 教師，避免額外改變共享語意")
+    parts, data = _dataset(ctx, "sft")
+    source.eval()
+    start_hash = _parameter_hash(source)
+    source_path = _save_float(ctx, source, "initial_fp32", provenance["steps"], provenance)
+    plain, plain_path, plain_fit = _fit_text(
+        ctx, copy.deepcopy(source), parts["train"], "fp_finetuned", _steps(ctx, 350)
+    )
+    fake = _qat_layers(copy.deepcopy(source))
+    fake, _, qat_fit = _fit_text(ctx, fake, parts["train"], "qat_fake", _steps(ctx, 350))
+    # fake checkpoint 中的數值仍是浮點；部署檔案必須另做真正 packing。
+    qat_float = _qat_layers(copy.deepcopy(fake), remove=True)
+    qat_float_path = _save_float(ctx, qat_float, "qat_float", qat_fit["steps"], qat_fit)
+    initial_ptq = _packed(ctx, source, "initial_ptq4", 4, provenance)
+    matched_ptq = _packed(ctx, plain, "matched_ptq4", 4, {"training": plain_fit})
+    deployment = _packed(ctx, qat_float, "model", 4, {"training": qat_fit})
+    x, _ = _example(parts["test"][0], source.config.max_length)
+    with torch.no_grad():
+        a = fake(x[None].to(ctx.device))["logits"]
+        b = deployment[0](x[None].to(ctx.device))["logits"]
+        matching_error = float((a - b).abs().max())
+    if matching_error > 1e-4:
+        raise ValueError(f"fake 與 deployed per-channel 規則不一致：{matching_error}")
+    if plain_fit["initialization_sha256"] != qat_fit["initialization_sha256"]:
+        raise ValueError("FP 與 QAT 初始化不同")
+    if plain_fit["batch_plan_sha256"] != qat_fit["batch_plan_sha256"]:
+        raise ValueError("FP 與 QAT batch plan 不同")
+    variants = {
+        "initial_fp32": (source, source_path),
+        "initial_ptq4": initial_ptq,
+        "fp_finetuned": (plain, plain_path),
+        "matched_ptq4": matched_ptq,
+        "qat_float": (qat_float, qat_float_path),
+        "qat_packed4": deployment,
+    }
+    reports = {
+        name: {
+            "storage": _storage(model, path),
+            "validation": _evaluate(model, parts["validation"], ctx.device),
+            "test": _evaluate(model, parts["test"], ctx.device),
+        }
+        for name, (model, path) in variants.items()
+    }
+    return {
+        "experiment": "qat",
+        "sections": ["17.14", "17.15"],
+        "teacher_provenance": provenance,
+        "data": data,
+        "initialization_sha256": start_hash,
+        "training": {"fp_finetuning": plain_fit, "qat": qat_fit},
+        "fake_quantization": "weight-only symmetric per output channel; signed -7..7; STE identity gradient",
+        "activation_quantization": False,
+        "same_initialization_and_batch_plan": True,
+        "fake_deployed_max_logit_difference": matching_error,
+        "runs": reports,
+        "qat_vs_matched_ptq_test_nll_delta": reports["qat_packed4"]["test"]["answer_nll"]
+        - reports["matched_ptq4"]["test"]["answer_nll"],
+        "qat_vs_matched_ptq_test_em_delta": reports["qat_packed4"]["test"]["exact_match"]
+        - reports["matched_ptq4"]["test"]["exact_match"],
+        "checkpoint": "model.pt",
+        "seconds": time.perf_counter() - began,
+        "limitations": [
+            "STE is an approximate gradient",
+            "QAT improvement is measured, never assumed",
+            "packed forward dequantizes to FP32",
+        ],
+    }
+
+

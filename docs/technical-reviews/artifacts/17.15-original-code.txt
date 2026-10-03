@@ -1,0 +1,9 @@
+import torch
+
+tokens = ["<EOS>", "貓"]
+original = torch.tensor([1.0, 1.005])
+quantized = torch.tensor([1.01, 1.005])
+mae = (original - quantized).abs().mean().item()
+print("分數MAE", round(mae, 4))
+print("原版選擇", tokens[original.argmax().item()])
+print("量化版選擇", tokens[quantized.argmax().item()])
