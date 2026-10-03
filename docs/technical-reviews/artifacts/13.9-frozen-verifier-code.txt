@@ -1,0 +1,71 @@
+from pathlib import Path
+import hashlib, json, random, sys, torch
+from tiny_perceptron.data import ByteTokenizer, render_chat
+from scripts.course_experiments.common import split_records
+from scripts.course_experiments.text import arithmetic_records
+base = Path("docs/technical-reviews/artifacts")
+H = lambda p: hashlib.sha256(Path(p).read_bytes()).hexdigest()
+x = json.loads(Path("docs/course-experiments/results/dpo.json").read_text())
+s = json.loads(Path("docs/course-experiments/results/style.json").read_text())
+r = x["results"]
+tok = ByteTokenizer()
+checks = []
+def generated(e):
+    rows = []
+    for z in e["samples"]:
+        ids = z["generated_ids"]
+        raw = ids[:ids.index(tok.eos_id)] if tok.eos_id in ids else ids
+        good = raw == tok.encode(z["expected"])
+        assert good == z["exact"]
+        assert (tok.eos_id in ids) == z["eos"]
+        rows.append({"prompt": z["messages"][0]["content"], "expected": z["expected"], "generated": z["generated"], "ids": ids, "exact": good})
+    count = sum(z["exact"] for z in rows)
+    assert count == e["matches"] and len(rows) == e["records"]
+    return {"records": len(rows), "matches": count, "rows": rows}
+def preference(e):
+    rows = []
+    for z in e["samples"]:
+        margin = z["policy_chosen_logp"] - z["policy_rejected_logp"]
+        relative = margin - z["reference_margin"]
+        assert abs(margin-z["policy_margin"]) < 1e-5
+        assert abs(relative-z["relative_margin"]) < 1e-5
+        for side in ("chosen", "rejected"):
+            _, y = render_chat([{"role":"user", "content":z["prompt"]},{"role":"assistant", "content":z[side]}])
+            assert int((y != -100).sum()) == z[side+"_answer_tokens"]
+        rows.append({k:z[k] for k in ["family", "policy_chosen_logp", "policy_rejected_logp", "reference_margin", "policy_margin", "relative_margin", "chosen_answer_tokens", "rejected_answer_tokens"]})
+    chosen = sum(z["policy_margin"] > 0 for z in rows)
+    improved = sum(z["relative_margin"] > 0 for z in rows)
+    assert chosen == e["chosen_higher_absolute_probability"]
+    assert improved == e["relative_preference_improved"] and len(rows) == e["records"]
+    return {"records":len(rows), "chosen_higher":chosen, "relative_improved":improved, "rows":rows}
+checks.append({"baseline_test": generated(s["results"]["content_evaluation"]["test"])})
+for name,z in r["runs"].items():
+    checks.append({"run":name,"beta":z["beta"],"training":{k:z["training"][k] for k in ["steps","effective_answer_tokens_both_sides"]},"arithmetic_test":generated(z["arithmetic"]["test"])})
+checks.append({"format_test":preference(r["format_only"]["preference"]["test"]),"format_generation":generated(r["format_only"]["arithmetic"]["test"]),"format_steps":r["format_only"]["training"]["steps"]})
+pilot = r["ultrafeedback_pilot"]
+for split,e in pilot["evaluation"].items():
+    for z in e["samples"]:
+        for field in ("prompt","chosen","rejected"):
+            assert len(z[field].encode("utf-8")) <= 120
+    checks.append({"natural_split":split, "count":preference(e)})
+parts = split_records(arithmetic_records(),seed=42)
+assert {k:len(v) for k,v in parts.items()} == {"train":49,"validation":8,"test":7}
+examples = []
+for row in parts["train"]:
+    lengths=[]
+    for answer in (str(row["a"]+row["b"]),str(row["a"]+row["b"]+1)):
+        _, y = render_chat([{"role":"user","content":row["messages"][0]["content"]},{"role":"assistant","content":answer}])
+        lengths.append(int((y != -100).sum()))
+    examples.append(sum(lengths))
+sampler = random.Random(42)
+effective = sum(sum(sampler.choices(examples,k=8)) for _ in range(250))
+assert effective == 9448
+checks.append({"recomputed_controlled_split":{k:len(v) for k,v in parts.items()},"recomputed_250_step_two_side_exposure":effective,"sampled_pairs":250*8})
+versions = {"python":sys.version,"torch":str(torch.__version__),"torch_commit":str(torch.version.git_version),"device":"cpu","OMP_NUM_THREADS":"1","MKL_NUM_THREADS":"1"}
+result = {"scope":"只讀凍結原始結果、以原公式重新計數並重播抽樣位置分母；沒有模型更新、權重下載、GPU或訓練重跑。", "environment":versions, "result_sha256":H("docs/course-experiments/results/dpo.json"), "baseline_sha256":H("docs/course-experiments/results/style.json"), "formal_run":{"revision":x["revision"],"device":x["device"],"seed":x["seed"],"torch":x["torch_version"],"step_scale":x["step_scale"],"checkpoints_pin":x["hf"]["revision"],"reference_unchanged":r["reference_unchanged"]}, "pilot_configuration":{"data":pilot["data"],"sft_steps":pilot["sft_training"]["steps"],"dpo_steps":pilot["training"]["steps"],"sft_effective_tokens":pilot["sft_training"]["effective_tokens"],"dpo_effective_tokens_both_sides":pilot["training"]["effective_answer_tokens_both_sides"],"evaluation_keys":list(pilot["evaluation"]),"model_configuration_locator":"固定版 behavior.py:_natural_dpo_pilot，width=32, layers=1, max_length=256；無生成評估呼叫。"}, "checks":checks, "exit_code":0}
+(base/"13.9-frozen-result-verification.json").write_text(json.dumps(result,ensure_ascii=False,indent=2)+"\n")
+print("baseline/test, model/test, beta1/test, format generation: each 0/7")
+print("format relative improvement 7/7; candidate chosen-higher 7/7")
+print("natural validation: relative improved 6/10, chosen-higher 7/10")
+print("natural test: relative improved 8/10, chosen-higher 4/10")
+print("split 49/8/7; each 250-step two-side effective exposure",effective)
