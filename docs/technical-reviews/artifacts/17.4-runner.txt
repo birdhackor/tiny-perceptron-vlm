@@ -1,0 +1,24 @@
+import argparse, contextlib, hashlib, io, json, os, platform, sys
+from pathlib import Path
+import torch
+p=argparse.ArgumentParser();p.add_argument('case');a=p.parse_args()
+root=Path('docs/technical-reviews/artifacts')
+code_path=root/f'17.4-{a.case}-code.txt';code=code_path.read_bytes()
+stdout=io.StringIO();ns={}
+with contextlib.redirect_stdout(stdout):exec(compile(code, str(code_path), 'exec'),ns)
+x,q,restored=ns['x'],ns['q'],ns['restored']
+expected={'primary':([0,5,10,15],[-1.0,0.0,1.0,2.0]),'primary-exercise':([0,10,15],[-2.0,0.0,1.0]),'prerequisite':([-1,0,1,2],[-0.5,0.0,0.5,1.0]),'prerequisite-exercise':([-3,1,3,5],[-0.75,0.25,0.75,1.25])}[a.case]
+assert q.tolist()==expected[0]
+assert restored.tolist()==expected[1]
+assert x.device.type==q.device.type==restored.device.type=='cpu'
+if a.case.startswith('primary'):
+ assert ns['scale']==0.2
+ assert ns['zero']==(10 if a.case.endswith('exercise') else 5)
+ assert torch.equal(x,restored)
+else:
+ e=(x-restored).abs()
+ target=0.05 if a.case.endswith('exercise') else 0.2
+ assert torch.allclose(e,torch.full_like(e,target),atol=5e-8,rtol=0)
+result={'case':a.case,'code_path':str(code_path),'code_sha256':hashlib.sha256(code).hexdigest(),'command':f'OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 timeout 30 .venv/bin/python docs/technical-reviews/artifacts/17.4-runner.txt {a.case}','stdout':stdout.getvalue(),'observed':{'input':x.tolist(),'input_dtype':str(x.dtype),'scale':ns['scale'],'zero':ns.get('zero'),'q':q.tolist(),'q_dtype':str(q.dtype),'q_element_size_bytes':q.element_size(),'q_storage_bytes':q.numel()*q.element_size(),'restored':restored.tolist(),'error':(x-restored).tolist(),'min_tensor_shape':list(x.min().shape),'max_tensor_shape':list(x.max().shape)},'assertions':'實際 q/反量化與各案預期相符；主例與17.4練習 torch.equal(input,restored) 為真；前置誤差容忍5e-8。','environment':{'python':sys.version.split()[0],'torch':torch.__version__,'torch_git_version':torch.version.git_version,'device':'cpu','platform':platform.platform(),'threads':str(torch.get_num_threads()),'OMP_NUM_THREADS':os.environ.get('OMP_NUM_THREADS',''),'MKL_NUM_THREADS':os.environ.get('MKL_NUM_THREADS','')},'exit_code':0}
+path=root/f'17.4-{a.case}-execution.json';path.write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\n')
+print(json.dumps(result,ensure_ascii=False,indent=2))
