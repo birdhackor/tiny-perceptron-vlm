@@ -1,0 +1,84 @@
+import contextlib
+import hashlib
+import io
+import json
+import re
+import sys
+from pathlib import Path
+
+root = Path('/workspace/tiny-perceptron-vlm')
+sys.path.insert(0, str(root))
+import torch
+from tiny_perceptron.multimodal import scene
+
+torch.set_num_threads(1)
+torch.set_default_device('cpu')
+assert torch.version.cuda is None
+
+def audit(event, args):
+    if event in ('socket.connect', 'socket.getaddrinfo', 'subprocess.Popen', 'os.system'):
+        raise RuntimeError('offline CPU review guard: ' + event)
+
+sys.addaudithook(audit)
+raw = (root / 'course/chapters/10.md').read_bytes()
+headers = list(re.finditer(rb'(?m)^## ', raw))
+body = raw[headers[0].start():headers[1].start()]
+code = re.search(rb'```python\n(.*?)```', body, re.S)[1]
+namespace = {'__name__': '__main__'}
+exercise_code = code.replace(b'scene("red", "square")', b'scene("blue", "square")')
+capture = io.StringIO()
+with contextlib.redirect_stdout(capture):
+    exec(compile(exercise_code, 'course/chapters/10.md#10.1-blue-exercise', 'exec'), namespace)
+exercise = namespace['image']
+assert tuple(exercise.shape) == (3, 16, 16)
+assert exercise[:, 8, 8].tolist() == [0.0, 0.0, 1.0]
+
+red = scene('red', 'square')
+original = red.clone()
+as_tuple = tuple(red.shape)
+as_list = red[:, 8, 8].tolist()
+expanded = red.unsqueeze(0)
+batch = torch.stack([red, exercise])
+hwc = red.permute(1, 2, 0)
+wrong_reshape = hwc.reshape(3, 16, 16)
+scores = torch.tensor([[60., 70., 80.], [80., 90., 100.]])
+before = {'mean_dim1': scores.mean(1).tolist(), 'mean_dim0': scores.mean(0).tolist()}
+scores[0, 2] = 110
+after = {'mean_dim1': scores.mean(1).tolist(), 'mean_dim0': scores.mean(0).tolist()}
+intro_examples = {}
+for lesson in ('10.2', '10.3', '10.7'):
+    match = re.search(rb'(?m)^## ' + lesson.encode() + rb' [^\n]+\n', raw)
+    following = re.search(rb'(?m)^## ', raw[match.end():])
+    stop = match.end() + following.start() if following else len(raw)
+    selected = raw[match.start():stop]
+    snippet = re.search(rb'```python\n(.*?)```', selected, re.S)[1]
+    stream = io.StringIO()
+    torch.manual_seed(0)
+    with contextlib.redirect_stdout(stream):
+        exec(compile(snippet, 'course/chapters/10.md#' + lesson + '-intro-source', 'exec'), {'__name__': '__main__'})
+    intro_examples[lesson] = {'code_utf8': snippet.decode(), 'code_sha256': hashlib.sha256(snippet).hexdigest(), 'stdout': stream.getvalue(), 'scope': 'only supports 10.1 chapter introduction; no separate section verdict'}
+result = {
+    'environment': {'python': sys.version, 'torch': str(torch.__version__), 'torch_git_version': str(torch.version.git_version), 'device': str(red.device), 'threads': str(torch.get_num_threads()), 'cuda_build': str(torch.version.cuda)},
+    'exercise': {'change': 'only red -> blue in original fence', 'code_utf8': exercise_code.decode(), 'code_sha256': hashlib.sha256(exercise_code).hexdigest(), 'stdout': capture.getvalue()},
+    'intro_examples': intro_examples,
+    'observations': {
+        'original_unchanged_after_tuple_tolist_unsqueeze': torch.equal(red, original),
+        'unsqueeze_shape': list(expanded.shape),
+        'unsqueeze_numel_equals_original': expanded.numel() == red.numel(),
+        'unsqueeze_shares_storage': expanded.data_ptr() == red.data_ptr(),
+        'two_image_batch_shape': list(batch.shape),
+        'batch0_equals_whole_red_image': torch.equal(batch[0], red),
+        'batch0_central_rgb': batch[0, :, 8, 8].tolist(),
+        'red_channel_region_ones': int((red[0] == 1).sum()),
+        'green_blue_all_zero': bool((red[1:] == 0).all()),
+        'scene_range': [red.min().item(), red.max().item()],
+        'double_division_red_center': (red / 255)[:, 8, 8].tolist(),
+        'hwc_shape': list(hwc.shape),
+        'permuted_back_equal': torch.equal(hwc.permute(2, 0, 1), red),
+        'reshape_without_permute_equal': torch.equal(wrong_reshape, red),
+        'warmup_W3_before': before,
+        'warmup_W3_exercise_after': after
+    },
+    'scope': 'one 10.1 original-fence exercise and bounded tensor checks; no model training, dataset downloads, GPU or formal experiment reruns'
+}
+print(json.dumps(result, ensure_ascii=False, indent=2))

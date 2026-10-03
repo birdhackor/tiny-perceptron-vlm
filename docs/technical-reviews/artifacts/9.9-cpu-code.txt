@@ -1,0 +1,201 @@
+import contextlib
+import hashlib
+import io
+import json
+import math
+import platform
+import re
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(ROOT))
+import torch
+from torch import nn
+from torch.nn import functional as F
+from tiny_perceptron.multimodal import AudioEncoder, tone
+
+torch.set_num_threads(1)
+
+
+def guard(event, args):
+    if event.startswith("socket.") or event in ("subprocess.Popen", "os.system"):
+        raise RuntimeError("offline review: network and child processes disabled")
+
+
+sys.addaudithook(guard)
+
+
+def sha(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def section(path, identifier):
+    raw = (ROOT / path).read_bytes()
+    start = re.search(rb"(?m)^## " + re.escape(identifier.encode()) + rb" ", raw).start()
+    following = re.search(rb"(?m)^## ", raw[start + 1:])
+    end = start + 1 + following.start() if following else len(raw)
+    return raw[start:end]
+
+
+runs = []
+
+
+def run_fence(path, identifier, label, old=None, new=None):
+    raw = section(path, identifier)
+    code = re.search(r"```python\n(.*?)\n```", raw.decode(), re.S)[1]
+    if old is not None:
+        assert code.count(old) == 1
+        code = code.replace(old, new)
+    namespace = {"__name__": "__main__"}
+    output = io.StringIO()
+    torch.manual_seed(42)
+    with contextlib.redirect_stdout(output):
+        exec(compile(code, label, "exec"), namespace)
+    runs.append({"label": label, "source": path + "#" + identifier,
+                 "source_sha256": hashlib.sha256(raw).hexdigest(),
+                 "change": None if old is None else {"old": old, "new": new},
+                 "stdout": output.getvalue(), "exit_code": 0})
+    return namespace
+
+
+main = run_fence("course/chapters/09.md", "9.9", "9.9 原例")
+exercise = run_fence("course/chapters/09.md", "9.9", "9.9 練習", "correct_index = 1", "correct_index = 0")
+assert main["scores"].shape == (1, 3)
+assert main["scores"].equal(exercise["scores"])
+diagnostics = []
+for scale in (1.0, 10.0):
+    probability = (main["scores"] * scale).softmax(-1)
+    confidence, prediction = probability.max(-1)
+    exact = 1 / (1 + math.exp(-scale) + math.exp(-2 * scale))
+    assert abs(confidence.item() - exact) < 1e-7
+    assert prediction.item() == 0
+    assert confidence.numel() == prediction.numel() == 1
+    assert isinstance(confidence.item(), float) and isinstance(prediction.item(), int)
+    diagnostics.append({"scale": scale, "probabilities": probability.tolist(),
+                        "confidence": confidence.item(), "prediction": prediction.item(),
+                        "confidence_shape": list(confidence.shape), "prediction_shape": list(prediction.shape),
+                        "analytic_confidence": exact, "rounded": round(confidence.item(), 4),
+                        "below_one": confidence.item() < 1,
+                        "correct_original": prediction.item() == 1,
+                        "correct_exercise": prediction.item() == 0})
+
+run_fence("course/chapters/01.md", "1.7", "必要前置 1.7 原例")
+run_fence("course/chapters/01.md", "1.7", "必要前置 1.7 練習", "[1.0, 2.0, -1.0]", "[3.0, 2.0, -1.0]")
+run_fence("course/first-steps.md", "W.3", "必要前置 W.3 原例")
+run_fence("course/first-steps.md", "W.3", "必要前置 W.3 練習", "[60.0, 70.0, 80.0]", "[60.0, 70.0, 110.0]")
+run_fence("course/chapters/12.md", "12.8", "必要前置 12.8 原例")
+run_fence("course/chapters/12.md", "12.8", "必要前置 12.8 寬度練習", "width=8", "width=12")
+run_fence("course/chapters/12.md", "12.8", "必要前置 12.8 區段練習", "AudioEncoder(bands=16, width=8)", "AudioEncoder(bands=32, width=8)")
+# Display-band change is an additional independent check of the described log_mel call.
+from tiny_perceptron.multimodal import log_mel
+assert log_mel(tone()[None], bands=32).shape == (1, 32, 11)
+
+result_path = ROOT / "docs/course-experiments/results/encoders.json"
+formal = json.loads(result_path.read_text())
+audio = formal["results"]["audio"]
+calibration = audio["calibration"]
+validation_logits = torch.tensor(calibration["validation"]["logits"], dtype=torch.float32)
+validation_labels = torch.tensor(calibration["validation"]["labels"], dtype=torch.long)
+selection = [{"temperature": temperature,
+              "validation_nll": F.cross_entropy(validation_logits / temperature, validation_labels).item()}
+             for temperature in calibration["temperature_grid"]]
+chosen = min(selection, key=lambda row: row["validation_nll"])["temperature"]
+assert chosen == calibration["chosen_temperature"] == 0.5
+for computed, saved in zip(selection, calibration["selection"], strict=True):
+    assert abs(computed["validation_nll"] - saved["validation_nll"]) < 1e-7
+
+test_logits = torch.tensor(calibration["test"]["logits"], dtype=torch.float32)
+labels = torch.tensor(calibration["test"]["labels"], dtype=torch.long)
+original_probabilities = test_logits.softmax(-1)
+scaled_probabilities = (test_logits / chosen).softmax(-1)
+argmax_invariant = torch.equal(test_logits.argmax(-1), (test_logits / chosen).argmax(-1))
+assert argmax_invariant and calibration["test_argmax_invariant"]
+assert torch.allclose(original_probabilities.max(-1).values,
+                      torch.tensor(calibration["test"]["original"]["confidence"]), atol=1e-7, rtol=0)
+assert torch.allclose(scaled_probabilities.max(-1).values,
+                      torch.tensor(calibration["test"]["calibrated"]["confidence"]), atol=1e-7, rtol=0)
+row_index = 11
+record = audio["data"]["splits"]["test"]["records"][row_index]
+assert record["frequency"] == 320 and record["amplitude"] == 0.5 and record["seconds"] == 0.12
+assert record["answer"] == "high" and test_logits[row_index].argmax().item() == 0
+families = {name: {r["family"] for r in split["records"]}
+            for name, split in audio["data"]["splits"].items()}
+assert not (families["train"] & families["validation"])
+assert not (families["train"] & families["test"])
+assert not (families["validation"] & families["test"])
+
+release_path = ROOT / "docs/course-experiments/public-releases/encoders.json"
+release = json.loads(release_path.read_text())["release"]
+manifest = {row["output"]: row for row in release["public_manifest"]["files"]}
+model_dir = ROOT / "checkpoints/course/encoders"
+for name in ("README.md", "audio.pt", "evaluation.json"):
+    assert sha(model_dir / name) == manifest[name]["sha256"]
+saved = torch.load(model_dir / "audio.pt", map_location="cpu", weights_only=True)
+encoder = AudioEncoder(**saved["config"])
+encoder.load_state_dict(saved["encoder"], strict=True)
+classifier = nn.Linear(saved["config"]["width"], len(saved["classes"]))
+classifier.load_state_dict(saved["classifier"], strict=True)
+encoder.eval()
+classifier.eval()
+with torch.no_grad():
+    wave = tone(record["frequency"], seconds=record["seconds"]) * (record["amplitude"] / 0.5)
+    features = encoder(wave[None])
+    replay_logits = classifier(features.mean(1))
+    replay_original = replay_logits.softmax(-1)
+    replay_scaled = (replay_logits / chosen).softmax(-1)
+assert torch.allclose(replay_logits[0], test_logits[row_index], atol=2e-4, rtol=0)
+assert replay_logits.argmax(-1).item() == 0
+assert sha(model_dir / "audio.pt") == manifest["audio.pt"]["sha256"]
+
+# The directly read 12.8 prerequisite contains this figure; verify its fixed denominators.
+fsdd_path = ROOT / "docs/course-experiments/results/real_modal.json"
+fsdd = json.loads(fsdd_path.read_text())["results"]["fsdd"]
+fsdd_summary = {name: {"count": split["count"],
+                       "speakers": sorted({row["family"].split("_")[1] for row in split["records"]}),
+                       "digits": sorted({row["answer"] for row in split["records"]})}
+                for name, split in fsdd["data"]["splits"].items()}
+for name, expected in (("validation", 5), ("test", 3)):
+    evaluation = fsdd[name]
+    assert evaluation["examples"] == 20 and evaluation["correct"] == expected
+    assert sum(row["exact_match"] for row in evaluation["samples"]) == expected
+    assert sum(row["eos"] for row in evaluation["samples"]) == 20
+conversion = fsdd["resampling"][0]
+assert conversion["samples_before"] == 4591 and conversion["samples_after"] == 9182
+assert conversion["samples_before"] / conversion["source_rate"] == conversion["samples_after"] / conversion["target_rate"] == 0.573875
+
+out = {"environment": {"python": platform.python_version(), "torch": torch.__version__,
+                       "torch_git_version": str(torch.version.git_version), "device": "cpu",
+                       "threads": str(torch.get_num_threads()), "platform": sys.platform},
+       "runs": runs, "main_diagnostics": diagnostics,
+       "formal_recalculation": {"result_sha256": sha(result_path), "original_training_revision": formal["revision"],
+                                "seed": formal["seed"], "device": formal["device"],
+                                "training_steps": audio["training"]["steps"],
+                                "training_parameters": audio["training"]["parameters"],
+                                "effective_targets": audio["training"]["effective_targets"],
+                                "weights_changed": audio["training"]["weights_changed"],
+                                "classes": audio["classes"], "family_sets": {k: sorted(v) for k, v in families.items()},
+                                "validation_selection": selection, "chosen_temperature": chosen,
+                                "test_count": len(labels), "test_correct": int((test_logits.argmax(-1) == labels).sum()),
+                                "argmax_invariant_all_test_rows": argmax_invariant,
+                                "selected_row_index": row_index, "selected_row": record,
+                                "selected_logits": test_logits[row_index].tolist(),
+                                "original_confidence": original_probabilities[row_index].max().item(),
+                                "scaled_confidence": scaled_probabilities[row_index].max().item()},
+       "public_checkpoint_replay": {"immutable_revision": release["revision"],
+                                    "repo": release["repo"], "verified_file_hashes": {n: sha(model_dir / n) for n in ("README.md", "audio.pt", "evaluation.json")},
+                                    "format_version": saved["format_version"], "config": saved["config"],
+                                    "classes": saved["classes"], "wave_shape": list(wave.shape),
+                                    "features_shape": list(features.shape), "logits": replay_logits.tolist(),
+                                    "original_confidence": replay_original.max().item(),
+                                    "scaled_confidence": replay_scaled.max().item(), "prediction": saved["classes"][replay_logits.argmax(-1).item()],
+                                    "correct": False, "max_logit_delta_from_fixed_run": (replay_logits[0] - test_logits[row_index]).abs().max().item(),
+                                    "updates": 0, "offline": True},
+       "prerequisite_figure_fixed_check": {"result_path": str(fsdd_path.relative_to(ROOT)),
+                                          "result_sha256": sha(fsdd_path), "splits": fsdd_summary,
+                                          "training_steps": fsdd["training"]["steps"],
+                                          "validation_correct": 5, "validation_count": 20, "validation_eos": 20,
+                                          "test_correct": 3, "test_count": 20, "test_eos": 20,
+                                          "first_resampling_record": conversion, "duration_seconds": 0.573875},
+       "scope": "只重算固定 logits 與離線 CPU 前向；未執行正式排程、未訓練、未下載資料或權重，不能外推 GPU 速度與普遍品質。"}
+print(json.dumps(out, ensure_ascii=False, indent=2))

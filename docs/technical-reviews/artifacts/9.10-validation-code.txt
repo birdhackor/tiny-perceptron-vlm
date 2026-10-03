@@ -1,0 +1,130 @@
+from pathlib import Path
+import hashlib
+import json
+import math
+import platform
+import sys
+
+ROOT = Path('/workspace/tiny-perceptron-vlm')
+sys.path.insert(0, str(ROOT))
+import torch
+from torch.nn import functional as F
+from tiny_perceptron.alignment import reliability_bins
+
+torch.set_num_threads(1)
+torch.set_num_interop_threads(1)
+def no_network(event, args):
+    if event.startswith('socket.') or event in ('subprocess.Popen', 'os.system'):
+        raise RuntimeError('offline bounded review: ' + event)
+sys.addaudithook(no_network)
+
+def digest(path):
+    return hashlib.sha256((ROOT / path).read_bytes()).hexdigest()
+
+def example(confidence, correct, number):
+    x = torch.tensor(confidence)
+    y = torch.tensor(correct)
+    rows = reliability_bins(x, y, bins=number)
+    ece = sum(r['count'] / len(x) * abs(r['accuracy'] - r['confidence']) for r in rows)
+    return {'confidence': x.tolist(), 'correct': y.tolist(), 'bins': rows, 'ece': ece}
+
+examples = {
+    'original': example([.55, .65, .85, .95], [1, 0, 1, 0], 2),
+    'exercise_added_correct_low': example([.55, .65, .85, .95, .25], [1, 0, 1, 0, 1], 2),
+    'four_bins': example([.55, .65, .85, .95], [1, 0, 1, 0], 4),
+    'boundaries_two_bins': example([0., .5, 1.], [1, 0, 1], 2),
+    'boundaries_five_bins': example([0., .2, .4, .6, .8, 1.], [1]*6, 5),
+}
+assert examples['original']['bins'][0]['count'] == 4
+assert abs(examples['original']['ece'] - .25) < 1e-6
+assert [r['count'] for r in examples['exercise_added_correct_low']['bins']] == [1, 4]
+assert abs(examples['exercise_added_correct_low']['ece'] - .35) < 1e-6
+assert [r['count'] for r in examples['four_bins']['bins']] == [2, 2]
+assert [r['count'] for r in examples['boundaries_two_bins']['bins']] == [1, 2]
+assert [r['count'] for r in examples['boundaries_five_bins']['bins']] == [1, 1, 1, 1, 2]
+
+report = json.loads((ROOT / 'docs/course-experiments/results/encoders.json').read_text())
+formal = {}
+max_error = 0.
+for modality in ['vision', 'audio']:
+    source = report['results'][modality]
+    c = source['calibration']
+    v_logits = torch.tensor(c['validation']['logits'], dtype=torch.float32)
+    v_labels = torch.tensor(c['validation']['labels'], dtype=torch.long)
+    selection = [{'temperature': t, 'validation_nll': float(F.cross_entropy(v_logits/t, v_labels))}
+                 for t in c['temperature_grid']]
+    chosen = min(selection, key=lambda s: s['validation_nll'])['temperature']
+    assert chosen == c['chosen_temperature'] == .5
+    for own, saved in zip(selection, c['selection'], strict=True):
+        assert abs(own['validation_nll'] - saved['validation_nll']) < 1e-6
+    families = {k: {r['family'] for r in v['records']} for k,v in source['data']['splits'].items()}
+    assert not (families['train'] & families['validation'] or families['train'] & families['test']
+                or families['validation'] & families['test'])
+    formal[modality] = {'chosen_temperature': chosen, 'selection': selection, 'splits_disjoint_by_family': True}
+    for split in ['validation', 'test']:
+        batch = c[split]
+        z = torch.tensor(batch['logits'], dtype=torch.float32)
+        y = torch.tensor(batch['labels'], dtype=torch.long)
+        mode_rows = {}
+        for mode, t in [('original', 1.), ('calibrated', chosen)]:
+            p = (z/t).softmax(-1)
+            predicted = (z/t).argmax(-1)
+            confidence = p.max(-1).values
+            correct = predicted == y
+            brier = float((p - F.one_hot(y, num_classes=p.shape[1])).square().sum(-1).mean())
+            bins = []
+            ece = 0.
+            ids = (confidence*5).floor().long().clamp(max=4)
+            for i in range(5):
+                mask = ids == i
+                count = int(mask.sum())
+                avg = float(confidence[mask].mean()) if count else None
+                acc = int(correct[mask].sum())/count if count else None
+                if count:
+                    ece += count/len(y) * abs(acc-avg)
+                bins.append({'lower':i/5, 'upper':(i+1)/5, 'upper_inclusive':i==4,
+                             'count':count, 'mean_confidence':avg, 'accuracy':acc})
+            metrics = {'count':len(y), 'correct':int(correct.sum()), 'accuracy':float(correct.sum())/len(y),
+                       'mean_confidence':float(confidence.mean()), 'nll':float(F.cross_entropy(z/t,y)),
+                       'brier':brier, 'ece':ece}
+            for k,v in metrics.items():
+                error = abs(v-batch[mode][k]); max_error = max(error,max_error)
+                assert error < 1e-6, (modality,split,mode,k,v,batch[mode][k])
+            assert predicted.tolist() == batch[mode]['predicted_labels']
+            assert [b['count'] for b in bins] == [b['count'] for b in batch[mode]['bins']]
+            # Independent double-precision arithmetic from the frozen logits and labels.
+            double_p = []
+            for row in batch['logits']:
+                maximum = max(row)/t
+                exp = [math.exp(v/t-maximum) for v in row]
+                double_p.append([v/sum(exp) for v in exp])
+            double_brier = sum(sum((p-(j==target))**2 for j,p in enumerate(row))
+                               for row,target in zip(double_p,batch['labels'],strict=True))/len(y)
+            double_nll = -sum(math.log(row[target]) for row,target in zip(double_p,batch['labels'],strict=True))/len(y)
+            assert abs(double_brier-brier) < 1e-6
+            assert abs(double_nll-metrics['nll']) < 1e-6
+            mode_rows[mode] = {'temperature':t, 'metrics':metrics, 'bins':bins,
+                               'predicted_labels':predicted.tolist(), 'independent_double_brier':double_brier,
+                               'independent_double_nll':double_nll,
+                               'overall_mean_gap':abs(metrics['mean_confidence']-metrics['accuracy'])}
+        assert mode_rows['original']['predicted_labels'] == mode_rows['calibrated']['predicted_labels']
+        formal[modality][split] = mode_rows
+
+scores = torch.tensor([[60.,70.,80.],[80.,90.,100.]])
+derivations = {'nll_0.8':-math.log(.8), 'nll_0.2':-math.log(.2),
+               'brier_wrong_high':.8**2+(.2-1)**2,
+               'four_bin_means':[sum([.55,.65])/2,sum([.85,.95])/2],
+               'tensor_mean_dim1':scores.mean(1).tolist(), 'tensor_mean_dim0':scores.mean(0).tolist(),
+               'ece_exercise_exact':1/5*.75+4/5*.25,
+               'svg_bar_widths':[410*.8795977234840393,410*.9272507429122925],
+               'svg_accuracy_relative_x':410*11/14}
+paths = ['docs/course-experiments/results/encoders.json','scripts/course_experiments/modalities.py',
+         'tiny_perceptron/alignment.py','docs/course-experiments/public-releases/encoders.json',
+         'docs/course-experiments/student-checks/encoders.json']
+out = {'reviewer_task':'/root/technical_round_coordinator/technical_9_10_fresh',
+       'environment':{'python':platform.python_version(),'torch':str(torch.__version__),
+                      'torch_git':torch.version.git_version,'device':'cpu','threads':'1','OMP_NUM_THREADS':'1','MKL_NUM_THREADS':'1'},
+       'examples':examples,'formal_recalculation':formal,'derivations':derivations,
+       'max_abs_error_vs_frozen_report':max_error,'source_hashes':{p:digest(p) for p in paths},
+       'scope':'僅離線核算既存固定 logits 與原例／練習；未訓練、未載模型、未呼叫雲端。'}
+print(json.dumps(out,ensure_ascii=False,indent=2))

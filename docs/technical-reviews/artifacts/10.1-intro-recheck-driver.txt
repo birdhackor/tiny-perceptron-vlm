@@ -1,0 +1,67 @@
+import ast
+import hashlib
+import json
+import os
+import re
+import sys
+from pathlib import Path
+
+root = Path('/workspace/tiny-perceptron-vlm')
+out = root / 'docs/technical-reviews/artifacts'
+digest = lambda raw: hashlib.sha256(raw).hexdigest()
+report = json.loads((root / 'docs/technical-reviews/10.1.json').read_text())
+chapter = (root / 'course/chapters/10.md').read_bytes()
+headers = list(re.finditer(rb'(?m)^## ', chapter))
+intro = chapter[:headers[0].start()]
+body = chapter[headers[0].start():headers[1].start()]
+assert digest(body) == report['source_sha256']
+old_intro = (out / '10.1-intro-raw.txt').read_bytes()
+original = json.loads((out / '10.1-original-execution.json').read_text())
+assert digest(old_intro + chapter[headers[0].start():]) == original['extraction']['source_file_sha256']
+reused = json.loads((out / '10.1-cpu-checks.json').read_text())
+unchanged_fences = {}
+for lesson, previous in reused['intro_examples'].items():
+    match = re.search(rb'(?m)^## ' + lesson.encode() + rb' [^\n]+\n', chapter)
+    following = re.search(rb'(?m)^## ', chapter[match.end():])
+    stop = match.end() + following.start() if following else len(chapter)
+    section = chapter[match.start():stop]
+    fence = re.search(rb'```python\n(.*?)```', section, re.S)[1]
+    assert digest(fence) == previous['code_sha256']
+    unchanged_fences[lesson] = digest(fence)
+fixed = json.loads((root / 'docs/course-experiments/results/real_modal.json').read_text())
+asset = next(a for a in fixed['assets'] if a['id'] == 'fashion-mnist')
+assert asset['training_records'] == 50
+counts = {key: value['count'] for key, value in fixed['results']['fashion-mnist']['data']['splits'].items()}
+assert counts == {'train': 30, 'validation': 10, 'test': 10}
+metadata = json.loads((root / 'assets/training/sources/fashion-mnist.json').read_text())
+assert metadata['selected_rows'] == 50
+assert metadata['hf_revision'] == '531be5e2ccc9dba0c201ad3ae567a4f3d16ecdd2'
+code = (root / 'scripts/course_experiments/modalities.py').read_bytes()
+assert digest(code) == fixed['code_sha256']['scripts/course_experiments/modalities.py']
+assert '本章的合成圖片可離線生成' in intro.decode()
+assert '真實資料實驗另使用已取得的服飾圖' in intro.decode()
+builder = (root / 'scripts/build_course.py').read_text()
+tree = ast.parse(builder)
+build = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == 'build')
+loops = [node for node in ast.walk(build) if isinstance(node, ast.For) and isinstance(node.target, ast.Name) and node.target.id == 'i']
+assert len(loops) == 1
+assert ast.unparse(loops[0].iter) == 'range(1, len(parts), 3)'
+parts = re.split(r'^## ([\dABC]+\.\d+) (.+)$', chapter.decode(), flags=re.M)
+assert parts[0].encode() == intro
+assert all(i >= 1 for i in range(1, len(parts), 3))
+record = {
+    'environment': {'python': sys.version, 'device': 'CPU read-only source/result inspection', 'OMP_NUM_THREADS': str(os.environ.get('OMP_NUM_THREADS')), 'MKL_NUM_THREADS': str(os.environ.get('MKL_NUM_THREADS'))},
+    'old_intro_sha256': digest(old_intro),
+    'new_intro_sha256': digest(intro),
+    'unchanged_primary_sha256': digest(body),
+    'old_full_chapter_sha256': original['extraction']['source_file_sha256'],
+    'reconstructed_old_full_chapter_sha256': digest(old_intro + chapter[headers[0].start():]),
+    'new_full_chapter_sha256': digest(chapter),
+    'unchanged_intro_example_fences': unchanged_fences,
+    'fashion_original_run': {'revision': fixed['revision'], 'run_id': fixed['modal']['run_id'], 'source_sha256': digest((root / 'docs/course-experiments/results/real_modal.json').read_bytes()), 'records': asset['training_records'], 'splits': counts, 'one_persisted_image_reference': next(f for f in asset['files'] if '/images/' in f['path']), 'hf_revision': metadata['hf_revision'], 'source_repository_revision': metadata['source_repository_revision']},
+    'notebook_scope': {'builder_sha256': digest(builder.encode()), 'locator': 'scripts/build_course.py:156-169', 'split_intro_is_parts_0': True, 'section_loop_start': 1, 'note': '親读build原始碼並以AST/原Markdown分割核對，沒有呼叫build或生成Notebook。'},
+    'reviewer_reran_training': False,
+    'reviewer_reran_unchanged_cpu_examples': False,
+    'scope': '只為10.1新版導言，讀取固定結果及原source；既有實跑證據因對應code與inputs unchanged而重用。'
+}
+print(json.dumps(record, ensure_ascii=False, indent=2))

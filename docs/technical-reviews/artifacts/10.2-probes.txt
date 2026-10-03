@@ -1,0 +1,49 @@
+import json
+import platform
+import torch
+from tiny_perceptron.multimodal import scene, patchify, unpatchify
+
+torch.set_num_threads(1)
+image = scene()
+batch = image[None]
+marked = (torch.arange(3)[:, None, None] * 10000 + torch.arange(16)[None, :, None] * 100 + torch.arange(16)[None, None, :])[None]
+actual = patchify(marked, 4)
+expected = torch.empty_like(actual)
+origins = []
+for row in range(4):
+    for col in range(4):
+        slot = row * 4 + col
+        expected[0, slot] = marked[0, :, row * 4:(row + 1) * 4, col * 4:(col + 1) * 4].reshape(-1)
+        origins.append({"slot": slot, "row": row * 4, "column": col * 4, "RGB_first_values": actual[0, slot, [0, 16, 32]].tolist()})
+assert torch.equal(expected, actual)
+assert torch.equal(marked, unpatchify(actual, 3, 16, 16, 4))
+reversed_channels = actual.reshape(1, 16, 3, 4, 4).flip(2).reshape(1, 16, 48)
+undo_reversal = reversed_channels.reshape(1, 16, 3, 4, 4).flip(2).reshape(1, 16, 48)
+cards = [["a", "b"], ["c", "d"]]
+row_cards = [cards[r][c] for r in range(2) for c in range(2)]
+col_cards = [cards[r][c] for c in range(2) for r in range(2)]
+col_restore = [[None, None], [None, None]]
+for k, value in enumerate(col_cards):
+    col_restore[k % 2][k // 2] = value
+same_shape_naive = marked.reshape(1, 16, 48)
+channel_as_card = marked.reshape(1, 3, 256)
+bad_sizes = []
+try:
+    patchify(torch.zeros(1, 3, 15, 16), 4)
+except ValueError as exc:
+    bad_sizes.append(str(exc))
+result = {
+    "environment": {"python": platform.python_version(), "torch": torch.__version__, "torch_git_version": torch.version.git_version, "device": str(batch.device), "dtype": str(batch.dtype), "threads": str(torch.get_num_threads())},
+    "default_scene": {"shape": list(image.shape), "central_RGB": image[:, 8, 8].tolist(), "top_left_RGB": image[:, 0, 0].tolist(), "matches_explicit_red_square": torch.equal(image, scene("red", "square"))},
+    "none_index": {"shape": list(batch.shape), "same_as_unsqueeze0": torch.equal(batch, image.unsqueeze(0)), "same_storage_pointer": batch.data_ptr() == image.data_ptr()},
+    "formula": "patch[0,r*4+s,c*16+dy*4+dx] = marked[0,c,4*r+dy,4*s+dx]",
+    "positions": origins,
+    "all_768_coordinate_channel_values_match": torch.equal(actual, expected),
+    "marked_roundtrip": torch.equal(marked, unpatchify(actual, 3, 16, 16, 4)),
+    "RGB_reversal_counterexample": {"sequence_differs": not torch.equal(actual, reversed_channels), "roundtrip_after_inverse_channel_reversal": torch.equal(marked, unpatchify(undo_reversal, 3, 16, 16, 4))},
+    "cards": {"row_order": row_cards, "column_order": col_cards, "column_order_roundtrip": col_restore == cards},
+    "naive_reshape": {"same_1_16_48_shape": list(same_shape_naive.shape), "same_768_elements": same_shape_naive.numel() == marked.numel(), "differs_from_spatial_patches": not torch.equal(actual, same_shape_naive), "first48_all_red_channel": bool((same_shape_naive[0, 0] < 10000).all()), "channel_as_card_shape": list(channel_as_card.shape), "first_card_entire_red_plane": torch.equal(channel_as_card[0, 0], marked[0, 0].reshape(-1))},
+    "valid_size_requirement": bad_sizes,
+    "torch_equal_boundaries": {"equal_NaN_tensors": torch.equal(torch.tensor([float("nan")]), torch.tensor([float("nan")])), "same_values_different_dtype": torch.equal(torch.tensor([1], dtype=torch.int32), torch.tensor([1], dtype=torch.float32))}
+}
+print(json.dumps(result, ensure_ascii=False, indent=2))
