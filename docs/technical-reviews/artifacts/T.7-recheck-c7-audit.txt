@@ -1,0 +1,53 @@
+import ast
+import hashlib
+import json
+import platform
+from pathlib import Path
+
+import torch
+
+root = Path.cwd()
+sha = lambda path: hashlib.sha256(Path(path).read_bytes()).hexdigest()
+source_path = root / "scripts/course_experiments/applications.py"
+source = source_path.read_text()
+result_path = root / "docs/course-experiments/results/reasoning.json"
+original = json.loads(result_path.read_text())
+assert sha(source_path) == original["code_sha256"]["scripts/course_experiments/applications.py"]
+assert sha(root / "scripts/course_experiments/common.py") == original["code_sha256"]["scripts/course_experiments/common.py"]
+assert original["revision"] == "910aebc6419c9fc6217279a27fde9851c5cfad30"
+assert original["evidence_status"] == "complete_run" and original["status"] == "completed"
+assert original["step_scale"] == 1.0 and original["seed"] == 42
+tree = ast.parse(source)
+functions = {n.name: ast.get_source_segment(source, n) for n in tree.body if isinstance(n, (ast.FunctionDef, ast.ClassDef))}
+raw = functions["_reinforce"]
+assert "actions = distribution.sample()" in raw
+assert "advantage = reward - baseline" in raw
+assert raw.index("advantage = reward - baseline") < raw.index("baseline = 0.95 * baseline")
+assert "advantage.detach() * distribution.log_prob(actions)" in raw
+assert "0.005 * distribution.entropy().mean()" in raw
+assert "steps=1200" in raw and "lr=0.003" in raw
+assert "k=64" in raw
+assert "nn.Linear(18, 48)" in functions["_FinitePolicy"] and "nn.Linear(48, 17)" in functions["_FinitePolicy"]
+assert "re.fullmatch" in functions["_policy_reward"]
+branches = {}
+for name in ("strict", "weak_proxy"):
+    training = original["results"]["reinforce"][name]["training"]
+    assert training["steps"] == training["planned_steps"] == 1200
+    assert training["step_scale"] == 1.0
+    assert training["effective_tokens"] == 0
+    assert training["sampled_actions"] == 1200 * 64 == 76800
+    assert training["history"][-1]["step"] == 1200
+    checkpoint = next(a for a in original["artifacts"] if a["path"] == training["checkpoint"])
+    branches[name] = {"training": {k: training[k] for k in ("steps", "planned_steps", "step_scale", "sampled_actions", "effective_tokens", "checkpoint")}, "original_checkpoint_record": checkpoint}
+summary = {
+    "reviewer_task": "/root/technical_round_coordinator/technical_t_7_fresh",
+    "environment": {"python": platform.python_version(), "torch": torch.__version__, "device": "cpu", "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"},
+    "execution_scope": "本次僅CPU讀取並核固定C.7原始程式／原正式紀錄；未重跑原T.7 CPU、未執行小策略正式训练、未更新參數、未使用GPU/付費/下載模型或資料。",
+    "formal_source": {"path": "scripts/course_experiments/applications.py", "sha256": sha(source_path), "immutable_url": "https://raw.githubusercontent.com/birdhackor/tiny-perceptron-vlm/910aebc6419c9fc6217279a27fde9851c5cfad30/scripts/course_experiments/applications.py", "function_sha256": {name: hashlib.sha256(functions[name].encode()).hexdigest() for name in ("_FinitePolicy", "_policy_features", "_policy_reward", "_reinforce", "_fit", "run_reasoning")}},
+    "formal_result": {"path": "docs/course-experiments/results/reasoning.json", "sha256": sha(result_path), "revision": original["revision"], "evidence_status": original["evidence_status"], "device": original["device"], "seed": original["seed"], "scope": "僅T.7新增C.7小策略訓練存在性及方法來源，沒有重審C.7品質/速度/全章。"},
+    "branches": branches,
+    "method_inspection": {"policy": "18輸入、48隱藏、17固定動作的有限策略；非自回歸語言模型。", "gradient_estimator": "loss=-mean((reward-old_baseline).detach()*log_prob(sampled_action))，另減0.005熵；可驗證嚴格回饋由單整數真值判定，弱支線是刻意設計的代理漏洞。", "baseline_condition": "advantage先用舊baseline；本批reward之均值之後才更新供下一批，沒有用當前抽樣回答決定這批的baseline。", "optimizer_condition": "估計梯度交common.fit的AdamW與裁剪；稱REINFORCE式方法，不把Williams純更新定理外推成AdamW/熵正則的性能保證。", "ppo_distinction": "沒有新舊policy ratio surrogate/clip/adaptive KL；不能改稱PPO或已訓練RM。"},
+    "all_assertions_passed": True
+}
+Path("docs/technical-reviews/artifacts/T.7-recheck-c7-result.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n")
+print(json.dumps({"all_assertions_passed": True, "formal_source_sha256": sha(source_path), "branches": branches}, ensure_ascii=False, indent=2))

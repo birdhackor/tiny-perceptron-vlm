@@ -1,0 +1,54 @@
+import ast
+import copy
+import hashlib
+import json
+import platform
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+sys.path.insert(0, str(Path.cwd()))
+import torch
+from tiny_perceptron.model import ModelConfig, TinyLM
+from tiny_perceptron.multimodal import MultiModalLM
+
+torch.set_num_threads(1)
+source_path = Path('scripts/train.py')
+source = source_path.read_text()
+tree = ast.parse(source)
+nodes = [n for n in ast.walk(tree) if isinstance(n, ast.If) and ast.unparse(n.test) == 'train_model is not model' and isinstance(n.body[0], ast.Expr) and ast.unparse(n.body[0]) == 'train_model.requires_grad_(True)']
+assert len(nodes) == 1
+branch = nodes[0]
+production_branch = compile(ast.Module(body=[branch], type_ignores=[]), str(source_path), 'exec')
+checks = {}
+for mode in ('projector', 'partial', 'none'):
+    candidate = MultiModalLM(TinyLM(ModelConfig(width=8, layers=2)))
+    scope = {'train_model': candidate, 'model': candidate.language, 'args': SimpleNamespace(freeze=mode, vision_encoder=None, audio_encoder=None), 'torch': torch, 'device': 'cpu'}
+    exec(production_branch, scope)
+    actual = [name for name, parameter in candidate.named_parameters() if parameter.requires_grad]
+    expected = [name for name, parameter in candidate.named_parameters() if mode == 'none' or name.startswith(('image_projector.', 'audio_projector.')) or (mode == 'partial' and name.startswith(('language.blocks.0.', 'language.blocks.1.')))]
+    assert actual == expected
+    checks[mode] = {'trainable_names': actual, 'exact_expected_match': True}
+
+parameter = torch.nn.Parameter(torch.tensor([2.0]))
+optimizer = torch.optim.AdamW([parameter], lr=0.1, weight_decay=0.2)
+parameter.grad = torch.tensor([9.0])
+optimizer.zero_grad(set_to_none=True)
+assert parameter.grad is None
+optimizer.state[parameter] = {'step': torch.tensor(4.0), 'exp_avg': torch.tensor([3.0]), 'exp_avg_sq': torch.tensor([9.0])}
+before_parameter = parameter.detach().clone()
+before_state = copy.deepcopy(optimizer.state[parameter])
+optimizer.step()
+assert torch.equal(parameter.detach(), before_parameter)
+assert all(torch.equal(value, before_state[key]) for key, value in optimizer.state[parameter].items())
+result = {
+    'command': 'OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 .venv/bin/python docs/technical-reviews/artifacts/T.6-recheck-api-program.txt',
+    'environment': {'python': platform.python_version(), 'torch': str(torch.__version__), 'device': 'cpu', 'OMP_NUM_THREADS': '1', 'MKL_NUM_THREADS': '1'},
+    'source_sha256': hashlib.sha256(source_path.read_bytes()).hexdigest(),
+    'actual_production_ast_scope': {'line_start': branch.lineno, 'line_end': branch.end_lineno},
+    'freeze_checks': checks,
+    'grad_none_adamw': {'reset_grad_to_none': True, 'parameter_unchanged': True, 'existing_moments_and_step_unchanged': True, 'weight_decay': 0.2},
+    'scope': '只執行目前train.py原AST凍結分支；三個新width8兩層模型沒有前反向或參數更新。單一標量optimizer以手設既有moment/step檢查grad=None跳過，step沒有更新參數；不是訓練、續訓或正式CLI實跑。不重跑原例或已保存的vision反向反例。'
+}
+Path('docs/technical-reviews/artifacts/T.6-recheck-api-execution.json').write_text(json.dumps(result, ensure_ascii=False, indent=2) + '\n')
+print(json.dumps(result, ensure_ascii=False))

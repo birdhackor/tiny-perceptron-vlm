@@ -1,0 +1,129 @@
+import ast
+import hashlib
+import json
+import platform
+import random
+from pathlib import Path
+
+import torch
+
+from scripts.course_experiments.behavior import _pair_examples, _preference_evaluate, _state_digest
+from scripts.course_experiments.common import evaluate_lm, split_records
+from scripts.course_experiments.text import arithmetic_records
+from scripts.train import parser, prepare_examples
+from tiny_perceptron.data import ByteTokenizer
+from tiny_perceptron.training import load_checkpoint
+
+torch.set_num_threads(1)
+root = Path.cwd()
+out = root / "docs/technical-reviews/artifacts/T.7-cpu-result.json"
+def digest(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+frozen_path = root / "docs/course-experiments/results/dpo.json"
+report = json.loads(frozen_path.read_text())
+result = report["results"]
+style = json.loads((root / "docs/course-experiments/results/style.json").read_text())["results"]
+data = split_records(arithmetic_records(), seed=42)
+pairs = {key: [{"family": r["family"], "prompt": r["messages"][0]["content"], "chosen": r["messages"][-1]["content"], "rejected": str(r["a"] + r["b"] + 1)} for r in rows] for key, rows in data.items()}
+split_audit = {}
+for name, rows in pairs.items():
+    raw = "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows).encode()
+    observed = {"records": len(rows), "families": len({r["family"] for r in rows}), "sha256": hashlib.sha256(raw).hexdigest()}
+    for key, value in observed.items():
+        assert value == result["data"][name][key], (name, key, value)
+    split_audit[name] = observed
+sets = [{r["family"] for r in rows} for rows in pairs.values()]
+assert all(not sets[a] & sets[b] for a in range(3) for b in range(a + 1, 3))
+examples = _pair_examples(pairs["train"], 128)
+sampler = random.Random(42)
+tokens = sum(int((labels != -100).sum()) for _ in range(250) for pair in sampler.choices(examples, k=8) for inputs, labels in pair)
+assert tokens == 9448
+
+def preference_audit(value):
+    rows = value["samples"]
+    count = len(rows)
+    absolute = sum(r["policy_chosen_logp"] > r["policy_rejected_logp"] for r in rows)
+    relative = sum(r["policy_chosen_logp"] - r["policy_rejected_logp"] - r["reference_margin"] > 0 for r in rows)
+    for r in rows:
+        assert abs(r["policy_margin"] - (r["policy_chosen_logp"] - r["policy_rejected_logp"])) < 1e-9
+        assert abs(r["relative_margin"] - (r["policy_margin"] - r["reference_margin"])) < 1e-9
+    assert (count, absolute, relative) == (value["records"], value["chosen_higher_absolute_probability"], value["relative_preference_improved"])
+    return {"records": count, "chosen_higher_absolute_probability": absolute, "relative_preference_improved": relative, "mean_relative_margin": value["mean_relative_margin"]}
+
+def arithmetic_audit(value):
+    rows = value["samples"]
+    for row in rows:
+        raw = row["generated_ids"]
+        eos = 2 in raw
+        body = raw[:raw.index(2)] if eos else raw
+        assert row["exact"] == (body == ByteTokenizer().encode(row["expected"]))
+        assert row["eos"] == eos
+    matches = sum(r["exact"] for r in rows)
+    ended = sum(r["eos"] for r in rows)
+    assert matches == value["matches"] and len(rows) == value["records"]
+    assert matches / len(rows) == value["exact_match"] and ended / len(rows) == value["eos_rate"]
+    return {"records": len(rows), "matches": matches, "eos_count": ended, "samples": [{"prompt": r["messages"][0]["content"], "expected": r["expected"], "generated": r["generated"], "generated_ids": r["generated_ids"], "eos": r["eos"]} for r in rows]}
+
+run_audits = {}
+for name, run in result["runs"].items():
+    assert run["training"]["steps"] == 250
+    assert run["training"]["effective_answer_tokens_both_sides"] == tokens
+    run_audits[name] = {"beta": run["beta"], "steps": run["training"]["steps"], "effective_answer_tokens_both_sides": tokens, "preference": {s: preference_audit(v) for s, v in run["preference"].items()}, "arithmetic": {s: arithmetic_audit(v) for s, v in run["arithmetic"].items()}}
+format_audit = {"training": result["format_only"]["training"], "preference": {s: preference_audit(v) for s, v in result["format_only"]["preference"].items()}, "arithmetic": {s: arithmetic_audit(v) for s, v in result["format_only"]["arithmetic"].items()}}
+natural = result["ultrafeedback_pilot"]
+natural_audit = {"source_records": natural["source_records"], "data": natural["data"], "sft_steps": natural["sft_training"]["steps"], "dpo_steps": natural["training"]["steps"], "sft_parameters": natural["sft_training"]["parameters"], "preference": {s: preference_audit(v) for s, v in natural["evaluation"].items()}, "contains_generation_quality_evaluation": "arithmetic" in natural or "generation" in natural}
+assert natural_audit["source_records"] == 100
+assert [natural["data"][s]["records"] for s in ("train", "validation", "test")] == [80, 10, 10]
+assert (natural_audit["sft_steps"], natural_audit["dpo_steps"]) == (80, 80)
+
+base, payload = load_checkpoint(root / "checkpoints/course/style/content.pt", "cpu")
+reference_digest = _state_digest(base.state_dict())
+assert reference_digest == result["reference_sha256"]
+manifest = json.loads((root / "checkpoints/course/dpo/download-manifest.json").read_text())
+export = json.loads((root / "checkpoints/course/dpo/export-manifest.json").read_text())
+checkpoint_audits = []
+cpu_replays = {}
+for name in ("model.pt", "beta1.pt", "format-model.pt", "ultrafeedback-sft.pt", "ultrafeedback-pilot.pt"):
+    path = root / "checkpoints/course/dpo" / name
+    entry = next(e for e in manifest["files"] if e["output"] == name)
+    original = next(e for e in export["files"] if e["output"] == name)
+    original_result = next(e for e in report["artifacts"] if e["path"] == name)
+    assert digest(path) == entry["sha256"] == original["sha256"]
+    assert original["source_sha256"] == original_result["sha256"]
+    model, p = load_checkpoint(path, "cpu")
+    checkpoint_audits.append({"local_input_kind": "ignored downloaded public inference checkpoint", "path": str(path.relative_to(root)), "sha256": digest(path), "source_training_sha256": original["source_sha256"], "url": f"https://huggingface.co/{manifest['repo']}/resolve/{manifest['revision']}/{entry['path']}", "config": vars(model.config), "metadata": p.get("metadata", {}), "step": p.get("step"), "parameters": sum(t.numel() for t in model.parameters())})
+    if name in ("model.pt", "beta1.pt", "format-model.pt"):
+        wanted = result["format_only"] if name == "format-model.pt" else result["runs"][name[:-3]]
+        selected_pairs = {s: [{**row, "rejected": row["chosen"] + "; answer complete"} for row in rows] for s, rows in pairs.items()} if name == "format-model.pt" else pairs
+        replay = {}
+        for split in ("validation", "test"):
+            fresh_scores = _preference_evaluate(model, base, selected_pairs[split])
+            frozen_scores = wanted["preference"][split]
+            for field in ("records", "chosen_higher_absolute_probability", "relative_preference_improved"):
+                assert fresh_scores[field] == frozen_scores[field]
+            error = max(abs(fresh[field] - old[field]) for fresh, old in zip(fresh_scores["samples"], frozen_scores["samples"], strict=True) for field in ("policy_chosen_logp", "policy_rejected_logp", "reference_margin", "policy_margin", "relative_margin"))
+            assert error < 1e-4, (name, split, error)
+            fresh_generation = evaluate_lm(model, data[split], mode="sft", tokens=32)
+            assert [r["generated_ids"] for r in fresh_generation["samples"]] == [r["generated_ids"] for r in wanted["arithmetic"][split]["samples"]]
+            replay[split] = {"max_score_abs_error": error, "tolerance": 0.0001, "counts": preference_audit(fresh_scores), "generation": arithmetic_audit(fresh_generation)}
+        cpu_replays[name] = replay
+
+args = parser().parse_args(["--task", "dpo", "--checkpoint", "checkpoints/style.pt", "--data", "data/generated/preference/train.jsonl", "--train", "--steps", "200", "--output", "checkpoints/preferred.pt"])
+toy_pair = {"prompt": "0+5=?", "chosen": "5", "rejected": "6"}
+args.data = None
+default_pair = prepare_examples(args, ByteTokenizer())
+assert args.train and args.steps == 200 and len(default_pair) == 1
+args.data = None
+
+official = Path("outputs/technical-sources/T.7-own/formal-behavior.py").read_text()
+current = Path("scripts/course_experiments/behavior.py").read_text()
+def function_digests(text):
+    tree = ast.parse(text)
+    return {n.name: hashlib.sha256(ast.get_source_segment(text, n).encode()).hexdigest() for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+old, now = function_digests(official), function_digests(current)
+function_audit = {name: {"formal_sha256": old[name], "current_sha256": now[name], "same_bytes": old[name] == now[name]} for name in ("_pair_examples", "_dpo_train", "_preference_evaluate", "_natural_dpo_pilot", "run_dpo", "_state_digest")}
+
+saved = {"reviewer_task": "/root/technical_round_coordinator/technical_t_7_fresh", "environment": {"python": platform.python_version(), "torch": torch.__version__, "device": "cpu", "threads": str(torch.get_num_threads()), "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"}, "execution_scope": "離線短CPU：資料重建、原凍結JSON逐題核算、parser與既有公開權重配置及15題推論重播；未更新模型，未執行正式排程，未下載資料或模型。", "frozen_report_sha256": digest(frozen_path), "frozen_configuration": {k: report[k] for k in ("revision", "seed", "device", "torch_version", "python_version", "step_scale", "evidence_status", "status")}, "data": split_audit, "family_overlap": False, "reconstructed_effective_tokens": tokens, "before_preference": {s: preference_audit(v) for s, v in result["before"].items()}, "base_arithmetic": {s: arithmetic_audit(v) for s, v in style["content_evaluation"].items()}, "base_config": vars(base.config), "reference_state_digest": reference_digest, "frozen_reference_unchanged_reported": result["reference_unchanged"], "runs": run_audits, "format_only": format_audit, "natural": natural_audit, "pinned_checkpoint_inputs": checkpoint_audits, "cpu_pinned_weight_replays": cpu_replays, "formal_function_comparison": function_audit, "parser": {"train": args.train, "steps": args.steps, "output": str(args.output)}, "all_assertions_passed": True}
+out.write_text(json.dumps(saved, ensure_ascii=False, indent=2) + "\n")
+print(json.dumps({"output": str(out.relative_to(root)), "all_assertions_passed": True, "tokens": tokens, "reference_state_digest": reference_digest, "formal_function_comparison": function_audit}, ensure_ascii=False, indent=2))

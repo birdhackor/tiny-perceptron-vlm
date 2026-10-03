@@ -1,0 +1,180 @@
+"""T.6 本人離線短 CPU 核對；不執行任何更新、下載或雲端入口。"""
+import contextlib
+import hashlib
+import io
+import json
+import os
+import platform
+import random
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+import torch
+
+ROOT = Path.cwd()
+OUT = ROOT / 'docs/technical-reviews/artifacts'
+sys.path.insert(0, str(ROOT))
+torch.set_num_threads(1)
+assert str(torch.__version__) == '2.14.1+cpu'
+assert not torch.cuda.is_available()
+ENV = {'python': platform.python_version(), 'torch': str(torch.__version__), 'device': 'cpu', 'threads': '1', 'OMP_NUM_THREADS': os.environ['OMP_NUM_THREADS'], 'MKL_NUM_THREADS': os.environ['MKL_NUM_THREADS']}
+
+def sha(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+def write(name, data):
+    p = OUT / ('T.6-' + name + '.json')
+    p.write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n')
+    return str(p.relative_to(ROOT))
+
+def command(args, timeout=40):
+    p = subprocess.run([sys.executable, *args], cwd=ROOT, env={**os.environ, 'CUDA_VISIBLE_DEVICES': ''}, capture_output=True, text=True, timeout=timeout)
+    result = {'command': [sys.executable, *args], 'returncode': p.returncode, 'stdout': p.stdout, 'stderr': p.stderr, 'environment': ENV}
+    return result
+
+body = (OUT / 'T.6-source-raw.txt').read_bytes()
+original = re.search(rb'```python\n(.*?)\n```', body, re.S)[1]
+(OUT / 'T.6-original-python.txt').write_bytes(original + b'\n')
+raw_run = command([str(OUT / 'T.6-original-python.txt')])
+write('original-python-execution', raw_run)
+assert raw_run['returncode'] != 0 and 'FileNotFoundError' in raw_run['stderr']
+
+# 重建同seed42合成屬性資料；只在記憶體中重建，不做訓練。
+from scripts.prepare_data import generate_records
+from scripts.course_experiments.common import split_records, records_sha256
+from scripts.evaluate import evaluate
+from tiny_perceptron.training import load_checkpoint
+from tiny_perceptron.data import render_chat
+splits = split_records(generate_records('attributes-sft'), seed=42)
+vqa = json.loads((ROOT / 'docs/course-experiments/results/vqa.json').read_text())
+assert {k: records_sha256(v) for k, v in splits.items()} == {k: v['sha256'] for k, v in vqa['results']['text_data'].items()}
+weights = {}
+for ident, filename in [('sft', 'model.pt'), ('projector', 'model.pt'), ('ocr', 'model.pt'), ('real_modal', 'fashion-mnist.pt'), ('real_modal', 'fsdd.pt')]:
+    directory = ROOT / 'checkpoints/course' / ident
+    manifest = json.loads((directory / 'download-manifest.json').read_text())
+    exported = json.loads((directory / 'export-manifest.json').read_text())
+    entry = next(x for x in manifest['files'] if x['output'] == filename)
+    e = next(x for x in exported['files'] if x['output'] == filename)
+    assert sha(directory / filename) == entry['sha256'] == e['sha256']
+    payload = torch.load(directory / filename, map_location='cpu', weights_only=True)
+    weights[ident + '/' + filename] = {'url': 'https://huggingface.co/' + manifest['repo'] + '/resolve/' + manifest['revision'] + '/' + entry['path'], 'revision': manifest['revision'], 'sha256': entry['sha256'], 'original_training_sha256': e['source_sha256'], 'source_kind': '公開固定版本權重；本機ignored hydration，非Git index程式', 'format_version': payload.get('format_version'), 'config': payload.get('config'), 'modal_config': payload.get('modal_config'), 'keys': sorted(payload), 'optimizer': payload.get('optimizer'), 'step': payload.get('step')}
+write('pinned-weight-identities', weights)
+before, _ = load_checkpoint('checkpoints/course/sft/model.pt', 'cpu')
+after, _ = load_checkpoint('checkpoints/course/projector/model.pt', 'cpu')
+assert before.config.width == 64 and before.config.layers == 2
+state_before = {k: v.clone() for k, v in before.state_dict().items()}
+state_after = {k: v.clone() for k, v in after.state_dict().items()}
+reports = {}
+for label, language in [('before', before), ('after', after.language)]:
+    reports[label] = evaluate(language, splits['validation'], mode='sft', max_new_tokens=24)
+assert all(torch.equal(v, before.state_dict()[k]) for k, v in state_before.items())
+assert all(torch.equal(v, after.state_dict()[k]) for k, v in state_after.items())
+write('python-pinned-replay', {'environment': ENV, 'command': 'OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 .venv/bin/python docs/technical-reviews/artifacts/T.6-audit-program.txt', 'scope': '原Python先親跑並留下缺前置資料的失敗；此重播只替換為已存在固定公開SFT/projector權重，依原產生器在記憶體重建同validation，保留sft/24tokens與before/after.language。不是T4 width32及T6 vision.pt的500步成績。', 'data': {k: {'records': len(v), 'records_sha256': records_sha256(v)} for k,v in splits.items()}, 'reports': reports, 'weights_unchanged': True, 'language_weights_equal': all(torch.equal(v, after.language.state_dict()[k]) for k,v in before.state_dict().items())})
+
+# 每道OCR對照練習分別實跑，保留原flags；僅替換checkpoint/data/output路徑。
+prepared = command(['scripts/prepare_ocr.py', '--output', '/tmp/T.6-ocr-data', '--seed', '42'])
+assert prepared['returncode'] == 0
+write('ocr-preparation-execution', prepared)
+ocr_runs = {}
+for mode in ['none', 'blank', 'shuffle']:
+    target = OUT / ('T.6-ocr-' + mode + '-replay.json')
+    execution = command(['scripts/evaluate_modal.py', 'checkpoints/course/ocr/model.pt', '--data', '/tmp/T.6-ocr-data/validation.jsonl', '--ablation', mode, '--limit', '30', '--tokens', '16', '--seed', '42', '--device', 'cpu', '--output', str(target)])
+    assert execution['returncode'] == 0
+    report = json.loads(target.read_text())
+    assert report['examples'] == 30
+    ocr_runs[mode] = {'execution': execution, 'report_path': str(target.relative_to(ROOT)), 'report_sha256': sha(target), 'correct': sum(s['exact_match'] for s in report['samples'])}
+normal = json.loads((OUT / 'T.6-ocr-none-replay.json').read_text())
+blank = json.loads((OUT / 'T.6-ocr-blank-replay.json').read_text())
+shuffle = json.loads((OUT / 'T.6-ocr-shuffle-replay.json').read_text())
+records = [json.loads(s) for s in Path('/tmp/T.6-ocr-data/validation.jsonl').read_text().splitlines()]
+table = []
+for a,b,c in zip(normal['samples'], blank['samples'], shuffle['samples'], strict=True):
+    i=c['row']; donor=c['donor_row']; assert donor != i
+    assert records[i]['answer'] == c['target']
+    table.append({'row':i, 'original_digits':records[i]['answer'], 'donor_row':donor, 'donor_digits':records[donor]['answer'], 'none':a['generated'], 'blank':b['generated'], 'shuffle':c['generated'], 'shuffle_matches_donor_digits':c['generated'] == records[donor]['answer'], 'same_digit_donor':records[i]['answer'] == records[donor]['answer']})
+write('ocr-exercises-execution', {'environment':ENV, 'scope':'以現有正式OCR的公開推論匯出權重完成三組CPU操作練習，非教材500步命令的成績；驗證資料由原生成器seed42重建。', 'data_sha256':sha('/tmp/T.6-ocr-data/validation.jsonl'), 'runs':ocr_runs, 'table':table})
+
+# 原有三個單次媒體輸出的同條件CPU核對，不下載資料。
+media = [
+    ['scripts/infer_modal.py', 'checkpoints/course/ocr/model.pt', '--image', 'outputs/course-student/ocr-42.png', '--prompt', 'read digits', '--tokens', '5', '--device', 'cpu'],
+    ['scripts/infer_modal.py', 'checkpoints/course/real_modal/fashion-mnist.pt', '--image', 'outputs/course-student/real-modal/vision-initial/images/fashion-train-00044-label-9.png', '--prompt', 'clothing?', '--tokens', '32', '--device', 'cpu'],
+    ['scripts/infer_modal.py', 'checkpoints/course/real_modal/fsdd.pt', '--audio', 'outputs/course-student/real-modal/fsdd-initial/recordings/0_theo_5.wav', '--resample-audio', '--prompt', 'digit?', '--tokens', '32', '--device', 'cpu'],
+]
+receipt = json.loads((ROOT / 'docs/course-experiments/student-checks/media-and-raw-adapter-cli.json').read_text())
+media_runs=[]
+for args,expected in zip(media,['42','Ankle boot','8'],strict=True):
+    run=command(args); assert run['returncode']==0
+    result=json.loads(run['stdout']); assert result['answer']==expected and result['eos']
+    flag='--image' if '--image' in args else '--audio';p=args[args.index(flag)+1]
+    assert sha(p)==receipt['input_sha256'][p]
+    run['input_sha256']=sha(p);run['output']=result;media_runs.append(run)
+write('media-replay-execution', {'environment':ENV,'runs':media_runs,'scope':'三個固定輸入各一次操作重播；音訊真值0但輸出8，不能當正確率評估。'})
+
+# 親讀凍結原始配置/分母/逐題答案後，以CPU重算它們；不重新訓練。
+frozen={}
+def compact_training(t):
+    d={k:v for k,v in t.items() if k!='history'}
+    if t.get('history') and 'effective_targets' in t['history'][0]:
+        d['sum_history_effective_targets']=sum(x['effective_targets'] for x in t['history'])
+        assert d['sum_history_effective_targets']==t['effective_targets']
+    return d
+def compact_evaluation(e):
+    d={k:v for k,v in e.items() if k!='samples'}
+    field='exact_match' if 'examples' in e and 'correct' in e else 'correct' if 'count' in e else 'exact'
+    d['recount_correct']=sum(s[field] for s in e['samples']); d['recount_samples']=len(e['samples'])
+    assert d['recount_correct']==e.get('correct',e.get('matches'))
+    d['rows']=[{k:v for k,v in s.items() if k!='generated_ids'} for s in e['samples']]
+    return d
+for name in ['encoders','projector','vqa','ocr','real_modal','sft']:
+    p=ROOT/'docs/course-experiments/results'/(name+'.json');d=json.loads(p.read_text());r=d['results']
+    meta={k:d[k] for k in ['revision','device','seed','torch_version','python_version','gpu','elapsed_seconds','timing_scope','status','hf']}
+    meta['source_sha256']=sha(p);meta['source']=str(p.relative_to(ROOT))
+    if name in ['encoders','real_modal']:
+        branches={}
+        for k,v in r.items():
+            branches[k]={'training':compact_training(v['training']),'splits':{a:{'count':b['count'],'sha256':b['sha256'],'families':sorted({x['family'] for x in b['records']})} for a,b in v['data']['splits'].items()},'validation':compact_evaluation(v['validation']),'test':compact_evaluation(v['test'])}
+            if name=='real_modal':branches[k]['resampling']=v['resampling']
+        meta['branches']=branches
+    elif name=='vqa':
+        meta['budget']=r['direct_vs_two_stage_budget'];meta['text_data']=r['text_data'];meta['branches']={}
+        for k,v in r['variants'].items():
+            meta['branches'][k]={'training':compact_training(v['training']),'freeze_scope':v.get('freeze_scope'),'replay_probability_per_example':v.get('replay_probability_per_example'),'validation':compact_evaluation(v['validation']),'test':compact_evaluation(v['test'])}
+            for side in ['text_before','text_after']:
+                if side in v:meta['branches'][k][side]=compact_evaluation(v[side])
+        assert r['two_stage_alignment_training']['effective_tokens']+r['variants']['all']['training']['effective_tokens']==18238
+    elif name=='sft':
+        meta['training']=compact_training(r['training']);meta['test']=compact_evaluation(r['after']['test']);meta['validation']=compact_evaluation(r['after']['validation'])
+    else:
+        meta['training']=compact_training(r['training']);meta['validation']=compact_evaluation(r['validation']);meta['test']=compact_evaluation(r['test']);meta['splits']={a:{'count':b['count'],'sha256':b['sha256'],'families':sorted({x['family'] for x in b['records']})} for a,b in r['data']['splits'].items()}
+        if name=='projector':meta['language_weights_unchanged']=r['language_weights_unchanged']
+    frozen[name]=meta
+def edit(a,b):
+    p=list(range(len(b)+1))
+    for i,x in enumerate(a,1):
+        c=[i]
+        for j,y in enumerate(b,1):c.append(min(c[-1]+1,p[j]+1,p[j-1]+(x!=y)))
+        p=c
+    return p[-1]
+o=json.loads((ROOT/'docs/course-experiments/results/ocr.json').read_text())['results']['test']
+assert sum(edit(s['generated'],s['target']) for s in o['samples'])==40
+assert sum(len(s['target']) for s in o['samples'])==57
+write('frozen-results-audit', {'environment':ENV,'results':frozen,'recomputed_ocr':{'edits':40,'reference_characters':57,'CER':40/57,'eos_count':sum(s['eos'] for s in o['samples'])},'scope':'CPU僅重算凍結receipt的配置與分母；GPU數字來自原凍結完整實跑，不宣稱本人重跑。'})
+
+# 數學/API邊界：零個新權重更新。
+from scripts.train import parser
+from tiny_perceptron.multimodal import patchify, scene, VisionEncoder, AudioEncoder
+assert 'video' not in next(a for a in parser()._actions if a.dest=='task').choices
+try:
+    patchify(torch.zeros(1,2,3,16,16))
+except ValueError as e:
+    video_error=str(e)
+else:
+    raise AssertionError('unexpected video acceptance')
+identities=[(c,s,o,int(s=='circle')) for c in ['red','green','blue'] for s in ['square','circle'] for o in [-1,0,1] if c=='blue' and o==1]
+assert len(identities)==2 and [x[-1] for x in identities]==[0,1]
+assert [int(f>500) for f in [180,1000]]==[0,1]
+counts={'vision_encoder':sum(p.numel() for p in VisionEncoder().parameters()),'audio_encoder':sum(p.numel() for p in AudioEncoder().parameters()),'projector':16*64+64,'audio_extra_positions':(176-128)*64}
+write('api-boundaries-execution', {'environment':ENV,'encoder_holdout':identities,'audio_holdout':[[180,0],[1000,1]],'two_correct_ratio':2/2,'one_correct_ratio':1/2,'counts':counts,'patchify_5d_error':video_error,'task_choices':next(a for a in parser()._actions if a.dest=='task').choices,'implementation_search':'完整multimodal.py與repo Python video/frames_to/frame.*patch/逐幀搜尋無影片helper；patchify只接受B,C,H,W。','scope':'僅API與數字CPU核對；不重訓。'})
+print(json.dumps({'environment':ENV,'original_example_exit':raw_run['returncode'],'pinned_validation':{k:[v['exact_match'],v['metric_denominators'],v['eos_rate']] for k,v in reports.items()},'ocr':{k:v['correct'] for k,v in ocr_runs.items()},'media':[x['output']['answer'] for x in media_runs],'frozen_audit':'complete','video_helper':'absent'},ensure_ascii=False))

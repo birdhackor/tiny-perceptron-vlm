@@ -1,0 +1,34 @@
+import torch, random, json, platform, sys
+from pathlib import Path
+sys.path.insert(0, str(Path.cwd()))
+from tiny_perceptron.multimodal import MultiModalLM
+from tiny_perceptron.model import TinyLM, ModelConfig
+from scripts.train import modal_loss
+from tiny_perceptron.data import ByteTokenizer
+from tiny_perceptron.training import save_checkpoint, load_checkpoint, restore_checkpoint_rng
+from scripts.infer_modal import load_modal_checkpoint
+torch.set_num_threads(1)
+m = MultiModalLM(TinyLM(ModelConfig(width=8, layers=2)))
+m.requires_grad_(True)
+torch.manual_seed(0)
+random.seed(0)
+loss = modal_loss(m, 'vision', ByteTokenizer(), 'cpu')
+loss.backward()
+groups = {}
+for part in ['language', 'vision', 'audio', 'image_projector', 'audio_projector']:
+    parameters = list(getattr(m, part).parameters())
+    groups[part] = {'requires_grad': all(p.requires_grad for p in parameters), 'gradient_present': sum(p.grad is not None for p in parameters), 'parameters': sum(p.numel() for p in parameters)}
+optimizer = torch.optim.AdamW(m.parameters(), lr=0.001)
+save_checkpoint('/tmp/T.6-native-no-update.pt', m, optimizer, 3, {'task': 'vision', 'freeze': 'none', 'schedule_steps': 500})
+expected = [random.random(), torch.rand(3).tolist()]
+loaded, payload = load_checkpoint('/tmp/T.6-native-no-update.pt', 'cpu')
+restore_checkpoint_rng(payload)
+observed = [random.random(), torch.rand(3).tolist()]
+assert expected == observed
+assert all(torch.equal(v, loaded.state_dict()[k]) for k, v in m.state_dict().items())
+torch.save({'model': m.state_dict(), 'config': payload['config'], 'task': 'vision'}, '/tmp/T.6-sidecar-no-update.modal.pt')
+legacy, legacy_payload, task = load_modal_checkpoint('/tmp/T.6-sidecar-no-update.modal.pt', 'cpu')
+assert task == 'vision' and 'optimizer' not in legacy_payload
+result = {'environment': {'python': platform.python_version(), 'torch': str(torch.__version__), 'device': 'cpu', 'threads': '1'}, 'command': 'OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 .venv/bin/python docs/technical-reviews/artifacts/T.6-checkpoint-and-freeze-program.txt', 'gradient_groups': groups, 'scope': '新width8兩層CPU模型只作一次原modal_loss vision前向與反向，沒有optimizer.step。所有參數requires_grad=True不保證每個零件收到梯度；audio與audio_projector皆None。保存零次更新模型以測loader/RNG，不是原500步CLI訓練；保存step=3只是loader測試輸入，非實際更新次數。', 'native_keys': sorted(payload), 'rng_equal': expected == observed, 'state_dict_equal': True, 'legacy_keys': sorted(legacy_payload), 'legacy_inference_loader': 'passed'}
+Path('docs/technical-reviews/artifacts/T.6-checkpoint-and-freeze-execution.json').write_text(json.dumps(result, ensure_ascii=False, indent=2) + '\n')
+print(json.dumps(result, ensure_ascii=False))
