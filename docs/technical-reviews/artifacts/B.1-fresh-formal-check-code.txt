@@ -1,0 +1,86 @@
+import hashlib
+import json
+import platform
+import random
+import subprocess
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+import torch
+from scripts.course_experiments.applications import _tool_records
+from scripts.course_experiments.common import new_lm, records_sha256, split_records, text_examples
+from tiny_perceptron.data import IGNORE
+
+art = Path('docs/technical-reviews/artifacts')
+source_path = Path('docs/course-experiments/results/tools.json')
+frozen = json.loads(source_path.read_bytes())
+result = frozen['results']
+paths = ['scripts/course_experiments/applications.py', 'scripts/course_experiments/common.py',
+         'scripts/course_experiments/run.py', 'tiny_perceptron/model.py', 'tiny_perceptron/data.py',
+         'tiny_perceptron/retrieval.py', 'tiny_perceptron/training.py']
+pins = {}
+for path in paths:
+    current = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    pins[path] = {'current_sha256': current, 'formal_sha256': frozen['code_sha256'][path],
+                  'matches_formal': current == frozen['code_sha256'][path]}
+assert all(item['matches_formal'] for item in pins.values())
+small_model = new_lm(SimpleNamespace(seed=42, device='cpu'), width=64, layers=2, max_length=384, heads=2, backend='sdpa')
+assert small_model.description() == result['model']
+records = _tool_records()
+splits = split_records(records, 42)
+summary = {}
+families = {}
+for name, rows in splits.items():
+    families[name] = {row['family'] for row in rows}
+    summary[name] = {'records': len(rows), 'families': len(families[name]), 'sha256': records_sha256(rows)}
+assert summary == result['split']
+assert all(not families[a] & families[b] for a, b in [('train', 'validation'), ('train', 'test'), ('validation', 'test')])
+examples = text_examples(splits['train'], mode='sft', max_length=384)
+counts = [int((labels != IGNORE).sum()) for _, labels in examples]
+sampler = random.Random(42)
+effective = sum(sum(sampler.choices(counts, k=16)) for _ in range(1200))
+assert effective == result['training']['effective_tokens'] == 1296064
+assert all(message['content'].isascii() for row in records for message in row['messages'])
+assert all(0 <= row['a'] <= 9 and 0 <= row['b'] <= 9 for row in records if row['operation'] != 'copy')
+assert all(int((text_examples([row], mode='sft', max_length=384)[0][1] != IGNORE).sum()) ==
+           sum(len(message['content'].encode()) + 1 for message in row['messages'] if message['role'] == 'assistant')
+           for row in records)
+traces = []
+for episode in result['samples']:
+    traces.append({'question': episode['question'], 'operation': episode['operation'],
+                   'trace': [{'step': event['step'], 'generated': event['generation']['samples'][0]['generated'],
+                              'eos': event['generation']['samples'][0]['eos'],
+                              'parsed': event.get('parsed'), 'executed': event['executed'],
+                              'tool_result': event.get('tool_result'), 'request_matches_question': event.get('request_matches_question')}
+                             for event in episode['trace']]})
+release = json.loads(Path('docs/course-experiments/releases/tools.json').read_bytes())
+public = json.loads(Path('docs/course-experiments/public-releases/tools.json').read_bytes())['release']
+selected_weight = next(file for file in public['public_manifest']['files'] if file['output'] == 'model.pt')
+help_run = subprocess.run([sys.executable, 'scripts/course_experiments/run.py', '--help'], capture_output=True, timeout=15)
+output = {
+    'command': 'OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 .venv/bin/python < docs/technical-reviews/artifacts/B.1-fresh-formal-check-code.txt',
+    'environment': {'python': platform.python_version(), 'torch': str(torch.__version__), 'device': 'cpu',
+                    'torch_threads': str(torch.get_num_threads()), 'torch_git_version': str(torch.version.git_version)},
+    'result': '固定當次 code pin 全相符；只重建合成資料、label數與抽樣次序，沒有模型更新或正式排程。',
+    'formal_source': {'path': str(source_path), 'sha256': hashlib.sha256(source_path.read_bytes()).hexdigest(),
+                      'revision': frozen['revision'], 'device': frozen['device'], 'gpu': frozen['gpu'],
+                      'python_version': frozen['python_version'], 'torch_version': frozen['torch_version'], 'seed': frozen['seed']},
+    'code_pins': pins, 'split_rebuilt': summary, 'families_disjoint': True,
+    'training_selected': {key: result['training'][key] for key in ['steps', 'planned_steps', 'step_scale', 'records', 'effective_tokens']},
+    'model_config': result['model']['config'], 'all_program_records_ascii': True,
+    'cpu_model_constructed': small_model.description(), 'asset_manifest_exists': Path('assets/training/manifest.json').is_file(),
+    'total_program_records': len(records), 'total_families': len(set.union(*families.values())),
+    'effective_token_replay': {'optimizer_updates_executed': 0, 'sampler_draws': 1200 * 16, 'seed': 42,
+                               'batch_size': 16, 'count': effective, 'assistant_content_plus_eos_only': True,
+                               'minimum_targets_per_train_record': min(counts), 'maximum_targets_per_train_record': max(counts)},
+    'formal_artifacts': frozen['artifacts'], 'formal_small_traces': traces,
+    'release_selected': {'code_revision': release['revision'], 'final_private_checkpoint_sha256': release['files'][0]['sha256'],
+                         'public_repo': public['repo'], 'public_revision': public['revision'],
+                         'weights_revision': public['weights_revision'], 'public_weight': selected_weight},
+    'cli_help': {'exit_code': help_run.returncode, 'stdout': help_run.stdout.decode(), 'stderr': help_run.stderr.decode()},
+    'scope': '原始 L4 報告與相同 code pin 的算術/資料核對；未重訓，未測 CUDA、品質普適性或123乘45模型作答。原outputs dataset/generations/model.pt本地不存在，使用固定results內原trace與匹配split hash；不冒稱重播原GPU訓練。'
+}
+(art / 'B.1-fresh-formal-check-execution.json').write_text(json.dumps(output, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+print(json.dumps({key: output[key] for key in ['formal_source', 'split_rebuilt', 'effective_token_replay', 'model_config', 'result']}, ensure_ascii=False, indent=2))
+print('formal original trace first:', json.dumps(traces[0], ensure_ascii=False))
