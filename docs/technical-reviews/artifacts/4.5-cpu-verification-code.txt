@@ -1,0 +1,103 @@
+import json
+import sys
+from dataclasses import asdict
+
+import torch
+from tiny_perceptron.model import Block, ModelConfig, TinyLM, generate
+from tiny_perceptron.modern import DenseFFN
+
+torch.set_num_threads(1)
+torch.manual_seed(42)
+config = ModelConfig(width=8)
+block = Block(config)
+x = torch.randn(2, 3, 8)
+x_before = x.clone()
+parameters_before = [p.detach().clone() for p in block.parameters()]
+y, cache, auxiliary = block(x)
+attended, expected_cache = block.attention(block.norm1(x))
+u = x + attended
+ffn_correction = block.ffn(block.norm2(u))
+expected_y = u + ffn_correction
+assert torch.equal(y, expected_y)
+assert torch.equal(x, x_before)
+assert not torch.equal(x, u)
+assert not torch.equal(u, y)
+assert isinstance(block.ffn, DenseFFN)
+assert block.attention.heads == 1
+assert all(torch.equal(a, b) for a, b in zip(cache, expected_cache))
+assert auxiliary.shape == torch.Size([])
+assert auxiliary.item() == 0.0
+assert isinstance(auxiliary.item(), float)
+assert all(torch.equal(p, q) for p, q in zip(block.parameters(), parameters_before))
+assert all(p.grad is None for p in block.parameters())
+torch.manual_seed(42)
+seeded_replay = Block(config)
+replay_x = torch.randn(2, 3, 8)
+assert torch.equal(x, replay_x)
+assert all(torch.equal(p, q) for p, q in zip(block.parameters(), seeded_replay.parameters()))
+assert torch.equal(y, seeded_replay(replay_x)[0])
+result = {
+    'environment': {
+        'python': sys.version,
+        'torch': torch.__version__,
+        'torch_git_version': torch.version.git_version,
+        'device': str(x.device),
+        'dtype': str(x.dtype),
+        'threads': str(torch.get_num_threads()),
+        'OMP_NUM_THREADS': '1',
+        'MKL_NUM_THREADS': '1',
+    },
+    'config': asdict(config),
+    'original': {
+        'x_shape': list(x.shape), 'y_shape': list(y.shape),
+        'cache_shapes': [list(t.shape) for t in cache],
+        'auxiliary_shape': list(auxiliary.shape), 'auxiliary': auxiliary.item(),
+        'auxiliary_python_type': type(auxiliary.item()).__name__,
+        'attention_correction_max_abs': attended.abs().max().item(),
+        'ffn_correction_max_abs': ffn_correction.abs().max().item(),
+        'pre_norm_formula_max_error': (y-expected_y).abs().max().item(),
+        'x_unchanged': torch.equal(x, x_before),
+        'parameter_values_unchanged': all(torch.equal(p, q) for p,q in zip(block.parameters(), parameters_before)),
+        'parameter_gradients_absent': all(p.grad is None for p in block.parameters()),
+        'shape_type': type(x.shape).__name__,
+        'seeded_replay_equal': True,
+    },
+    'exercises': [],
+}
+for shape in ((1,3,8),(2,4,8)):
+    torch.manual_seed(42)
+    exercise_block = Block(ModelConfig(width=8))
+    exercise_x = torch.randn(*shape)
+    exercise_y, exercise_cache, exercise_aux = exercise_block(exercise_x)
+    assert exercise_y.shape == exercise_x.shape
+    assert exercise_aux.item() == 0.0
+    result['exercises'].append({'input':list(shape),'output':list(exercise_y.shape),'auxiliary':exercise_aux.item()})
+try:
+    block(torch.randn(2,3,7))
+except RuntimeError as e:
+    result['width_mismatch'] = {'input':[2,3,7],'config_width':8,'exception':type(e).__name__,'message':str(e)}
+else:
+    raise AssertionError('Width mismatch did not fail')
+second = Block(config)
+second_y, _, second_aux = second(y)
+first_pointers = {p.data_ptr() for p in block.parameters()}
+second_pointers = {p.data_ptr() for p in second.parameters()}
+assert first_pointers.isdisjoint(second_pointers)
+assert second_y.shape == x.shape
+result['stack'] = {'output':list(second_y.shape),'parameters_disjoint':True,'auxiliary':second_aux.item()}
+torch.manual_seed(123)
+sequence = torch.randn(2,4,8)
+full_y, _, _ = block(sequence)
+_, prefix_cache, _ = block(sequence[:,:3])
+suffix_y, suffix_cache, _ = block(sequence[:,3:],cache=prefix_cache)
+cache_error = (full_y[:,3:]-suffix_y).abs().max().item()
+assert torch.allclose(full_y[:,3:],suffix_y,atol=1e-6,rtol=1e-6)
+result['cache_reuse'] = {'prefix_positions':3,'suffix_positions':1,'output':[2,1,8],'cache_shapes':[list(t.shape) for t in suffix_cache],'max_abs_error':cache_error,'tolerance':'atol=1e-6, rtol=1e-6; no padding/packing'}
+torch.manual_seed(99)
+lm = TinyLM(ModelConfig(width=8,vocab_size=20,max_length=10))
+ids = torch.tensor([[3,4,5]])
+full_generated = generate(lm,ids,max_new_tokens=3,eos_id=-1,use_cache=False)
+cached_generated = generate(lm,ids,max_new_tokens=3,eos_id=-1,use_cache=True)
+assert torch.equal(full_generated,cached_generated)
+result['generation'] = {'input':ids.tolist(),'max_new_tokens':3,'uncached':full_generated.tolist(),'cached':cached_generated.tolist(),'equal':True,'updates':0}
+print(json.dumps(result,ensure_ascii=False,indent=2))
