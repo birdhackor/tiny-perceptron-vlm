@@ -1,0 +1,79 @@
+import ast
+import hashlib
+import json
+import re
+import sys
+from pathlib import Path
+import torch
+
+def sha(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+result_path = Path("docs/course-experiments/results/rag.json")
+original = json.loads(result_path.read_text())
+results = original["results"]
+required = ["tiny_perceptron/retrieval.py", "scripts/course_experiments/applications.py", "scripts/course_experiments/common.py", "scripts/course_experiments/run.py"]
+code_pins = {}
+for path in required:
+    current = sha(path)
+    formal = original["code_sha256"][path]
+    assert current == formal, path
+    code_pins[path] = {"current_sha256": current, "formal_sha256": formal, "match": True}
+application = Path("scripts/course_experiments/applications.py").read_text()
+tree = ast.parse(application)
+node = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_grounding")
+namespace = {"re": re}
+exec(compile(ast.Module(body=[node], type_ignores=[]), "formal-exact-hashed-_grounding", "exec"), namespace)
+grounding = namespace["_grounding"]
+rows = results["samples"]
+all_doc_fields_grammar = True
+for row in rows:
+    sample = row["generation"]["samples"][0]
+    computed = grounding(sample, row["documents"], row["expected"])
+    for key, value in computed.items():
+        assert row[key] == value, (row["mode"], row["family"], key)
+    assert row["generation"]["temperature"] == 0.0
+    assert row["generation"]["max_new_tokens"] == 16
+    assert len(row["generation"]["samples"]) == 1
+    all_doc_fields_grammar &= all(re.fullmatch(r"[KZ][0-9]{3} address=[A-E][0-9]", d["text"]) is not None for d in row["documents"])
+summary = {}
+selected_rows = []
+for mode in ["without_context", "distractor_only", "correct_context"]:
+    selected = [r for r in rows if r["mode"] == mode]
+    unknown = sum(r["generation"]["samples"][0]["generated"] == "UNKNOWN" and not r["generation"]["samples"][0]["invalid_special_tokens"] for r in selected)
+    assert len(selected) == 12
+    assert len({r["family"] for r in selected}) == 12
+    assert unknown == results["metrics"][mode]["unknown"]["numerator"]
+    assert len(selected) == results["metrics"][mode]["unknown"]["denominator"]
+    if mode == "without_context":
+        assert all(r["documents"] == [] for r in selected)
+    elif mode == "distractor_only":
+        assert all(len(r["documents"]) == 1 and not r["documents"][0]["text"].startswith(r["fact"]["key"] + " ") for r in selected)
+    else:
+        assert all(r["documents"] == [{"id": r["fact"]["source"], "text": r["fact"]["key"] + " address=" + r["fact"]["address"]}] for r in selected)
+    summary[mode] = {"unknown_numerator": unknown, "denominator": len(selected), "unknown_rate": unknown / len(selected)}
+    selected_rows += [{"family": r["family"], "mode": r["mode"], "documents": r["documents"], "expected": r["expected"], "generated": r["generation"]["samples"][0]["generated"], "invalid_special_tokens": r["generation"]["samples"][0]["invalid_special_tokens"], "unknown": r["unknown"]} for r in selected]
+release_path = Path("docs/course-experiments/releases/rag.json")
+release = json.loads(release_path.read_text())
+public_path = Path("docs/course-experiments/public-releases/rag.json")
+public = json.loads(public_path.read_text())["release"]
+assert release["revision"] == original["revision"]
+checkpoint = next(a for a in original["artifacts"] if a["path"] == "model.pt")
+release_checkpoint = next(a for a in release["files"] if a["path"] == "model.pt")
+assert checkpoint["sha256"] == release_checkpoint["sha256"]
+record = {
+    "local_environment": {"python": sys.version.split()[0], "torch": str(torch.__version__), "device": "cpu", "threads": torch.get_num_threads()},
+    "original_file": str(result_path), "original_file_sha256": sha(result_path),
+    "original_environment": {k: original[k] for k in ["revision", "device", "seed", "torch_version", "python_version", "gpu", "step_scale", "evidence_status"]},
+    "training": {k: results["training"][k] for k in ["steps", "planned_steps", "step_scale", "records", "effective_tokens", "parameters", "records_sha256"]},
+    "split": results["split"], "model": results["model"],
+    "code_pins": code_pins, "modes_all": sorted({r["mode"] for r in rows}), "total_rows": len(rows),
+    "grounding_recomputed_all_rows": True,
+    "all_84_document_texts_follow_affirmative_ASCII_grammar": all_doc_fields_grammar,
+    "summary": summary, "selected_rows": selected_rows,
+    "release_provenance": {"source_file_sha256": sha(release_path), "revision": release["revision"], "private_source_pin": release["private_source"], "formal_checkpoint_sha256": checkpoint["sha256"]},
+    "public_provenance": {"source_file_sha256": sha(public_path), "repo": public["repo"], "revision": public["revision"], "weights_revision": public["weights_revision"], "model": next({k: a[k] for k in ["path", "sha256", "bytes"]} for a in public["public_manifest"]["files"] if a["output"] == "model.pt")},
+    "scope": "重算保存的正式生成與分母，沒有重訓或重跑正式模型；三種條件各12個held-out店名，單一seed42、greedy、16-token上限；現行CPU只用來核原記錄，不能替代原L4生成或外推品質。所有文件只有肯定address欄位；changed_*是單文件介入而非自然語言衝突，沒有惡意文件評測。"
+}
+assert all_doc_fields_grammar
+print(json.dumps(record, ensure_ascii=False, indent=2))
