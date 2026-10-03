@@ -1,0 +1,75 @@
+import os
+import sys
+import re
+import math
+import json
+import hashlib
+import platform
+from pathlib import Path
+
+sys.path.insert(0, str(Path.cwd()))
+os.environ.update(CUDA_VISIBLE_DEVICES='', HF_HUB_OFFLINE='1', HF_DATASETS_OFFLINE='1', TRANSFORMERS_OFFLINE='1')
+import torch
+from tiny_perceptron.training import learning_rate
+
+root = Path('docs/technical-reviews/artifacts')
+raw = Path('course/chapters/05.md').read_bytes()
+headings = list(re.finditer(rb'(?m)^## ([A-Z\d]+\.\d+) [^\r\n]+', raw))
+def extract(lesson):
+    p = next(i for i, h in enumerate(headings) if h[1].decode() == lesson)
+    end = headings[p+1].start() if p+1 < len(headings) else len(raw)
+    return raw[headings[p].start():end]
+sha = lambda b: hashlib.sha256(b).hexdigest()
+current = extract('5.6')
+old = (root / '5.6-source.txt').read_bytes()
+(root / '5.6-recheck-source.txt').write_bytes(current)
+assert sha(current) == 'be26c059dc4beba50d2bf56f0379eda05592437efb83dbb20d5b8742697556bb'
+report = json.loads(Path('docs/technical-reviews/5.6.json').read_text())
+versions = []
+for src in report['sources']:
+    if src['kind'] == 'repository_code':
+        observed = sha(Path(src['path']).read_bytes())
+        assert observed == src['sha256']
+        versions.append({'path':src['path'], 'sha256':observed, 'same_as_first_review':True})
+prerequisites = []
+for lesson in ('5.4','5.1'):
+    before = (root / ('5.6-prerequisite-'+lesson+'-source.txt')).read_bytes()
+    after = extract(lesson)
+    assert before == after
+    prerequisites.append({'lesson_id':lesson, 'source_sha256':sha(after), 'same_bytes_as_first_read':True, 'svg_references':[]})
+fences = lambda b: re.findall(rb'```python\n(.*?)```', b, re.S)
+assert fences(old) == fences(current)
+assert re.findall(rb'[^\s()\[\]<>]+\.svg',current) == []
+changed = [(i, before, after) for i,(before,after) in enumerate(zip(old.decode().splitlines(),current.decode().splitlines()),1) if before != after]
+assert len(changed) == 1 and changed[0][0] == 18
+# Independent two-domain cap and formula oracle; no parameter updates.
+configurations = 0
+rates_checked = 0
+max_error = 0.0
+examples = []
+for total in range(1,129):
+    cap = 1 if total <= 3 else total // 4
+    if total <= 3:
+        assert cap == 1
+    else:
+        assert cap <= total / 4
+    for requested in (0,1,2,3,5,10,30,1000):
+        effective = min(requested,cap)
+        assert 0 <= effective <= cap
+        for i in range(total):
+            if i < effective:
+                expected = 0.001*(i+1)/effective
+            else:
+                fraction = min(1.0,(i-effective)/max(1,total-effective))
+                expected = 0.0001 + 0.00045*(1+math.cos(math.pi*fraction))
+            actual = learning_rate(i,total,peak=0.001,warmup=requested)
+            error = abs(actual-expected)
+            assert error <= 1e-15
+            max_error = max(max_error,error)
+            rates_checked += 1
+        configurations += 1
+        if total in (1,2,3,4,5,40) and requested in (0,1,2,30):
+            examples.append({'total':total,'requested_warmup':requested,'cap':cap,'effective_warmup':effective,'first_rate':learning_rate(0,total,peak=0.001,warmup=requested)})
+proof = '令n為正整數總更新步數，w為非負整數暖身請求。n>=4時floor(n/4)>=1，因此max(1,n//4)=floor(n/4)<=n/4；有效長度min(w,floor(n/4))不超過n/4。n=1,2,3時n//4=0，上限max(1,0)=1，有效長度min(w,1)最多1。上限1不表示所有請求都必須暖身1步：w=0時有效暖身0。此證明涵蓋所有正整數n及非負整數w，不靠有限執行例子外推。'
+result = {'reviewer_task':'/root/technical_round_coordinator/technical_5_6_fresh','checked_on':'2026-10-03','command':'OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 .venv/bin/python < docs/technical-reviews/artifacts/5.6-recheck-code.txt > docs/technical-reviews/artifacts/5.6-recheck-output.json','environment':{'python':platform.python_version(),'torch':str(torch.__version__),'torch_git_version':str(torch.version.git_version),'device':'cpu','OMP_NUM_THREADS':os.environ['OMP_NUM_THREADS'],'MKL_NUM_THREADS':os.environ['MKL_NUM_THREADS']},'old_source_sha256':sha(old),'current_source_sha256':sha(current),'changed_line_numbers':[x[0] for x in changed],'new_line18':changed[0][2],'python_fences_identical':True,'fence_sha256':[sha(x) for x in fences(current)],'repository_sources':versions,'prerequisites':prerequisites,'svg_references':[],'derivation':proof,'cpu_checks':{'total_domain':'整數1..128','requested_warmup_values':[0,1,2,3,5,10,30,1000],'configurations':configurations,'rates_checked':rates_checked,'max_absolute_error':max_error,'tolerance':1e-15,'examples':examples},'reuse_scope':'正文只改行18暖身上限條件；原例fence、練習指示、5.1/5.4全文與三份相關repo程式SHA完全未變。原CPU結果仍支持相同函式和輸入的原例/練習，其舊原文SHA不被偽稱為新版執行。舊source/反例/推導保留不改。','result':'全部assertion通過；新版分別敘述total>=4的四分之一上限與total1..3的1步上限，符合實作。'}
+print(json.dumps(result,ensure_ascii=False,indent=2))

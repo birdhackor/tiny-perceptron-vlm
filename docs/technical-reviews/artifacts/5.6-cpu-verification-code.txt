@@ -1,0 +1,73 @@
+import os
+import sys
+import re
+import io
+import json
+import math
+import platform
+import hashlib
+import contextlib
+from pathlib import Path
+
+sys.path.insert(0, str(Path.cwd()))
+os.environ.update(CUDA_VISIBLE_DEVICES='', HF_HUB_OFFLINE='1', HF_DATASETS_OFFLINE='1', TRANSFORMERS_OFFLINE='1')
+import torch
+from tiny_perceptron.training import learning_rate
+
+raw = Path('course/chapters/05.md').read_bytes()
+headings = list(re.finditer(rb'(?m)^## ([A-Z\d]+\.\d+) [^\r\n]+', raw))
+def section(lesson):
+    p = next(i for i, h in enumerate(headings) if h[1].decode() == lesson)
+    end = headings[p+1].start() if p+1 < len(headings) else len(raw)
+    return raw[headings[p].start():end]
+def run_fence(lesson, replacement=None):
+    code = re.findall(r'```python\n(.*?)```', section(lesson).decode(), re.S)[0]
+    if replacement:
+        code = code.replace(*replacement)
+    output = io.StringIO()
+    ns = {}
+    error = None
+    with contextlib.redirect_stdout(output):
+        try:
+            exec(compile(code, 'original-course-'+lesson, 'exec'), ns)
+        except Exception as exc:
+            error = {'type': type(exc).__name__, 'message': str(exc)}
+    return ns, {'stdout': output.getvalue(), 'error': error}
+
+results = {}
+rates10 = [learning_rate(i, 40, peak=0.001, warmup=10) for i in range(40)]
+assert math.isclose(rates10[0], 0.0001, abs_tol=1e-15)
+assert math.isclose(rates10[4], 0.0005, abs_tol=1e-15)
+assert math.isclose(rates10[9], 0.001, abs_tol=1e-15)
+assert max(rates10) <= 0.001 + 1e-9
+assert all(0.0001 <= value <= 0.001 for value in rates10)
+results['exercise_warmup10'] = {'first10': rates10[:10], 'first11': rates10[:11], 'last3': rates10[-3:], 'min': min(rates10), 'max': max(rates10)}
+rates5 = [learning_rate(i, 40, peak=0.001, warmup=5) for i in range(40)]
+rates30 = [learning_rate(i, 40, peak=0.001, warmup=30) for i in range(40)]
+assert rates30 == rates10
+assert rates5[4] == rates5[5] == 0.001
+assert all(rates5[i+1] <= rates5[i] for i in range(5, 39))
+assert learning_rate(40, 40, peak=0.001, warmup=5) == 0.0001
+assert learning_rate(45, 40, peak=0.001, warmup=5) == 0.0001
+results['original_numeric_details'] = {'first6': rates5[:6], 'last3': rates5[-3:], 'min': min(rates5), 'max': max(rates5), 'endpoint_i40': learning_rate(40,40,peak=0.001,warmup=5), 'warmup30_equals10': rates30==rates10}
+results['quarter_cap_boundary'] = []
+for total in (1,2,3,4,5,40):
+    effective = min(30, max(1, total // 4))
+    results['quarter_cap_boundary'].append({'total':total,'requested_warmup':30,'effective_warmup':effective,'quarter':total/4,'effective_within_quarter':effective<=total/4,'first_rate':learning_rate(0,total,peak=0.001,warmup=30)})
+results['total_plan_changes_progress'] = {str(i): {'total40':learning_rate(i,40,peak=0.001,warmup=5),'total100':learning_rate(i,100,peak=0.001,warmup=5)} for i in (19,20,39)}
+assert learning_rate(19,40,peak=0.001,warmup=5) != learning_rate(19,100,peak=0.001,warmup=5)
+resumed = [learning_rate(i,40,peak=0.001,warmup=5) for i in range(20,40)]
+assert resumed == rates5[20:]
+results['pure_schedule_resume'] = {'start_index':20,'total':40,'peak':0.001,'warmup':5,'identical_suffix':resumed==rates5[20:]}
+_, results['prerequisite_5.4_original'] = run_fence('5.4')
+assert results['prerequisite_5.4_original']['error'] is None
+_, results['prerequisite_5.4_exercise'] = run_fence('5.4', ('[1.0, 100.0]', '[1.0, -100.0]'))
+assert results['prerequisite_5.4_exercise']['error'] is None
+ns, results['prerequisite_5.1_original'] = run_fence('5.1')
+assert results['prerequisite_5.1_original']['error'] is None
+assert ns['model'].embedding.weight.device.type == 'cpu'
+results['prerequisite_5.1_original'].update(before=ns['before'], after=ns['after'], updates=40, seed=42, independent_examples=1, supervised_token_positions=3, device=str(ns['model'].embedding.weight.device))
+_, results['prerequisite_5.1_empty_exercise'] = run_fence('5.1', ('y = torch.tensor([[2, 3, 4]])', 'y = torch.tensor([[-100, -100, -100]])'))
+assert results['prerequisite_5.1_empty_exercise']['error']['type'] == 'ValueError'
+report = {'command':'OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 .venv/bin/python < docs/technical-reviews/artifacts/5.6-cpu-verification-code.txt > docs/technical-reviews/artifacts/5.6-cpu-verification-output.json', 'environment':{'python':platform.python_version(),'torch':str(torch.__version__),'torch_git_version':str(torch.version.git_version),'device':'cpu','OMP_NUM_THREADS':os.environ['OMP_NUM_THREADS'],'MKL_NUM_THREADS':os.environ['MKL_NUM_THREADS']}, 'source_sha256':{lesson:hashlib.sha256(section(lesson)).hexdigest() for lesson in ('5.6','5.4','5.1')},'results':results, 'result':'全部assertion通過；小於4步的暖身上限並非四分之一，這是教材一般敘述的反例。'}
+print(json.dumps(report, ensure_ascii=False, indent=2))
