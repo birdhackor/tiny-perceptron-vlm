@@ -26,7 +26,17 @@ python -m ipykernel install --sys-prefix --name tiny-perceptron --display-name "
 jupyter lab notebooks
 ```
 
-第一行檢查 Python 與 PyTorch 能否使用；看到 `compute` 那列為 `OK（cpu）`，且套件沒有「未安裝」或最後的紅色錯誤，才表示 CPU 計算檢查完成。第二行登記工作頁要用的執行環境，第三行啟動 JupyterLab，終端機會提供瀏覽器網址。開啟 `01/1.1.ipynb`，選 **Tiny Perceptron**，點進一個程式框並按 **Shift+Enter**。一個框叫 cell；負責執行它的程序叫 kernel，可想成工作桌：上一格取過的名字還留在桌上，後面才能使用。
+如果 Windows PowerShell 在啟用時顯示「此系統上已停用指令碼執行」或 `PSSecurityException`，被擋住的是 `Activate.ps1` 啟用腳本，不表示 Python 工具箱沒有裝好。仍在專案資料夾內，改用以下三行，直接指定工具箱裡的 Python，不必先啟用：
+
+```powershell
+.\.venv\Scripts\python.exe scripts/check_env.py
+.\.venv\Scripts\python.exe -m ipykernel install --sys-prefix --name tiny-perceptron --display-name "Tiny Perceptron"
+.\.venv\Scripts\python.exe -m jupyterlab notebooks
+```
+
+往後若教材寫 `python ...` 或 `.venv/bin/python ...`，也可把 Python 的路徑換成 `.\.venv\Scripts\python.exe`，其後的參數保持相同。
+
+兩組指令做的是同樣三件事。第一行檢查 Python 與 PyTorch 能否使用；看到 `compute` 那列為 `OK（cpu）`，且套件沒有「未安裝」或最後的紅色錯誤，才表示 CPU 計算檢查完成。第二行登記工作頁要用的執行環境，第三行啟動 JupyterLab，終端機會提供瀏覽器網址。開啟 `01/1.1.ipynb`，選 **Tiny Perceptron**，點進一個程式框並按 **Shift+Enter**。一個框叫 cell；負責執行它的程序叫 kernel，可想成工作桌：上一格取過的名字還留在桌上，後面才能使用。
 
 要試讀暖身中的短程式，可以在 Colab 用上方「＋程式碼」新增程式框；JupyterLab 則用工具列的「＋」。把暖身的整段程式貼入新框，先跑完「準備本節的工具」程式框，再選新框按 Shift+Enter。貼入時保留每行開頭的空格，它們可能是 Python 分辨重複動作範圍的縮排。
 
@@ -145,16 +155,16 @@ layer = nn.Linear(3, 2)
 with torch.no_grad():
     layer.weight.copy_(weights.T)
     layer.bias.copy_(torch.tensor([5.0, 0.0]))
-print(layer(recipes))
+print(layer(recipes).tolist())
 ```
 
-這段接續前段執行，手動設定同一套配方，再為成本加 5。`copy_` 把數字抄進層的權重；`torch.no_grad()` 表示這次設定不必記錄如何求導，求導會在 [W.6](#W.6) 解釋。兩列結果是 `[45, 1]`、`[85, 6]`，甜度不變。練習只把偏移量的 5 改成 8，先預測兩杯成本都增加 3，再執行核對；若甜度也變了，就檢查你改的是哪一欄。
+這段接續前段執行，手動設定同一套配方，再為成本加 5。`copy_` 把數字抄進層的權重；`torch.no_grad()` 表示這次設定不必記錄如何求導，求導會在 [W.6](#W.6) 解釋。`.tolist()`把數值表轉成一般Python清單，方便直接讀數字。兩列結果是 `[45, 1]`、`[85, 6]`，甜度不變。練習只把偏移量的 5 改成 8，先預測兩杯成本都增加 3，再執行核對；若甜度也變了，就檢查你改的是哪一欄。
 
 ## W.6 忘了微積分，可以先想旋鈕敏感度
 
 想把水溫調到 3 個單位，眼前的旋鈕位置卻是 1。為了比較調整前後，用「離目標的差，自己乘自己」當代價：`(1-3)²=4`。把旋鈕調到 1.1，代價變成 `(1.1-3)²=3.61`，下降了 0.39。這個例子想回答的不是「目標在哪」，而是「從目前位置往哪邊調、調一點會影響多少」。模型有很多可調數字，不能每次靠人試完所有方向，因此需要一種計算敏感度的工具。
 
-當調整量越來越小，「代價改變數 ÷ 旋鈕改變數」會靠近某個數，這個區域性敏感度叫導數（derivative）。上例在 1 附近約為 -4：旋鈕稍微增加，代價就減少；負號表示方向，絕對值表示每單位改變的強弱。有多個旋鈕時，每個旋鈕各算一個導數，排列起來叫梯度（gradient）。模型中的這些可調旋鈕叫參數（parameter），並不是文字的 ID。
+當調整量越來越小，「代價改變數 ÷ 旋鈕改變數」會靠近某個數，這個區域性敏感度叫導數（derivative）。上例在 1 附近約為 -4：旋鈕稍微增加，代價就減少；負號表示方向，絕對值表示每單位改變的強弱。有多個旋鈕時，每個旋鈕各算一個導數，排列起來叫梯度（gradient）。模型中的這些可調旋鈕叫參數（parameter）；訓練要改的就是它們的數值。
 
 下面讓 PyTorch 儲存旋鈕的數值並自動計算導數。tensor 的概念見 [W.3](#W.3)。輸入 `w=1`，目標固定為 3；`requires_grad=True` 要求工具記錄與 `w` 有關的運算，稍後才能沿著它們計算敏感度。
 
