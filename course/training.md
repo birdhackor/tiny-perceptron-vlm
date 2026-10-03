@@ -539,7 +539,31 @@ python scripts/infer.py checkpoints/safety.pt --chat --prompt "盒子15；請提
 
 目前這個訓練入口每次保存兩份權重檔。指定的`vision.pt`是原生`multimodal-v1`格式：包含文字模型、圖片與聲音編碼器、接頭、各自配置、目前步數、優化器、隨機數狀態與可訓練參數名單，供推論或恢復未完成的同一排程。另存的`vision.modal.pt`是較舊推論格式，只存權重、文字配置與任務名；它仍能供`infer_modal.py`推論，卻缺少精確續訓所需的優化器與隨機數資料。模態指文字、圖片或聲音這種輸入種類，檔名有modal不表示保存狀態反而更多。
 
-若原排程還沒跑完，用相同任務、資料、總步數、批次大小與學習率，讓`--checkpoint checkpoints/vision.pt --resume`恢復已存步數後的部分；原先只訓接頭，就要保持同一凍結範圍。載入工具會核對配置與可訓練名單。這不表示任意權重檔都能精確續訓：舊`.modal.pt`、只含編碼器權重的檔案與其他推論快照，都沒有這項保證。換成另一訓練階段則載入原生檔、不要加`--resume`，再明定新的凍結範圍。純文字能力檢查要對包裝內的`model.language`使用同一批留出題，見[11.7](chapters/11.md#11.7)；原生多模態檔不能直接交給只接受文字模型的`infer.py`。
+若原排程還沒跑完，用相同任務、資料、總步數、批次大小與學習率，讓`--checkpoint checkpoints/vision.pt --resume`恢復已存步數後的部分；原先只訓接頭，就要保持同一凍結範圍。續訓時移除首訓命令的`--vision-encoder`與`--audio-encoder`：完整檔已保存它們，入口會拒絕一面恢復、一面重新載入編碼器。例如上面的圖片排程尚未完成500步時：
+
+```bash
+.venv/bin/python scripts/train.py --task vision --checkpoint checkpoints/vision.pt --resume --freeze projector --train --steps 500 --output checkpoints/vision.pt
+```
+
+這裡500是原排程的總步數，不是另外再更新500次；已經跑完的檔案不需要這條命令。載入工具會核對配置與可訓練名單。這不表示任意權重檔都能精確續訓：舊`.modal.pt`、只含編碼器權重的檔案與其他推論快照，都沒有這項保證。換成另一訓練階段則載入原生檔、不要加`--resume`，再明定新的凍結範圍。
+
+純文字能力檢查要對包裝內的`model.language`使用同一批留出題，原理見[11.7](chapters/11.md#11.7)；原生多模態檔不能直接交給只接受文字模型的`infer.py`。在專案根目錄執行以下Python，沿用T.4準備的同一份屬性validation，並將文字底座與圖片模型裡的文字部分並排評估：
+
+```python
+import json
+from tiny_perceptron.data import load_jsonl
+from tiny_perceptron.training import load_checkpoint
+from scripts.evaluate import evaluate
+
+records = load_jsonl("data/generated/attributes-sft/validation.jsonl")
+before, _ = load_checkpoint("checkpoints/attributes.pt", "cpu")
+after, _ = load_checkpoint("checkpoints/vision.pt", "cpu")
+for label, language in [("before", before), ("after", after.language)]:
+    report = evaluate(language, records, mode="sft", max_new_tokens=24)
+    print(label, json.dumps(report, ensure_ascii=False))
+```
+
+`load_checkpoint`返回模型與保存資訊，`_`表示這裡不使用後者。`after.language`只取多模態包裝裡的文字模型，沒有餵圖片；`evaluate`以同一份題目與24個新token上限評估，並返回可逐題查閱的JSON。保存兩行輸出，按`samples`的`row`並排理想`target`與實際`generated`，再比較`exact_match`及它在`metric_denominators`中的分母；正常結束另看`eos_rate`。這段不更新權重，也沒有保證兩行會答對幾題。要檢查聲音或聯合訓練後的文字部分，只換第二個載入路徑為`audio.pt`或`joint.pt`，保留同一文字題目與生成設定。
 
 以上CLI配方是自己練習的入口。我們另用`scripts/course_experiments/modalities.py`完成固定資料與完整留出評估的GPU實驗，兩者的目標、抽樣、學習率和保存格式要分別閱讀，不能把正式數字當成上面500步命令的預期輸出。例如正式編碼器各訓練250步，視覺六類在新位置測試6/6，音訊在14段新頻率測試11/14，見[10.5](chapters/10.md#10.5)與[12.8](chapters/12.md#12.8)；這不是上面CLI各兩題的`holdout_accuracy`。
 
@@ -692,7 +716,7 @@ python scripts/infer.py checkpoints/safety.pt --chat --prompt "盒子15；請提
 
 `outputs/course-experiments/course-v1/moe/`保存`dense_active_top1.pt`、`dense_active_top2.pt`、`dense_total.pt`與四份`top1_aux0.pt`、`top1_aux0.01.pt`、`top2_aux0.pt`、`top2_aux0.01.pt`。三側原始故事仍在`dataset.json`；`model.pt`固定複製top-2、0.01，供後面的教師教學使用，沒有用最後檢查成績挑選。完整訓練、51／52篇留出代價、每側前八篇的原樣續寫與每層路由計數，可核對[MoE實報](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/course-experiments/results/moe.json)。它仍會寫重複片語，不能把教師檔存在當成教師答案可靠。
 
-其他架構選項有 `--rotary`、`--activation swiglu` 或 `relu2`、`--tied`、`--heads` 與 `--kv-heads`。各自含義在第 14–16 章逐節講解，先選眼前要檢查的一項，不需要把所有開關一次打開。
+其他架構選項有 `--rotary`、`--activation swiglu` 或 `relu2`、`--tied`、`--heads` 與 `--kv-heads`。RoPE用旋轉表示位置，先看[14.1](chapters/14.md#14.1)；ReLU²把保留下來的正值再平方，見[14.4](chapters/14.md#14.4)；SwiGLU讓一組特徵控制另一組的通過程度，見[14.5](chapters/14.md#14.5)。其餘開關也各選眼前要檢查的一項，保留其他設定不變。
 
 速度比較也先量測原方法。`--backend sdpa` 選 PyTorch 的注意力運算介面；真正使用哪種加速核心，依裝置、資料型態與條件決定。CPU 上算出相同結果，不能證明 GPU 上會更快。GPU 計時需要先暖身、在量測區間兩側等待裝置工作完成，這些原理見[16.1](chapters/16.md#16.1)。
 
@@ -702,7 +726,7 @@ efficiency正式組先載入[T.4](#T.4)的`sft/model.pt`與同目錄`dataset.jso
 .venv/bin/python -m scripts.course_experiments.run --experiment efficiency --device cuda
 ```
 
-它先保存`mha.pt`、`gqa.pt`各100次SFT更新，再從MHA起點分開訓練`ordinary.pt`、`accumulated.pt`、`activation_checkpoint.pt`、`sdpa.pt`各40次，保持同一批抽樣與有效目標數。`padded.pt`與`packed.pt`也各40次，但它們只學助手短文字，目標已改；本輪原問答最後檢查都只1/10，不能把裝填數值接近寫成問答品質保持，詳細對照在[16.5](chapters/16.md#16.5)。全部輸出在`outputs/course-experiments/course-v1/efficiency/`，`model.pt`固定複製ordinary，沒有選最好成績。
+它先保存`mha.pt`、`gqa.pt`各100次SFT更新，再從MHA起點分開訓練`ordinary.pt`、`accumulated.pt`、`activation_checkpoint.pt`、`sdpa.pt`各40次，保持同一批抽樣與有效目標數。`accumulated`把一批拆小、累積梯度後才更新，讓較小記憶體也能處理同一批，先讀[16.6](chapters/16.md#16.6)；`activation_checkpoint`少保存部分中間結果，到反向時重算，用額外計算換記憶體，先讀[16.10](chapters/16.md#16.10)。`padded.pt`與`packed.pt`也各40次，但它們只學助手短文字，目標已改；本輪原問答最後檢查都只1/10，不能把裝填數值接近寫成問答品質保持，詳細對照在[16.5](chapters/16.md#16.5)。全部輸出在`outputs/course-experiments/course-v1/efficiency/`，`model.pt`固定複製ordinary，沒有選最好成績。
 
 同次實驗另核對快取、梯度與實際後端：[16.3](chapters/16.md#16.3)列數值容差與原始生成ID，[16.8](chapters/16.md#16.8)的profiler確定本輪FP32用了memory-efficient。真正Inductor只編譯一個固定形狀FFN，首次7.717秒、穩態比eager慢，沒有回本點，見[16.11](chapters/16.md#16.11)。`compile-input.pt`是內部傳給子程序的載荷，不能交給一般模型推論入口；`compile-result.json`另存編譯量測。完整有效分母、留出生成與每支線時間／記憶體可核對[efficiency實報](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/course-experiments/results/efficiency.json)。
 
@@ -761,6 +785,8 @@ NLL是平均負對數代價，越低表示這批標準答案的機率較高；69
 ## T.10 用較小學生學教師，再與普通訓練比較
 
 先讀[18.1的教師訊號](chapters/18.md#18.1)、[18.6的文字單位對齊](chapters/18.md#18.6)。學生是實際要部署的較小模型，教師提供答案或候選比例；學生變小先由架構決定，教師訊號是否有幫助則要和同架構的普通訓練比較。這次已完成完整L4實跑，保留沒有提升、量化後退步與教師答錯的結果。
+
+本節還會把同一學生另存成`packed4`版本。先讀[17.2的量化刻度](chapters/17.md#17.2)：把浮點權重映成少量整數格子叫量化，按刻度近似還原叫反量化。`packed4`再按[17.8的打包規則](chapters/17.md#17.8)，把兩個四位元碼放進同一byte；刻度與其他浮點數仍另存。它縮小的是保存格式，不會減少學生的層數，本專案推論時仍先還原成FP32計算。
 
 重跑前先完成[T.4的完整直接SFT](#T.4)、[T.5的條件式風格](#T.5)與[T.8的MoE](#T.8)，讓預設`outputs/course-experiments/course-v1/`下的三個來源資料夾各有`model.pt`與`dataset.json`。風格使用條件式教師；MoE固定使用top-2、輔助係數0.01。工具核對原家族切分，缺權重或資料會停止。另取GSM8K固定200題包作完整短題診斷：
 
@@ -838,7 +864,7 @@ GSM8K另外先掃200道完整原題，只兩道能連同真實chat前文及預�
 
 我們也在[RAG正式報告](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/course-experiments/results/rag.json)保存了另一種可回查紀錄：12個未教過的店名各有七種上下文，共84份實際生成，另有四份同權重示例映射生成。店名按家族切分，測試地址與來源在訓練後才重新抽取；改公告介入只改本次文件，不改已保存的切分。原公告與改地址公告都答對5/12對，改來源則2/12對，沒有以單側答對數代替配對成功。`fact`、`context_fact`、`documents`、原始生成ID與各條判準都在同一題紀錄裡，讀者可以看見答案應隨哪個欄位改變。
 
-這次由隨機權重訓練的小模型讀到157,361個有效回答目標，完整1,000次更新；實驗在L4包含訓練、評估與本機保存共15.02秒，未含啟動、映像與HF上傳。五份checkpoint在私有HF固定版本逐份下載核對雜湊，表示備份內容一致；模型讀正確公告仍只答對5/12，保存成功不會把這個失敗改成能力通過。報告的完整程式版本是`910aebc6419c9fc6217279a27fde9851c5cfad30`，另逐檔保存程式SHA-256與資料指紋，重做方法見[A.2](chapters/0A.md#A.2)。
+這次由隨機權重訓練的小模型讀到157,361個有效回答目標，完整1,000次更新；實驗在L4包含訓練、評估與本機保存共15.02秒，未含啟動、映像與HF上傳。HF是Hugging Face，這裡用它的檔案庫保存模型與實驗檔；私有庫限制存取，固定版本則讓下載者取得同一次保存的內容。五份checkpoint在私有HF固定版本逐份下載核對雜湊，表示備份內容一致；模型讀正確公告仍只答對5/12，保存成功不會把這個失敗改成能力通過。報告的完整程式版本是`910aebc6419c9fc6217279a27fde9851c5cfad30`，另逐檔保存程式SHA-256與資料指紋，重做方法見[A.2](chapters/0A.md#A.2)。
 
 [Tools正式報告](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/course-experiments/results/tools.json)則保存每步的SYSTEM、原問題、模型原始JSON、解析物件、實際執行旗標、返回值與回填後生成。20道完整任務完成19道；例如9×9已實算出81，模型卻在最後生成多括號的JSON，仍按原判準留作失敗。首動作解析20/20、正確參數18/18次、任務19/20是不同分母，不能互相替代。一步上限另有18份新生成，全部真正執行工具但被`step_limit`截停；人工故障注入也另外列明，沒有混入模型成績。重做入口與回填協議見[B.1](chapters/0B.md#B.1)、[B.3](chapters/0B.md#B.3)。
 
@@ -848,7 +874,7 @@ GSM8K另外先掃200道完整原題，只兩道能連同真實chat前文及預�
 
 同份報告另記兩支有限策略的真REINFORCE，每支1,200次更新、76,800個訓練動作，新題則各有24次最高機率選擇與384個抽樣動作。嚴格支線新題0/24、0/384；弱支線靠列舉取得384/384代理分，嚴格正確仍0/384。自然資料支線則另建小語言模型，拿200筆GSM8K人類訓練答案做150次更新，保存完整原始記錄、分側、片段位置與人類解答前綴續寫。它們既不是教師生成，也沒有形成GSM8K解題成績。這些支線的單位、保存格式與限制要各自看，不能把有限策略的零自回歸token解讀成沒有訓練。
 
-三項應用都使用程式版本`910aebc6419c9fc6217279a27fde9851c5cfad30`，正式排程完整、沒有縮步或重試；各有獨立資料指紋及全checkpoint固定HF版本下載核對紀錄。Reasoning共有18份保存檔，整項L4實驗45.71秒。整個資料夾備份保留了當次檔案，但是否能精確續訓仍須逐格式檢查；例如有限策略的保存檔沒有另外保存閉包中的移動baseline與抽題器狀態。重做入口與各支保存檔的區別見[C.1](chapters/0C.md#C.1)、[C.7](chapters/0C.md#C.7)。
+三項應用都使用程式版本`910aebc6419c9fc6217279a27fde9851c5cfad30`，正式排程完整、沒有縮步或重試；各有獨立資料指紋及全checkpoint固定HF版本下載核對紀錄。Reasoning共有18份保存檔，整項L4實驗45.71秒。整個資料夾備份保留了當次檔案，但是否能精確續訓仍須逐格式檢查。例如有限策略會在記憶體中維護獎勵的參考值baseline，隨著新一批回饋逐步更新；抽題用的隨機產生器也有當下狀態，決定接下來抽哪些題。這兩份狀態沒有另外寫進策略保存檔，所以僅還原已存權重與一般隨機數狀態，仍不足以讓後續更新逐次一致。重做入口與各支保存檔的區別見[C.1](chapters/0C.md#C.1)、[C.7](chapters/0C.md#C.7)。
 
 公開之後，我們也實際下載三項應用的固定版本，在CPU走完一次檢索後回答、一次受限計算工具對話，以及一次算式步驟生成與外部檢查。工具模型確實提出一次合法計算請求，外層程式執行並回填結果，再收到正確最終回答；這和只印出一段像工具請求的文字不同。完整命令、請求與回填紀錄見[公開模型操作檢查](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/course-experiments/student-checks/application-workflows.json)。這些是單次操作檢查，不增加上面正式留出題的答對分子或分母。
 
