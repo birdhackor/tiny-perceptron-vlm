@@ -1,0 +1,110 @@
+{
+  "read_on": "2026-10-03",
+  "reviewer_task": "/root/technical_round_coordinator/technical_16_1_fresh",
+  "scope": "只回查本人16.1＋導言所需16.6支持，不給16.6 primary判定。",
+  "old_source_path": "/tmp/root-chapter-16-before-accumulation-fix/05794da02b7d951f3ab9bd2d305e9f93497a277b5e4a971f857e22ff8dd8f6b5.md",
+  "old_whole_sha256": "05794da02b7d951f3ab9bd2d305e9f93497a277b5e4a971f857e22ff8dd8f6b5",
+  "current_whole_sha256": "cf67e621a07e9a4b068cff081b86c2b3dbffc16d28c3d6a58a186472e110545b",
+  "original_whole_identity_preserved": "78149cab1683387266a69dd25716b930987da0ec83fe2e552b628bf6aaa9b517",
+  "old_raw_sha256": "bdae9fb93563de3db28ad3169b3d49028875060160a56c21209cdf0ffed82863",
+  "current_raw_sha256": "836c58c39b25ca58e758a76ce1b6c1417a7388a8072bb9bf4b1a04fb940f7be9",
+  "old_raw_utf8": "## 16.6 Batch 放不下怎麼辦？\n\n想讓三筆資料一起決定一次更新，記憶體卻只能同時放其中一兩筆，可以分次計算、最後再更新嗎？可以，但要把各份資料的誤差按原本的比例相加，不能平均「兩次各自的平均」。這種做法叫gradient accumulation（梯度累積）：多次向後計算都加到同一份梯度，最後只做一次參數更新。前置是[梯度暖身](../first-steps.md#W.6)；梯度表示改動權重對誤差的影響，PyTorch的backward預設會累加它。\n\n用一個權重w=1與三個輸入 `[1,2,3]`，希望輸出全為零，誤差取各輸出的平方。整批平均誤差是 `(1+4+9)/3=14/3`，對w的梯度是 `2×(1+4+9)/3=28/3`，約9.3333。若拆成一筆與兩筆，第一份誤差和1，第二份誤差和13；兩份都除以共同總數3，累加仍是原來的14/3。\n\n```python\nimport torch\n\nx = torch.tensor([1.0, 2.0, 3.0])\nwhole = torch.tensor(1.0, requires_grad=True)\n(whole * x).square().mean().backward()\naccumulated = torch.tensor(1.0, requires_grad=True)\nwrong = torch.tensor(1.0, requires_grad=True)\nfor part in (x[:1], x[1:]):\n    ((accumulated * part).square().sum() / len(x)).backward()\n    ((wrong * part).square().mean() / 2).backward()\nprint(\"整批梯度\", round(whole.grad.item(), 4))\nprint(\"正確累積\", round(accumulated.grad.item(), 4))\nprint(\"錯誤平均\", round(wrong.grad.item(), 4))\n```\n\n`x[:1]`取索引1之前，也就是第一筆；`x[1:]`取索引1到結尾，也就是後兩筆，切片終點本身不包含在內。三個權重初值相同但獨立，分別核對三種計算。正確那行先取每份的誤差和，再除以共同的3；每次backward會把新貢獻加到accumulated.grad。錯誤那行先對份內求平均，再讓兩份各占一半，相當於第一筆占一半、第二與第三筆各占四分之一，已不是三筆等權。輸出應為9.3333、9.3333與7.5：程式能跑不代表平均方式正確。\n\n真實語言模型通常按有效答案token計算誤差，這裡「有效」指[確實納入答案誤差的位置](07.md#7.3)，[PAD](07.md#7.7)則是補齊長度的符號，不是要學的答案。有的micro-batch（拆出的較小批次）只有一個有效token，有的有十個，因此分母應是累積範圍內的有效token總數，不是迴圈次數，也不是包含PAD的表格大小。只有每份有效數完全相同時，「各份平均再平均」才會與整體平均相同。\n\n訓練操作順序也很重要：先清除前一輪梯度，再對各份backward，最後才裁剪梯度（整份梯度過大時一起縮小，避免更新突然太大），再做一次step更新權重。若每份都step，後一份看到的是更新後的權重，就不再是同一個大batch。此例沒有step，只驗證梯度。有些運算依同一批資料共同計算平均值等統計，拆批就可能改變它；dropout則是在訓練時隨機關閉部分特徵，分次計算可能抽到不同遮罩。這些行為需另核對，不能把任何模型分批都視為無條件等價。\n\n真實文字小核對把三段助手內容拆成一段與兩段，兩份有效目標7與13，都除以20；與整批的權重梯度最大差2.08616×10⁻⁷。正式問答訓練用準備好的問題與示範答案，讓模型學習產生助手答案，採用的拆法不同：每批八題拆為三題、五題，共同分母仍是這批有效助手目標，全部累積後才裁剪與step。\n\n普通批次與累積兩支各完成40次更新、2,328個有效目標。更新後權重最大差1.38730×10⁻⁵，最後檢查代價0.41778與0.41778，完整答案都5/10，沒有逐bit相同的承諾。每步中位數14.070與24.064毫秒；訓練峰值扣掉各自開始前配置的新增量為8.824與6.474 MiB，省同時保留的中間量但多花時間。完整峰值75.988與74.724 MiB包含不同的駐留起點67.164與68.250 MiB，範圍按[16.1](16.md#16.1)理解，不能當成兩個模型單獨部署的大小。\n\n練習只改拆法為兩筆與一筆：`(x[:2],x[2:])`。先預測正確梯度仍9.3333，錯誤方式改為11.5，再執行核對。拆法不該影響同一整批的權重，如果結果變了，先檢查每筆資料到底被分配了多少份量。\n\n",
+  "current_raw_utf8": "## 16.6 Batch 放不下怎麼辦？\n\n想讓三筆資料一起決定一次更新，記憶體卻只能同時放其中一兩筆，可以分次計算、最後再更新嗎？可以，但要把各份資料的誤差按原本的比例相加，不能平均「兩次各自的平均」。這種做法叫gradient accumulation（梯度累積）：多次向後計算都加到同一份梯度，最後只做一次參數更新。前置是[梯度暖身](../first-steps.md#W.6)；梯度表示改動權重對誤差的影響，PyTorch的backward預設會累加它。\n\n用一個權重w=1與三個輸入 `[1,2,3]`，希望輸出全為零，誤差取各輸出的平方。整批平均誤差是 `(1+4+9)/3=14/3`，對w的梯度是 `2×(1+4+9)/3=28/3`，約9.3333。若拆成一筆與兩筆，第一份誤差和1，第二份誤差和13；兩份都除以共同總數3，累加仍是原來的14/3。\n\n```python\nimport torch\n\nx = torch.tensor([1.0, 2.0, 3.0])\nwhole = torch.tensor(1.0, requires_grad=True)\n(whole * x).square().mean().backward()\naccumulated = torch.tensor(1.0, requires_grad=True)\nwrong = torch.tensor(1.0, requires_grad=True)\nfor part in (x[:1], x[1:]):\n    ((accumulated * part).square().sum() / len(x)).backward()\n    ((wrong * part).square().mean() / 2).backward()\nprint(\"整批梯度\", round(whole.grad.item(), 4))\nprint(\"正確累積\", round(accumulated.grad.item(), 4))\nprint(\"錯誤平均\", round(wrong.grad.item(), 4))\n```\n\n`x[:1]`取索引1之前，也就是第一筆；`x[1:]`取索引1到結尾，也就是後兩筆，切片終點本身不包含在內。三個權重初值相同但獨立，分別核對三種計算。正確那行先取每份的誤差和，再除以共同的3；每次backward會把新貢獻加到accumulated.grad。錯誤那行先對份內求平均，再讓兩份各占一半，相當於第一筆占一半、第二與第三筆各占四分之一，已不是三筆等權。輸出應為9.3333、9.3333與7.5：程式能跑不代表平均方式正確。\n\n真實語言模型通常按有效答案token計算誤差，這裡「有效」指[確實納入答案誤差的位置](07.md#7.3)，[PAD](07.md#7.7)則是補齊長度的符號，不是要學的答案。有的micro-batch（拆出的較小批次）只有一個有效token，有的有十個，因此分母應是累積範圍內的有效token總數，不是迴圈次數，也不是包含PAD的表格大小。每份有效數相同時，「各份平均再平均」能保證每個token占相同份量。數量不同時，兩種平均有時會剛好得到同一數字：例如一份有1個token、另一份有10個，但11個位置的誤差全是1，兩種平均都會得到1。這個巧合不能保證換一批資料仍然正確；要保留每個token原來的份量，仍應把各份誤差和除以共同總數。\n\n訓練操作順序也很重要：先清除前一輪梯度，再對各份backward，最後才裁剪梯度（整份梯度過大時一起縮小，避免更新突然太大），再做一次step更新權重。若每份都step，後一份看到的是更新後的權重，就不再是同一個大batch。此例沒有step，只驗證梯度。有些運算依同一批資料共同計算平均值等統計，拆批就可能改變它；dropout則是在訓練時隨機關閉部分特徵，分次計算可能抽到不同遮罩。這些行為需另核對，不能把任何模型分批都視為無條件等價。\n\n真實文字小核對把三段助手內容拆成一段與兩段，兩份有效目標7與13，都除以20；與整批的權重梯度最大差2.08616×10⁻⁷。正式問答訓練用準備好的問題與示範答案，讓模型學習產生助手答案，採用的拆法不同：每批八題拆為三題、五題，共同分母仍是這批有效助手目標，全部累積後才裁剪與step。\n\n普通批次與累積兩支各完成40次更新、2,328個有效目標。更新後權重最大差1.38730×10⁻⁵，最後檢查代價0.41778與0.41778，完整答案都5/10，沒有逐bit相同的承諾。每步中位數14.070與24.064毫秒；訓練峰值扣掉各自開始前配置的新增量為8.824與6.474 MiB，省同時保留的中間量但多花時間。完整峰值75.988與74.724 MiB包含不同的駐留起點67.164與68.250 MiB，範圍按[16.1](16.md#16.1)理解，不能當成兩個模型單獨部署的大小。\n\n練習只改拆法為兩筆與一筆：`(x[:2],x[2:])`。先預測正確梯度仍9.3333，錯誤方式改為11.5，再執行核對。拆法不該影響同一整批的權重，如果結果變了，先檢查每筆資料到底被分配了多少份量。\n\n",
+  "diff_raw_utf8": "--- 16.6-previous-own-read\n+++ 16.6-current-own-read\n@@ -22,7 +22,7 @@\n \n `x[:1]`取索引1之前，也就是第一筆；`x[1:]`取索引1到結尾，也就是後兩筆，切片終點本身不包含在內。三個權重初值相同但獨立，分別核對三種計算。正確那行先取每份的誤差和，再除以共同的3；每次backward會把新貢獻加到accumulated.grad。錯誤那行先對份內求平均，再讓兩份各占一半，相當於第一筆占一半、第二與第三筆各占四分之一，已不是三筆等權。輸出應為9.3333、9.3333與7.5：程式能跑不代表平均方式正確。\n \n-真實語言模型通常按有效答案token計算誤差，這裡「有效」指[確實納入答案誤差的位置](07.md#7.3)，[PAD](07.md#7.7)則是補齊長度的符號，不是要學的答案。有的micro-batch（拆出的較小批次）只有一個有效token，有的有十個，因此分母應是累積範圍內的有效token總數，不是迴圈次數，也不是包含PAD的表格大小。只有每份有效數完全相同時，「各份平均再平均」才會與整體平均相同。\n+真實語言模型通常按有效答案token計算誤差，這裡「有效」指[確實納入答案誤差的位置](07.md#7.3)，[PAD](07.md#7.7)則是補齊長度的符號，不是要學的答案。有的micro-batch（拆出的較小批次）只有一個有效token，有的有十個，因此分母應是累積範圍內的有效token總數，不是迴圈次數，也不是包含PAD的表格大小。每份有效數相同時，「各份平均再平均」能保證每個token占相同份量。數量不同時，兩種平均有時會剛好得到同一數字：例如一份有1個token、另一份有10個，但11個位置的誤差全是1，兩種平均都會得到1。這個巧合不能保證換一批資料仍然正確；要保留每個token原來的份量，仍應把各份誤差和除以共同總數。\n \n 訓練操作順序也很重要：先清除前一輪梯度，再對各份backward，最後才裁剪梯度（整份梯度過大時一起縮小，避免更新突然太大），再做一次step更新權重。若每份都step，後一份看到的是更新後的權重，就不再是同一個大batch。此例沒有step，只驗證梯度。有些運算依同一批資料共同計算平均值等統計，拆批就可能改變它；dropout則是在訓練時隨機關閉部分特徵，分次計算可能抽到不同遮罩。這些行為需另核對，不能把任何模型分批都視為無條件等價。\n \n",
+  "diff_raw_sha256": "32752328e319557f8a412f2d7aea16cf7d2a33de48a5db4aefde0703d688a98a",
+  "whole_diff_raw_utf8": "--- whole16-05794\n+++ whole16-cf67\n@@ -223,7 +223,7 @@\n \n `x[:1]`取索引1之前，也就是第一筆；`x[1:]`取索引1到結尾，也就是後兩筆，切片終點本身不包含在內。三個權重初值相同但獨立，分別核對三種計算。正確那行先取每份的誤差和，再除以共同的3；每次backward會把新貢獻加到accumulated.grad。錯誤那行先對份內求平均，再讓兩份各占一半，相當於第一筆占一半、第二與第三筆各占四分之一，已不是三筆等權。輸出應為9.3333、9.3333與7.5：程式能跑不代表平均方式正確。\n \n-真實語言模型通常按有效答案token計算誤差，這裡「有效」指[確實納入答案誤差的位置](07.md#7.3)，[PAD](07.md#7.7)則是補齊長度的符號，不是要學的答案。有的micro-batch（拆出的較小批次）只有一個有效token，有的有十個，因此分母應是累積範圍內的有效token總數，不是迴圈次數，也不是包含PAD的表格大小。只有每份有效數完全相同時，「各份平均再平均」才會與整體平均相同。\n+真實語言模型通常按有效答案token計算誤差，這裡「有效」指[確實納入答案誤差的位置](07.md#7.3)，[PAD](07.md#7.7)則是補齊長度的符號，不是要學的答案。有的micro-batch（拆出的較小批次）只有一個有效token，有的有十個，因此分母應是累積範圍內的有效token總數，不是迴圈次數，也不是包含PAD的表格大小。每份有效數相同時，「各份平均再平均」能保證每個token占相同份量。數量不同時，兩種平均有時會剛好得到同一數字：例如一份有1個token、另一份有10個，但11個位置的誤差全是1，兩種平均都會得到1。這個巧合不能保證換一批資料仍然正確；要保留每個token原來的份量，仍應把各份誤差和除以共同總數。\n \n 訓練操作順序也很重要：先清除前一輪梯度，再對各份backward，最後才裁剪梯度（整份梯度過大時一起縮小，避免更新突然太大），再做一次step更新權重。若每份都step，後一份看到的是更新後的權重，就不再是同一個大batch。此例沒有step，只驗證梯度。有些運算依同一批資料共同計算平均值等統計，拆批就可能改變它；dropout則是在訓練時隨機關閉部分特徵，分次計算可能抽到不同遮罩。這些行為需另核對，不能把任何模型分批都視為無條件等價。\n \n",
+  "whole_diff_raw_sha256": "ab0f723af1fdf93ea9e06dba9ee268a8955ad5f565a3ea80895b1378ab0240b0",
+  "changed_sections": [
+    "16.6"
+  ],
+  "reconstruct_previous_whole": "用現行whole16中的唯一16.6 raw，完整替換為本artifact old_raw_utf8，可losslessly還原05794全檔；親查bytes完全相等。",
+  "reconstructed_old_whole_sha256": "05794da02b7d951f3ab9bd2d305e9f93497a277b5e4a971f857e22ff8dd8f6b5",
+  "primary_raw_sha256": "2cc9c51149a14143fd03708de1a5d98534acee6170de3308a850ad99dd394507",
+  "primary_unchanged": true,
+  "intro_sha256": "a8b2dae29d5488abdc4432aa08f634efdb946ae3b3d9b0a22045657c85ba6a78",
+  "intro_unchanged": true,
+  "all_original_python_fences_unchanged": true,
+  "16.6_exercise_unchanged": true,
+  "previous_genuine_final_report": {
+    "path": "docs/technical-reviews/artifacts/16.1-final-2cc-report.json",
+    "sha256": "327060c54f4621737bce930b2fcdeaaa079ca9a6471a67c81849cd4030410bf7",
+    "genuine_final": true,
+    "scope": "本人上一turn已真正FINAL pass，54 claims；本次保存該exact報告原bytes，不改其whole-source身份或過往判定。"
+  },
+  "previous_genuine_final_checker": {
+    "path": "docs/technical-reviews/artifacts/16.1-final-2cc-checker.json",
+    "sha256": "00d7333f8b2432dc49304ac09ed064353fd8f91adfc576bafd34fe86e0a1aca5",
+    "exit_code": 0
+  },
+  "history_scope": "b4真revise、5a非FINAL、2cc真FINAL與各原checker均原bytes保留。本次依協調者已消費2cc的直接通知回查來源變更，未讀任何他人review／作者歷史。",
+  "actual_inspection": "完整親讀新版與本人先前版本16.6，唯一prose改動位於有效token分母段。原「只有同有效數才與整體平均相同」擴為同有效數保證各token等權；不同數量可在11個loss全1時巧合同值，換資料不保證仍相同，故保留共同總分母。",
+  "inspection_pending": false,
+  "support_inspection": {
+    "denominator": "新版區分對任意loss的等權保證與特定loss巧合同值。本人推導各token權重係數，親跑Fraction三例及float64自有梯度例，均吻合；全部有效token共同分母仍是保持整體目標與梯度的方式。固定_train及loss_sum／pad_batch原碼確認只數labels!=IGNORE，累積完才clip／step。",
+    "memory": "ordinary／accumulated raw receipt、六支memory coverage舊證據及PyTorch原API範圍未改。新增量是各自peak-before；不同主程序駐留baseline不能變成單獨部署大小。16.6 prose修正平均的必要條件，不改這些實測數值、device、更新數或記憶體定義。",
+    "attention_component": "Flash receipt固定QKV[2,4,512,32]、causal、dropout0，無全LM／task loss／optimizer。前向和前向＋反向各有單獨warmup後reset memory範圍；原profile前向1種kernel名、前向＋反向5種，不把attention組件說成任意路徑都只有一個CUDA kernel。數值仍只支持此固定組件。",
+    "intro_and_primary": "親讀現行16.1＋完整導言，原byte SHA均未改；導言所指梯度累積機制仍有共同分母原例及實際fixed原碼支援，新版文字更明確限縮等權保證，沒有減損本人54項主張的支持。只給16.1＋導言判定，不給16.6整節primary結論。"
+  },
+  "actual_execution": {
+    "path": "docs/technical-reviews/artifacts/16.1-support-16.6-output.json",
+    "sha256": "9c27425df63779cbd73811e1bd5217960a2dd202c2b2d9ab7a7d2105e7c620b1",
+    "command": "OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 CUDA_VISIBLE_DEVICES='' HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1 .venv/bin/python docs/technical-reviews/artifacts/16.1-support-16.6-program.txt",
+    "exit_code": 0,
+    "new_prose_cases": {
+      "unequal_counts_all_losses_one": {
+        "group_counts": [
+          1,
+          10
+        ],
+        "total_count": 11,
+        "overall_mean_exact": "1",
+        "average_of_group_means_exact": "1",
+        "sum_over_common_denominator_exact": "1",
+        "overall_matches_average_of_group_means": true,
+        "overall_matches_common_denominator": true
+      },
+      "unequal_counts_changed_losses": {
+        "group_counts": [
+          1,
+          10
+        ],
+        "total_count": 11,
+        "overall_mean_exact": "21/11",
+        "average_of_group_means_exact": "3/2",
+        "sum_over_common_denominator_exact": "21/11",
+        "overall_matches_average_of_group_means": false,
+        "overall_matches_common_denominator": true
+      },
+      "equal_counts_different_losses": {
+        "group_counts": [
+          2,
+          2
+        ],
+        "total_count": 4,
+        "overall_mean_exact": "3/2",
+        "average_of_group_means_exact": "3/2",
+        "sum_over_common_denominator_exact": "3/2",
+        "overall_matches_average_of_group_means": true,
+        "overall_matches_common_denominator": true
+      }
+    },
+    "additional_gradient_scope_example": {
+      "whole": {
+        "initial_losses_all_one": true,
+        "objective": 1.0,
+        "gradient": 3.8181818181818183
+      },
+      "common_denominator": {
+        "initial_losses_all_one": true,
+        "objective": 1.0,
+        "gradient": 3.8181818181818183
+      },
+      "equal_group_means": {
+        "initial_losses_all_one": true,
+        "objective": 1.0,
+        "gradient": 3.0
+      }
+    }
+  },
+  "unchanged_execution_and_figures": "本人逐一核對全部必要來源／原核心code／frozenJSON／六圖／原例與練習SHA，僅16.6 prose改。原10例、三次練習與圖的實跑／親看紀錄原bytes保留；未重跑未變項或正式GPU／訓練。"
+}
