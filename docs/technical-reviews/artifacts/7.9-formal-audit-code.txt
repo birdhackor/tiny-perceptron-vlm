@@ -1,0 +1,56 @@
+import hashlib
+import json
+from pathlib import Path
+import platform
+import torch
+from tiny_perceptron.data import ByteTokenizer
+
+p = Path("docs/technical-reviews/artifacts/7.9-formal-inputs.json")
+d = json.loads(p.read_text())
+for key in ["original_report", "original_student_check", "original_public_release"]:
+    origin = d[key]
+    assert hashlib.sha256(Path(origin["path"]).read_bytes()).hexdigest() == origin["sha256"]
+assert d["frozen_run"]["seed"] == 42
+assert d["frozen_run"]["step_scale"] == 1.0
+assert d["frozen_run"]["evidence_status"] == "complete_run"
+assert d["training"]["steps"] == 900
+assert d["training"]["records"] == 45
+assert d["training"]["parameters"] == 141568
+print("frozen_training", json.dumps({k: d["training"][k] for k in ["steps", "records", "parameters", "effective_tokens"]}))
+
+tok = ByteTokenizer()
+for name, count, matches, targets in [("validation", 5, 1, 36), ("test", 10, 5, 69)]:
+    report = d["after"][name]
+    samples = report["samples"]
+    assert len(samples) == report["records"] == count
+    eos_count = sum(s["generated_ids"][-1] == tok.eos_id for s in samples)
+    exact_count = sum(s["generated_ids"][:-1] == tok.encode(s["expected"]) for s in samples)
+    effective = sum(len(tok.encode(s["expected"])) + 1 for s in samples)
+    assert eos_count == count
+    assert exact_count == report["matches"] == matches
+    assert report["eos_rate"] == eos_count / count == 1.0
+    assert report["exact_match"] == matches / count
+    assert effective == report["effective_tokens"] == targets
+    assert all(s["eos"] == (2 in s["generated_ids"]) for s in samples)
+    assert all(tok.decode(s["generated_ids"]) == s["generated"] for s in samples)
+    print("frozen_" + name, json.dumps({"records": count, "eos_count": eos_count, "exact_matches": exact_count, "content_errors": count - exact_count, "effective_targets": effective, "nll": report["nll"]}))
+sample = d["after"]["validation"]["samples"][0]
+assert sample["expected"] == "circle"
+assert sample["generated_ids"] == [107, 113, 122, 109, 2]
+assert sample["generated"] == "cire" and sample["exact"] is False and sample["eos"] is True
+print("validation_cire", json.dumps(sample))
+
+# Read existing public weights; no download, inference, parameter update or training.
+model_path = Path("checkpoints/course/sft/model.pt")
+weight_sha = hashlib.sha256(model_path.read_bytes()).hexdigest()
+assert weight_sha == d["public_model_manifest_entry"]["sha256"]
+payload = torch.load(model_path, map_location="cpu", weights_only=True)
+assert payload["config"]["width"] == 64 and payload["config"]["layers"] == 2
+assert payload["config"]["heads"] == 1 and payload["config"]["max_length"] == 128
+assert payload["metadata"]["revision"] == d["frozen_run"]["revision"]
+card = d["model_card"]
+assert hashlib.sha256(Path(card["local_input"]).read_bytes()).hexdigest() == card["sha256"]
+weight_url = "https://huggingface.co/" + d["public_release_pin"]["repo"] + "/resolve/" + d["public_release_pin"]["revision"] + "/" + d["public_model_manifest_entry"]["path"]
+print("existing_weight_input", json.dumps({"source_path": str(model_path), "immutable_url": weight_url, "sha256": weight_sha, "architecture": payload["architecture"], "config": payload["config"], "metadata": payload["metadata"], "necessary_tensor_shapes": {k: list(payload["model"][k].shape) for k in ["embedding.weight", "position.weight", "blocks.0.attention.q.weight", "blocks.1.attention.q.weight", "output.weight"]}}))
+print("scope", "凍結報告算術與既有權重配置核對；不是GPU實驗重跑或模型品質重測。")
+print("environment", json.dumps({"python": platform.python_version(), "torch": torch.__version__, "device": "cpu", "torch_git": torch.version.git_version, "num_threads": torch.get_num_threads()}))
