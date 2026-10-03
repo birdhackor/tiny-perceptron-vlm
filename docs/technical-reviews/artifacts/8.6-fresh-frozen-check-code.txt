@@ -1,0 +1,67 @@
+import ast, hashlib, json, random, platform
+from pathlib import Path
+import torch
+base = Path("/tmp/8.6-originals")
+namespace = {"json":json,"random":random,"hashlib":hashlib}
+for name, wanted in [("frozen-common.py",{"split_records"}),("frozen-text.py",{"arithmetic_records"}),("frozen-behavior.py",{"_conversation","_style_record"})]:
+    tree = ast.parse((base/name).read_text())
+    selected = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in wanted]
+    assert len(selected) == len(wanted)
+    exec(compile(ast.Module(body=selected,type_ignores=[]),name,"exec"),namespace)
+frozen = json.loads(Path("docs/course-experiments/results/style.json").read_text())
+for name,relative in [("frozen-common.py","scripts/course_experiments/common.py"),("frozen-text.py","scripts/course_experiments/text.py"),("frozen-behavior.py","scripts/course_experiments/behavior.py")]:
+    assert hashlib.sha256((base/name).read_bytes()).hexdigest() == frozen["code_sha256"][relative]
+split = namespace["split_records"]
+conversation = namespace["_conversation"]
+style_record = namespace["_style_record"]
+dates = []
+for day in range(1,25):
+    date = f"2026-10-{day:02d}"
+    dates.append(conversation(f"task=date;date={date};confirm","已確認"+date+"。","date-"+date,style="clarification"))
+    dates.append(conversation(f"task=date;id={day};date=?;confirm","請提供日期。","date-"+date,style="clarification"))
+date_parts = split(dates,seed=frozen["seed"])
+arithmetic = split(namespace["arithmetic_records"](),seed=frozen["seed"])
+conditional = {name:[style_record(row,style,True) for row in rows for style in ("concise","vivid","json")] + date_parts[name] for name,rows in arithmetic.items()}
+summary = {}
+all_families = []
+for name,rows in date_parts.items():
+    families = sorted(set(row["family"] for row in rows))
+    summary[name] = {"dates":len(families),"questions":len(rows),"families":families,"date_inputs":[row["messages"][0]["content"] for row in rows]}
+    assert all(sum(row["family"]==family for row in rows)==2 for family in families)
+    for row in rows:
+        if "date=?" in row["messages"][0]["content"]:
+            assert row["family"].removeprefix("date-") not in row["messages"][0]["content"]
+    all_families.append(set(families))
+    payload="".join(json.dumps(row,ensure_ascii=False)+"\n" for row in conditional[name]).encode()
+    observed_hash=hashlib.sha256(payload).hexdigest()
+    assert observed_hash == frozen["results"]["data"][name]["sha256"]
+    summary[name]["full_split_jsonl_sha256"] = observed_hash
+assert not (all_families[0]&all_families[1] or all_families[0]&all_families[2] or all_families[1]&all_families[2])
+full_raw = (json.dumps(conditional,ensure_ascii=False,indent=2,allow_nan=False)+"\n").encode()
+full_hash = hashlib.sha256(full_raw).hexdigest()
+expected_hash = next(row["sha256"] for row in frozen["artifacts"] if row["path"]=="dataset.json")
+assert full_hash == expected_hash
+counts = {}
+samples = {}
+for stage in ["before","after"]:
+    counts[stage] = {}
+    samples[stage] = {}
+    for split_name in ["validation","test"]:
+        rows = [row for row in frozen["results"][stage][split_name]["samples"] if row.get("kind")=="clarification"]
+        assert len(rows)==len(date_parts[split_name])
+        for sample,record in zip(rows,date_parts[split_name],strict=True):
+            assert sample["messages"] == record["messages"][:-1]
+            assert sample["expected"] == record["messages"][-1]["content"]
+            raw = sample["generated_ids"][:sample["generated_ids"].index(2)]
+            raw_text = bytes(value-8 for value in raw).decode("utf-8")
+            assert raw_text == sample["generated"]
+            assert sample["exact"] == (raw == [value+8 for value in sample["expected"].encode()])
+        missing=[row for row in rows if "date=?" in row["messages"][0]["content"]]
+        given=[row for row in rows if "date=?" not in row["messages"][0]["content"]]
+        counts[stage][split_name] = {"records":len(rows),"missing_date_correct":sum(row["exact"] for row in missing),"missing_date_total":len(missing),"given_date_correct":sum(row["exact"] for row in given),"given_date_total":len(given),"total_correct":sum(row["exact"] for row in rows)}
+        assert frozen["results"][stage][split_name]["rubric"]["clarification"]["content_correct"] == counts[stage][split_name]["total_correct"]
+        samples[stage][split_name] = rows
+assert [summary[name]["dates"] for name in ["train","validation","test"]]==[19,2,3]
+assert counts["after"]["test"]["missing_date_correct"]==3
+assert counts["after"]["test"]["given_date_correct"]==0
+print(json.dumps({"environment":{"python":platform.python_version(),"torch":torch.__version__,"device":"cpu","threads":str(torch.get_num_threads())},"result_sha256":hashlib.sha256(Path("docs/course-experiments/results/style.json").read_bytes()).hexdigest(),"frozen_revision":frozen["revision"],"frozen_environment":{"device":frozen["device"],"gpu":frozen["gpu"],"python":frozen["python_version"],"torch":frozen["torch_version"],"seed":frozen["seed"]},"date_partition":summary,"dataset_json_sha256":full_hash,"counts":counts,"samples":samples,"conditional_training":{"steps":frozen["results"]["training"]["steps"],"records":frozen["results"]["training"]["records"],"effective_tokens":frozen["results"]["training"]["effective_tokens"]},"scope":"僅重建確定性題目模板/分組並重算凍結結果；未載入權重、未生成模型答案、未重跑或更新模型。"},ensure_ascii=False,indent=2))

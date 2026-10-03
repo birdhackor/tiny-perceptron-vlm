@@ -1,0 +1,50 @@
+import json, hashlib, random, platform, os
+from pathlib import Path
+import torch
+from tiny_perceptron.data import ByteTokenizer, render_chat
+from scripts.course_experiments.common import split_records
+from scripts.course_experiments.text import arithmetic_records
+from scripts.course_experiments.behavior import _style_record
+
+tok=ByteTokenizer()
+print(json.dumps({'environment':{'python':platform.python_version(),'torch':str(torch.__version__),'device':'cpu','OMP_NUM_THREADS':os.environ['OMP_NUM_THREADS'],'MKL_NUM_THREADS':os.environ['MKL_NUM_THREADS']},'scope':'只重算既存凍結結果的分母與規則；未執行模型前向、參數更新、訓練排程或網路。'},ensure_ascii=False))
+lora_path=Path('docs/course-experiments/results/lora.json'); raw=lora_path.read_bytes(); j=json.loads(raw); r=j['results']
+print('lora_result_sha256',hashlib.sha256(raw).hexdigest(),'training_revision',j['revision'],'result_revision',j['hf']['result_revision'],'seed',j['seed'],'device',j['device'],'torch_version',j['torch_version'],'gpu',j['gpu'])
+arithmetic=split_records(arithmetic_records(),seed=42)
+families={s:{x['family'] for x in rows} for s,rows in arithmetic.items()}
+assert all(not families[a]&families[b] for a,b in [('train','validation'),('train','test'),('validation','test')])
+for style in ('concise','vivid'):
+    parts={s:[_style_record(row,style,False) for row in rows] for s,rows in arithmetic.items()}
+    for split,rows in parts.items():
+        digest=hashlib.sha256(''.join(json.dumps(row,ensure_ascii=False)+'\n' for row in rows).encode()).hexdigest()
+        assert digest==r['runs'][style]['data'][split]['sha256']
+        print(json.dumps({'style':style,'split':split,'records':len(rows),'families':len(families[split]),'data_sha256':digest},ensure_ascii=False))
+    counts=[int((render_chat(row['messages'])[1]!=-100).sum()) for row in parts['train']]
+    sampler=random.Random(42)
+    effective=sum(sum(sampler.choices(counts,k=16)) for _ in range(450))
+    assert effective==r['runs'][style]['training']['effective_tokens']
+    if style=='vivid': assert effective==r['full_sft']['training']['effective_tokens']
+    print('effective_target_count',style,effective)
+for name,run,style in [('concise',r['runs']['concise'],'concise'),('vivid',r['runs']['vivid'],'vivid'),('full_sft',r['full_sft'],'vivid')]:
+    for split,e in run['evaluation'].items():
+        style_count=content_count=eos_count=0
+        for s in e['samples']:
+            ids=s['generated_ids']; decoded=tok.decode(ids); assert decoded==s['generated']
+            assert not any(x<8 and x!=2 for x in ids)
+            eos=2 in ids; assert eos==s['eos']; eos_count+=eos
+            question=s['messages'][0]['content']; a,b=map(int,question.removesuffix('=?').split('+')); text=s['generated']
+            content=text.strip()==str(a+b) if style=='concise' else text.split('，',1)[0].strip()==str(a+b)
+            styl=text.strip().isdigit() if style=='concise' else '像把兩組積木合在一起再數' in text
+            assert content==s['content_correct'] and styl==s['style_correct']
+            content_count+=content; style_count+=styl
+            print(json.dumps({'model':name,'split':split,'question':question,'expected':s['expected'],'generated':text,'generated_ids':ids,'eos':eos,'content_correct':content,'style_correct':styl},ensure_ascii=False))
+        rubric=e['rubric'][style]; assert (content_count,style_count,len(e['samples']))==(rubric['content_correct'],rubric['style_correct'],rubric['records'])
+        assert eos_count/len(e['samples'])==e['eos_rate']
+        print(json.dumps({'model':name,'split':split,'records':len(e['samples']),'eos':eos_count,'style_correct':style_count,'content_correct':content_count,'effective_evaluation_tokens':e['effective_tokens']},ensure_ascii=False))
+style_path=Path('docs/course-experiments/results/style.json'); raw=style_path.read_bytes(); base=json.loads(raw)
+print('style_result_sha256',hashlib.sha256(raw).hexdigest(),'revision',base['revision'],'result_revision',base['hf']['result_revision'])
+samples=base['results']['content_evaluation']['test']['samples']; assert len(samples)==7
+correct=sum(s['generated']==s['expected'] for s in samples); assert correct==0
+assert [s['messages'] for s in samples]==[s['messages'] for s in r['runs']['concise']['evaluation']['test']['samples']]
+print(json.dumps({'base_test_records':7,'base_test_correct':correct,'base_test_pairs':[[s['messages'][0]['content'],s['expected'],s['generated']] for s in samples]},ensure_ascii=False))
+print('all_assertions_passed')

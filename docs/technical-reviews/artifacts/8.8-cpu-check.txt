@@ -1,0 +1,33 @@
+import os, json, sys, platform, hashlib, re
+from pathlib import Path
+import torch
+from torch import nn
+from tiny_perceptron.alignment import LoRALinear
+from tiny_perceptron.model import TinyLM, ModelConfig
+from tiny_perceptron.adapters import base_state_sha256
+from scripts.course_experiments.behavior import _add_lora
+mode = sys.argv[1]
+env = {"python":platform.python_version(),"torch":str(torch.__version__),"torch_git_version":str(torch.version.git_version),"device":"cpu","OMP_NUM_THREADS":os.environ["OMP_NUM_THREADS"],"MKL_NUM_THREADS":os.environ["MKL_NUM_THREADS"]}
+print(json.dumps({"mode":mode,"environment":env},ensure_ascii=False))
+if mode in ("example","exercise"):
+    section=Path("docs/technical-reviews/artifacts/8.8-reviewed-section.txt").read_text()
+    code=re.search(r"```python\n(.*?)```",section,re.S)[1]
+    if mode=="exercise": code=code.replace("rank=2, alpha=2","rank=4, alpha=4")
+    exec(compile(code,"8.8-"+mode,"exec"))
+    print(json.dumps({"input_shape":list(x.shape),"weight_shape":list(layer.base.weight.shape),"bias_parameters":layer.base.bias.numel(),"base_frozen":all(not p.requires_grad for p in layer.base.parameters()),"a_shape":list(layer.a.shape),"b_shape":list(layer.b.shape),"scaling":layer.alpha/layer.rank,"a_max":layer.a.grad.abs().max().item(),"b_max":layer.b.grad.abs().max().item(),"total_parameters":sum(p.numel() for p in layer.parameters())},ensure_ascii=False))
+    assert sum(p.numel() for p in layer.parameters() if p.requires_grad)==(56 if mode=="example" else 112)
+    assert torch.equal(layer(x),layer.base(x)) and layer.a.grad.abs().max().item()==0 and layer.b.grad.abs().max().item()>0
+elif mode=="base-config":
+    pins={"base":{"path":"checkpoints/course/style/content.pt","revision":"23b58c077a2da2ec6b94f4902e88510c0364e3fc","expected":"57a49e9bcdfb1e411d9a64c683bae90ad1fba41072bace0f1bd68e0e1f3a35f6"},"concise":{"path":"checkpoints/course/lora/adapter-concise.pt","revision":"237f4a10907c8f106c14a757dba180b3e18cc264","expected":"a17192b40050ea891063a4e29255fee3c77783800be58b5187662853337703fa"},"vivid":{"path":"checkpoints/course/lora/adapter-vivid.pt","revision":"237f4a10907c8f106c14a757dba180b3e18cc264","expected":"dd2525010901218db8bd90fa5ab0e863e10424b2bddb8ec13515bc4c49abbfbe"}}
+    for name,pin in pins.items():
+        path=Path(pin["path"]); actual=hashlib.sha256(path.read_bytes()).hexdigest(); assert actual==pin["expected"]
+        p=torch.load(path,map_location="cpu",weights_only=True)
+        print(json.dumps({"name":name,"pin":pin,"sha256":actual,"format_version":p.get("format_version"),"config":p.get("config"),"base_sha256":p.get("base_sha256")},ensure_ascii=False))
+        if name=="base":
+            h=base_state_sha256(p["model"]); assert h=="4cf7b1e2182ad1edcc028480246baf2fe55d1fe54576c532c63505071b658d98"
+            model=TinyLM(ModelConfig(**p["config"])); print("base_state_sha256",h,"base_parameters",sum(t.numel() for t in p["model"].values()))
+            layers=_add_lora(model); counts={n:t.a.numel()+t.b.numel() for n,t in model.named_modules() if isinstance(t,LoRALinear)}
+            print(json.dumps({"layers":layers,"adapter_counts":counts,"trainable_parameters":sum(t.numel() for t in model.parameters() if t.requires_grad),"frozen_parameters":sum(t.numel() for t in model.parameters() if not t.requires_grad),"ratio_percent":9504/141568*100},ensure_ascii=False))
+            assert len(layers)==11 and sum(counts.values())==9504
+        else:
+            print(json.dumps({"adapter_tensors":{n:{"a_shape":list(s["a"].shape),"b_shape":list(s["b"].shape),"rank":s["rank"],"alpha":s["alpha"]} for n,s in p["adapter"].items()}},ensure_ascii=False))
