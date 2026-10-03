@@ -1,0 +1,124 @@
+import difflib
+import hashlib
+import importlib.metadata
+import json
+import re
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+def sha(raw):
+    return hashlib.sha256(raw).hexdigest()
+
+
+def sections(raw):
+    heads = list(re.finditer(rb'(?m)^## ([A-Z\d]+\.\d+) [^\r\n]+', raw))
+    return {
+        m[1].decode(): raw[m.start():heads[i + 1].start() if i + 1 < len(heads) else len(raw)]
+        for i, m in enumerate(heads)
+    }, raw[:heads[0].start()]
+
+
+base = Path('docs/technical-reviews/artifacts')
+previous_report_path = base / '17.1-previous-genuine-pass-report-537551.json'
+previous_report_bytes = previous_report_path.read_bytes()
+assert sha(previous_report_bytes) == '5375512c4943d2e74ea1901dde387b3e03f85c8679af9a7fc09c4a9c08b2f3f8'
+previous = json.loads(previous_report_bytes)
+assert Path('docs/technical-reviews/17.1.json').read_bytes() == previous_report_bytes
+old_path = base / '17.1-current-whole-source-7f4150.txt'
+old = old_path.read_bytes()
+new_path = Path('course/chapters/17.md')
+new = new_path.read_bytes()
+assert sha(old) == '7f415055f9086438eb8bab5b263f6ade8c967b4f6193a0dc9f39739809c36923'
+assert sha(new) == '5ef17106a2c04cf901b24c5c914ea153d2a8bc65db356f912df6b8302d88c251'
+assert (base / '17.1-latest-whole-source-5ef171.txt').read_bytes() == new
+old_sections, old_intro = sections(old)
+new_sections, new_intro = sections(new)
+assert old_sections['17.1'] == new_sections['17.1'] == (base / '17.1-current-source-bbbd6a.txt').read_bytes()
+assert sha(new_sections['17.1']) == previous['source_sha256']
+assert old_intro == new_intro == (base / '17.1-intro.txt').read_bytes()
+assert sha(new_intro) == previous['intro_sha256']
+changed_sections = [key for key in old_sections if old_sections[key] != new_sections[key]]
+assert changed_sections == ['17.9', '17.11', '17.12']
+old_headings = [m[0].decode() for m in re.finditer(rb'(?m)^## [^\r\n]+', old)]
+new_headings = [m[0].decode() for m in re.finditer(rb'(?m)^## [^\r\n]+', new)]
+assert old_headings == new_headings
+fence_pattern = rb'(?ms)^```[^\r\n]*\r?\n.*?^```[^\r\n]*\r?\n'
+old_fences = [m[0] for m in re.finditer(fence_pattern, old)]
+new_fences = [m[0] for m in re.finditer(fence_pattern, new)]
+assert old_fences == new_fences
+diff = json.loads((base / '17.1-whole-identity-lossless-diff.json').read_bytes())
+actual_diff = ''.join(difflib.unified_diff(old.decode().splitlines(keepends=True), new.decode().splitlines(keepends=True), fromfile='previous7f4150/course/chapters/17.md', tofile='current5ef171/course/chapters/17.md'))
+assert actual_diff == diff['raw_diff_utf8']
+assert sha(actual_diff.encode()) == diff['raw_diff_sha256']
+assert sha(old) == diff['old_raw_sha256'] and sha(new) == diff['new_raw_sha256']
+supports = []
+for item in json.loads((base / '17.1-supporting-book.json').read_bytes()):
+    path, label = item['source'].split('#')
+    part = sections(Path(path).read_bytes())[0][label]
+    assert part == item['raw_utf8'].encode() and sha(part) == item['sha256']
+    supports.append({'source': item['source'], 'sha256': sha(part), 'raw_bytes_unchanged': True})
+repo_sources = []
+for source in previous['sources']:
+    if source['kind'] == 'repository_code' and source['id'] != 's_book':
+        actual_sha = sha(Path(source['path']).read_bytes())
+        assert actual_sha == source['sha256']
+        repo_sources.append({'id': source['id'], 'path': source['path'], 'sha256': actual_sha, 'unchanged': True})
+artifacts = []
+for artifact in previous['artifacts']:
+    actual_sha = sha(Path(artifact['path']).read_bytes())
+    assert actual_sha == artifact['sha256']
+    artifacts.append({'id': artifact['id'], 'path': artifact['path'], 'sha256': actual_sha, 'unchanged': True})
+figures = []
+for path, expected in previous['figure_sha256'].items():
+    actual_sha = sha(Path(path).read_bytes())
+    assert actual_sha == expected
+    figures.append({'path': path, 'sha256': actual_sha, 'unchanged': True})
+receipt_path = base / '17.1-consumed-537551-receipt.json'
+receipt_bytes = receipt_path.read_bytes()
+assert sha(receipt_bytes) == '8744cf87ed0357d5ffe20fda271239fa036cb86c684fb19961a197210459ae72'
+receipt = json.loads(receipt_bytes)
+assert receipt['entry']['report_sha256'] == sha(previous_report_bytes)
+assert receipt['entry']['source_sha256'] == previous['source_sha256']
+assert receipt['entry']['reviewer_task'] == previous['reviewer_task']
+assert receipt['entry']['verdict'] == 'pass'
+result = {
+    'inspected_at': datetime.now(timezone.utc).isoformat(),
+    'reviewer_task': previous['reviewer_task'],
+    'old_input_path': str(old_path),
+    'old_input_provenance': '本人在上一輪真正537551 FINAL前已保存的原whole7f4150；不是本輪root cache冒稱早存。',
+    'old_whole_sha256': sha(old),
+    'new_whole_sha256': sha(new),
+    'primary_sha256': sha(new_sections['17.1']),
+    'intro_sha256': sha(new_intro),
+    'primary_and_intro_raw_equal': True,
+    'changed_sections': changed_sections,
+    'whole_diff_raw_sha256': sha(actual_diff.encode()),
+    'whole_diff_lossless_equal': True,
+    'whole_python_and_bash_fences_unchanged': True,
+    'fence_count': len(new_fences),
+    'roadmap_headings': new_headings,
+    'roadmap_headings_unchanged': True,
+    'supporting_sections': supports,
+    'other_repository_sources': repo_sources,
+    'previous_report_artifacts': artifacts,
+    'figures': figures,
+    'historical_consume_receipt_sha256': sha(receipt_bytes),
+    'scope_inspection': [
+        '本人完整親讀17.1＋首個##前全部導言，並再次精確完整親讀17.2／17.8／17.10／17.14；其他直接前置W.5／W.6／16.3前已完整親讀，本次逐raw身份回查。',
+        '17.9新增manual_seed與deepcopy比較說明；末段改為輸入當次估計範圍或代表資料校準固定範圍。只為whole identity親讀這兩項diff，17.1不含該方法主張，導言i5只稱有範圍材料。',
+        '17.11開頭從每次輸入都不同改為特徵取決於輸入且可能改變，並新增qx/qw及name/output拆值解釋。17.12開頭同樣改為可能隨輸入改變，並新增Boolean比較／求和／item說明。上述變更均親讀；本task不另判這些小節主張或執行其例子。',
+        '導言i3/i4/i6的刻度、打包與QAT支持材料及i8的FP32反量化参考forward皆未改；i5/i7只核原章標題的材料存在與順序。本節storage原數字、weight-only界限、凍結source pin／分母與cache可選条件原樣，沒有由whole新SHA外推其他primary。'
+    ],
+    'execution_reuse': '原19次本人CPU原例／練習／inspection及後續RNG短CPU1的證據與相應fences／原碼未改；本次新增模型／練習／RNG執行0、正式實驗0。',
+    'figure_reuse': '原4張SVG及親render/view_image證據原SHA一致；本次新增render0。',
+    'environment': {
+        'python': sys.version.split()[0],
+        'torch': importlib.metadata.version('torch'),
+        'device': 'cpu（本程式只讀檔案，未執行模型／Torch運算）',
+        'OMP_NUM_THREADS': '1',
+        'MKL_NUM_THREADS': '1'
+    }
+}
+print(json.dumps(result, ensure_ascii=False, indent=2))
