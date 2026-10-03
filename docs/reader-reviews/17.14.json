@@ -1,39 +1,200 @@
 {
   "lesson_id": "17.14",
   "source": "course/chapters/17.md#17.14",
-  "reviewer_task": "/root/manuscript_reviews/reader_17_14",
-  "source_sha256": "23c6dbd395d368c52efbe59b0796a0911bfd49dd1de4c70aae36907bb3ff4137",
+  "reviewer_task": "/root/reader_17_14_fresh",
+  "source_sha256": "89edaebf27586737fe95339a9ac1eeccca28d938be4ea8a182b9de7eb00da409",
   "verdict": "pass",
-  "reader_summary": "直接把訓練好的模型數字換成粗格子可能影響品質。本節的 QAT 讓訓練先看到量化後再還原的數字，嘗試適應這些誤差。工具使用四位元對稱整數碼 -7 至 7，所以最大絕對輸入 0.9 除以最大正碼 7 得到 scale；[0.1,0.4,0.9] 除刻度、取整再乘回後約為 [0.1286,0.3857,0.9]。fake quantization 的向前計算使用這組還原值，向後用 STE 這種刻意選擇的近似傳遞規則。x+(還原值-x).detach() 向前讓兩個 x 抵消，向後因括號裡不回傳梯度而留下外面 x 的路徑。y.sum() 對每個 y 的導數為 1，所以 x.grad=[1,1,1]。普通 round 對照先用 detach 切斷舊求導關係、clone 複製數值、requires_grad_ 啟用新副本的求導，得到獨立 hard.grad=[0,0,0]。STE 有非零梯度只提供訓練機會，不保證任務改善；這段浮點模擬也不產生較小權重檔，完整流程仍要訓練、轉換實際打包格式並檢查品質與成本。練習只把第一個 y.sum() 改成 y.square().sum()，STE 梯度變成 2*y，約 [0.2571,0.7714,1.8]，直接 round 保留總和仍是零。現在我能由本節及必要前置跟上例子、程式重要行與練習，未留下需要退回的缺口。",
+  "reader_summary": {
+    "problem": "已訓練的數字換成粗整數刻度後，可能使回答品質下降。本節讓浮點主權重在訓練時反覆體驗捨入與還原的誤差，再保存四位元版本。但 round 的真正梯度通常為零，所以訓練時改用 STE 近似傳遞梯度；這只是可更新的辦法，不能保證最後回答改善。",
+    "example": "三個數 0.1、0.4、0.9 使用共同刻度 0.9/7，取整數得到 1、3、7，還原約 0.1286、0.3857、0.9。fake_quantize 用 x 加上不回傳梯度的還原修正項，讓向前用還原值，向後保留直接 x 的路徑。hard 是切斷原求導關係、複製數值、重新允許求導的另一個輸入，因此可獨立核對真正 round 的零梯度。",
+    "expected_output": "總和誤差對每個 y 的敏感度是 1，STE 把這個訊號傳到 x，得到 [1,1,1]；普通 round 則得到 [0,0,0]。實際列印的還原值帶浮點尾數，與正文約值相符。這段沒有 optimizer 更新，也沒有產生壓縮檔。",
+    "formal_result": "PTQ 是先完成浮點訓練或微調，再將固定權重轉換成低位元表示；PTQ4 是四位元版本。QAT 則在訓練時就模擬這種誤差。正式對照從同一份直接 SFT 模型開始，普通浮點微調與 QAT 各更新 350 次，批次、抽題計畫、學習率及有效回答目標數相同。正式模型按輸出列使用各自刻度，與單向量例子不同。最後 QAT packed4 在十題測試答對四題，普通微調後 PTQ4 答對六題；平均正確答案負對數代價也較差。五題驗證上的較低代價沒有變成最後測試的收益。模擬模型與載入打包模型的分數一致只說明轉換一致，並不代表答對。",
+    "exercise": "整段重新執行，只將第一個 y.sum() 改為 y.square().sum()。平方誤差提供 2y 的訊號，STE 梯度應約 [0.2571,0.7714,1.8]。plain.sum() 那條路保持不變，仍是零。原例及此練習已親自用離線單執行緒 CPU 跑過。",
+    "deployment": "圖中浮點主權重可以小幅更新；每次前向都重新捨入並還原，透過 STE 回到主權重更新。訓練完才另行保存 packed4；本工具載入後仍還原為 FP32 運算。圖與 17.1 讓我理解四位元節省的是部分權重的存法，並沒有減少參數個數。新增的 QAT 包裝層說明讓我理解：它將普通線性層的前向換成使用模擬量化權重的前向，浮點主權重仍保留；單純載入這些數值不會恢復這項行為。自行續訓時，要先用 _qat_layers(model) 包裝各線性層，再建立對應 optimizer 並載回訓練狀態。正文下方 CLI 是重新做整個實驗，不會自動接續中途檔。"
+  },
   "issues": [],
   "checks": {
-    "background_links": {
+    "background_and_links": {
       "status": "pass",
-      "details": "獨立重讀完整 17.14 及明示必要前置 course/first-steps.md#W.6、course/chapters/17.md#17.2，並補讀 W.6 明示的 #W.3 tensor 概念；各檔案與精確 H2 節號均存在。W.6 提供導數/梯度、requires_grad、backward/grad 與平方導數，17.2 提供刻度、round/還原與浮點尾數，W.3 提供 tensor/tolist。四位元碼範圍、forward/kernel 和 hard 建立已在本節定義，因此沒有再展開其他參考鏈。"
+      "details": "完整親讀當前 17.14。保留自己先前親讀的明列 W.6、17.2、T.4 與按需追讀 W.3、17.1、W.5、1.9、1.8、W.4、1.7、7.1、7.3、4.7、5.4 的理解。本次另親讀新增明連 17.9 全節，依其前置追讀 17.7 全節；PTQ 是對既有固定權重選刻度並轉換，需比較同一來源模型及其副本，weight-only 的輸入與參考計算仍是浮點。17.14 已自行展開 PTQ／PTQ4，也已解釋包裝層角色與 CLI 不接續中途檔的範圍；親讀正文指定 compression.py 的 _qat_layers 及它使用的 _QATLinear，能接回前向模擬的說明。未讀其他 reader-review 或未連結教材。"
     },
     "terminology": {
       "status": "pass",
-      "details": "QAT 是訓練先體驗量化誤差；fake quantization 是向前使用量化還原值而向後採近似；STE 把取整視為原樣通過來傳梯度，且明說不是 round 的真正導數。本節已說明本工具的四位元整數碼 -7 至 7、forward 是向前計算、kernel 是專為低位元資料安排讀取與乘加的底層運算。hard 的 detach、clone、requires_grad_ 三步也有白話說明，可跟上新的獨立求導輸入如何建立。"
+      "details": "QAT、fake quantization、STE、forward、kernel 都有具體意義；FP32、bit、byte、packed4 的儲存背景由先前讀過的 17.1 與圖補足。本次正文新增 PTQ 的英文、中文與先訓練再轉換的順序，明說 PTQ4 表示四位元。QAT 包裝層以中文解釋為在普通線性層外加上每次前向的模擬量化計算，主權重仍能更新。17.9／17.7 也交代只量化權重與保留浮點輸入、參考計算的意思，已沒有未理解的關鍵縮寫。"
     },
-    "examples": {
+    "example": {
       "status": "pass",
-      "details": "由本節給的最大正碼 7 和最大绝對值 0.9 可算 scale=0.9/7；輸入除 scale 約 [0.7778,3.1111,7]，round 為 [1,3,7]，乘回約 [0.1286,0.3857,0.9]。實測 y=[0.12857142090797424,0.38571426272392273,0.8999999761581421]。普通 round 對照也是相同取整格，兩路數值最大差僅 5.960464477539063e-08、torch.allclose=True，與 17.2 提醒的浮點表示尾數一致。"
+      "details": "先算 0.9/7 以及整數 [1,3,7]，再實跑原例與練習，還原值、STE 梯度、直接 round 零梯度均吻合。親自渲染並查看 QAT 圖，核對三個框的數字、反覆訓練箭頭及訓練結束後打包箭頭。讀取指定 qat.json，核對六版 test 的 5/4/6/6/4/4 題、NLL、69 個目標、共同 350 次更新與 39,348 個有效目標；QAT 與 matched PTQ 的測試 NLL 差為 0.19128959766332654，且 describe 的 circle／square 與正文相符。正式 checkpoint 未重新訓練或載入，這些正式數字是核對公開報告，沒有冒稱 CPU 重現。 本次已核對原例逐字未變，正式比較表及數字也未改；QAT SVG 完整檔案 hash 與自己先前 render／view_image 時一致，沿用自己的親跑與看圖證據。新增讀過的 17.9、17.7 沒有 SVG。"
     },
     "program_explanation": {
       "status": "pass",
-      "details": "用現有 .venv/bin/python 短離線 CPU 重跑原程式：向前列印 [0.12860000133514404,0.385699987411499,0.8999999761581421]，STE 梯度 [1.0,1.0,1.0]，直接 round 梯度 [0.0,0.0,0.0]。能跟上 fake_quantize 的 x 抵消与 detach 阻止修正項傳梯度，因此外面 x 路徑保留導數 1。hard 的三步說明解決先前 detach 後怎能再求導的疑問；對 hard 求導後 x.grad 仍為 [1,1,1]，確認兩個輸入的求導關係分開。"
+      "details": "當前短 Python 原例逐字與自己先前親跑版本一致，hash 為 03377237a7c7c7fa13e3f501ca0a3f25efb2ca8445d205598077c73f5bda070c，因此沿用自己實跑的輸出。detach、clone、requires_grad_ 的數值及求導關係說明完整，x + (還原值-x).detach() 能追清前向與後向的差別。本次親讀指定 helper：_QATLinear 保留 source.weight／bias，每次 forward 以逐列刻度求整數及還原值，再用相同 STE 表達式做線性運算；_qat_layers 對各線性子層裝上這種行為並回傳模型。正文把自行恢復包裝與 optimizer 狀態列為續訓所需步驟，清楚說下方 CLI 會重做實驗，未提供自動接續入口，因而不再將它誤認為可直接用 CLI 恢復中途檔。本次未執行完整續訓或全流程。"
     },
     "exercise": {
       "status": "pass",
-      "details": "先預測只把第一個 y.sum() 改成 y.square().sum() 時，平方的導數是 2*y，再經原 STE 傳給 x，約 [0.2571,0.7714,1.8]。重新建立 x/y 重跑後 x.grad=[0.2571428418159485,0.7714285254478455,1.7999999523162842]，逐項等於 2*y.detach()；普通 round 對照保留 plain.sum().backward()，hard.grad 仍 [0,0,0]。修改範圍、預測與輸出相符，能看出誤差函數改變而 STE 規則維持。"
-    },
-    "figures": {
-      "status": "pass",
-      "details": "17.14 沒有直接 SVG。必要前置 architecture_quantize_grid.svg 與 foundations_tensor_axes.svg 已重新用 Inkscape 匯出 1200px 到 /tmp/reader_17_14_recheck-architecture_quantize_grid.png 與 /tmp/reader_17_14_recheck-foundations_tensor_axes.png，並各用 view_image 實看。量化圖左右箭頭依序除 scale、取最近整數、乘回 scale，0.7→1.4→1→0.5、1.2→2.4→2→1.0，兩差值 0.2；tensor 圖橫向 dim=1 跨每列小考得 [70,90]，直向 dim=0 跨每欄同學得 [70,80,90]。箭頭、數字與前置文字一致。"
+      "details": "修改位置明確，只改第一個 y.sum() 為 y.square().sum()，保留 plain.sum()。用全新 x／hard 重跑整個短例子，避免累加舊梯度；實得 STE [0.2571428418159485,0.7714285254478455,1.7999999523162842]、hard [0,0,0]，與 2y 預測相符。練習能分辨誤差函數提供的訊號與 STE 選定的傳遞規則。 本次完整重讀後確認練習改法未變，原例程式逐字未改，沿用自己的先前離線 CPU 實跑。"
     }
   },
+  "prerequisite_reading": {
+    "explicit": [
+      "course/first-steps.md#W.6",
+      "course/chapters/17.md#17.2",
+      "course/training.md#T.4"
+    ],
+    "followed_chains": [
+      {
+        "chain": [
+          "course/first-steps.md#W.6",
+          "course/first-steps.md#W.3"
+        ],
+        "reason": "tensor 與形狀"
+      },
+      {
+        "chain": [
+          "course/chapters/17.md#17.2",
+          "course/chapters/17.md#17.1",
+          "course/first-steps.md#W.5",
+          "course/first-steps.md#W.3"
+        ],
+        "reason": "FP32／四位元 bytes、線性層權重形狀與輸出列"
+      },
+      {
+        "chain": [
+          "course/chapters/17.md#17.2",
+          "course/chapters/01.md#1.9"
+        ],
+        "reason": "浮點尾數與量化誤差的區別"
+      },
+      {
+        "chain": [
+          "course/training.md#T.4",
+          "course/chapters/01.md#1.8",
+          "course/first-steps.md#W.4"
+        ],
+        "reason": "NLL、機率與負對數代價"
+      },
+      {
+        "chain": [
+          "course/training.md#T.4",
+          "course/chapters/01.md#1.8",
+          "course/chapters/01.md#1.7"
+        ],
+        "reason": "候選分數與機率轉換"
+      },
+      {
+        "chain": [
+          "course/training.md#T.4",
+          "course/chapters/07.md#7.1"
+        ],
+        "reason": "SFT、角色與 EOS"
+      },
+      {
+        "chain": [
+          "course/training.md#T.4",
+          "course/chapters/07.md#7.3"
+        ],
+        "reason": "只計回答與 EOS 的有效目標"
+      },
+      {
+        "chain": [
+          "course/training.md#T.4",
+          "course/chapters/04.md#4.7"
+        ],
+        "reason": "完整正確前文下的一次分數計算與逐步生成的區別"
+      },
+      {
+        "chain": [
+          "course/training.md#T.4",
+          "course/chapters/05.md#5.4"
+        ],
+        "reason": "optimizer 更新工具與保存歷史的意義"
+      },
+      {
+        "chain": [
+          "course/chapters/17.md#17.14",
+          "course/chapters/17.md#17.9"
+        ],
+        "reason": "親讀新增 PTQ 轉換流程連結，理解先訓練再轉換、保留原版並比較獨立副本"
+      },
+      {
+        "chain": [
+          "course/chapters/17.md#17.14",
+          "course/chapters/17.md#17.9",
+          "course/chapters/17.md#17.7"
+        ],
+        "reason": "親讀 weight-only QuantizedLinear 的低位元儲存、逐列 scale、浮點輸入與 FP32 參考前向"
+      }
+    ],
+    "external": [
+      {
+        "source": "https://arxiv.org/abs/1712.05877v1",
+        "read_scope": "親讀第 3 節開頭、3.1 與 Algorithm 1，核對保留浮點主權重、前向模擬捨入、另建低位元推論圖的區別；未聲稱讀完全部論文。"
+      },
+      {
+        "source": "https://arxiv.org/abs/1308.3432v1",
+        "read_scope": "親讀第 4 節，確認把硬閾值反向視為 identity 是有偏估計。"
+      },
+      {
+        "source": "docs/course-experiments/results/qat.json",
+        "read_scope": "親讀 results 的訓練設定、fake_quantization、六版 storage／validation／test、parity、delta 和指定 describe 題生成。"
+      }
+    ],
+    "linked_program": {
+      "path": "scripts/course_experiments/compression.py",
+      "read_scope": "_qat_layers(model, remove=False) 與其呼叫的 _QATLinear 類別，使用 AST 限定讀取；未讀其他無關 helper。",
+      "understanding": "各線性層由保留原浮點權重／偏置的 QAT 層替代。該層前向使用與 QuantizedLinear 同一逐列還原規則，後向採 STE；這種前向行為必須重建，不能從僅存的浮點權重數值推回。"
+    }
+  },
+  "execution": {
+    "environment": "OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 .venv/bin/python；離線 CPU；在 repo 根目錄經標準輸入執行原例與練習",
+    "original_stdout": [
+      "向前 [0.12860000133514404, 0.385699987411499, 0.8999999761581421]",
+      "STE梯度 [1.0, 1.0, 1.0]",
+      "直接round梯度 [0.0, 0.0, 0.0]"
+    ],
+    "exercise_stdout": [
+      "練習向前 [0.12860000133514404, 0.385699987411499, 0.8999999761581421]",
+      "練習STE梯度 [0.2571428418159485, 0.7714285254478455, 1.7999999523162842]",
+      "練習直接round梯度 [0.0, 0.0, 0.0]"
+    ],
+    "not_run": "未啟動完整 QAT／SFT 訓練、GPU、付費或雲端工作；未操作 Git；未生成 Notebook。",
+    "recheck": "當前 Python 區塊已逐字比對自己先前實跑程式並相符；練習操作也未改。本次未重跑相同短例子，沿用自己的先前 CPU 輸出；未把 helper 親讀當成已實際執行恢復續訓。",
+    "python_block_sha256": "03377237a7c7c7fa13e3f501ca0a3f25efb2ca8445d205598077c73f5bda070c"
+  },
   "figure_sha256": {
+    "course/figures/qat_training_deployment.svg": "4809ed99448a94903c26ae0565852bc5fe8f0a38b2aab40e270e064d7de94b03"
+  },
+  "prerequisite_figure_sha256": {
     "course/figures/architecture_quantize_grid.svg": "14927d2523dd2b3ca4473502a2f7a4bd148ac4bc6f4a2d691890b25421230e2e",
     "course/figures/foundations_tensor_axes.svg": "9a0a44863fdc43f783e830b88d41b1575389e91336e5f656be9ef5c6d1528b5c"
+  },
+  "figure_inspection": [
+    {
+      "source": "course/figures/qat_training_deployment.svg",
+      "render": "node /tmp/render-course-svg.mjs qat_training_deployment.svg /tmp/reader_17_14_fresh-17.14-qat.png 688",
+      "viewed_with": "tools.view_image",
+      "details": "親見三個框由上而下排列：FP32 主權重 [0.1,0.4,0.9]；scale=0.9÷7、整數 [1,3,7]、還原約 [0.1286,0.3857,0.9]；最後 packed4 並在本工具還原 FP32。右側棕色「再練一步」箭頭由模擬框回到主權重，往下藍箭頭標訓練結束另做打包。各標籤、數字、位置及箭頭與正文一致，沒有看到文字溢出。"
+    },
+    {
+      "source": "course/figures/architecture_quantize_grid.svg",
+      "render": "node /tmp/render-course-svg.mjs architecture_quantize_grid.svg /tmp/reader_17_14_fresh-17.2-grid.png 688",
+      "viewed_with": "tools.view_image",
+      "details": "親見 0.7→1.4→1→0.5 與 1.2→2.4→2→1.0 兩列；箭頭依序除 scale、取最近整數、乘 scale，底下兩個還原差都是 0.2，符合 17.2。"
+    },
+    {
+      "source": "course/figures/foundations_tensor_axes.svg",
+      "render": "node /tmp/render-course-svg.mjs foundations_tensor_axes.svg /tmp/reader_17_14_fresh-W.3-axes.png 688",
+      "viewed_with": "tools.view_image",
+      "details": "親見兩列三欄六個成績，dim=1 的橫箭頭跨三次小考，得到每人平均 [70,90]；dim=0 的直箭頭跨兩位同學，得到每次小考平均 [70,80,90]。標籤、方向與 W.3 一致。"
+    }
+  ],
+  "recheck": {
+    "complete_current_section_read": true,
+    "result": "新增 PTQ 定義及 QAT 包裝層說明與明連 helper 消除了先前兩處不懂；獨立回查未發現新卡點，改判 pass。",
+    "figure_reuse": "本節及先前已讀前置三張 SVG 的當前完整檔案 hash 都與自己先前渲染查看時記錄一致，因此本次沿用自己的親看記錄。新增 17.9、17.7 沒有 SVG。",
+    "linked_program_sha256": {
+      "_QATLinear": "200f80414eee95699cf8166f279984d1af8e721d399ecd399475e57532bde5df",
+      "_qat_layers": "4dd5e37d97cbec1314d4d15a4d99f79865f49d985586d5457de59ca4e9384178"
+    }
   }
 }
