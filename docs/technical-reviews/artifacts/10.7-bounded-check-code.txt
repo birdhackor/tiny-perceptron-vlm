@@ -1,0 +1,141 @@
+import hashlib
+import json
+import os
+import platform
+import random
+from pathlib import Path
+from types import SimpleNamespace
+
+import torch
+from torch import nn
+
+from scripts.course_experiments.modalities import _sequence
+from tiny_perceptron.attention import attention_mask
+from tiny_perceptron.data import ByteTokenizer
+from tiny_perceptron.model import ModelConfig, TinyLM, masked_loss
+from tiny_perceptron.multimodal import expand_modalities
+
+torch.set_num_threads(1)
+torch.manual_seed(42)
+environment = {
+    "python": platform.python_version(),
+    "torch": torch.__version__,
+    "torch_git_version": torch.version.git_version,
+    "device": "cpu",
+    "OMP_NUM_THREADS": os.environ["OMP_NUM_THREADS"],
+    "MKL_NUM_THREADS": os.environ["MKL_NUM_THREADS"],
+    "torch_threads": str(torch.get_num_threads()),
+}
+print(json.dumps({"environment": environment}, ensure_ascii=False))
+
+tok = ByteTokenizer()
+model = TinyLM(ModelConfig(width=8))
+ids = torch.tensor([1, 5, 4, 73, 2])
+labels = torch.tensor([-100, -100, -100, 73, 2])
+visual = torch.randn(3, 8, requires_grad=True)
+x, y = expand_modalities(ids, labels, model.embedding, {5: visual}, {5})
+assert tuple(x.shape) == (1, 6, 8)
+assert y.tolist() == [[-100, -100, -100, -100, 73, 2]]
+assert torch.equal(x[0, 4], model.embedding.weight[4])
+assert torch.equal(x[0, 5], model.embedding.weight[73])
+positions = torch.arange(x.shape[1])
+allowed = attention_mask(positions, positions)
+assert torch.equal(allowed[0, 0], torch.ones(6, 6, dtype=torch.bool).tril())
+logits = model(embeddings=x)["logits"]
+logits.retain_grad()
+loss = masked_loss(logits, y)
+loss.backward()
+assert logits.grad[0, :4].abs().sum().item() == 0.0
+assert visual.grad.norm().item() > 0.0
+assert tuple(logits.shape) == (1, 6, 264)
+old_shifted_labels_with_ignore_padding = torch.tensor([[-100, -100, 73, 2, -100, -100]])
+wrong_loss = masked_loss(logits.detach(), old_shifted_labels_with_ignore_padding)
+assert torch.isfinite(wrong_loss)
+assert not torch.equal(y, old_shifted_labels_with_ignore_padding)
+print(json.dumps({
+    "toy": {
+        "x_shape": list(x.shape), "y": y.tolist(),
+        "positions": positions.tolist(), "allowed_mask": allowed[0, 0].int().tolist(),
+        "assistant_predicts_73_at": 4, "last_input_73_predicts_eos_at": 5,
+        "logits_shape": list(logits.shape),
+        "ignored_logits_gradient_sum": logits.grad[0, :4].abs().sum().item(),
+        "visual_context_gradient_norm": visual.grad.norm().item(),
+        "embedding_shape": list(model.embedding.weight.shape),
+        "misalignment_counterexample": {
+            "old_shifted_labels_padded_to_matching_shape": old_shifted_labels_with_ignore_padding.tolist(),
+            "incorrect_target_positions": [2, 3],
+            "correct_target_positions": [4, 5],
+            "finite_loss_without_shape_error": wrong_loss.item(),
+            "scope": "Only a counterexample when old labels are padded to the new length; raw unequal shapes can error."
+        },
+        "token_ids": {"bos": tok.bos_id, "image": tok.image_id,
+                      "assistant": tok.assistant_id, "eos": tok.eos_id,
+                      "A_byte_id": tok.encode("A")[0]},
+    }
+}, ensure_ascii=False))
+model.embedding(torch.tensor([0, 263]))
+try:
+    model.embedding(torch.tensor([264]))
+except IndexError as error:
+    print(json.dumps({"embedding_invalid_264": str(error)}))
+else:
+    raise AssertionError("Expected out-of-range embedding index")
+
+path = Path("docs/course-experiments/results/projector.json")
+raw = path.read_bytes()
+fixed = json.loads(raw)
+result = fixed["results"]
+training = result["training"]
+records = result["data"]["splits"]["train"]["records"]
+records_hash = hashlib.sha256(json.dumps(records, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+assert records_hash == result["data"]["splits"]["train"]["sha256"]
+targets = sorted({row["answer"] for row in records})
+assert len(targets) == 6
+assert {row["question"] for row in records} == {"describe"}
+ctx = SimpleNamespace(device="cpu")
+red = next(row for row in records if row["answer"] == "red circle")
+formal_ids, formal_labels, count = _sequence(red, ctx)
+formal_embedding = nn.Embedding(264, 64)
+patch_count = (training["modal_config"]["image_size"] // training["modal_config"]["patch_size"]) ** 2
+formal_x, formal_y = expand_modalities(formal_ids, formal_labels, formal_embedding,
+                                      {tok.image_id: torch.zeros(patch_count, 64)}, {tok.image_id})
+assert len(formal_ids) == 24 and count == 11
+assert (formal_labels != -100).sum().item() == 11
+assert patch_count == 16 and tuple(formal_x.shape) == (1, 38, 64)
+assert (formal_y != -100).sum().item() == 11
+assert (formal_y != -100).nonzero()[0].tolist() == [0, 27]
+
+# Replay only the finite, deterministic sampling counts. No model training,
+# checkpoint loading, optimizer updates, or formal experiment is invoked.
+history = training["history"]
+per_step = []
+repeat_draw_steps = 0
+for step in range(training["steps"]):
+    rng = random.Random(fixed["seed"] + step)
+    drawn = [rng.choice(records) for _ in range(4)]
+    repeat_draw_steps += int(len({row["family"] for row in drawn}) < 4)
+    total = sum(len(row["answer"].encode("utf-8")) + 1 for row in drawn)
+    per_step.append(total)
+    assert history[step]["step"] == step + 1
+    assert history[step]["effective_targets"] == total
+assert len(history) == 300
+assert sum(per_step) == training["effective_tokens"] == training["effective_targets"] == 14408
+print(json.dumps({"formal_evidence": {
+    "file": str(path), "sha256": hashlib.sha256(raw).hexdigest(),
+    "revision": fixed["revision"], "seed": fixed["seed"],
+    "original_device": fixed["device"], "original_torch": fixed["torch_version"],
+    "config": training["config"], "modal_config": training["modal_config"],
+    "training_records": len(records), "records_sha256": records_hash,
+    "questions": ["describe"], "answer_lengths_including_EOS":
+        {s: len(s.encode("utf-8")) + 1 for s in targets},
+    "red_circle": {"prefix": formal_ids[:-count].tolist(), "prefix_length": len(formal_ids)-count,
+                   "tail_length": count, "original_length": len(formal_ids),
+                   "expanded_full_length": int(formal_x.shape[1])+1,
+                   "shifted_input_shape": list(formal_x.shape),
+                   "effective_targets": int((formal_y != -100).sum()), "first_target_position": 27},
+    "steps": len(history), "batch_draws_per_step": 4, "sample_draws": len(history)*4,
+    "per_step_effective_targets": per_step, "sum_effective_targets": sum(per_step),
+    "steps_with_repeat_record_draw": repeat_draw_steps,
+    "all_red_circle_batch_targets": 4*count,
+    "checks": "All 300 fixed history counts equal deterministic count-only replay; no training replay."
+}}, ensure_ascii=False))
