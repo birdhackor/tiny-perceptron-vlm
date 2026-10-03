@@ -1,0 +1,65 @@
+import os, json, hashlib, random, platform
+from pathlib import Path
+import torch
+from tiny_perceptron.data import render_chat, ByteTokenizer
+from scripts.course_experiments.text import arithmetic_records
+from scripts.course_experiments.common import split_records
+
+torch.set_num_threads(1)
+path=Path('docs/course-experiments/results/style.json')
+raw=path.read_bytes(); full=json.loads(raw); result=full['results']
+parts=split_records(arithmetic_records(), seed=42)
+questions={k:[r['messages'][0]['content'] for r in v] for k,v in parts.items()}
+assert [len(parts[k]) for k in ['train','validation','test']]==[49,8,7]
+assert '2+2=?' not in questions['train'] and '2+2=?' in questions['test']
+assert all('style=' not in q for values in questions.values() for q in values)
+tok=ByteTokenizer(); checked={}
+for style in ['concise','vivid']:
+    lengths=[]
+    for row in parts['train']:
+        answer=str(row['a']+row['b']) + ('，像把兩組積木合在一起再數。' if style=='vivid' else '')
+        _,labels=render_chat([{'role':'user','content':row['messages'][0]['content']},{'role':'assistant','content':answer}])
+        lengths.append(int((labels != -100).sum()))
+    sampler=random.Random(42)
+    total=sum(sum(sampler.choices(lengths,k=16)) for _ in range(450))
+    run=result['default_style_runs'][style]
+    assert total==run['training']['effective_tokens']
+    assert run['training']['steps']==450 and run['training']['records']==49
+    stages={}
+    for stage in ['before','after']:
+        evaluation=run[stage]['test']; samples=evaluation['samples']
+        assert len(samples)==7
+        content_count=style_count=0
+        audited=[]
+        for sample in samples:
+            ids=sample['generated_ids']
+            assert ids[-1]==tok.eos_id and ids.count(tok.eos_id)==1
+            assert all(8 <= i < 264 for i in ids[:-1])
+            text=tok.decode(ids[:-1]); assert text==sample['generated']
+            content=(text.split('，',1)[0].strip()==sample['expected'].split('，',1)[0])
+            correct_style=('像把兩組積木合在一起再數' in text) if style=='vivid' else text.strip().isdigit()
+            assert content==sample['content_correct'] and correct_style==sample['style_correct']
+            content_count+=int(content); style_count+=int(correct_style)
+            audited.append({k:sample[k] for k in ['messages','expected','generated','generated_ids','eos','content_correct','style_correct']})
+        assert content_count==evaluation['rubric'][style]['content_correct']
+        assert style_count==evaluation['rubric'][style]['style_correct']
+        stages[stage]={'records':7,'content_correct':content_count,'style_correct':style_count,'eos':7,'samples':audited}
+    assert stages['after']['content_correct']==0 and stages['after']['style_correct']==7
+    checked[style]={'training':run['training'],'data':run['data'],'recounted_effective_tokens':total,'stages':stages}
+baseline=result['content_evaluation']['test']
+assert len(baseline['samples'])==7 and baseline['matches']==0
+assert all(s['generated']==b['generated'] for s,b in zip(checked['concise']['stages']['before']['samples'],baseline['samples'],strict=True))
+assert all(s['generated']==b['generated'] for s,b in zip(checked['vivid']['stages']['before']['samples'],baseline['samples'],strict=True))
+output={
+ 'audit_scope':'唯讀凍結結果與有界資料/抽样分母核對；沒有載入模型、生成、訓練或重跑正式實驗',
+ 'environment':{'python':platform.python_version(),'torch':torch.__version__,'torch_source':torch.version.git_version,'device':'cpu','threads':str(torch.get_num_threads()),'OMP_NUM_THREADS':os.environ['OMP_NUM_THREADS'],'MKL_NUM_THREADS':os.environ['MKL_NUM_THREADS']},
+ 'result_path':str(path),'result_sha256':hashlib.sha256(raw).hexdigest(),
+ 'formal_run_metadata':{k:full[k] for k in ['revision','device','seed','torch_version','python_version','gpu','step_scale','evidence_status','status','hf']},
+ 'matched_code_sha256':{str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in map(Path,['tiny_perceptron/data.py','tiny_perceptron/model.py','scripts/course_experiments/common.py','scripts/course_experiments/text.py'])},
+ 'arithmetic_data':result['arithmetic_data'],'question_splits':questions,
+ 'default_style_runs':checked,
+ 'baseline_test':baseline,
+ 'check_summary':'兩支各450步×16筆=7200次抽樣；有效目標16,591與318,991；相差302,400=7200×42。train49/test7；2+2仅在test。after各style7/7、content0/7，全部EOS/合法ID；before与content七题原始输出一致。',
+ 'model_updates':0,
+}
+print(json.dumps(output,ensure_ascii=False,indent=2))

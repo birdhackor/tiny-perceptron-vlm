@@ -1,0 +1,83 @@
+import json
+import math
+import os
+import sys
+from decimal import Decimal, ROUND_HALF_UP
+
+import torch
+from torch.nn import functional as F
+
+torch.set_num_threads(1)
+torch.set_default_device("cpu")
+assert torch.version.cuda is None
+
+result = {
+    "environment": {
+        "python": sys.version,
+        "torch": str(torch.__version__),
+        "torch_git_version": str(torch.version.git_version),
+        "device": "cpu",
+        "OMP_NUM_THREADS": os.environ["OMP_NUM_THREADS"],
+        "MKL_NUM_THREADS": os.environ["MKL_NUM_THREADS"],
+        "cuda_build": str(torch.version.cuda),
+    },
+    "card_probabilities": [3 / 4, 1 / 4],
+    "e": math.e,
+    "power_e_squared": math.e ** 2,
+    "power_e_negative_one": math.e ** -1,
+    "costs": {str(p): -math.log(p) for p in (0.9, 0.5, 0.1, 0.25)},
+    "bits": {str(p): -math.log(p) / math.log(2) for p in (0.9, 0.5, 0.1, 0.25)},
+    "cost_ratio_0.1_vs_0.9": math.log(0.1) / math.log(0.9),
+    "independent_joint_probability": 0.5 * 0.5,
+    "joint_cost": -math.log(0.5 * 0.5),
+    "sum_cost": -math.log(0.5) - math.log(0.5),
+    "round_counterexample": {
+        "input": 1.0625,
+        "input_is_exact_binary_float": 1.0625.hex(),
+        "python_round_to_three": round(1.0625, 3),
+        "decimal_half_up_to_three": str(Decimal("1.0625").quantize(Decimal("0.001"), rounding=ROUND_HALF_UP)),
+    },
+}
+try:
+    math.log(0)
+except ValueError as e:
+    result["log_zero"] = {"exception": type(e).__name__, "message": str(e)}
+else:
+    raise AssertionError("math.log(0) unexpectedly returned")
+
+logits = torch.tensor([[0.0, 2.0, 0.0]], dtype=torch.float64)
+target = torch.tensor([1], dtype=torch.int64)
+probabilities = logits.softmax(dim=-1)
+manual = -probabilities[0, 1].log()
+loss = F.cross_entropy(logits, target)
+double_softmax_loss = F.cross_entropy(probabilities, target)
+assert torch.allclose(loss, manual, atol=1e-14, rtol=1e-14)
+assert not torch.allclose(loss, double_softmax_loss)
+result["logits_cross_entropy"] = {
+    "shape": list(logits.shape),
+    "dtype": str(logits.dtype),
+    "target_dtype": str(target.dtype),
+    "probabilities": probabilities.tolist(),
+    "probability_sum": probabilities.sum().item(),
+    "manual_negative_log": manual.item(),
+    "cross_entropy_raw_logits": loss.item(),
+    "cross_entropy_probabilities_as_input": double_softmax_loss.item(),
+    "cross_entropy_target_zero": F.cross_entropy(logits, torch.tensor([0])).item(),
+    "reduction": "mean (default); one valid class-index target; no weighting or smoothing",
+}
+
+batch_logits = logits.expand(2, -1).clone()
+batch_targets = torch.tensor([1, 0], dtype=torch.int64)
+per_example = F.cross_entropy(batch_logits, batch_targets, reduction="none")
+batch_mean = F.cross_entropy(batch_logits, batch_targets)
+assert torch.allclose(batch_mean, per_example.mean())
+result["batch_mean"] = {
+    "valid_targets": 2,
+    "per_example": per_example.tolist(),
+    "default_mean": batch_mean.item(),
+    "arithmetic_mean": per_example.mean().item(),
+}
+assert result["joint_cost"] == result["sum_cost"]
+assert round(result["costs"]["0.25"], 3) == 1.386
+assert result["bits"]["0.25"] == 2.0
+print(json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False))

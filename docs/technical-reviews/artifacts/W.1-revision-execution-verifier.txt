@@ -1,0 +1,101 @@
+"""W.1 reviewer: inspect frozen receipts without launching kernels; run three bounded CPU cases."""
+import datetime
+import hashlib
+import importlib.metadata
+import json
+import os
+import platform
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path('/workspace/tiny-perceptron-vlm')
+ART = ROOT / 'docs/technical-reviews/artifacts'
+sha = lambda b: hashlib.sha256(b).hexdigest()
+now = lambda: datetime.datetime.now(datetime.timezone.utc).isoformat()
+started = now()
+assert os.environ['OMP_NUM_THREADS'] == os.environ['MKL_NUM_THREADS'] == '1'
+import torch
+torch.set_num_threads(1)
+assert torch.version.cuda is None
+ENV = {
+    'python': platform.python_version(), 'torch': torch.__version__,
+    'torch_source_commit': torch.version.git_version, 'device': 'cpu',
+    'platform': platform.platform(), 'OMP_NUM_THREADS': '1', 'MKL_NUM_THREADS': '1',
+    'ipykernel': importlib.metadata.version('ipykernel'),
+    'nbclient': importlib.metadata.version('nbclient'),
+    'nbformat': importlib.metadata.version('nbformat'),
+}
+
+def write(name, value):
+    target = ART / ('W.1-' + name + '.json')
+    assert not target.exists(), target
+    target.write_text(json.dumps(value, ensure_ascii=False, indent=2) + '\n')
+    return {'path': str(target.relative_to(ROOT)), 'sha256': sha(target.read_bytes())}
+
+def section(raw, lesson):
+    heads = list(re.finditer(rb'(?m)^## ([A-Z\d]+\.\d+) [^\r\n]+', raw))
+    for i, h in enumerate(heads):
+        if h[1].decode() == lesson:
+            return raw[h.start():heads[i + 1].start() if i + 1 < len(heads) else len(raw)]
+    raise ValueError(lesson)
+
+coverage = json.loads((ART / 'W.1-current-cpu-coverage.json').read_bytes())
+guide_path = ROOT / 'docs/validation-artifacts/technical-revision-W.1-guide-code.json'
+guide_raw = guide_path.read_bytes()
+guide = json.loads(guide_raw)
+guide_target = ART / 'W.1-guide-revision-receipt.json'
+assert guide_target.exists()
+assert guide_target.read_bytes() == guide_raw
+body = section((ROOT / 'course/first-steps.md').read_bytes(), 'W.1')
+refbody = section((ROOT / 'course/chapters/01.md').read_bytes(), '1.1')
+assert sha(body) == guide['source_sha256']
+assert sha(refbody) == guide['reference']['source_sha256']
+assert sha((ROOT / 'scripts/check_env.py').read_bytes()) == guide['repository_sources']['scripts/check_env.py']
+example = re.findall(rb'\x60\x60\x60python\n(.*?)\n\x60\x60\x60', refbody, re.S)
+assert len(example) == 1
+expected_programs = {
+    'environment_check': 'import runpy\nrunpy.run_path("scripts/check_env.py", run_name="__main__")\n',
+    'referenced_original': example[0].decode(),
+    'guide_exercise_bird': example[0].decode().replace('text = "貓看狗，狗看貓。"', 'text = "鳥看狗，狗看鳥。"'),
+}
+guard = '''import sys
+def guard(event, args):
+    if event == 'subprocess.Popen' and args[1] == ['uname', '-p']:
+        return
+    if event.startswith('socket.') or event in ('subprocess.Popen', 'os.system', 'os.fork', 'os.posix_spawn'):
+        raise RuntimeError('W.1 bounded offline CPU guard denied ' + event)
+sys.addaudithook(guard)
+'''
+cases = []
+for record in guide['records']:
+    program = record['program']
+    assert program == expected_programs[record['case']]
+    assert sha(program.encode()) == record['program_sha256']
+    guarded = guard + 'exec(compile(' + repr(program) + ', "W.1:' + record['case'] + '", "exec"))\n'
+    command = [str(ROOT / '.venv/bin/python'), '-c', guarded]
+    run = subprocess.run(command, cwd=ROOT, env={**os.environ, 'PYTHONDONTWRITEBYTECODE': '1'},
+                         capture_output=True, text=True, timeout=60)
+    assert run.returncode == 0, (record['case'], run.stderr)
+    assert run.stdout == record['stdout'], (record['case'], run.stdout)
+    assert run.stderr == record['stderr'] == ''
+    cases.append({'case': record['case'], 'program': program, 'program_sha256': sha(program.encode()),
+                  'executed_program': guarded, 'executed_program_sha256': sha(guarded.encode()),
+                  'command': command, 'exit_code': run.returncode, 'stdout': run.stdout,
+                  'stderr': run.stderr, 'matches_existing_receipt': True,
+                  'offline_guard': 'Python audit hook rejects all socket events and subprocess/system/fork/spawn, except read-only uname -p for platform.platform; no rejected event occurred.'})
+assert len(cases) == 3
+assert section((ROOT / 'course/first-steps.md').read_bytes(), 'W.1') == body
+execution = {
+    'actual_command': 'OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python docs/technical-reviews/artifacts/W.1-revision-execution-verifier.txt',
+    'reviewer_task': '/root/technical_round_coordinator/technical_w_1_fresh',
+    'checked_at': now(), 'command': 'OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python docs/technical-reviews/artifacts/W.1-revision-execution-verifier.txt', 'environment': ENV,
+    'source_sha256': sha(body), 'reference_source_sha256': sha(refbody),
+    'existing_guide_receipt': {'original_path': str(guide_path.relative_to(ROOT)),
+                             'path': str(guide_target.relative_to(ROOT)), 'sha256': sha(guide_raw)},
+    'result': {'total': 3, 'passed': 3, 'failed': 0}, 'cases': cases,
+    'scope': '本人在三個獨立離線 audit-guard CPU 子程序跑環境檢查、1.1 原句、W.1 指定鳥句練習；原輸入程式與既有3/3 receipt 逐字相同，stdout 全同。沒有指南 Notebook、瀏覽器 UI、Colab、安裝或全書離線驗證。',
+}
+execution_saved = write('revision-self-execution', execution)
+print(json.dumps({'self_execution': execution_saved, 'result': execution['result']}, ensure_ascii=False))

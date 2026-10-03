@@ -1,0 +1,119 @@
+import ast
+import hashlib
+import importlib.metadata
+import json
+import os
+import platform
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+root = Path(__file__).resolve().parents[3]
+artifacts = root / "docs/technical-reviews/artifacts"
+raw = (root / "course/first-steps.md").read_bytes()
+headings = list(re.finditer(rb"(?m)^## ([A-Z\d]+\.\d+) [^\r\n]+", raw))
+sections = {}
+for n, heading in enumerate(headings):
+    end = headings[n + 1].start() if n + 1 < len(headings) else len(raw)
+    sections[heading[1].decode()] = raw[heading.start():end]
+(artifacts / "W.7-source-raw.txt").write_bytes(sections["W.7"])
+(artifacts / "W.7-prerequisites-raw.json").write_text(json.dumps({
+    k: {"source": f"course/first-steps.md#{k}",
+        "sha256": hashlib.sha256(sections[k]).hexdigest(),
+        "raw_utf8": sections[k].decode(),
+        "direct_svg_references": re.findall(r"[^\s()]+\.svg", sections[k].decode())}
+    for k in ("W.1", "W.2")}, ensure_ascii=False, indent=2) + "\n")
+code = re.findall(rb"```python\n(.*?)```", sections["W.7"], re.S)[0].decode()
+env = os.environ.copy()
+env["OMP_NUM_THREADS"] = "1"
+env["MKL_NUM_THREADS"] = "1"
+env["PYTHONDONTWRITEBYTECODE"] = "1"
+environment = {"python": platform.python_version(), "device": "CPU", "torch": importlib.metadata.version("torch"),
+               "ipykernel": importlib.metadata.version("ipykernel"),
+               "platform": platform.platform(), "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"}
+
+def run(argv, cwd, stdin=None):
+    completed = subprocess.run(argv, cwd=cwd, env=env, input=stdin,
+                               text=True, capture_output=True, timeout=30)
+    return {"argv": argv, "cwd": str(cwd), "stdin": stdin,
+            "returncode": completed.returncode, "stdout": completed.stdout,
+            "stderr": completed.stderr, "environment": environment}
+
+original = run([sys.executable, "-c", code], root)
+assert original["returncode"] == 0
+assert original["stdout"] == f"{root}\nTrue\nTrue\n"
+original["code"] = code
+(artifacts / "W.7-original-execution.json").write_text(json.dumps(original, ensure_ascii=False, indent=2) + "\n")
+
+exercise = run([sys.executable, "-c", code], root / "notebooks")
+assert exercise["returncode"] == 0
+assert exercise["stdout"] == f"{root / 'notebooks'}\nFalse\nFalse\n"
+exercise["code"] = code
+exercise["root_files_still_exist"] = {p: (root / p).exists() for p in ("pyproject.toml", "tiny_perceptron")}
+assert all(exercise["root_files_still_exist"].values())
+(artifacts / "W.7-exercise-execution.json").write_text(json.dumps(exercise, ensure_ascii=False, indent=2) + "\n")
+
+interactive = run(["bash", "--noprofile", "--norc", "-c", "source .venv/bin/activate\npython -q -i <<'W7PY'\n" + code + "exit()\nW7PY\ncd notebooks\npython -q -i <<'W7PY'\n" + code + "exit()\nW7PY\ncd ..\npwd\n"], root)
+assert interactive["returncode"] == 0
+assert interactive["stdout"] == f"{root}\nTrue\nTrue\n{root / 'notebooks'}\nFalse\nFalse\n{root}\n"
+assert ">>>" in interactive["stderr"]
+
+cases = {
+    "missing_module": "import _w7_missing_module_for_review",
+    "missing_file": "from pathlib import Path\nPath('_w7_missing_file_for_review').read_text()",
+    "missing_key": "record = {'animal':'貓', 'caption':'貓在睡覺'}\nrecord['missing']",
+    "index": "animals = ['貓', '狗']\nprint(animals[0], animals[1], len(animals))\nanimals[2]",
+    "syntax_parenthesis": "print('貓'",
+    "syntax_colon": "if True\n    print('貓')",
+    "syntax_indentation": "if True:\nprint('貓')",
+}
+diagnostics = {name: run([sys.executable, "-c", text], root) for name, text in cases.items()}
+for name, expected in {"missing_module":"ModuleNotFoundError", "missing_file":"FileNotFoundError",
+                       "missing_key":"KeyError", "index":"IndexError",
+                       "syntax_parenthesis":"SyntaxError", "syntax_colon":"SyntaxError",
+                       "syntax_indentation":"IndentationError"}.items():
+    assert diagnostics[name]["returncode"] != 0
+    assert expected in diagnostics[name]["stderr"].splitlines()[-1]
+assert diagnostics["index"]["stdout"] == "貓 狗 2\n"
+inventory = {}
+for directory in ("course/chapters", "notebooks", "tiny_perceptron", "scripts", "data", "checkpoints", "outputs"):
+    path = root / directory
+    inventory[directory] = {"is_dir": path.is_dir(), "sample_names": sorted(p.name for p in path.iterdir())[:12] if path.is_dir() else []}
+assert (root / "notebooks/01/1.1.ipynb").is_file()
+hashes = {p: hashlib.sha256((root / p).read_bytes()).hexdigest() for p in (
+    ".gitignore", "pyproject.toml", "scripts/build_course.py", "scripts/check_env.py",
+    "scripts/train.py", "scripts/train_simple.py", "tiny_perceptron/training.py")}
+shell_help = run(["bash", "--noprofile", "--norc", "-c", "help cd"], root)
+assert shell_help["returncode"] == 0 and "working directory" in shell_help["stdout"]
+cli = {p: run([sys.executable, "-B", p, "--help"], root) for p in ("scripts/train.py", "scripts/train_simple.py")}
+for result in cli.values():
+    assert result["returncode"] == 0 and "--train" in result["stdout"]
+kernel_help = run([sys.executable, "-B", "-m", "ipykernel", "install", "--help"], root)
+assert kernel_help["returncode"] == 0 and "--display-name" in kernel_help["stdout"]
+training_ast = {}
+for path in ("scripts/train.py", "scripts/train_simple.py"):
+    tree = ast.parse((root / path).read_text())
+    guarded_calls = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.If) and ast.unparse(node.test) == "args.train":
+            calls = [ast.unparse(item.func) for body in node.body for item in ast.walk(body) if isinstance(item, ast.Call)]
+            guarded_calls.append({"line": node.lineno, "calls": calls})
+    assert any("optimizer.step" in item["calls"] for item in guarded_calls)
+    modes = [ast.unparse(value) for node in ast.walk(tree) if isinstance(node, ast.Dict)
+             for key, value in zip(node.keys, node.values)
+             if isinstance(key, ast.Constant) and key.value == "mode"]
+    assert modes == ["'train' if args.train else 'dry-run-no-weight-update'"]
+    training_ast[path] = {"guarded_calls": guarded_calls, "sha256": hashes[path],
+                          "mode_expressions": modes}
+result = {"environment": environment, "interactive_shell": interactive,
+          "diagnostic_cases": diagnostics, "inventory": inventory, "repository_hashes": hashes, "bash_cd_help": shell_help,
+          "training_cli_help": cli, "ipykernel_install_help_only": kernel_help,
+          "training_ast_inspection": training_ast,
+          "unrun": ["安裝/clone/sync", "kernel登記", "Notebook重生成", "正式訓練與權重更新", "GPU/雲端/發布", "Git操作"],
+          "scope": "只跑原例、切換起點練習、短錯誤示範及CLI --help；訓練只讀原碼與AST，沒有執行訓練入口。"}
+(artifacts / "W.7-local-checks.json").write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n")
+print(json.dumps({"original": original["stdout"], "exercise": exercise["stdout"],
+                  "interactive_returncode": interactive["returncode"], "diagnostic_cases": len(diagnostics),
+                  "cli_help_returncodes": {p: v["returncode"] for p,v in cli.items()},
+                  "kernel_help_returncode": kernel_help["returncode"], "training_executed": False}, ensure_ascii=False))

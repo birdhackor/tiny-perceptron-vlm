@@ -1,0 +1,160 @@
+import ast
+import copy
+import hashlib
+import io
+import json
+import os
+import platform
+import re
+import sys
+from contextlib import redirect_stdout
+from pathlib import Path
+
+root = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(root))
+import torch
+
+torch.set_num_threads(1)
+
+def guard(event, arguments):
+    if event.startswith('socket.') or event in {'subprocess.Popen', 'os.system', 'os.exec', 'os.posix_spawn'}:
+        raise PermissionError('bounded offline CPU review guard: ' + event)
+
+sys.addaudithook(guard)
+artifacts = root / 'docs/technical-reviews/artifacts'
+
+def sha(raw):
+    return hashlib.sha256(raw).hexdigest()
+
+def fences(text):
+    return re.findall(r'^```python\n(.*?)^```', text, re.M | re.S)
+
+def execute(code):
+    stdout = io.StringIO()
+    namespace = {}
+    with redirect_stdout(stdout):
+        exec(compile(code, '<reviewed-source-fence>', 'exec'), namespace)
+    return stdout.getvalue(), namespace
+
+environment = {
+    'python': platform.python_version(), 'torch': torch.__version__,
+    'torch_source_commit': str(torch.version.git_version), 'device': 'cpu',
+    'OMP_NUM_THREADS': os.environ.get('OMP_NUM_THREADS', ''),
+    'MKL_NUM_THREADS': os.environ.get('MKL_NUM_THREADS', ''),
+    'threads': str(torch.get_num_threads()), 'guard': 'no socket or subprocess calls'
+}
+mode = sys.argv[1]
+result = {'mode': mode, 'environment': environment, 'training_executed': False}
+if mode == 'exercise':
+    raw = (artifacts / '8.1-section-raw.txt').read_bytes()
+    code = fences(raw.decode())[0]
+    previous = '{"回答": "4，就像兩雙筷子共有四根。", "正確": True, "貼切比喻": True}'
+    changed = '{"回答": "4，像一片深邃的海", "正確": True, "貼切比喻": False}'
+    assert code.count(previous) == 1
+    exercise = code.replace(previous, changed)
+    stdout, ns = execute(exercise)
+    assert ns['examples'][1]['正確'] is True
+    assert ns['examples'][1]['貼切比喻'] is False
+    assert stdout == '4 True False\n4，像一片深邃的海 True False\n5，數字如星光流動。 False False\n'
+    parsed = json.loads('{"answer": 4}')
+    assert parsed == {'answer': 4} and type(parsed['answer']) is int
+    result.update({'source_sha256': sha(raw), 'code': exercise, 'stdout': stdout,
+                   'expected_labels': {'正確': True, '貼切比喻': False},
+                   'json_example': parsed, 'assertions': 'all passed'})
+elif mode == 'intro':
+    data = json.loads((artifacts / '8.1-supporting-raw.json').read_text())
+    runs = []
+    selected = {'8.2', '8.3', '8.8', '8.10', '8.11', '8.12'}
+    for row in data['sections']:
+        lesson = row['source'].split('#')[1]
+        if lesson not in selected:
+            continue
+        for number, code in enumerate(fences(row['raw_utf8']), 1):
+            stdout, ns = execute(code)
+            runs.append({'source': row['source'], 'raw_sha256': row['raw_sha256'],
+                         'fence': number, 'stdout': stdout})
+    expected = {
+      '8.2': '用一句話回答：2+2=?\n用貼切比喻回答：2+2=?\n兩次都使用同一份權重與同一個選字方式\n',
+      '8.3': '簡短 總位置 10 學習位置 2\n生動 總位置 46 學習位置 38\n',
+      '8.8': '可訓練參數 56\n初始相同 True\nA梯度為零 True\nB梯度非零 True\n',
+      '8.10': '一致比例 0.75\n分歧索引 [1]\n',
+      '8.11': '原順序選 correct 2+2=4\n交換後選 wrong 2+2=5\n內容身分一致 False\n',
+      '8.12': '字元數 [5, 50]\n長度裁判選長版 True\n不同句子數 1\n'
+    }
+    for run in runs:
+        assert run['stdout'] == expected[run['source'].split('#')[1]]
+    result.update({'runs': runs, 'assertions': 'all passed',
+                   'scope': 'Only six explicitly read teaching examples supporting introduction. No formal experiment schedule, optimizer update, external judge or training executed.'})
+elif mode == 'frozen':
+    from scripts.course_experiments.text import arithmetic_records
+    from scripts.course_experiments.common import split_records, records_sha256
+    from tiny_perceptron.data import ByteTokenizer
+    from tiny_perceptron.tokenization import generation_report
+    original = (artifacts / '8.1-frozen-behavior-source.txt').read_bytes()
+    tree = ast.parse(original.decode())
+    functions = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in {'_conversation', '_style_record', '_style_metrics'}]
+    namespace = {'json': json}
+    exec(compile(ast.Module(body=functions, type_ignores=[]), '<immutable-behavior-source>', 'exec'), namespace)
+    make, score = namespace['_style_record'], namespace['_style_metrics']
+    path = root / 'docs/course-experiments/results/style.json'
+    raw = path.read_bytes(); formal = json.loads(raw); r = formal['results']
+    assert sha(original) == formal['code_sha256']['scripts/course_experiments/behavior.py']
+    names = ['scripts/course_experiments/common.py', 'scripts/course_experiments/text.py', 'tiny_perceptron/data.py', 'tiny_perceptron/model.py', 'tiny_perceptron/tokenization.py']
+    versions = {n: sha((root / n).read_bytes()) for n in names}
+    assert all(versions[n] == formal['code_sha256'][n] for n in names)
+    parts = split_records(arithmetic_records(), seed=42)
+    assert [len(parts[x]) for x in ['train', 'validation', 'test']] == [49, 8, 7]
+    checks = []; samples = []; tok = ByteTokenizer()
+    for style, run in r['default_style_runs'].items():
+        prepared = {split: [make(row, style, False) for row in rows] for split, rows in parts.items()}
+        for split, rows in prepared.items():
+            raw_jsonl = ''.join(json.dumps(row, ensure_ascii=False) + '\n' for row in rows).encode()
+            assert sha(raw_jsonl) == run['data'][split]['sha256']
+        assert records_sha256(prepared['train']) == run['training']['records_sha256']
+        for split in ['validation', 'test']:
+            scored = score(copy.deepcopy(run['after'][split]), prepared[split])
+            assert scored['rubric'] == run['after'][split]['rubric']
+            for s in scored['samples']:
+                assert generation_report(tok, s['generated_ids'])['valid_answer_tokens']
+                assert tok.decode([i for i in s['generated_ids'] if i != tok.eos_id]) == s['generated']
+                samples.append({'run': 'default-' + style, 'split': split,
+                                'question': s['messages'][0]['content'], 'expected': s['expected'],
+                                'generated': s['generated'], 'content_correct': s['content_correct'],
+                                'style_correct': s['style_correct'], 'eos': s['eos']})
+            checks.append({'run': 'default-' + style, 'split': split, 'recount': scored['rubric']})
+    for style, probe in r['prompt_only_comparison_same_weights'].items():
+        rows = [make(row, style, True) for row in parts['test']]
+        scored = score(copy.deepcopy(probe), rows)
+        counts = scored['rubric'][style]
+        assert counts['records'] == 7 and counts['style_correct'] == 7 and counts['content_correct'] == 0
+        for s in scored['samples']:
+            assert generation_report(tok, s['generated_ids'])['valid_answer_tokens']
+            assert tok.decode([i for i in s['generated_ids'] if i != tok.eos_id]) == s['generated']
+            assert s['eos'] and tok.eos_id in s['generated_ids']
+            samples.append({'run': 'conditional-' + style, 'split': 'test',
+                            'question': s['messages'][0]['content'], 'expected': s['expected'],
+                            'generated': s['generated'], 'content_correct': s['content_correct'],
+                            'style_correct': s['style_correct'], 'eos': s['eos']})
+        checks.append({'run': 'conditional-' + style, 'split': 'test', 'recount': scored['rubric']})
+    for value, valid in [('{"answer": 4}', True), ('{"answer": true}', False), ('{"answer": 4.0}', False), ('{"answer": "4"}', False), ('{"answer": 4, "extra": 0}', False)]:
+        probe = {'samples': [{'generated': value}]}
+        assert bool(score(probe, [make({'a': 2, 'b': 2, 'family': '2+2'}, 'json', True)])['rubric']['json']['json_valid']) is valid
+    release = json.loads((root / 'docs/course-experiments/public-releases/style.json').read_text())['release']
+    card_path = root / 'checkpoints/course/style/README.md'
+    card_raw = card_path.read_bytes(); entry = next(x for x in release['public_manifest']['files'] if x['output'] == 'README.md')
+    assert sha(card_raw) == entry['sha256']
+    result.update({'frozen_result_sha256': sha(raw), 'training_revision': formal['revision'],
+      'training_environment': {k: formal[k] for k in ['device', 'seed', 'torch_version', 'python_version', 'step_scale', 'status']},
+      'matching_source_sha256': versions, 'frozen_behavior_sha256': sha(original),
+      'split_sizes': {k: len(v) for k, v in parts.items()},
+      'held_out_families': {k: sorted({s['family'] for s in rows}) for k, rows in parts.items()},
+      'content_training': r['content_training'],
+      'default_training': {k: v['training'] for k, v in r['default_style_runs'].items()},
+      'conditional_training': r['training'], 'conditional_data': r['data'],
+      'counts_recomputed': checks, 'samples': samples,
+      'public_card_binding': {'url': 'https://huggingface.co/' + release['repo'] + '/resolve/' + release['revision'] + '/' + entry['path'],
+        'revision': release['revision'], 'sha256': sha(card_raw), 'notes': '固定單一積木句；不證明創造力、人格或一般指令遵循。內容與格式分開。'},
+      'assertions': 'all passed', 'scope': 'Recount of frozen generated text and IDs only; no training, no model inference, no weights or training data downloads.'})
+else:
+    raise ValueError(mode)
+print(json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False))

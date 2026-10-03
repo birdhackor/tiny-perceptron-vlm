@@ -1,0 +1,73 @@
+"""W.6 原例、兩個獨立練習及直接前置累加示範；只執行有界 CPU 純量運算。"""
+import contextlib
+import hashlib
+import io
+import json
+import platform
+import re
+import sys
+from decimal import Decimal
+from pathlib import Path
+
+import torch
+
+torch.set_num_threads(1)
+torch.set_default_device('cpu')
+assert torch.version.cuda is None
+assert torch.version.git_version == '5c4886908584029761b579af026dcfb627c84070'
+
+def guard(event, args):
+    if event in {'socket.connect','socket.getaddrinfo','socket.bind','socket.sendto','subprocess.Popen','os.system','os.exec','os.posix_spawn'}:
+        raise PermissionError('W.6 offline CPU guard')
+sys.addaudithook(guard)
+
+root=Path(__file__).resolve().parents[3]
+art=root/'docs/technical-reviews/artifacts'
+raw=(art/'W.6-source-raw.txt').read_bytes()
+code=re.search(rb'```python\n(.*?)```',raw,re.S)[1].decode()
+results={
+    'environment':{'python':platform.python_version(),'torch':str(torch.__version__),'torch_git_version':str(torch.version.git_version),'device':'cpu','dtype':str(torch.get_default_dtype()),'OMP_NUM_THREADS':'1','MKL_NUM_THREADS':'1','cpu_threads':str(torch.get_num_threads()),'cuda_build':str(torch.version.cuda)},
+    'original_code_sha256':hashlib.sha256(code.encode()).hexdigest(),
+    'runs':[]
+}
+for tag,rate in [('original','0.1'),('exercise_0.6','0.6'),('exercise_1.1','1.1')]:
+    selected=code if rate=='0.1' else code.replace('0.1 * w.grad',rate+' * w.grad')
+    ns={'__name__':'__main__'}
+    output=io.StringIO()
+    with contextlib.redirect_stdout(output):exec(compile(selected,'course/first-steps.md#W.6:'+tag,'exec'),ns)
+    w=ns['w']
+    rate_exact=Decimal(rate);expected_w=Decimal(1)+rate_exact*Decimal(4);expected_loss=(expected_w-3)**2
+    assert abs(w.item()-float(expected_w))<1e-6
+    assert abs((w-3).square().item()-float(expected_loss))<2e-6
+    assert ns['loss'].item()==4.0 and w.grad.item()==-4.0
+    results['runs'].append({'case':tag,'learning_rate':rate,'stdout':output.getvalue(),'code_sha256':hashlib.sha256(selected.encode()).hexdigest(),'w':w.item(),'new_loss':(w-3).square().item(),'old_loss':ns['loss'].item(),'stored_gradient':w.grad.item(),'expected_exact_w':str(expected_w),'expected_exact_loss':str(expected_loss),'w_is_leaf':w.is_leaf,'w_requires_grad':w.requires_grad,'w_grad_fn':str(w.grad_fn)})
+
+w=torch.tensor(1.0,requires_grad=True)
+loss=(w-3).square();loss.backward()
+assert w.item()==1.0
+results['before_update']={'w':w.item(),'loss':loss.item(),'gradient':w.grad.item(),'w_is_leaf':w.is_leaf,'loss_requires_grad':loss.requires_grad}
+with torch.no_grad():
+    update=0.1*w.grad
+    w-=update
+    results['no_grad_update']={'update_requires_grad':update.requires_grad,'w_grad_fn':str(w.grad_fn),'grad_mode_inside':torch.is_grad_enabled(),'w_requires_grad':w.requires_grad}
+new_loss=(w-3).square()
+results['new_forward']={'value':new_loss.item(),'requires_grad':new_loss.requires_grad,'grad_mode_restored':torch.is_grad_enabled()}
+new_loss.backward()
+accumulated=w.grad.item()
+w.grad=None
+(w-3).square().backward()
+results['second_step_gradient']={'gradient_without_clear':accumulated,'gradient_after_clear':w.grad.item(),'w':w.item(),'expected_without_clear':-7.2,'expected_after_clear':-3.2}
+assert abs(accumulated+7.2)<1e-6 and abs(w.grad.item()+3.2)<1e-6
+
+praw=(art/'W.6-prerequisite-1.13-raw.txt').read_bytes()
+pcode=re.search(rb'```python\n(.*?)```',praw,re.S)[1].decode()
+for tag,selected in [('prerequisite_original',pcode),('prerequisite_exercise',pcode.replace('w.grad = None','#w.grad = None'))]:
+    ns={};output=io.StringIO()
+    with contextlib.redirect_stdout(output):exec(compile(selected,'course/chapters/01.md#1.13:'+tag,'exec'),ns)
+    results['runs'].append({'case':tag,'stdout':output.getvalue(),'code_sha256':hashlib.sha256(selected.encode()).hexdigest(),'w':ns['w'].item(),'gradient':ns['w'].grad.item()})
+
+results['decimal_calculation']={'initial_loss':str((Decimal(1)-3)**2),'loss_at_1.1':str((Decimal('1.1')-3)**2),'decrease':str(Decimal(4)-(Decimal('1.1')-3)**2),'derivative_at_1':str(2*(Decimal(1)-3)),'derivative_at_1.4':str(2*(Decimal('1.4')-3)),'finite_difference_at_1':[]}
+for h in [Decimal('0.1'),Decimal('0.01'),Decimal('0.001'),Decimal('-0.001')]:
+    quotient=((Decimal(1)+h-3)**2-Decimal(4))/h
+    results['decimal_calculation']['finite_difference_at_1'].append({'h':str(h),'difference_quotient':str(quotient),'expected_formula':'-4+h'})
+print(json.dumps(results,ensure_ascii=False,indent=2,allow_nan=False))

@@ -1,0 +1,54 @@
+import hashlib
+import json
+import os
+import platform
+import sys
+from dataclasses import asdict
+from pathlib import Path
+sys.path.insert(0, str(Path.cwd()))
+import torch
+from tiny_perceptron.training import load_checkpoint
+from tiny_perceptron.data import ByteTokenizer
+from tiny_perceptron.model import generate
+from tiny_perceptron.tokenization import generation_report
+
+def deny_network(event, args):
+    if event in {"socket.connect", "socket.getaddrinfo", "socket.bind", "socket.sendto", "subprocess.Popen", "os.system"}:
+        raise RuntimeError("offline reviewer evidence prohibits " + event)
+sys.addaudithook(deny_network)
+
+def state_digest(model):
+    h = hashlib.sha256()
+    for name, value in sorted(model.state_dict().items()):
+        h.update(name.encode())
+        h.update(str(tuple(value.shape)).encode())
+        h.update(str(value.dtype).encode())
+        h.update(value.detach().cpu().contiguous().numpy().tobytes())
+    return h.hexdigest()
+
+checkpoint = Path("checkpoints/course/style/model.pt")
+file_hash = hashlib.sha256(checkpoint.read_bytes()).hexdigest()
+assert file_hash == "a3481cd6ee5415563f107d6ec07aeecba92f2520ab7d45fdc5373840f8a78607"
+model, payload = load_checkpoint(checkpoint, device="cpu")
+model.eval()
+tok = ByteTokenizer()
+before = state_digest(model)
+records = []
+# Read the existing frozen reported test questions; do not train or download data.
+formal = json.loads(Path("docs/course-experiments/results/style.json").read_bytes())
+for style in ("concise", "vivid", "json"):
+    reported = formal["results"]["prompt_only_comparison_same_weights"][style]["samples"]
+    for sample in reported:
+        prompt = sample["messages"][0]["content"]
+        ids = [tok.bos_id, tok.user_id] + tok.encode(prompt) + [tok.eos_id, tok.assistant_id]
+        with torch.no_grad():
+            output = generate(model, torch.tensor([ids]), max_new_tokens=96, temperature=0.0, eos_id=tok.eos_id)
+        report = generation_report(tok, output[0, len(ids):].tolist())
+        assert report["valid_answer_tokens"] and report["eos"]
+        assert report["answer"] == sample["generated"]
+        assert report["generated_ids"] == sample["generated_ids"]
+        records.append({"style": style, "prompt": prompt, "expected": sample["expected"], "formal_answer": sample["generated"], "replay": report, "same_as_formal": True})
+after = state_digest(model)
+assert before == after
+result = {"checked_on": "2026-10-03", "command": "OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1 TRANSFORMERS_OFFLINE=1 CUDA_VISIBLE_DEVICES='' timeout 30 .venv/bin/python docs/technical-reviews/artifacts/8.2-run-replay.txt", "environment": {"python": platform.python_version(), "torch": torch.__version__, "torch_git_version": torch.version.git_version, "device": "cpu", "threads": str(torch.get_num_threads()), "OMP_NUM_THREADS": os.environ["OMP_NUM_THREADS"], "MKL_NUM_THREADS": os.environ["MKL_NUM_THREADS"], "offline": "HF flags and audit hook block sockets and subprocesses"}, "checkpoint": {"local_input": str(checkpoint), "sha256": file_hash, "bytes": checkpoint.stat().st_size, "public_url": "https://huggingface.co/birdhackor/tiny-perceptron-course-models/resolve/23b58c077a2da2ec6b94f4902e88510c0364e3fc/course/course-v1/style/model.pt", "public_revision": "23b58c077a2da2ec6b94f4902e88510c0364e3fc", "config": asdict(model.config), "format_version": payload["format_version"], "parameters": sum(p.numel() for p in model.parameters()), "payload_keys": sorted(payload)}, "state_sha256_before": before, "state_sha256_after": after, "state_unchanged": before == after, "records": records, "denominators": {"models": 1, "questions_per_style": 7, "styles": 3, "generations": 21, "independent_training_seeds": 1, "training_steps_replayed": 0}, "exit_code": 0, "scope": "Bounded CPU inference on already present pinned public weights; no training, download or GPU timing. Exact answers and IDs are checked; no general quality inference."}
+print(json.dumps(result, ensure_ascii=False, indent=2))

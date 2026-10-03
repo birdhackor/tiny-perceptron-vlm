@@ -1,0 +1,202 @@
+from pathlib import Path
+import hashlib
+import json
+
+ROOT = Path(".")
+OUT = ROOT / "docs/technical-reviews/artifacts"
+TASK = "/root/technical_round_coordinator/technical_w_4_fresh"
+COMMIT = "5c4886908584029761b579af026dcfb627c84070"
+
+
+def sha(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def read_json(name):
+    return json.loads((OUT / name).read_text())
+
+
+env = read_json("W.4-fresh-verify-output.json")["environment"]
+notes = read_json("W.4-fresh-primary-source-notes.json")
+downloads = {item["file"]: item for item in notes["original_downloads"]}
+sources = []
+artifacts = []
+claims = []
+
+
+def artifact(identifier, name, kind, description, command=None, result=None, environment=None):
+    path = OUT / name
+    item = dict(id=identifier, kind=kind, path=path.as_posix(), sha256=sha(path), description=description)
+    if command:
+        item.update(command=command, result=result, environment=environment)
+    artifacts.append(item)
+
+
+artifact("a_raw", "W.4-fresh-section-raw.txt", "source_snapshot", "完整 W.4 原始 UTF-8 bytes，保留末尾空行，未正規化。")
+artifact("a_extract", "W.4-fresh-extraction.json", "source_snapshot", "本次單節 helper 原始提取的範圍、raw hash、原 fence hash 與無 SVG 事實。")
+artifact("a_original_code", "W.4-fresh-original-code.txt", "code", "本節原始 Python fence 的逐 byte 複本，可使用現成 venv 直接重播。")
+artifact(
+    "a_original", "W.4-fresh-original-stdout.txt", "execution", "原例親自離線 CPU 執行的三行輸出。",
+    "OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 .venv/bin/python docs/review-tools/section_facts.py 'course/first-steps.md#W.4' --execute --timeout 45 --output /tmp/W.4-fresh-original",
+    "exit 0；0.9 0.105 0.152；0.5 0.693 1.0；0.1 2.303 3.322。", env,
+)
+artifact("a_original_stderr", "W.4-fresh-original-stderr.txt", "source_snapshot", "原例 stderr 為空，保存實際 bytes。")
+artifact("a_original_env", "W.4-fresh-original-environment.json", "source_snapshot", "原例 Python、PyTorch、CPU/offline guard 與當次執行環境。")
+artifact("a_original_meta", "W.4-fresh-original-execution.json", "source_snapshot", "原例 worker command、exit 0、timeout 與當次檔案 SHA。")
+artifact("a_exercise_code", "W.4-fresh-exercise-code.txt", "code", "僅在原例清單加入 0.25 的練習碼，沒有修改教材。")
+artifact(
+    "a_exercise", "W.4-fresh-exercise-stdout.txt", "execution", "練習與原例分開執行，第四行驗證 0.25。",
+    "OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1 TRANSFORMERS_OFFLINE=1 CUDA_VISIBLE_DEVICES='' .venv/bin/python docs/technical-reviews/artifacts/W.4-fresh-exercise-code.txt > docs/technical-reviews/artifacts/W.4-fresh-exercise-stdout.txt",
+    "exit 0；前三行與原例相同，第四行為 0.25 1.386 2.0。",
+    dict(python=env["python"], device="cpu", torch="未使用；僅 Python 標準庫 math", OMP_NUM_THREADS="1", MKL_NUM_THREADS="1"),
+)
+artifact("a_verify_code", "W.4-fresh-verify-code.txt", "code", "有界離線 CPU 核對 e、比例、獨立機率、log(0)、round 反例與 logits/CE，未更新參數。")
+artifact(
+    "a_verify", "W.4-fresh-verify-output.json", "execution", "獨立數值與 API 核對：round 正中間反例、logits/機率輸入差別、mean 分母。",
+    "OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1 TRANSFORMERS_OFFLINE=1 CUDA_VISIBLE_DEVICES='' .venv/bin/python docs/technical-reviews/artifacts/W.4-fresh-verify-code.txt > docs/technical-reviews/artifacts/W.4-fresh-verify-output.json",
+    "exit 0；round(1.0625,3)=1.062，而 ROUND_HALF_UP=1.063；原例數字全符；raw logits CE=0.2395447662，機率作 logits CE=0.6995012992。", env,
+)
+artifact("a_sources", "W.4-fresh-primary-source-notes.json", "source_snapshot", "親讀原始官方文件／原碼／論文的自有繁體筆記，附 URL、版本、下載 SHA、定位、必要公式。")
+artifact("a_prerequisites", "W.4-fresh-prerequisites.json", "source_snapshot", "W.1、W.2、1.7、1.8 親讀記錄及 raw SHA；四節沒有 SVG。")
+artifact("a_derivation", "W.4-fresh-derivation.txt", "derivation", "卡片計數、log 單調性與極限、乘積加法、换底、one-hot CE、round 反例的自有推導。")
+artifact("a_builder", "W.4-fresh-report-builder.txt", "code", "本次報告建置碼；只寫自身 W.4.json，固定依親讀與親跑事實填入。")
+artifact(
+    "a_checker", "W.4-fresh-checker-output.txt", "execution", "指定單節checker的真實輸出；因需修訂而exit 1，沒有其他hash或格式錯誤。",
+    "OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 .venv/bin/python scripts/check_technical_reviews.py --lesson W.4 > /tmp/W.4-fresh-checker-latest.txt",
+    "exit 1，僅指出verdict revise、c23 contradicted、未解決issue及factual_accuracy revise。",
+    dict(python=env["python"], device="cpu", torch="未使用；格式checker僅用Python標準庫"),
+)
+
+
+def external(identifier, kind, title, filename, version, reason, inspection):
+    item = downloads[filename]
+    sources.append(dict(
+        id=identifier, kind=kind, title=title, url=item["url"], version=version,
+        verified=True, checked_original=True, accessed_on="2026-10-03",
+        authority_reason=reason, inspection_note=inspection + "；公開自有筆記見 a_sources。",
+        download_sha256=item["sha256"],
+    ))
+
+
+external("s_probability", "official_docs", "OpenStax Introductory Statistics 2e §3.1 Terminology", "probability.html", "第2版，2023-12-13 出版；2026-10-03 親讀官方 HTML", "Barbara Illowsky、Susan Dean 的 Rice University/OpenStax 原始出版教材。", "親讀 probability、equally likely、count-and-divide、complement 段，核對本節有限離散例子的範圍。")
+external("s_independence", "official_docs", "OpenStax Introductory Statistics 2e §3.2", "independence.html", "第2版，2023-12-13 出版；2026-10-03 親讀官方 HTML", "原始統計教材，提供本節獨立及互斥定義。", "親讀 Independent Events 開頭、Mutually Exclusive Events 開頭及 Example 3.6；獨立時才可直接乘邊際機率。")
+external("s_math", "official_docs", "Python 3.13 math 官方文件", "python-math.html", "Python 3.13 文件，2026-10-03 讀取；執行 CPython 3.13.5", "CPython 作者的官方標準庫文件。", "親讀 math.exp、math.log、math.log2、math.e 與結尾 CPython implementation detail 的 log(0) ValueError。")
+external("s_round", "official_docs", "Python 3.13 builtins round 官方文件", "python-builtins.html", "Python 3.13 文件，2026-10-03 讀取；執行 CPython 3.13.5", "Python 官方內建 round 契約。", "親讀 round(number, ndigits=None)：取最近值，兩個值等距時取偶數；不等於傳統半入規則。")
+external("s_power", "official_docs", "Python 3.13 Language Reference §6.5", "python-expressions.html", "Python 3.13 文件，2026-10-03 讀取", "Python 官方語言參考的 ** 契約。", "親讀 power operator 定義、負指數、fractional power；本節浮點底數 e 為正。")
+external("s_units", "official_docs", "SciPy 1.16.1 scipy.stats.entropy 官方文件", "scipy-entropy.html", "固定 scipy-1.16.1 文件，2026-10-03 親讀", "SciPy 作者的官方文件明示資訊量單位及交叉熵公式。", "親讀 Notes 的底 e/nat、底 2/bit 對應及 CE=-Σp log q；僅作數學定義來源，未用 SciPy 執行教材。")
+external("s_lm", "paper", "Language Models are Unsupervised Multitask Learners", "gpt2_2019.pdf", "OpenAI 2019 官方技術報告，未標示修訂版號", "OpenAI 作者的原始技術報告官方 PDF。", "親讀原 PDF 抽取文字 §2 Approach、PDF p.2、Eq.(1)；只核序列符號條件機率分解，未借用效能結論。")
+external("s_softmax", "official_source", "PyTorch torch.nn.functional 官方原碼", "torch-functional.py", "PyTorch 2.14.1，官方 commit " + COMMIT, "目前 CPU wheel 對應的官方固定版本原碼。", "親讀 softmax L2176–2218、cross_entropy L3478–3565，指數正規化及 unnormalized logits 介面。")
+external("s_ce", "official_source", "PyTorch CrossEntropyLoss 官方原碼", "torch-loss.py", "PyTorch 2.14.1，官方 commit " + COMMIT, "目前 CPU wheel 對應的官方固定版本原碼。", "親讀 CrossEntropyLoss L1200–1280：class-index 的 -log 正確格與 weighted mean；本節無權重／忽略／平滑。")
+external("s_ce_native", "official_source", "PyTorch LossNLL.cpp 官方原碼", "torch-LossNLL.cpp", "PyTorch 2.14.1，官方 commit " + COMMIT, "目前 CPU wheel 對應的 ATen 官方固定版本實作。", "親讀 cross_entropy_loss_symint L632–666：class-index 無 smoothing 分支先 log_softmax 再 NLL。")
+sources.append(dict(id="s_derivation", kind="derivation", title="W.4 自有透明數學推導", verified=True, details=(OUT / "W.4-fresh-derivation.txt").read_text()))
+for identifier, artifact_id, title in [
+    ("s_original", "a_original", "W.4 原例親自離線 CPU 執行"),
+    ("s_exercise", "a_exercise", "W.4 加入0.25練習的親自執行"),
+    ("s_verify", "a_verify", "W.4 原子主張及 API 的短 CPU 核對"),
+]:
+    sources.append(dict(id=identifier, kind="execution", title=title, verified=True, artifact_id=artifact_id))
+
+
+def evidence(identifier, locator, supports):
+    return dict(source_id=identifier, locator=locator, supports=supports)
+
+
+def concept(identifier, statement, location, scope, source, locator, support, derive=False):
+    proof = [evidence(source, locator, support)]
+    artifact_ids = ["a_sources"]
+    if derive:
+        proof.append(evidence("s_derivation", "W.4-fresh-derivation.txt", "逐步數學推導此性質及成立條件。"))
+        artifact_ids.append("a_derivation")
+    claims.append(dict(id=identifier, kind="concept", statement=statement, location=location, scope=scope, status="verified", evidence=proof, artifact_ids=artifact_ids))
+
+
+def numeric(identifier, statement, location, expected, observed, details, artifact_id="a_verify", tolerance="三位近似絕對誤差0.0005；已顯示字串與所述精確值另作精確核對。", method="executed"):
+    source = {"a_original": "s_original", "a_exercise": "s_exercise", "a_verify": "s_verify"}[artifact_id]
+    proof = [evidence("s_derivation", "W.4-fresh-derivation.txt", "公式、代入值與比較方法。")]
+    if method == "executed":
+        proof.append(evidence(source, artifact_id, "親自 CPU 執行觀察值。"))
+    claims.append(dict(
+        id=identifier, kind="numeric", statement=statement, location=location,
+        scope="只支持本節固定輸入的數學算例，不是模型訓練實測。", status="verified",
+        evidence=proof, artifact_ids=[artifact_id, "a_derivation"],
+        verification=dict(method=method, expected=expected, observed=observed, tolerance=tolerance, details=details),
+    ))
+
+
+def software(identifier, statement, location, scope, source, locator, support, expected, observed, details, artifact_id="a_verify", status="verified"):
+    execution_source = "s_original" if artifact_id == "a_original" else "s_verify"
+    claims.append(dict(
+        id=identifier, kind="software", statement=statement, location=location, scope=scope,
+        status=status, evidence=[evidence(source, locator, support), evidence(execution_source, artifact_id, "實际親跑或原始 fence 的程式行為。")],
+        artifact_ids=["a_sources", artifact_id, "a_original_code" if artifact_id == "a_original" else "a_verify_code"],
+        verification=dict(method="executed", expected=expected, observed=observed, details=details),
+    ))
+
+
+concept("c01", "機率以 [0,1] 表示事件發生機會。", "L106第1段", "本節有限離散卡片／候選分類情境。", "s_probability", "§3.1 probability 開頭", "機率界限與含義。")
+concept("c02", "機率0表示不會，1表示一定。", "L106第1段", "限本節有限離散的入門語意；不外推連續分布單點零機率。", "s_probability", "§3.1 P(A)=0/1 段", "本節有限離散事件的端點意義。")
+concept("c03", "互斥且涵蓋全部結果的候選類別機率合計1。", "L106第1段", "完整分類，不能套到相互重疊的事件。", "s_probability", "§3.1 complement P(A)+P(A′)=1", "互補事件的正規化。", True)
+numeric("c04", "三貓一狗且每卡等可能，抽到貓機率3/4。", "L106第1段", "3/4=0.75", "0.75", "四張等可能卡片，貓事件含三張。", tolerance="0.75 精確相等。")
+numeric("c05", "同袋抽到狗機率1/4。", "L106第1段", "1/4=0.25", "0.25", "四張等可能卡片，狗事件含一張。", tolerance="0.25 精確相等。")
+numeric("c06", "只有貓狗二類時，兩類不能各為0.9。", "L106第1段", "0.9+0.9=1.8，不等於1", "十進位手算總和1.8，不等於1", "依c03的分布總和條件，比較十進位精確相加。", method="hand_calculation", tolerance="十進位數學恆等式及不等於1判斷。")
+concept("c07", "文字模型對候選符號分配機率。", "L108第2段", "候選字為教學簡稱，符號可為 tokenizer 的文字片段。", "s_lm", "§2 Approach、p.2、Eq.(1)", "序列模型的符號條件機率。")
+concept("c08", "只看是否選中正確字，無法充分區分對正確答案的信心。", "L108第2段", "loss 衡量機率分配，不是準確率本身。", "s_ce", "class-index loss L1222–1240", "同一正確ID的代價依其機率改變。", True)
+concept("c09", "正確類別機率p的常用代價為-ln(p)，0.9比0.1代價小。", "L108第2段", "單一正確類別、未加權、無標籤平滑。", "s_ce", "class-index negative log loss", "one-hot 的負對數機率公式。", True)
+concept("c10", "此處log是底e的自然對數。", "L108第2段", "math.log單參數形式。", "s_math", "math.log(x[, base])", "單參數自然對數定義。")
+numeric("c11", "e約2.718。", "L108第2段", "e≈2.718", "math.e=2.718281828459045", "內建常數核對三位近似。")
+concept("c12", "p=e**a時，ln(p)=a，對數由指數結果反求指數。", "L110第3段", "正實數p的反函式關係；浮點為近似。", "s_math", "math.exp、math.log", "指數與自然對數的定義。", True)
+software("c13", "Python ** 表示次方。", "L110第3段", "本節正浮點底數e。", "s_power", "§6.5 The power operator", "官方 ** 運算契約。", "e**2=e×e；e**-1=1/e", "7.3890560989306495；0.36787944117144233", "CPython3.13.5正底數e的直接 ** 運算。")
+numeric("c14", "e**2是e乘e。", "L110第3段", "e²≈7.38905609893065", "7.3890560989306495", "正實數整數次方2的定義與直接運算。", tolerance="雙精度絕對誤差≤2e-15。")
+numeric("c15", "e**-1是1/e，約0.368。", "L110第3段", "1/e≈0.368", "0.36787944117144233", "負指數倒數定義與直接運算。")
+concept("c16", "指數a可非整數，0<p<1對應負指數。", "L110第3段", "正實數底e；p=0不在log定義域。", "s_math", "math.exp、math.log", "實數指數和log介面。", True)
+concept("c17", "0<p≤1的負對數代價非負。", "L110第3段", "只在合法正機率域。", "s_math", "math.log定義", "配合a≤0的透明推導。", True)
+concept("c18", "p趨近1，負對數代價趨近0。", "L110第3段", "實數極限，不要求任意有限浮點結果精確為0。", "s_math", "math.log定義", "ln(1)=0及連續性。", True)
+concept("c19", "p趨近0+，負對數代價增大無上界。", "L110第3段", "正機率逼近零，精確零另處理。", "s_math", "math.log定義及log(0) note", "定義域與零邊界，加上透明極限推導。", True)
+concept("c20", "越有把握排除正確答案，負對數懲罰越大。", "L110第3段及L127末句", "loss單調性，不是實際錯題數。", "s_ce", "class-index negative log loss", "正確格機率下降會提高代價。", True)
+software("c21", "原例只用標準庫math，迴圈逐一列印三個機率的代價。", "L110–120程式碼", "僅本節純Python fence；helper bootstrap另外載入torch是執行器環境。", "s_math", "math標準庫文件", "math為內建標準數學模組。", "三行，p依序0.9/0.5/0.1", "三行p依序0.9/0.5/0.1", "原始fence只import math，沒有其他套件呼叫。", artifact_id="a_original")
+software("c22", "math.log(p)單參數計算自然對數。", "L116與L121", "CPython3.13.5正實數p。", "s_math", "math.log(x[, base])", "一參數API契約。", "-ln(0.5)=ln(2)", "0.6931471805599453", "直接math.log，不傳base。")
+software("c23", "round(...,3)的一般規則被描述為四捨五入到小數三位。", "L121「只把顯示值四捨五入到小數三位」", "本節既有顯示值均正確，問題是一般round邊界規則的描述。", "s_round", "round(number, ndigits=None)", "官方規則為最近值、正中間取偶數。", "傳統四捨五入時1.0625到三位為1.063", "Python round(1.0625,3)=1.062；Decimal HALF_UP=1.063", "1.0625可精確表示為二進位浮點；非浮點輸入誤差。", status="contradicted")
+software("c24", "程式只將round結果送print，不改寫cost的定義。", "L118與L121", "原fence的cost仍由-math.log(p)產生。", "s_round", "round(number, ndigits=None)", "round回傳捨入值；原碼沒有指派回cost。", "cost=-math.log(p)，print取round(cost,3)", "原fence順序與輸出符合", "親讀原始fence，round結果只作print參數。", artifact_id="a_original")
+for identifier, p, cost in [("c25", "0.9", "0.105"), ("c26", "0.5", "0.693"), ("c27", "0.1", "2.303")]:
+    numeric(identifier, "p="+p+"的自然對數代價三位顯示為"+cost+"。", "L121原例輸出", cost, cost, "-math.log("+p+")後round(...,3)再print。", artifact_id="a_original")
+numeric("c28", "p=0.1的代價約為p=0.9的22倍。", "L121比例", "約22倍", "21.854345326782834", "使用未捨入成本相除。", tolerance="與22差0.1457，小於整數近似0.5。")
+concept("c29", "負自然對數除以ln(2)改為bit單位。", "L117與L121第三欄", "資訊量換底，不宣稱任何實際碼字恰有同樣小數bit長度。", "s_units", "Notes choice of base及fair coin example", "底e對nat、底2對bit。", True)
+for identifier, p, bits in [("c30", "0.9", "0.152"), ("c31", "0.5", "1.0"), ("c32", "0.1", "3.322")]:
+    numeric(identifier, "p="+p+"的bit代價三位顯示為"+bits+"。", "L121第三欄輸出", bits, bits, "-ln("+p+")/ln(2)後顯示。", artifact_id="a_original")
+concept("c33", "自然對數改bit不改代價排序。", "L121第三欄", "除以同一正數ln(2)，不涉及不同長度／tokenizer比較。", "s_math", "math.log換底公式", "相同正比例因子保留排序。", True)
+concept("c34", "-ln(p1*p2)=-ln(p1)-ln(p2)。", "L123第5段公式", "正實數恆等式；浮點乘積可能下溢，不要求任意浮點精確等號。", "s_math", "math.exp、math.log定義", "以p1=e^a與p2=e^b透明推導。", True)
+concept("c35", "兩題結果互不影響稱獨立。", "L123第5段", "原文明示獨立假設；自回歸字的邊際機率一般不是獨立。", "s_independence", "Independent Events開頭", "另一事件發生不改變機率，聯合機率等於乘積。")
+numeric("c36", "獨立兩題各正確機率0.5，同時正確機率0.25。", "L123第5段", "0.5×0.5=0.25", "0.25", "本節獨立假設下乘邊際機率。", tolerance="0.5與0.25二進位可精確表示，精確相等。")
+numeric("c37", "兩個0.5的總代價約1.386，等於未捨入單題代價相加。", "L123第5段", "-ln(0.25)=2[-ln(0.5)]≈1.386", "joint_cost=sum_cost=1.3862943611198906", "此例double結果相同；0.693是顯示值而非真值。")
+concept("c38", "多個位置的負對數可累加或平均，避免一直乘小機率。", "L123第5段", "加總為序列NLL，平均另除有效位置數；文字模型用條件機率，不需邊際獨立。", "s_lm", "§2 Approach Eq.(1)", "序列條件機率乘積可經log分解。", True)
+concept("c39", "正確答案機率0時，負對數沒有有限值。", "L123第5段末句", "p→0+的延伸loss為+∞；log本身在0不定義。", "s_math", "math.log定義域及log(0) note", "零輸入邊界與透明極限推導。", True)
+software("c40", "此Python程式不能直接計算math.log(0)。", "L123第5段末句", "CPython3.13.5的math.log；其他API不在本句範圍。", "s_math", "CPython implementation detail", "log(0.0)引發ValueError。", "ValueError", "ValueError: math domain error", "直接呼叫math.log(0)並保存捕獲的例外。")
+concept("c41", "softmax把分數換成合計1的機率。", "L125第6段", "沿候選軸、有限分數、至少一候選；浮點合計容許數值誤差，不含NaN/全無限值。", "s_softmax", "softmax L2176–2218", "exp(z_i)/Σexp(z_j)，沿dim正規化。")
+concept("c42", "cross entropy計算正確答案平均負對數代價。", "L125第6段", "本節單一正確類別、default mean、無權重／忽略／平滑；一般介面也有軟標籤或其他reduction。", "s_ce", "class-index loss與mean公式 L1222–1246", "預設未加權有效例子的平均。", True)
+concept("c43", "softmax與cross entropy做不同工作。", "L125第6段", "softmax由分數產生分布；loss另外依真實答案衡量分布，沒有品質保證。", "s_ce", "CrossEntropyLoss class-index公式", "softmax不需target，loss需要正確答案ID。", True)
+software("c44", "PyTorch cross_entropy接收原始logits，內部已做換算。", "L125第6段", "PyTorch2.14.1 CPU、class-index target、無權重／忽略／平滑、default mean。", "s_ce_native", "LossNLL.cpp L632–666", "類別ID且無smoothing分支先log_softmax再NLL。", "CE(logits,target)≈-ln(softmax(logits)[y])", "0.2395447662218847對0.23954476622188464", "float64 [1,3] logits=[0,2,0]，int64 target=[1]；誤差<1e-14。")
+software("c45", "不應先把cross_entropy的輸入換成機率。", "L125第6段", "先softmax的數值仍可被API接受，但會當新logits而改變原預期loss，不是必然報錯。", "s_softmax", "cross_entropy L3478–3565", "input始終按unnormalized logits解讀。", "先softmax再CE改變loss", "raw logits 0.2395447662218847；機率作logits 0.6995012992341304", "同一target的短CPU對照，未更新參數。")
+numeric("c46", "加入0.25，代價比0.5大，約1.386。", "L127練習", "第四行1.386>0.693", "0.25 1.386 2.0", "只在原清單加入0.25，與原例分開執行。", artifact_id="a_exercise")
+numeric("c47", "0.25的bit代價是2.0。", "L127練習", "-log2(1/4)=2.0", "2.0", "1/4=2^-2；換底推導與第四行相符。", artifact_id="a_exercise", tolerance="數學值2；本double結果精確2.0。")
+
+report = dict(
+    schema_version=1, review_stage="technical", lesson_id="W.4",
+    source="course/first-steps.md#W.4", reviewer_task=TASK, reviewer_context="fresh",
+    source_sha256=sha(OUT / "W.4-fresh-section-raw.txt"), figure_sha256={}, verdict="revise", reviewed_on="2026-10-03",
+    claims=claims, sources=sources, artifacts=artifacts,
+    issues=[dict(
+        claim_id="c23", status="contradicted", severity="minor",
+        details="「round(...,3)只把顯示值四捨五入到小數三位」沒有正確描述Python的正中間取偶數。官方契約為最近值、正中間取偶數。精確二進位輸入1.0625，Python取三位得1.062，傳統半入得1.063；本節原例與練習顯示值全正確。",
+        suggested_change="改成「round(...,3)把顯示值捨入到小數三位，正中間取偶數；這裡沒有改變代價定義。」",
+    )],
+    checks={
+        "factual_accuracy": dict(status="revise", details="47項原子主張完成核對；唯一矛盾為round一般規則的中文描述。", claim_ids=[item["id"] for item in claims]),
+        "numeric_verification": dict(status="pass", details="原例與加0.25練習分別親跑；成本、bit、22倍、聯合機率與總代價全部符合。", claim_ids=[item["id"] for item in claims if item["kind"] == "numeric"]),
+        "figure_consistency": dict(status="not_applicable", details="W.4及實際閱讀的W.1/W.2/1.7/1.8均無SVG引用。", claim_ids=[]),
+        "source_verification": dict(status="pass", details="親讀官方機率教材、Python3.13、SciPy1.16.1、GPT2官方PDF抽取文字及目前PyTorch官方固定SHA；公開保存自有筆記、版本、定位及下載SHA。", claim_ids=[item["id"] for item in claims]),
+        "limitations": dict(status="pass", details="已限定有限離散機率、正實數log與浮點近似、獨立例題及條件序列差別、one-hot/default mean。短CPU只驗本例；此節無正式實驗、GPU速度或訓練品質主張。", claim_ids=["c02", "c09", "c18", "c19", "c34", "c35", "c38", "c39", "c41", "c42", "c44", "c45"]),
+    },
+    scope_note="只審W.4自身##到下一##，非首節。直接必要前置已親讀並存raw SHA；未讀其他審閱或作者歷史。第8條無weights/cards來源；第9條無unified diff證據。",
+)
+(ROOT / "docs/technical-reviews/W.4.json").write_text(json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False) + "\n")
+print("W.4: wrote 47 claims, verdict revise; c23 contradicted.")

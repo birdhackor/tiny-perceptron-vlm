@@ -1,0 +1,135 @@
+from pathlib import Path
+import hashlib
+import json
+
+OUT = Path("docs/technical-reviews/artifacts")
+report = json.loads((OUT / "W.4-fresh-before-revision-report.json").read_text())
+
+
+def sha(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def artifact(identifier, name, kind, description, command=None, result=None, environment=None):
+    path = OUT / name
+    item = dict(id=identifier, kind=kind, path=path.as_posix(), sha256=sha(path), description=description)
+    if command:
+        item.update(command=command, result=result, environment=environment)
+    return item
+
+
+environment = json.loads((OUT / "W.4-recheck-original-environment.json").read_text())
+cpu_env = {
+    "python": environment["python"], "torch": environment["torch"], "device": "cpu",
+    "torch_git_version": environment["torch_git_version"], "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1",
+}
+plain_env = json.loads((OUT / "W.4-recheck-inline-output.json").read_text())["environment"]
+original_command = "OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 .venv/bin/python docs/review-tools/section_facts.py 'course/first-steps.md#W.4' --execute --timeout 45 --output /tmp/W.4-fresh-recheck-original"
+exercise_command = "OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1 TRANSFORMERS_OFFLINE=1 CUDA_VISIBLE_DEVICES='' .venv/bin/python docs/technical-reviews/artifacts/W.4-recheck-exercise-code.txt > docs/technical-reviews/artifacts/W.4-recheck-exercise-stdout.txt"
+inline_command = "OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1 TRANSFORMERS_OFFLINE=1 CUDA_VISIBLE_DEVICES='' .venv/bin/python docs/technical-reviews/artifacts/W.4-recheck-inline-code.txt > docs/technical-reviews/artifacts/W.4-recheck-inline-output.json"
+replace = {
+    "a_raw": artifact("a_raw", "W.4-recheck-section-raw.txt", "source_snapshot", "回查目前W.4完整raw UTF-8 bytes，末尾空行未trim；本人完整重新親讀。"),
+    "a_extract": artifact("a_extract", "W.4-recheck-extraction.json", "source_snapshot", "本次回查helper的current raw SHA、原fence SHA及無SVG事實。"),
+    "a_original_code": artifact("a_original_code", "W.4-recheck-original-code.txt", "code", "本次從目前raw提取的原始fence；與前輪byte-identical。"),
+    "a_original": artifact("a_original", "W.4-recheck-original-stdout.txt", "execution", "回查本人重新執行原例的三行真實輸出；guide direct CPU。", original_command, "exit 0，三行分別0.9 0.105 0.152；0.5 0.693 1.0；0.1 2.303 3.322。", cpu_env),
+    "a_original_stderr": artifact("a_original_stderr", "W.4-recheck-original-stderr.txt", "source_snapshot", "回查原例stderr仍為空；保存真bytes。"),
+    "a_original_env": artifact("a_original_env", "W.4-recheck-original-environment.json", "source_snapshot", "回查原例實際Python/PyTorch固定SHA及CPU/offline環境，沒有Notebook/kernel/Colab聲稱。"),
+    "a_original_meta": artifact("a_original_meta", "W.4-recheck-original-execution.json", "source_snapshot", "回查原例worker command argv、45秒上界、exit0及當次輸出SHA。"),
+    "a_exercise_code": artifact("a_exercise_code", "W.4-recheck-exercise-code.txt", "code", "從目前原始fence只在清單加入0.25的本次練習碼。"),
+    "a_exercise": artifact("a_exercise", "W.4-recheck-exercise-stdout.txt", "execution", "回查本人與原例分開重新執行練習，第四行0.25代價。", exercise_command, "exit0；前三行原例值相同，第四行0.25 1.386 2.0。", plain_env),
+    "a_prerequisites": artifact("a_prerequisites", "W.4-recheck-prerequisites.json", "source_snapshot", "直接前置current SHA與閱讀範圍；W.1有變已完整重讀，其餘三節byte未變；無SVG。"),
+}
+report["artifacts"] = [replace.get(item["id"], item) for item in report["artifacts"]]
+for item in report["artifacts"]:
+    if item["id"] == "a_checker":
+        item["description"] = "前輪revise的歷史checker輸出；對應完整before-revision-report，不是目前回查結果。"
+    elif item["id"] == "a_builder":
+        item["description"] = "前輪初審report builder歷史碼；保留前輪revise的完整生成記錄。"
+    elif item["id"] == "a_derivation":
+        item["description"] = "前輪親自數學推導；所有未變公式仍適用，第7點描述修訂前round問題，已於本回查resolve。"
+report["artifacts"] += [
+    artifact("a_history_report", "W.4-fresh-before-revision-report.json", "source_snapshot", "本人的完整原revise報告逐byte歷史快照，所有當時證據仍保留，沒有改寫歷史。"),
+    artifact("a_history_raw", "W.4-fresh-section-raw.txt", "source_snapshot", "本人的初審舊W.4原始raw bytes，對應前輪bfb0b2... SHA；未變動。"),
+    artifact("a_history_prerequisites", "W.4-fresh-prerequisites.json", "source_snapshot", "首次實讀必要前置的原始記錄；包括實讀舊W.1的1999d3... raw SHA。"),
+    artifact("a_revision_diff", "W.4-recheck-diff.json", "source_snapshot", "W.4完整unified diff以JSON字串保留，含原diff bytes SHA與舊新raw SHA；不trim必要空context prefix。"),
+    artifact("a_recheck_notes", "W.4-recheck-notes.json", "source_snapshot", "本人重讀全文、官方round原文、原反例、新增主張、作者receipt僅旁證及directCPU限制的自有回查筆記。"),
+    artifact("a_inline_code", "W.4-recheck-inline-code.txt", "code", "本人的新inline literal expression round(1.0625,3)及原反例CPU核對碼。"),
+    artifact("a_inline", "W.4-recheck-inline-output.json", "execution", "新增inline example及原反例由本人親跑，驗證精確二進位輸入、正中間取偶數。", inline_command, "exit0；literal round(1.0625,3)=1.062，傳統Decimal半入=1.063；input hex精確。", plain_env),
+    artifact("a_w1_prior_raw", "W.4-recheck-prerequisite-W.1-old-raw.txt", "source_snapshot", "本人首次實讀的舊W.1 raw；本次從本人實讀舊句重建，SHA吻合首次記錄，保存方法見對應diff。"),
+    artifact("a_w1_current_raw", "W.4-recheck-prerequisite-W.1-current-raw.txt", "source_snapshot", "必要前置新版W.1 raw，已由本人再次完整extract親讀；沒有SVG。"),
+    artifact("a_w1_diff", "W.4-recheck-prerequisite-W.1-diff.json", "source_snapshot", "W.1真實舊／新SHA、本人舊新版讀取方法、scope影響及lossless JSON編碼diff。"),
+    artifact("a_recheck_builder", "W.4-recheck-report-builder.txt", "code", "本人回查報告建置碼，保留舊報告、逐項更新受影響主張與新證據。"),
+]
+
+for source in report["sources"]:
+    if source["id"] == "s_round":
+        source["inspection_note"] += " 本回查再次親讀同一SHA原始官方文件round條目；新版已準確補最近值及正中間取偶數，見a_recheck_notes。"
+    elif source["id"] == "s_derivation":
+        source["details"] += "\n回查註：上文第7點記錄舊版問題；目前原文已修正，此原反例仍成立並用於核對新增inline。完整本人revise歷史保留a_history_report。\n"
+    elif source["id"] == "s_original":
+        source["title"] = "W.4目前原例由本人重新離線CPU執行"
+    elif source["id"] == "s_exercise":
+        source["title"] = "W.4目前練習由本人重新分開執行"
+report["sources"].append(dict(id="s_inline", kind="execution", title="W.4新增inline及本人原反例的回查執行", verified=True, artifact_id="a_inline"))
+
+claim = next(item for item in report["claims"] if item["id"] == "c23")
+claim.update(
+    statement="round(...,3)把本例顯示數字取成最接近的小數三位近似值。",
+    location="L121修訂後round說明第1句",
+    status="verified",
+    scope="本節標準浮點值與ndigits=3；一般正中間規則另由c48核對，十進位浮點不可精確表示的限制仍保留。",
+    evidence=[
+        dict(source_id="s_round", locator="round(number,ndigits=None)：closest multiple of10**(-ndigits)", supports="官方定義與目前最接近三位說法相符。"),
+        dict(source_id="s_original", locator="本次original三行stdout", supports="原例最近值三位顯示由本人重新執行。"),
+        dict(source_id="s_inline", locator="python_nearest_ties_to_even", supports="本人再跑官方規則與新inline的邊界值。"),
+    ],
+    artifact_ids=["a_sources", "a_recheck_notes", "a_original", "a_inline"],
+    verification=dict(method="executed", expected="本例三位最近值0.105/0.693/2.303；新增邊界例1.062", observed="原例三行與期望一致，inline round(1.0625,3)=1.062", details="原例與inline已分別親跑；round只作顯示參數，未改cost定義。"),
+)
+report["claims"] += [
+    dict(
+        id="c48", kind="software", statement="若恰位於两個候選值中間，Python round選最後一位是偶數者。",
+        location="L121修訂後round說明第2句", scope="本節正浮點、三位十進位捨入；精確中點1.0625可二進位表示，不外推所有寫出的十進位小數都是精確中點。",
+        status="verified", evidence=[
+            dict(source_id="s_round", locator="round條目equally close段", supports="官方明定正中間取偶數。"),
+            dict(source_id="s_inline", locator="candidate_decimal_values、input_hex、last_decimal_digit_selected", supports="本次精確中點CPU親跑取末位2。"),
+        ], artifact_ids=["a_sources", "a_recheck_notes", "a_inline", "a_inline_code"],
+        verification=dict(method="executed", expected="1.062與1.063正中間時取末位2的1.062", observed="1.062，input_hex=0x1.1000000000000p+0", details="官方文檔再親讀；literal round(1.0625,3)與Decimal半入對照，保存真環境。"),
+    ),
+    dict(
+        id="c49", kind="numeric", statement="新增inline round(1.0625,3)得到1.062。",
+        location="L121新增inline example", scope="本機CPython3.13.5的具體標準庫例子；只驗guide短直接CPU，不聲稱Notebook/kernel/Colab。",
+        status="verified", evidence=[
+            dict(source_id="s_round", locator="round：nearest and ties-to-even", supports="此字面值精確中點的介面規則。"),
+            dict(source_id="s_inline", locator="python_nearest_ties_to_even", supports="literal expression的真實回查結果。"),
+        ], artifact_ids=["a_recheck_notes", "a_inline", "a_inline_code"],
+        verification=dict(method="executed", expected="1.062", observed="1.062", tolerance="回傳float與字面float1.062精確相等；輸入1.0625精確二進位。", details="literal round(1.0625,3)親跑；1.062與1.063之十進位中點是1.0625，取偶数末位2。"),
+    ),
+]
+for item in report["issues"]:
+    if item["claim_id"] == "c23":
+        item["status"] = "resolved"
+        item["resolution"] = "本人重新完整親讀目前W.4：原四捨五入措辭改成最近三位近似，補正中間取偶數及round(1.0625,3)=1.062。本人再次讀官方round原文，重新分跑原例／練習／新增inline，結果一致。原revise報告與原raw未改，已另保留歷史。"
+report["verdict"] = "pass"
+report["source_sha256"] = sha(OUT / "W.4-recheck-section-raw.txt")
+report["reviewed_on"] = "2026-10-03"
+report["checks"]["factual_accuracy"] = dict(status="pass", details="重新完整親讀目前小節，49項主張核對完成；round描述已修正，兩項新增主張均經官方原文與本人短CPU核對。", claim_ids=[item["id"] for item in report["claims"]])
+report["checks"]["numeric_verification"] = dict(status="pass", details="本人重新分跑原例、0.25練習、新inline；49項中的數字都一致。未將作者receipt當作本人執行。", claim_ids=[item["id"] for item in report["claims"] if item["kind"] == "numeric"])
+report["checks"]["source_verification"]["details"] += " round原始官方條目本次再親讀；完整新舊W.4差異已核，其他來源及未變實質內容沿用本人前輪實核。"
+report["checks"]["source_verification"]["claim_ids"] = [item["id"] for item in report["claims"]]
+report["checks"]["limitations"]["claim_ids"] += ["c23", "c48", "c49"]
+report["checks"]["limitations"]["details"] += " 本次明列可精確二進位的中點與其他十進位浮點限制；只驗guide的直接CPU短例，沒有W.4.ipynb，未聲稱Notebook/kernel/Colab或全書離線。必要W.1新版已親讀，只作操作前置。"
+report["scope_note"] = "原task本人回查W.4自身##至下一##，非首節。完整親讀改文並核新增主張；原例／練習／inline各自親跑。直接前置新版W.1已再次親讀並保存真舊新raw/hash及必要scope，其餘前置未變。無SVG、無weights/cards、無導言；完整diff按第9條lossless JSON編碼。"
+report["revision_history"] = [dict(prior_verdict="revise", prior_source_sha256="bfb0b200958b916ddbadd9b69f7c1aaa1e614374aef5e7988071df6d2e9b1b4a", prior_report_artifact="a_history_report", changed_claim_ids=["c23", "c48", "c49"], result="本人重新核對後resolve，沒有機械只換hash。")]
+checker_path = OUT / "W.4-recheck-checker-output.txt"
+if checker_path.exists():
+    report["artifacts"].append(artifact(
+        "a_recheck_checker", checker_path.name, "execution", "本次指定W.4單節checker的真實輸出，格式與版本核對通過；不當成自動事實證明。",
+        "OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 .venv/bin/python scripts/check_technical_reviews.py --lesson W.4 > /tmp/W.4-recheck-checker-latest.txt",
+        "exit0，W.4唯一指定小節通過。", dict(python=environment["python"], device="cpu", torch="未使用；checker只用Python標準庫"),
+    ))
+text = json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
+for old, new in {"两個": "兩個", "偶数": "偶數"}.items():
+    text = text.replace(old, new)
+Path("docs/technical-reviews/W.4.json").write_text(text)
+print("W.4回查：49項主張、pass、c23 resolved，保留原revise歷史。")

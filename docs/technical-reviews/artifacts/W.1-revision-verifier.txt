@@ -1,0 +1,241 @@
+"""W.1 reviewer: inspect frozen receipts without launching kernels; run three bounded CPU cases."""
+import datetime
+import hashlib
+import importlib.metadata
+import json
+import os
+import platform
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path('/workspace/tiny-perceptron-vlm')
+ART = ROOT / 'docs/technical-reviews/artifacts'
+sha = lambda b: hashlib.sha256(b).hexdigest()
+now = lambda: datetime.datetime.now(datetime.timezone.utc).isoformat()
+started = now()
+assert os.environ['OMP_NUM_THREADS'] == os.environ['MKL_NUM_THREADS'] == '1'
+import torch
+torch.set_num_threads(1)
+assert torch.version.cuda is None
+ENV = {
+    'python': platform.python_version(), 'torch': torch.__version__,
+    'torch_source_commit': torch.version.git_version, 'device': 'cpu',
+    'platform': platform.platform(), 'OMP_NUM_THREADS': '1', 'MKL_NUM_THREADS': '1',
+    'ipykernel': importlib.metadata.version('ipykernel'),
+    'nbclient': importlib.metadata.version('nbclient'),
+    'nbformat': importlib.metadata.version('nbformat'),
+}
+
+def write(name, value):
+    target = ART / ('W.1-' + name + '.json')
+    assert not target.exists(), target
+    target.write_text(json.dumps(value, ensure_ascii=False, indent=2) + '\n')
+    return {'path': str(target.relative_to(ROOT)), 'sha256': sha(target.read_bytes())}
+
+def section(raw, lesson):
+    heads = list(re.finditer(rb'(?m)^## ([A-Z\d]+\.\d+) [^\r\n]+', raw))
+    for i, h in enumerate(heads):
+        if h[1].decode() == lesson:
+            return raw[h.start():heads[i + 1].start() if i + 1 < len(heads) else len(raw)]
+    raise ValueError(lesson)
+
+# This is a read-only inventory association, not an execution or a review of 222 lessons.
+original_path = ROOT / 'docs/validation-artifacts/reader-round-notebook-kernels.json'
+original_bytes = original_path.read_bytes()
+original = json.loads(original_bytes)
+assert original_bytes == (ART / 'W.1-frozen-kernel-receipt.json').read_bytes()
+assert original['result']['total'] == original['result']['passed'] == 222
+assert original['result']['failed'] == 0
+assert len(original['records']) == 222
+revisions = {}
+receipt_copies = []
+for lesson in ('2.1', '2.4', '3.1', '3.5', '5.11', '5.16', '5.6', '6.2', '7.13'):
+    path = ROOT / f'docs/validation-artifacts/technical-revision-{lesson}-kernel.json'
+    raw = path.read_bytes()
+    receipt = json.loads(raw)
+    assert receipt['result']['total'] == receipt['result']['passed'] == 1
+    assert receipt['result']['failed'] == 0
+    target = ART / f'W.1-cpu-{lesson}-receipt.json'
+    assert not target.exists()
+    target.write_bytes(raw)
+    saved = {'path': str(target.relative_to(ROOT)), 'sha256': sha(raw),
+             'original_path': str(path.relative_to(ROOT)), 'lesson_id': lesson}
+    receipt_copies.append(saved)
+    revisions[receipt['notebook']] = (receipt, saved)
+
+inventory = []
+programs = {}
+chapter_cache = {}
+for historical in original['records']:
+    path = ROOT / historical['notebook']
+    input_raw = path.read_bytes()
+    is_changed = sha(input_raw) != historical['input_sha256']
+    if is_changed:
+        receipt, copied = revisions[path.relative_to(ROOT).as_posix()]
+        entry = receipt
+        receipt_ref = copied
+    else:
+        assert historical['status'] == 'passed'
+        entry = historical
+        receipt_ref = {'path': 'docs/technical-reviews/artifacts/W.1-frozen-kernel-receipt.json',
+                       'sha256': sha(original_bytes)}
+    assert sha(input_raw) == entry['input_sha256'], path
+    executed_path = ROOT / 'outputs/notebooks-reader-round' / path.relative_to(ROOT / 'notebooks')
+    executed_raw = executed_path.read_bytes()
+    assert sha(executed_raw) == entry['executed_sha256'], executed_path
+    notebook = json.loads(input_raw)
+    executed = json.loads(executed_raw)
+    assert len(notebook['cells']) == len(executed['cells'])
+    assert notebook['metadata']['kernelspec']['name'] == 'tiny-perceptron'
+    assert notebook['metadata']['lesson_id'] == path.stem
+    cell_inspections = []
+    counts = 0
+    output_blocks = 0
+    demonstration_sources = []
+    for i, (input_cell, executed_cell) in enumerate(zip(notebook['cells'], executed['cells'])):
+        assert input_cell['cell_type'] == executed_cell['cell_type']
+        assert input_cell['source'] == executed_cell['source']
+        if input_cell['cell_type'] != 'code':
+            continue
+        counts += 1
+        source = ''.join(input_cell['source'])
+        source_sha = sha(source.encode())
+        programs[source_sha] = source
+        assert isinstance(executed_cell.get('execution_count'), int)
+        outputs = executed_cell.get('outputs', [])
+        assert all(o.get('output_type') != 'error' for o in outputs)
+        output_blocks += len(outputs)
+        output_inspections = []
+        for o in outputs:
+            reduced = {'output_type': o['output_type']}
+            if o['output_type'] == 'stream':
+                reduced.update(name=o.get('name'), text=o.get('text'))
+            if 'data' in o:
+                reduced['data'] = {}
+                for mime, value in o['data'].items():
+                    value_raw = json.dumps(value, ensure_ascii=False, separators=(',', ':')).encode()
+                    reduced['data'][mime] = {'json_sha256': sha(value_raw), 'json_bytes': len(value_raw)}
+                    if mime == 'text/plain':
+                        reduced['data'][mime]['value'] = value
+            output_inspections.append(reduced)
+        cell_inspections.append({'cell_index': i, 'source_sha256': source_sha,
+                                 'execution_count': executed_cell['execution_count'],
+                                 'outputs': output_inspections, 'error_outputs': 0})
+        metadata = input_cell.get('metadata', {})
+        if not metadata.get('course_setup') and not metadata.get('course_figure'):
+            demonstration_sources.append(source)
+    if 'code_cells' in entry:
+        assert counts == entry['code_cells']
+    if 'output_blocks' in entry:
+        assert output_blocks == entry['output_blocks']
+    chapter_path = ROOT / 'course/chapters' / (path.parent.name + '.md')
+    chapter_key = str(chapter_path.relative_to(ROOT))
+    if chapter_key not in chapter_cache:
+        chapter_cache[chapter_key] = chapter_path.read_bytes()
+    current_section = section(chapter_cache[chapter_key], path.stem)
+    # Match only Python programs. This does not inspect unrelated prose or SVG contents.
+    fences = re.findall(rb'\x60\x60\x60python\n(.*?)\x60\x60\x60', current_section, re.S)
+    authored_sources = [b.decode().strip().rstrip('\n') for b in fences]
+    assert demonstration_sources == authored_sources, path
+    inventory.append({
+        'lesson_id': path.stem, 'notebook': str(path.relative_to(ROOT)),
+        'source': chapter_key + '#' + path.stem, 'section_sha256': sha(current_section),
+        'chapter_file_sha256': sha(chapter_cache[chapter_key]),
+        'input_sha256': sha(input_raw), 'executed_original_path': str(executed_path.relative_to(ROOT)),
+        'executed_sha256': sha(executed_raw), 'receipt': receipt_ref,
+        'receipt_kind': 'specific_revision' if is_changed else 'original_222',
+        'all_cell_sources_equal': True, 'demonstration_code_equal_to_current_python_fences': True,
+        'demonstration_cells': len(demonstration_sources), 'code_cells': counts,
+        'output_blocks': output_blocks, 'code_cell_inspections': cell_inspections,
+        'error_outputs': 0,
+    })
+assert len({r['notebook'] for r in inventory}) == 222
+assert set(r['notebook'] for r in inventory if r['receipt_kind'] == 'specific_revision') == set(revisions)
+assert {str(p.relative_to(ROOT)) for p in (ROOT / 'notebooks').rglob('*.ipynb')} == {r['notebook'] for r in inventory}
+kernelspec_path = ROOT / '.venv/share/jupyter/kernels/tiny-perceptron/kernel.json'
+kernelspec_raw = kernelspec_path.read_bytes()
+kernelspec = json.loads(kernelspec_raw)
+assert kernelspec['argv'][0] == str(ROOT / '.venv/bin/python')
+coverage = {
+    'reviewer_task': '/root/technical_round_coordinator/technical_w_1_fresh',
+    'started_at': started, 'checked_at': now(),
+    'command': 'OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python docs/technical-reviews/artifacts/W.1-revision-verifier.txt',
+    'inspection_environment': ENV,
+    'scope': '本人唯讀逐條核原始執行紀錄、目前 input/executed raw SHA、全部 cell source、execution_count/no-error 與章節 Python fence 對應；沒有啟動任何 kernel、重跑全課排程或重生成 Notebook。只支持已備妥相依套件與檔案之本機小型示範，不支持全書離線、任意平台環境、正式訓練品質、GPU 或 Colab。',
+    'historical_environment': original['environment'],
+    'individual_revision_environment_limits': '前四個修訂 receipt 僅 command 保存 OMP/MKL=1、未逐份記 torch/python/platform；後五個記 Python3.13.5 與 OMP/MKL=1。原222 receipt 的完整 CPU 版本與目前 tiny-perceptron kernelspec/CPU 套件是共同環境脈絡，不冒稱前四個 receipt 自身記下完整版本。',
+    'historical_receipt_sha256': sha(original_bytes),
+    'historical_input_inventory_checkout': original['input_inventory_checkout'],
+    'historical_verification_checkout': original['verification_checkout'],
+    'correction_receipt_copies': receipt_copies,
+    'kernel_spec': {'original_path': str(kernelspec_path.relative_to(ROOT)), 'sha256': sha(kernelspec_raw), 'content': kernelspec},
+    'result': {'total_current_notebooks': 222, 'original_input_and_executed_matches': 213,
+               'specific_revision_input_and_executed_matches': 9,
+               'current_input_and_executed_matches': 222,
+               'code_cells': sum(r['code_cells'] for r in inventory),
+               'demonstration_cells': sum(r['demonstration_cells'] for r in inventory),
+               'all_cell_sources_equal': True, 'all_demonstration_code_matches_current_source': True,
+               'all_code_cells_have_execution_count': True, 'error_outputs': 0,
+               'kernels_launched_by_reviewer': 0},
+    'records': inventory, 'code_sources_by_sha256': programs,
+}
+coverage_saved = write('current-cpu-coverage', coverage)
+
+guide_path = ROOT / 'docs/validation-artifacts/technical-revision-W.1-guide-code.json'
+guide_raw = guide_path.read_bytes()
+guide = json.loads(guide_raw)
+guide_target = ART / 'W.1-guide-revision-receipt.json'
+assert not guide_target.exists()
+guide_target.write_bytes(guide_raw)
+body = section((ROOT / 'course/first-steps.md').read_bytes(), 'W.1')
+refbody = section((ROOT / 'course/chapters/01.md').read_bytes(), '1.1')
+assert sha(body) == guide['source_sha256']
+assert sha(refbody) == guide['reference']['source_sha256']
+assert sha((ROOT / 'scripts/check_env.py').read_bytes()) == guide['repository_sources']['scripts/check_env.py']
+example = re.findall(rb'\x60\x60\x60python\n(.*?)\n\x60\x60\x60', refbody, re.S)
+assert len(example) == 1
+expected_programs = {
+    'environment_check': 'import runpy\nrunpy.run_path("scripts/check_env.py", run_name="__main__")\n',
+    'referenced_original': example[0].decode(),
+    'guide_exercise_bird': example[0].decode().replace('text = "貓看狗，狗看貓。"', 'text = "鳥看狗，狗看鳥。"'),
+}
+guard = '''import sys
+def guard(event, args):
+    if event.startswith('socket.') or event in ('subprocess.Popen', 'os.system'):
+        raise RuntimeError('W.1 bounded offline CPU guard denied ' + event)
+sys.addaudithook(guard)
+'''
+cases = []
+for record in guide['records']:
+    program = record['program']
+    assert program == expected_programs[record['case']]
+    assert sha(program.encode()) == record['program_sha256']
+    guarded = guard + 'exec(compile(' + repr(program) + ', "W.1:' + record['case'] + '", "exec"))\n'
+    command = [str(ROOT / '.venv/bin/python'), '-c', guarded]
+    run = subprocess.run(command, cwd=ROOT, env={**os.environ, 'PYTHONDONTWRITEBYTECODE': '1'},
+                         capture_output=True, text=True, timeout=60)
+    assert run.returncode == 0, (record['case'], run.stderr)
+    assert run.stdout == record['stdout'], (record['case'], run.stdout)
+    assert run.stderr == record['stderr'] == ''
+    cases.append({'case': record['case'], 'program': program, 'program_sha256': sha(program.encode()),
+                  'executed_program': guarded, 'executed_program_sha256': sha(guarded.encode()),
+                  'command': command, 'exit_code': run.returncode, 'stdout': run.stdout,
+                  'stderr': run.stderr, 'matches_existing_receipt': True,
+                  'offline_guard': 'Python audit hook rejects all socket events and subprocess.Popen/os.system in child; no rejected event occurred.'})
+assert len(cases) == 3
+assert section((ROOT / 'course/first-steps.md').read_bytes(), 'W.1') == body
+execution = {
+    'reviewer_task': '/root/technical_round_coordinator/technical_w_1_fresh',
+    'checked_at': now(), 'command': coverage['command'], 'environment': ENV,
+    'source_sha256': sha(body), 'reference_source_sha256': sha(refbody),
+    'existing_guide_receipt': {'original_path': str(guide_path.relative_to(ROOT)),
+                             'path': str(guide_target.relative_to(ROOT)), 'sha256': sha(guide_raw)},
+    'result': {'total': 3, 'passed': 3, 'failed': 0}, 'cases': cases,
+    'scope': '本人在三個獨立離線 audit-guard CPU 子程序跑環境檢查、1.1 原句、W.1 指定鳥句練習；原輸入程式與既有3/3 receipt 逐字相同，stdout 全同。沒有指南 Notebook、瀏覽器 UI、Colab、安裝或全书離線驗證。',
+}
+execution_saved = write('revision-self-execution', execution)
+print(json.dumps({'coverage': coverage_saved, 'coverage_result': coverage['result'],
+                  'self_execution': execution_saved, 'self_execution_result': execution['result'],
+                  'guide_copy_sha256': sha(guide_raw)}, ensure_ascii=False))
