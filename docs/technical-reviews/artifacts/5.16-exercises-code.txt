@@ -1,0 +1,49 @@
+import json
+import platform
+import socket
+import torch
+from tiny_perceptron.data import IGNORE, pad_batch
+from tiny_perceptron.model import loss_sum
+
+def reject_network(*args, **kwargs):
+    raise RuntimeError("offline review: network disabled")
+
+socket.socket = reject_network
+torch.set_num_threads(1)
+torch.set_num_interop_threads(1)
+print(json.dumps({"environment": {"python": platform.python_version(), "torch": torch.__version__, "device": "cpu", "threads": str(torch.get_num_threads())}}, ensure_ascii=False))
+
+def exercise(name, counts, lengths, expected):
+    tokens = {}
+    for source in counts:
+        tokens[source] = counts[source] * lengths[source]
+    total = sum(tokens.values())
+    ratios = {source: amount / total for source, amount in tokens.items()}
+    assert tokens == expected
+    print(json.dumps({"case": name, "counts": counts, "lengths": lengths, "tokens": tokens, "total": total, "ratios": ratios}, ensure_ascii=False))
+
+exercise("練習一：只把長答長度改1", {"短答":90,"長答":10}, {"短答":1,"長答":1}, {"短答":90,"長答":10})
+exercise("練習二：恢复長20並把長答筆數改5", {"短答":90,"長答":5}, {"短答":1,"長答":20}, {"短答":90,"長答":100})
+exercise("數學檢查：180倍筆數", {"短答":180,"長答":1}, {"短答":1,"長答":20}, {"短答":180,"長答":20})
+
+# 100筆、每筆21格輸入，答案label長度為1或20；忽略其餘位置。
+examples = []
+for index in range(100):
+    n = 1 if index < 90 else 20
+    inputs = torch.zeros(21, dtype=torch.long)
+    labels = torch.full((21,), IGNORE, dtype=torch.long)
+    labels[:n] = 1
+    examples.append((inputs, labels))
+x, y, valid = pad_batch(examples)
+logits = torch.zeros(100, 21, 5, dtype=torch.float64)
+summed, count = loss_sum(logits, y)
+unreduced = torch.nn.functional.cross_entropy(logits.reshape(-1, 5), y.reshape(-1), ignore_index=IGNORE, reduction="none").reshape_as(y)
+raw_counts = [int((y[:90] != IGNORE).sum()), int((y[90:] != IGNORE).sum())]
+weights = torch.ones_like(unreduced)
+weights[:90] = 20
+weighted_sums = [float((unreduced[:90] * weights[:90]).sum()), float((unreduced[90:] * weights[90:]).sum())]
+weighted_shares = [v / sum(weighted_sums) for v in weighted_sums]
+assert raw_counts == [90, 200] and int(count) == 290
+assert abs(weighted_shares[0] - 0.9) < 1e-12
+assert abs(weighted_shares[1] - 0.1) < 1e-12
+print(json.dumps({"case":"反例：只改loss權重", "tensor_shape":list(y.shape), "valid_input_cells":int(valid.sum()), "effective_labels_before":raw_counts,"effective_labels_after": [int((y[:90] != IGNORE).sum()), int((y[90:] != IGNORE).sum())], "raw_token_shares":[v / int(count) for v in raw_counts],"source_loss_weights":[20,1],"weighted_loss_shares":weighted_shares,"scope":"使用相同均勻 logits 使每有效位置 CE 相同；示範權重可改加權 loss 份額，但不改原始 token 份額；不代表一般梯度或品質。"}, ensure_ascii=False))

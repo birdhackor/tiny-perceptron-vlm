@@ -1,0 +1,104 @@
+"""5.11：離線、有界 CPU 核對；不訓練模型、不讀訓練資料。"""
+import contextlib
+import hashlib
+import io
+import json
+import os
+from pathlib import Path
+import platform
+import random
+import re
+import sys
+
+ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(ROOT))
+
+def guard(event, args):
+    if event.startswith("socket.") or event in {"subprocess.Popen", "os.system"}:
+        raise RuntimeError("offline CPU review blocks network and child processes")
+
+sys.addaudithook(guard)
+import torch
+torch.set_num_threads(1)
+from tiny_perceptron.data import fingerprint
+from scripts.course_experiments.text import _deduplicate_text
+from scripts.course_experiments.common import split_records
+
+print(json.dumps({"environment": {"python": platform.python_version(), "torch": torch.__version__, "device": "cpu", "OMP_NUM_THREADS": os.environ.get("OMP_NUM_THREADS"), "MKL_NUM_THREADS": os.environ.get("MKL_NUM_THREADS"), "network": "audit-guard blocked"}}, ensure_ascii=False))
+raw = (ROOT / "docs/technical-reviews/artifacts/5.11-section-raw.txt").read_bytes()
+fence = re.findall(r"```python\n(.*?)```", raw.decode(), re.S)[0]
+
+def run_case(name, program):
+    namespace = {}
+    output = io.StringIO()
+    error = None
+    with contextlib.redirect_stdout(output):
+        try:
+            exec(compile(program, name, "exec"), namespace)
+        except AssertionError:
+            error = "AssertionError"
+    hashes = namespace["hashes"]
+    record = {"case": name, "stdout": output.getvalue(), "error": error, "normalized": namespace["normalized"], "distinct_hashes": len(set(hashes)), "hashes": hashes, "first_two_equal": hashes[0] == hashes[1]}
+    print(json.dumps(record, ensure_ascii=False))
+    return record
+
+original = run_case("original", fence)
+assert original["distinct_hashes"] == 2 and original["error"] is None
+changed = fence.replace('"貓 看狗"', '"鳥 看狗"', 1)
+stale = run_case("exercise_stale_assert", changed)
+assert stale["distinct_hashes"] == 3 and stale["error"] == "AssertionError"
+corrected = run_case("exercise_corrected_assert", changed.replace("assert hashes[0] == hashes[1]", "assert hashes[0] != hashes[1]"))
+assert corrected["distinct_hashes"] == 3 and corrected["error"] is None
+extra_space = run_case("exercise_extra_space", fence.replace('"貓 看狗"', '"貓   看狗"', 1))
+assert extra_space["distinct_hashes"] == 2 and extra_space["error"] is None
+
+whitespace = " \t貓\n\n看狗 \u3000"
+normalized = " ".join(whitespace.split())
+assert normalized == "貓 看狗" and fingerprint(whitespace) == fingerprint("貓 看狗")
+assert fingerprint("貓看狗") != fingerprint("貓 看狗")
+assert " ".join("貓，  看狗！".split()) == "貓， 看狗！"
+print(json.dumps({"whitespace_case": repr(whitespace), "normalized": normalized, "no_space_vs_one_space_different": True, "punctuation_retained": True}, ensure_ascii=False))
+
+left = fingerprint("貓 看狗")
+right = fingerprint("鳥 看狗")
+print(json.dumps({"sha256_digest_bytes": hashlib.sha256(b"").digest_size, "hex_characters": len(left), "alphabet": sorted(set(left)), "one_character_change": {"changed_hex_positions": sum(a != b for a, b in zip(left, right)), "changed_bits": (int(left, 16) ^ int(right, 16)).bit_count()}}, ensure_ascii=False))
+assert len(left) == 64 and set(left) <= set("0123456789abcdef")
+seen = {}
+for number in range(100):
+    text = f"文件 {number}"
+    full = fingerprint(text)
+    if full[:1] in seen:
+        prior_text, prior_full = seen[full[:1]]
+        assert text != prior_text and full != prior_full
+        print(json.dumps({"short_prefix_collision": {"texts": [prior_text, text], "one_hex_prefix": full[:1], "full_digests_different": True}}, ensure_ascii=False))
+        break
+    seen[full[:1]] = text, full
+else:
+    raise AssertionError("pigeonhole bound was not met")
+
+rows = [{"text": "貓  看狗\n", "id": 1}, {"text": "貓 看狗", "id": 2}, {"text": "狗 看貓", "id": 3}, {"text": "鳥 看狗", "id": 4}]
+unique = _deduplicate_text(rows)
+assert len(unique) == 3 and unique[0]["text"] == rows[0]["text"]
+assert unique[0]["family"] == fingerprint(rows[0]["text"])
+parts = split_records(unique, seed=42)
+assert sum(map(len, parts.values())) == 3
+print(json.dumps({"actual_dedup": {"input": 4, "output": 3, "first_raw_text_preserved": unique[0]["text"], "normalized_text_set_is_dedup_key": True, "family_is_full_sha256": True, "split_counts": {key: len(value) for key, value in parts.items()}}}, ensure_ascii=False))
+
+copies = ["A"] * 100 + ["B"]
+sampled = random.Random(42).choices(copies, k=128)
+print(json.dumps({"sampling_counterexample": {"copies_A": 100, "copies_B": 1, "probability_A": 100 / 101, "batch_size": 16, "optimizer_steps_configured": 8, "draws": 128, "observed_A_draws": sampled.count("A"), "observed_B_draws": sampled.count("B"), "scope": "只抽样；未建立或更新模型。資料複本數不等於optimizer更新次數。"}}, ensure_ascii=False))
+
+path = ROOT / "docs/course-experiments/results/real_text.json"
+result = json.loads(path.read_bytes())
+record = {key: result[key] for key in ("experiment_id", "revision", "device", "seed", "torch_version", "python_version", "gpu", "step_scale", "evidence_status", "status")}
+record["result_file_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+record["source_hashes"] = result["code_sha256"]
+record["runs"] = {}
+for name, run in result["results"]["runs"].items():
+    splits = {split: run["data"][split] for split in ("train", "validation", "test")}
+    assert sum(item["records"] for item in splits.values()) == run["deduplicated_records"]
+    expected = 512 if name == "tinystories" else 365
+    assert run["source_records"] == run["deduplicated_records"] == expected
+    record["runs"][name] = {"source_records": run["source_records"], "deduplicated_records": run["deduplicated_records"], "removed": run["source_records"] - run["deduplicated_records"], "data": splits, "training": {key: run["training"][key] for key in ("steps", "records", "parameters", "effective_tokens")}, "split_warning": run["split_warning"], "source_revision": run["source_revision"]}
+print(json.dumps({"frozen_result_inspection": record}, ensure_ascii=False))
+print("ALL BOUNDED CPU CHECKS PASSED; ORIGINAL EXERCISE ASSERT FAILED AS PREDICTED")

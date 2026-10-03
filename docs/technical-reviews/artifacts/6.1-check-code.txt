@@ -1,0 +1,81 @@
+import codecs
+import hashlib
+import json
+import os
+import platform
+import re
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(ROOT))
+
+def audit(event, args):
+    if event.startswith(("socket.", "subprocess.")) or event in ("os.system", "os.posix_spawn"):
+        raise RuntimeError("offline bounded CPU audit: " + event)
+
+sys.addaudithook(audit)
+import torch
+from tiny_perceptron.attention import manual_attention
+from tiny_perceptron.data import ByteTokenizer
+
+torch.set_num_threads(1)
+environment = {"python": platform.python_version(), "torch": torch.__version__, "torch_git_version": torch.version.git_version, "device": "cpu", "threads": str(torch.get_num_threads()), "OMP_NUM_THREADS": os.environ.get("OMP_NUM_THREADS", ""), "MKL_NUM_THREADS": os.environ.get("MKL_NUM_THREADS", ""), "network": "audit guard rejects socket/subprocess"}
+mode = sys.argv[1]
+print(json.dumps({"mode": mode, "environment": environment}, ensure_ascii=False))
+
+if mode in ("exercise-cat", "exercise-cat-to-cat"):
+    texts = ["小小貓", "cat", "🙂", "cat🙂" if mode == "exercise-cat" else "貓🙂"]
+    for text in texts:
+        raw = text.encode("utf-8")
+        print(text, "Unicode碼點", len(text), "UTF-8 bytes", len(raw))
+    expected = (4, 7) if mode == "exercise-cat" else (2, 7)
+    assert (len(texts[-1]), len(texts[-1].encode("utf-8"))) == expected
+elif mode == "bounded-verification":
+    print("units", json.dumps({text: {"codepoints": len(text), "bytes": len(text.encode("utf-8")), "ord_hex": [hex(ord(x)) for x in text], "raw_hex": text.encode("utf-8").hex()} for text in ["貓看狗", "perceptron", "小小貓", "cat", "🙂", "e\u0301", "👩\u200d💻"]}, ensure_ascii=False))
+    tok = ByteTokenizer()
+    for text in ["小小貓", "cat🙂", "貓🙂", "𠀀", "e\u0301", "<assistant>"]:
+        ids = tok.encode(text)
+        assert len(ids) == len(text.encode("utf-8"))
+        assert tok.decode(ids) == text
+        assert not set(ids).intersection(range(8))
+    print("byte_roundtrip", "六組有效Unicode字串，內容ID在8..263，還原精確")
+    for T in [3, 9]:
+        q = torch.zeros(1, 1, T, 2)
+        out, weights = manual_attention(q, q, torch.ones_like(q), torch.ones(T, T, dtype=torch.bool).tril()[None, None])
+        assert weights.numel() == T * T
+        print("attention", json.dumps({"T": T, "weight_shape": list(weights.shape), "weight_elements": weights.numel(), "allowed_elements": int((weights > 0).sum())}))
+    emb = torch.nn.Embedding(5, 3)
+    assert emb.weight.numel() == 15
+    print("embedding", json.dumps({"shape": list(emb.weight.shape), "parameters": emb.weight.numel(), "output_shape": list(emb(torch.tensor([[1, 2, 1]])).shape)}))
+    for path, lesson in [("course/chapters/01.md", "1.1"), ("course/chapters/02.md", "2.1"), ("course/chapters/03.md", "3.6")]:
+        source = (ROOT / path).read_text()
+        heads = list(re.finditer(r"(?m)^## ([A-Z\d]+\.\d+) [^\n]+", source))
+        i = next(i for i, h in enumerate(heads) if h[1] == lesson)
+        section = source[heads[i].start():heads[i + 1].start() if i + 1 < len(heads) else len(source)]
+        code = re.search(r"```python\n(.*?)```", section, re.S)[1]
+        print("prerequisite_original", lesson)
+        exec(compile(code, path + "#" + lesson, "exec"), {})
+    p = ROOT / "docs/course-experiments/results/real_text.json"
+    d = json.loads(p.read_text())
+    r = d["results"]["runs"]["chinese-poetry"]
+    s = next(s for s in r["after"]["validation"]["samples"] if s["prompt"] == "渡漢江\n李頻\n嶺外")
+    ids = s["generated_ids"]
+    raw = bytes(i - 8 for i in ids)
+    incremental = codecs.getincrementaldecoder("utf-8")("strict")
+    prefix = incremental.decode(raw, final=False)
+    pending = incremental.getstate()[0]
+    assert len(ids) == len(raw) == 32
+    assert s["generated"] == tok.decode(ids) == "孟沙，天夜天天天天春�"
+    assert len(s["prompt"].encode("utf-8")) == 23
+    assert len(pending) == 2 and pending.hex() == "e5a4"
+    assert len(prefix.encode("utf-8")) == 30 and "�" not in prefix
+    assert (raw + bytes([0xa9])).decode("utf-8") == prefix + "天"
+    print("frozen_generation_byte_analysis", json.dumps({"result_file_sha256": hashlib.sha256(p.read_bytes()).hexdigest(), "revision": d["revision"], "seed": d["seed"], "device": d["device"], "torch": d["torch_version"], "gpu": d["gpu"], "training_steps": r["training"]["steps"], "training_effective_tokens": r["training"]["effective_tokens"], "validation_records": r["after"]["validation"]["records"], "validation_loss_denominator": r["after"]["validation"]["effective_tokens"], "generation_record_index": 7, "generation_records": len(r["after"]["validation"]["samples"]), "prompt": s["prompt"], "prompt_bytes": 23, "generated_ids": ids, "generated": s["generated"], "generated_bytes": list(raw), "generated_byte_count": len(raw), "valid_prefix": prefix, "valid_prefix_codepoints": len(prefix), "pending_hex": pending.hex(), "eos": tok.eos_id in ids, "one_possible_completed_suffix": "天", "repeated_tian_count": prefix.count("天"), "scope": "只解碼凍結生成ID，不載入權重、不重新生成、不重跑訓練"}, ensure_ascii=False))
+    for key in ["scripts/course_experiments/common.py", "scripts/course_experiments/text.py", "tiny_perceptron/model.py", "tiny_perceptron/data.py"]:
+        h = hashlib.sha256((ROOT / key).read_bytes()).hexdigest()
+        assert h == d["code_sha256"][key]
+        print("frozen_code_sha_match", key, h)
+else:
+    raise ValueError(mode)
+print("result", "PASS")

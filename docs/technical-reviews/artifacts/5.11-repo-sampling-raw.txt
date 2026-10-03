@@ -1,0 +1,24 @@
+def fit_lm(
+    model, records, ctx, mode="text", steps=600, batch_size=16, lr=0.003, auxiliary=0.01, name="model", tokenizer=None
+):
+    examples = text_examples(records, mode, model.config.max_length, tokenizer)
+    initial = _nll(model, examples)
+    optimizer = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=lr)
+    sampler = random.Random(ctx.seed)
+    history, effective_tokens = [], 0
+    model.train()
+    _sync(ctx.device)
+    started = time.perf_counter()
+    for step in range(steps):
+        batch = sampler.choices(examples, k=batch_size)
+        x, y, valid = (t.to(ctx.device) for t in pad_batch(batch))
+        optimizer.zero_grad(set_to_none=True)
+        result = model(x, valid=valid)
+        loss = masked_loss(result["logits"], y) + auxiliary * result["auxiliary"]
+        if not torch.isfinite(loss):
+            raise FloatingPointError(f"Nonfinite training loss at step {step + 1}")
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0, error_if_nonfinite=True)
+        optimizer.step()
+        effective_tokens += int((y != IGNORE).sum())
+        if step == 0 or (step + 1) % max(1, steps // 10) == 0:

@@ -1,0 +1,38 @@
+import hashlib
+import json
+import platform
+from pathlib import Path
+import socket
+import torch
+
+def reject_network(*args, **kwargs):
+    raise RuntimeError("offline review: network disabled")
+
+socket.socket = reject_network
+torch.set_num_threads(1)
+root = Path.cwd()
+source = root / "docs/course-experiments/results/sft_ablation.json"
+raw = source.read_bytes()
+report = json.loads(raw)
+result = report["results"]
+needed = ["tiny_perceptron/model.py", "tiny_perceptron/data.py", "scripts/course_experiments/common.py", "scripts/course_experiments/text.py"]
+versions = {}
+for path in needed:
+    observed = hashlib.sha256((root / path).read_bytes()).hexdigest()
+    assert observed == report["code_sha256"][path]
+    versions[path] = {"observed_sha256":observed,"frozen_sha256":report["code_sha256"][path],"matches":True}
+runs = {}
+for name, expected in [("b-only",18453),("replay",36384)]:
+    row = result["runs"][name]
+    training = row["training"]
+    assert training["steps"] == 500 and training["effective_tokens"] == expected
+    runs[name] = {"training":training,"source_records":row["source_records"],"evaluations": {task:{split:{key:value for key,value in info.items() if key != "samples"} for split,info in row[task].items()} for task in ["A_attributes","B_arithmetic"]}}
+common=(root/"scripts/course_experiments/common.py").read_text()
+text=(root/"scripts/course_experiments/text.py").read_text()
+assert 'steps=600, batch_size=16, lr=0.003' in common
+assert 'batch = sampler.choices(examples, k=batch_size)' in common
+assert 'effective_tokens += int((y != IGNORE).sum())' in common
+assert 'steps=_steps(ctx, 500), name=name' in text
+assert 'model = copy.deepcopy(base)' in text
+assert 'attributes["train"] + arithmetic["train"]' in text
+print(json.dumps({"environment":{"python":platform.python_version(),"torch":torch.__version__,"device":"cpu","threads":str(torch.get_num_threads())}, "scope":"僅離線讀取、斷言與算術核對正式凍結記錄及配置；未重新訓練、生成、下載資料或執行GPU。正式結果仍為單seed42、NVIDIA L4、PyTorch2.14.1+cu126的原始量測。", "result_path":str(source.relative_to(root)), "result_sha256":hashlib.sha256(raw).hexdigest(),"frozen_revision":report["revision"],"frozen_environment":{key:report[key] for key in ["seed","device","gpu","torch_version","python_version","step_scale","evidence_status"]},"code_versions":versions,"data":result["data"],"runs":runs,"config_from_hash_matched_source":{"updates_each":500,"batch_size":16,"sampled_records_each":8000,"learning_rate":0.003,"sampling":"random.Random(seed).choices with replacement", "loss_denominator":"labels != IGNORE per update","same_base":"copy.deepcopy(base) for each branch"},"token_ratio_replay_over_b_only":36384/18453,"token_increase_fraction":(36384-18453)/18453,"matched_budget":result["matched_budget"]},ensure_ascii=False,indent=2))

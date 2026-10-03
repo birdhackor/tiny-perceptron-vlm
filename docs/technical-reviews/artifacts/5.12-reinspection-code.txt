@@ -1,0 +1,87 @@
+from pathlib import Path
+from fractions import Fraction
+import difflib
+import hashlib
+import json
+import re
+import sys
+import torch
+
+base = Path("docs/technical-reviews/artifacts")
+raw = Path("course/chapters/05.md").read_bytes()
+headers = list(re.finditer(rb"(?m)^## ([A-Z\d]+\.\d+) [^\r\n]+", raw))
+
+def extract(identifier):
+    index = next(i for i, h in enumerate(headers) if h[1].decode() == identifier)
+    end = headers[index + 1].start() if index + 1 < len(headers) else len(raw)
+    return raw[headers[index].start():end]
+
+def digest(content):
+    return hashlib.sha256(content).hexdigest()
+
+previous = (base / "5.12-prerequisite-5.11.txt").read_bytes()
+current = extract("5.11")
+body = extract("5.12")
+assert digest(previous) == "d0d51110437dd1bd23e05182f8b38c24210fa5f95648d22f43b86bd9f16b8042"
+assert digest(current) == "b48199a023ef77bab327a8ad1c23e4de1606f0060084ddbcf7622082da17bd34"
+assert body == (base / "5.12-section.txt").read_bytes()
+fence = re.search(rb"```python\n(.*?)```", body, flags=re.S)[1]
+assert fence == (base / "5.12-original-code.txt").read_bytes()
+assert (base / "5.12-exercise-code.txt").read_bytes() == fence.replace("grams(\"紅色圓形在左邊\")".encode(), "grams(\"紅色圓形在左邊\", n=3)".encode()).replace("grams(\"紅色圓形在右邊\")".encode(), "grams(\"紅色圓形在右邊\", n=3)".encode())
+report = json.loads(Path("docs/technical-reviews/5.12.json").read_bytes())
+unchanged_evidence = {}
+for artifact in report["artifacts"]:
+    if artifact["id"] in ("a3", "a6", "a8", "a15"):
+        actual = digest(Path(artifact["path"]).read_bytes())
+        assert actual == artifact["sha256"]
+        unchanged_evidence[artifact["id"]] = {"path": artifact["path"], "sha256": actual, "matches_previous_report": True}
+code_identity = {}
+for source in report["sources"]:
+    if source["kind"] == "repository_code":
+        actual = digest(Path(source["path"]).read_bytes())
+        assert actual == source["sha256"]
+        code_identity[source["path"]] = {"sha256": actual, "unchanged": True}
+formal = json.loads(Path("docs/course-experiments/results/real_text.json").read_bytes())
+asset_identity = {}
+for asset in formal["assets"]:
+    actual = digest(Path(asset["archive"]).read_bytes())
+    assert actual == asset["archive_sha256"]
+    asset_identity[asset["id"]] = {"archive": asset["archive"], "sha256": actual, "matches_frozen_report": True}
+
+historical = base / "5.12-prerequisite-5.11-before-update.txt"
+assert not historical.exists()
+historical.write_bytes(previous)
+(base / "5.12-prerequisite-5.11.txt").write_bytes(current)
+p1, p100 = Fraction(1, 901), Fraction(100, 1000)
+result = {
+    "reviewer_task": "/root/technical_round_coordinator/technical_5_12_fresh",
+    "reinspected_on": "2026-10-03",
+    "environment": {"python": sys.version, "torch": torch.__version__, "torch_git_version": torch.version.git_version, "device": "cpu", "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1", "torch_threads": str(torch.get_num_threads())},
+    "read_scope": "本人完整親讀當前精確5.11及5.12，並回讀原碼 _deduplicate_text、fit_lm；不讀他人審閱或作者歷史。此檔的diff只來自本人先前保留的5.11原始bytes與當前原始bytes。",
+    "previous_prerequisite_sha256": digest(previous),
+    "current_prerequisite_sha256": digest(current),
+    "previous_raw_path": historical.as_posix(),
+    "current_raw_path": (base / "5.12-prerequisite-5.11.txt").as_posix(),
+    "own_source_sha256": digest(body),
+    "own_source_bytes_unchanged": True,
+    "own_original_fence_bytes_unchanged": True,
+    "own_exercise_bytes_unchanged": True,
+    "new_figures": [],
+    "diff": "".join(difflib.unified_diff(previous.decode().splitlines(True), current.decode().splitlines(True), fromfile="本人先前已讀5.11", tofile="本人本次親讀5.11")),
+    "changes_and_effects": [
+        {"location": "5.11首段", "change": "區分副本數、抽樣出現機會與參數更新次數，並加上每筆等機率的條件。", "inspection": "5.12沒有把副本數換算成optimizer更新數；c2/c3只是資料結構重疊與分組風險，條件未被改變。common.fit_lm在for step in range(steps)內一次optimizer.step()，每步從編碼後windows抽batch_size個例子。", "scope": "一般均勻記錄抽樣的條件不能改說成real_text對每篇文件均勻抽樣；正式實驗抽的是窗口，不同文件可有不同窗口數。"},
+        {"location": "5.11真實文字實驗段", "change": "完整合併空白文字先判重，保留記錄後才加完整SHA作family標籤並切分。", "inspection": "親讀text._deduplicate_text：key為完整正規化str，seen存key；result.append把hash加為family。此更精確描述與原報告s10/c29相符。c1指正文獨立fingerprint算例，c30/c31仍只支持完整文字分組及固定切分交集0。", "scope": "沒有新增近重複聚類；c32/c33不排除近重複污染的限制仍成立。"},
+        {"location": "5.12全部39項主張", "change": "5.12原始正文、原例與n=3練習皆未變；正式報告、原碼與資料包亦未變。", "inspection": "逐項回看原主張與成立範圍，數值4/8=.5及3/7約.429與現存執行證據仍有效；完整文字／近重複之區別及單seed小批留出範圍仍相符。", "scope": "保留未變實跑證據，不重跑原例、正式實驗或訓練。"}
+    ],
+    "transparent_sampling_derivation": {
+        "assumptions": "有m份相同句的副本及K份其他記錄，每筆等機率、固定每步B次抽取；只是核對更新前置的條件，不是real_text sampling估計。",
+        "formula": "p=m/(m+K)。S步、每步B筆，抽樣槽位有S*B個，參數更新數仍是S。",
+        "example": {"other_records_K": 900, "p_single_copy_exact": str(p1), "p_single_copy_float": float(p1), "p_100_copies_exact": str(p100), "p_100_copies_float": float(p100), "steps": 800, "batch_size": 16, "sample_slots": 800 * 16, "parameter_updates": 800},
+        "result": "相同內容的抽到機率可因副本變大；100個副本本身不推出100次參數更新。"
+    },
+    "unchanged_execution_and_formal_evidence": unchanged_evidence,
+    "unchanged_repository_code": code_identity,
+    "current_assets_match_frozen_sha256": asset_identity,
+    "decision": "原39項主張仍verified；verdict維持pass，issues空。補強c2/c29/c30/c31/c33的條件與回查定位。",
+}
+print(json.dumps(result, ensure_ascii=False, indent=2))

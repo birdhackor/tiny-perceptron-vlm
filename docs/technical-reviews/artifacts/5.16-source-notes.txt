@@ -1,0 +1,39 @@
+5.16 原始來源與推導核對筆記
+審閱者：/root/technical_round_coordinator/technical_5_16_fresh
+實際讀取日期：2026-10-03 UTC。
+
+一、DoReMi 原論文
+URL：https://arxiv.org/pdf/2305.10429v1
+版本：arXiv:2305.10429v1，2023-05-17。
+下載原PDF SHA-256：f5e6259b67baea3f28e7eefb3ce4063d01e0e40f7fbd2dfbdda403857ff3fb44。
+親讀：第1頁腳註1；第3頁Section2 Setup；第4頁Eq.(1)、Steps2–3與Details for Step2；第5頁Algorithm1；第6頁Section3.1 Training setup及Evaluation。
+自有核對筆記：來源類別為domain i，alpha是抽來源的機率，P_alpha=sum_i alpha_i unif(D_i)。這個定義區別「資料來源／抽樣」與模型參數。Eq.(1)以各來源全部token長度之和作分母，乘來源權重alpha_i；這是加權目標的定義。代理訓練每步在固定取樣的小批上改權重，再把平均權重交給新資料分佈重新抽样；因此「重新抽資料」與「同批資料上的loss權重」是兩種不同操作，不能說後者改了已取出的label個數。Algorithm1顯式將每域loss除以域內token總長度，並每步調權重，支持分域監督分母與階段混合可變。Section3.1按held-out域逐個量perplexity，並明示token量／步數／batch及長度上限。论文使用預訓練所有token，沒有替本課SFT答案mask設規則；本課的答案mask另核對原碼。
+
+二、GPT-3 原論文（補充抽樣与資料庫份额的區別）
+URL：https://arxiv.org/pdf/2005.14165v4
+版本：arXiv:2005.14165v4。
+親讀既有原PDF轉文字：Section2.2，第8–9頁、Table2.2；AppendixB，第43頁。
+原PDF SHA-256：97fd272f1fdfc18677462d0292f5fbf26ca86b4d1b485c2dba03269b643a0e83。
+自有核對筆記：Table2.2分開報原始token量、訓練抽樣份額與經過幾個epoch，較小来源可重复更多次；AppendixB說明epoch內不放回抽樣、跨epoch再使用資料，且pack至2048 token。只引用這些操作定義，未套用其全長預訓練batch的等長token條件到本課可變答案長度的SFT。
+
+三、PyTorch 官方原始碼
+URL：https://raw.githubusercontent.com/pytorch/pytorch/5c4886908584029761b579af026dcfb627c84070/torch/nn/modules/loss.py
+版本：PyTorch2.14.1，commit 5c4886908584029761b579af026dcfb627c84070，符合本機2.14.1+cpu的torch.version.git_version。
+下載原檔SHA-256：415e4ccbbab63b9cc2b79f09a338cca6fa191c07138a4fb419e3c841c4748ae0。
+親讀：CrossEntropyLoss class，lines1200–1239的class-index target公式与sum/mean分母；lines1278–1281 ignore_index条件。未在公开快照複製長原文。
+自有核對筆記：class-index target y_n的未約簡loss含1[y_n != ignore_index]；无class權重時mean分母是所有未略过的位置。class權重是目標字表類別權重，不自动变成資料來源權重。要實作來源權重，可先reduction=none後按來源乘；這仍不修改y或ignore mask。
+
+四、透明推導
+定义：t_s=sum_{r:source(r)=s} sum_j 1[label_{rj} != -100]；q_s=t_s/sum_u t_u。固定每來源長度L_s時t_s=N_s L_s；若答案長度有差異，须逐筆数label。
+原例：短答90*1=90，長答10*20=200，總290；90/290=0.3103448275862069，200/290=0.6896551724137931。這是未加權有效位置份額，不是保證loss值／梯度範數／花費秒數的份额。
+90:10 token目標：N_short/(20 N_long)=9，故N_short=180 N_long。以180筆短答與1筆長答为例，token是180與20，確為0.9與0.1；固定有限batch、資料可用量及整數取樣尚需另安排。
+權重反例：維持原batch與labels，w_short=20,w_long=1；若每格loss相同，weighted位置質量为1800:200=9:1，但真實位置數仍90:200。一般每格loss不同時，加權loss和份额還要看loss值，更不能把token份额與loss贡献等同。
+變長／階段漂移：q_s取決於N_s和抽到的答案長度；只需改其中之一，实际q_s就可改，與先設定的概率未必相同。這是可能性，不是實測任何通用資料漂移。
+總平均：M=sum_s p_s m_s。即使各來源m_s不變，改p_s也可改M；例如m_short=0.9,m_long=0.5，p_short从0.5到0.9，總分由0.7變0.86，沒有任何來源變強。因此須保留來源指標與各自分母才能拆開組成變化及来源內表現。
+少數樣本波動：獨立放回抽樣K~Binomial(B,p)，Var(K/B)=p(1-p)/B；B=16,p=0.1時E[K]=1.6,SD[K]=1.2。長答為20 token、短答1 token，某batch K=1時長答份額20/(15+20)=0.5714，K=2時40/(14+40)=0.7407。累計統計可描述這段實際監督量，不保證任意非獨立資料平穩或所有短批都波動大。
+重採樣改重複出現的記錄數N_s；答案截斷改剩餘有效L_s；二者都可改t_s，不提高獨立資料覆蓋的保證。只改欄位百分比不改任何資料或目標。
+練習一：长答長度1且筆數10時90與10，总100，比率0.9／0.1；練習二：長答5*20=100，总90+100=190，100/190=0.5263157894736842。
+正式token比：36384/18453=1.9717119167615023；多17931 token，即97.17119167615021%增量。兩支抽樣總筆數8000=500*16，但獨立訓練庫分別49與94筆；不能說不同記錄數也匹配。
+
+五、範圍與圖
+正文5.16與親讀前置5.2、5.13、7.16均無SVG引用，無需render。正式回放结果按原记录的seed42、NVIDIA L4、500次与batch16成立；本次只核對凍結配置與記錄，未重跑訓練。CPU原例與練習只證明小算例和計数，不證明GPU速度或訓練品質。

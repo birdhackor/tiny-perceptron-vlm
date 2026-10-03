@@ -1,0 +1,70 @@
+import json
+import os
+import platform
+import sys
+from pathlib import Path
+
+import torch
+from torch import nn
+
+
+def offline_guard(event, arguments):
+    if event.startswith("socket.") or event in {
+        "subprocess.Popen", "os.system", "os.exec", "os.posix_spawn"
+    }:
+        raise RuntimeError("bounded offline CPU review prohibits network and child processes")
+
+
+sys.addaudithook(offline_guard)
+assert torch.version.cuda is None
+torch.set_num_threads(1)
+torch.manual_seed(17)  # reviewer harness only, fixes the random initialization
+layer = nn.Linear(2, 1)
+parameter_ids_before = [id(parameter) for parameter in layer.parameters()]
+for parameter in layer.parameters():
+    parameter.requires_grad_(False)
+parameter_ids_after = [id(parameter) for parameter in layer.parameters()]
+x = torch.ones(1, 2, requires_grad=True)
+layer.eval()
+weight_before = layer.weight.detach().clone()
+bias_before = layer.bias.detach().clone()
+output = layer(x)
+output.sum().backward()
+assert output.requires_grad
+assert output.grad_fn is not None
+assert torch.equal(x.grad, layer.weight)
+assert tuple(x.grad.shape) == (1, 2)
+assert not any(parameter.requires_grad for parameter in layer.parameters())
+assert all(parameter.grad is None for parameter in layer.parameters())
+assert parameter_ids_before == parameter_ids_after
+assert torch.equal(weight_before, layer.weight)
+assert torch.equal(bias_before, layer.bias)
+record = {
+    "kind": "bounded_cpu_exercise_execution",
+    "lesson": "5.17",
+    "command": "OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1 TRANSFORMERS_OFFLINE=1 CUDA_VISIBLE_DEVICES='' timeout 60s .venv/bin/python docs/technical-reviews/artifacts/5.17-exercise-code.txt",
+    "environment": {
+        "python": platform.python_version(), "torch": str(torch.__version__),
+        "torch_git_version": str(torch.version.git_version), "device": "cpu",
+        "OMP_NUM_THREADS": os.environ.get("OMP_NUM_THREADS"),
+        "MKL_NUM_THREADS": os.environ.get("MKL_NUM_THREADS"),
+        "network": "Python audit hook blocks socket operations and subprocesses"
+    },
+    "configuration": {"seed": 17, "input_shape": [1, 2], "dtype": "float32", "updates": 0, "frozen_parameters": ["weight", "bias"]},
+    "observed": {
+        "layer_training": layer.training,
+        "parameter_names": [name for name, _ in layer.named_parameters()],
+        "parameters_require_grad": [parameter.requires_grad for parameter in layer.parameters()],
+        "parameters_have_grad": [parameter.grad is not None for parameter in layer.parameters()],
+        "input": x.detach().tolist(), "weight": layer.weight.tolist(), "bias": layer.bias.tolist(),
+        "output": output.detach().tolist(), "output_requires_grad": output.requires_grad,
+        "grad_fn_type": type(output.grad_fn).__name__, "x_grad": x.grad.tolist(),
+        "input_gradient_equals_weight_exactly": torch.equal(x.grad, layer.weight),
+        "parameter_identity_preserved": parameter_ids_before == parameter_ids_after,
+        "parameters_unchanged": torch.equal(weight_before, layer.weight) and torch.equal(bias_before, layer.bias)
+    },
+    "result": "All exercise assertions passed; both input-gradient components equal the frozen weight entries exactly.",
+    "scope": "One CPU float32 Linear(2,1), one batch item and a summed scalar output; no optimizer step or training."
+}
+Path("docs/technical-reviews/artifacts/5.17-exercise-output.json").write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n")
+print(json.dumps(record, ensure_ascii=False, indent=2))

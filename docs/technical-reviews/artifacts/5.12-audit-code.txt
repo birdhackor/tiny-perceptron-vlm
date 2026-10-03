@@ -1,0 +1,120 @@
+from pathlib import Path
+import contextlib
+import hashlib
+import io
+import itertools
+import json
+import sys
+import tarfile
+
+import torch
+
+from tiny_perceptron.data import fingerprint
+from scripts.course_experiments.common import split_records
+from scripts.course_experiments.text import _deduplicate_text
+
+root = Path.cwd()
+namespace = {}
+with contextlib.redirect_stdout(io.StringIO()):
+    exec(compile((root / "docs/technical-reviews/artifacts/5.12-original-code.txt").read_bytes(), "5.12-original-code", "exec"), namespace)
+grams = namespace["grams"]
+left, right = "紅色圓形在左邊", "紅色圓形在右邊"
+output = {
+    "environment": {
+        "python": sys.version,
+        "torch": torch.__version__,
+        "torch_git_version": torch.version.git_version,
+        "device": "cpu",
+        "OMP_NUM_THREADS": "1",
+        "MKL_NUM_THREADS": "1",
+        "torch_threads": str(torch.get_num_threads()),
+    },
+    "examples": {},
+    "scope": "離線短 CPU：只執行原例函數、邊界例與現存凍結資料包的指紋核對；沒有建立或更新模型、沒有執行正式實驗入口。",
+}
+for n in (2, 3):
+    a, b = grams(left, n=n), grams(right, n=n)
+    output["examples"][str(n)] = {
+        "text_lengths": [len(left), len(right)],
+        "starts": list(range(len(left) - n + 1)),
+        "left_grams_in_text_order": [left[i:i+n] for i in range(len(left)-n+1)],
+        "right_grams_in_text_order": [right[i:i+n] for i in range(len(right)-n+1)],
+        "intersection": sorted(a & b),
+        "union": sorted(a | b),
+        "intersection_count": len(a & b),
+        "union_count": len(a | b),
+        "score": len(a & b) / len(a | b),
+        "sets_unchanged_by_sorted": sorted(a & b) == sorted(set(sorted(a & b))),
+    }
+output["fingerprints"] = {"left": fingerprint(left), "right": fingerprint(right), "different": fingerprint(left) != fingerprint(right)}
+assert output["fingerprints"]["different"]
+output["repetition"] = {"text": "哈哈哈", "positional_grams": ["哈哈", "哈哈"], "set_grams": sorted(grams("哈哈哈")), "distinct_count": len(grams("哈哈哈"))}
+empty = grams("", 2) | grams("紅", 2)
+try:
+    0 / len(empty)
+except ZeroDivisionError as error:
+    output["empty_union"] = {"empty_count": len(empty), "exception": type(error).__name__}
+else:
+    raise AssertionError("預期 ZeroDivisionError")
+output["semantics_examples"] = []
+for a, b in (("今天觀察到紅色圓形位於桌子的左邊", "今天觀察到紅色圓形位於桌子的右邊"), ("天色暗了", "夜幕降臨")):
+    sa, sb = grams(a), grams(b)
+    output["semantics_examples"].append({"texts": [a, b], "intersection_count": len(sa & sb), "union_count": len(sa | sb), "score": len(sa & sb)/len(sa | sb)})
+
+report_path = root / "docs/course-experiments/results/real_text.json"
+report = json.loads(report_path.read_bytes())
+output["frozen_report_sha256"] = hashlib.sha256(report_path.read_bytes()).hexdigest()
+output["frozen_configuration"] = {k: report[k] for k in ("revision", "device", "seed", "torch_version", "python_version", "gpu", "step_scale", "evidence_status", "status")}
+output["frozen_code_identity"] = {}
+for code in ("tiny_perceptron/data.py", "scripts/course_experiments/text.py", "scripts/course_experiments/common.py"):
+    actual = hashlib.sha256((root / code).read_bytes()).hexdigest()
+    expected = report["code_sha256"][code]
+    assert actual == expected
+    output["frozen_code_identity"][code] = {"actual_sha256": actual, "recorded_sha256": expected, "matches": True}
+output["frozen_data_audit"] = {}
+for name, basename in (("tinystories", "tinystories-train-512.jsonl"), ("chinese-poetry", "chinese-classical-train-365.jsonl")):
+    asset = next(a for a in report["assets"] if a["id"] == name)
+    archive = root / asset["archive"]
+    archive_hash = hashlib.sha256(archive.read_bytes()).hexdigest()
+    assert archive_hash == asset["archive_sha256"]
+    with tarfile.open(archive, "r:gz") as packed:
+        member = next(m for m in packed.getmembers() if m.name.endswith("/" + basename))
+        with packed.extractfile(member) as stream:
+            raw = stream.read()
+    rows = [json.loads(line) for line in raw.splitlines() if line.strip()]
+    records = _deduplicate_text(rows)
+    parts = split_records(records, seed=report["seed"])
+    expected_run = report["results"]["runs"][name]
+    assert len(rows) == expected_run["source_records"]
+    assert len(records) == expected_run["deduplicated_records"]
+    split_audit = {}
+    for split, split_rows in parts.items():
+        serialized = "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in split_rows).encode()
+        digest = hashlib.sha256(serialized).hexdigest()
+        expected = expected_run["data"][split]
+        assert digest == expected["sha256"]
+        normalized = {" ".join(row["text"].split()) for row in split_rows}
+        families = {row["family"] for row in split_rows}
+        assert len(normalized) == len(families) == len(split_rows)
+        split_audit[split] = {"records": len(split_rows), "families": len(families), "sha256": digest, "matches_frozen_report": True}
+    intersections = {}
+    for first, second in itertools.combinations(parts, 2):
+        a = {" ".join(row["text"].split()) for row in parts[first]}
+        b = {" ".join(row["text"].split()) for row in parts[second]}
+        intersections[first + ":" + second] = len(a & b)
+        assert not (a & b)
+    output["frozen_data_audit"][name] = {
+        "archive_sha256": archive_hash,
+        "source_member": member.name,
+        "source_member_sha256": hashlib.sha256(raw).hexdigest(),
+        "source_records": len(rows),
+        "deduplicated_records": len(records),
+        "splits": split_audit,
+        "normalized_full_text_cross_split_intersections": intersections,
+        "split_warning": expected_run["split_warning"],
+        "scope": expected_run["scope"],
+        "training": {k: v for k, v in expected_run["training"].items() if k != "history"},
+        "evaluation": {stage: {split: {k: v for k, v in values.items() if k != "samples"} for split, values in expected_run[stage].items()} for stage in ("before", "after")},
+        "near_duplicate_search_performed": False,
+    }
+print(json.dumps(output, ensure_ascii=False, indent=2))

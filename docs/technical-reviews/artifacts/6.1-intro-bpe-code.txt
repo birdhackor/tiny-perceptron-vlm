@@ -1,0 +1,21 @@
+import json
+import os
+import platform
+import sys
+
+def audit(event, args):
+    if event.startswith(("socket.", "subprocess.")) or event in ("os.system", "os.posix_spawn"):
+        raise RuntimeError("offline bounded CPU audit: " + event)
+
+sys.addaudithook(audit)
+import tokenizers
+from tokenizers import Tokenizer, models, pre_tokenizers, decoders
+
+tok = Tokenizer(models.BPE(vocab={"a": 0, "b": 1, "ab": 2}, merges=[("a", "b")]))
+tok.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False, use_regex=False)
+tok.decoder = decoders.ByteLevel()
+whole = tok.encode("ab", add_special_tokens=False).ids
+chunked = tok.encode("a", add_special_tokens=False).ids + tok.encode("b", add_special_tokens=False).ids
+assert whole == [2] and chunked == [0, 1]
+assert tok.decode(whole) == tok.decode(chunked) == "ab"
+print(json.dumps({"environment": {"python": platform.python_version(), "tokenizers": tokenizers.__version__, "device": "cpu", "OMP_NUM_THREADS": os.environ.get("OMP_NUM_THREADS"), "MKL_NUM_THREADS": os.environ.get("MKL_NUM_THREADS"), "network": "socket/subprocess audit guard"}, "fixed_vocab": tok.get_vocab(), "fixed_merges": [["a", "b"]], "whole_ids": whole, "separately_encoded_chunk_ids": chunked, "decoded": "ab", "result": "PASS", "scope": "固定小詞表與固定合併；無訓練。先分段再分別編碼可改變切法；編碼後切ID不改變原切法。此詞表未涵蓋256 bytes，不作未見字還原證據。"}, ensure_ascii=False))

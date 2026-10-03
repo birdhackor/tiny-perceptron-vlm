@@ -1,0 +1,64 @@
+import difflib
+import hashlib
+import json
+import platform
+from pathlib import Path
+import re
+import socket
+import torch
+
+def reject_network(*args, **kwargs):
+    raise RuntimeError("offline recheck: network disabled")
+
+socket.socket = reject_network
+torch.set_num_threads(1)
+H = lambda raw: hashlib.sha256(raw).hexdigest()
+
+def section(path, identifier):
+    raw = Path(path).read_bytes()
+    headings = list(re.finditer(rb"(?m)^## ([A-Z\d]+\.\d+) [^\r\n]+", raw))
+    index = next(i for i, h in enumerate(headings) if h[1].decode() == identifier)
+    end = headings[index + 1].start() if index + 1 < len(headings) else len(raw)
+    return raw[headings[index].start():end]
+
+artifact_root = Path("docs/technical-reviews/artifacts")
+old = (artifact_root / "5.16-source.txt").read_bytes()
+new = section("course/chapters/05.md", "5.16")
+assert H(old) == "a656c5ceb4797aeb55211ac73f699f8a1ac80a6bae4003c9a4dc1ea2a6cbc164"
+assert H(new) == "f0cbf8eac262cb0d1018e8800916da62cc442b2590ec50cf09e4a26e23abb7e8"
+fence_same = re.findall(rb"```python\n(.*?)```", old, re.S) == re.findall(rb"```python\n(.*?)```", new, re.S)
+exercise_same = old.split("練習只".encode())[-1] == new.split("練習只".encode())[-1]
+formal_same = old.split("這個差別已".encode())[-1].split("練習只".encode())[0] == new.split("這個差別已".encode())[-1].split("練習只".encode())[0]
+assert fence_same and exercise_same and formal_same
+assert not re.search(rb"\.svg", new)
+(artifact_root / "5.16-recheck-source.txt").write_bytes(new)
+
+report = json.loads(Path("docs/technical-reviews/5.16.json").read_bytes())
+source_versions = []
+for source in report["sources"]:
+    if source["kind"] == "repository_code":
+        observed = H(Path(source["path"]).read_bytes())
+        assert observed == source["sha256"]
+        source_versions.append({"path": source["path"], "sha256": observed, "unchanged": True})
+old_artifacts = []
+for artifact in report["artifacts"]:
+    observed = H(Path(artifact["path"]).read_bytes())
+    assert observed == artifact["sha256"]
+    old_artifacts.append({"path": artifact["path"], "sha256": observed, "unchanged": True})
+prerequisites = []
+for path, identifier in [("course/chapters/05.md", "5.2"), ("course/chapters/05.md", "5.13"), ("course/chapters/07.md", "7.16")]:
+    current = section(path, identifier)
+    earlier = (artifact_root / ("5.16-prerequisite-" + identifier + "-source.txt")).read_bytes()
+    assert current == earlier and not re.search(rb"\.svg", current)
+    prerequisites.append({"source": path + "#" + identifier, "sha256": H(current), "unchanged_raw_bytes": True, "svg_references": []})
+original_sources = []
+for path, expected in [("outputs/technical-sources/5.16-fresh/doremi-v1.pdf", "f5e6259b67baea3f28e7eefb3ce4063d01e0e40f7fbd2dfbdda403857ff3fb44"), ("outputs/technical-sources/5.16-fresh/torch-loss.py", "415e4ccbbab63b9cc2b79f09a338cca6fa191c07138a4fb419e3c841c4748ae0")]:
+    observed = H(Path(path).read_bytes())
+    assert observed == expected
+    original_sources.append({"path": path, "sha256": observed, "unchanged": True})
+
+frozen = json.loads(Path("docs/course-experiments/results/sft_ablation.json").read_bytes())
+counts = {name: {key: frozen["results"]["runs"][name]["training"][key] for key in ["steps", "effective_tokens", "records"]} for name in ["b-only", "replay"]}
+assert counts["b-only"]["effective_tokens"] == 18453
+assert counts["replay"]["effective_tokens"] == 36384
+print(json.dumps({"reviewer_task": "/root/technical_round_coordinator/technical_5_16_fresh", "checked_on": "2026-10-03", "environment": {"python": platform.python_version(), "torch": torch.__version__, "device": "cpu", "threads": str(torch.get_num_threads())}, "old_source_sha256": H(old), "current_source_sha256": H(new), "unchanged_python_fences": fence_same, "unchanged_exercise_paragraph": exercise_same, "unchanged_formal_paragraph": formal_same, "current_svg_references": [], "repository_sources": source_versions, "retained_artifacts": old_artifacts, "prerequisites": prerequisites, "original_sources": original_sources, "frozen_training_fields": counts, "raw_diff": "".join(difflib.unified_diff(old.decode().splitlines(keepends=True), new.decode().splitlines(keepends=True), fromfile="reviewer_old_raw", tofile="current_raw")), "scope": "實際親讀新整節後的離線bytes與分母回查；原例、練習、正式結果與支持配置完全相同，保留先前CPU執行，不重新訓練或重新量測。"}, ensure_ascii=False, indent=2))

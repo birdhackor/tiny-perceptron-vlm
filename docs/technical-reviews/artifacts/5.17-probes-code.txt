@@ -1,0 +1,95 @@
+import json
+import os
+import platform
+import sys
+from pathlib import Path
+
+import torch
+from torch import nn
+
+
+def offline_guard(event, arguments):
+    if event.startswith("socket.") or event in {
+        "subprocess.Popen", "os.system", "os.exec", "os.posix_spawn"
+    }:
+        raise RuntimeError("bounded offline CPU review prohibits network and child processes")
+
+
+sys.addaudithook(offline_guard)
+assert torch.version.cuda is None
+torch.set_num_threads(1)
+torch.manual_seed(17)
+checks = {}
+layer = nn.Linear(2, 1)
+x = torch.ones(1, 2)
+train_value = layer(x).detach().clone()
+layer.eval()
+out = layer(x)
+assert torch.equal(train_value, out.detach())
+out.sum().backward()
+assert torch.equal(layer.weight.grad, torch.ones(1, 2))
+assert torch.equal(layer.bias.grad, torch.ones(1))
+assert len(list(layer.parameters())) == 2
+checks["linear_eval"] = {
+    "input_shape": list(x.shape), "output_shape": list(out.shape),
+    "same_value_in_train_and_eval": torch.equal(train_value, out.detach()),
+    "weight_grad": layer.weight.grad.tolist(), "bias_grad": layer.bias.grad.tolist(),
+    "parameter_names": [name for name, _ in layer.named_parameters()]
+}
+layer.train()
+with torch.no_grad():
+    out = layer(x)
+assert not out.requires_grad and out.grad_fn is None
+checks["training_mode_no_grad"] = {"training": layer.training, "requires_grad": out.requires_grad, "grad_fn": str(out.grad_fn)}
+
+dropout = nn.Dropout(0.5)
+dropout_input = torch.ones(1, 16, requires_grad=True)
+train_dropout = dropout(dropout_input)
+assert torch.all((train_dropout == 0) | (train_dropout == 2))
+dropout.eval()
+eval_dropout = dropout(dropout_input)
+assert torch.equal(eval_dropout, dropout_input)
+assert eval_dropout.requires_grad
+eval_dropout.sum().backward()
+assert torch.equal(dropout_input.grad, torch.ones_like(dropout_input))
+checks["dropout"] = {"train_output": train_dropout.detach().tolist(), "eval_output": eval_dropout.detach().tolist(), "eval_requires_grad": eval_dropout.requires_grad, "eval_input_grad": dropout_input.grad.tolist()}
+
+bias_layer = nn.Linear(2, 1)
+bias_layer.weight.requires_grad_(False)
+bias_out = bias_layer(torch.ones(1, 2))
+bias_out.sum().backward()
+assert bias_out.requires_grad
+assert bias_layer.weight.grad is None
+assert torch.equal(bias_layer.bias.grad, torch.ones(1))
+checks["weight_only_freeze"] = {"output_requires_grad": bias_out.requires_grad, "weight_grad": str(bias_layer.weight.grad), "bias_grad": bias_layer.bias.grad.tolist()}
+
+generator = nn.Linear(1, 2, bias=False)
+reference = nn.Linear(2, 1)
+with torch.no_grad():
+    generator.weight.copy_(torch.tensor([[2.0], [3.0]]))
+    reference.weight.copy_(torch.tensor([[1.5, -2.0]]))
+    reference.bias.copy_(torch.tensor([0.25]))
+for parameter in reference.parameters():
+    parameter.requires_grad_(False)
+reference.eval()
+generated_input = generator(torch.ones(1, 1))
+value = reference(generated_input)
+value.sum().backward()
+assert torch.equal(generator.weight.grad, torch.tensor([[1.5], [-2.0]]))
+assert all(parameter.grad is None for parameter in reference.parameters())
+with torch.no_grad():
+    detached_value = reference(generator(torch.ones(1, 1)))
+assert not detached_value.requires_grad and detached_value.grad_fn is None
+checks["frozen_reference"] = {"reference_output": value.detach().tolist(), "generator_weight_grad": generator.weight.grad.tolist(), "reference_parameters_grad": [str(parameter.grad) for parameter in reference.parameters()], "no_grad_output_requires_grad": detached_value.requires_grad}
+
+record = {
+    "kind": "bounded_cpu_supplementary_execution",
+    "command": "OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1 TRANSFORMERS_OFFLINE=1 CUDA_VISIBLE_DEVICES='' timeout 60s .venv/bin/python docs/technical-reviews/artifacts/5.17-probes-code.txt",
+    "environment": {"python": platform.python_version(), "torch": str(torch.__version__), "torch_git_version": str(torch.version.git_version), "device": "cpu", "OMP_NUM_THREADS": os.environ.get("OMP_NUM_THREADS"), "MKL_NUM_THREADS": os.environ.get("MKL_NUM_THREADS"), "network": "Python audit hook blocks socket operations and subprocesses"},
+    "configuration": {"seed": 17, "dtype": "float32", "optimizer_updates": 0},
+    "checks": checks,
+    "result": "All assertions passed.",
+    "scope": "Bounded mechanism checks with fresh parameters and no optimizer; does not measure training quality or speed."
+}
+Path("docs/technical-reviews/artifacts/5.17-probes-output.json").write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n")
+print(json.dumps(record, ensure_ascii=False, indent=2))

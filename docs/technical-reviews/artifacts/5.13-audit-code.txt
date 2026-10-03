@@ -1,0 +1,94 @@
+import ast
+import hashlib
+import json
+import platform
+import random
+from collections import Counter
+from pathlib import Path
+import torch
+from tiny_perceptron.data import ByteTokenizer, IGNORE, shifted, pad_batch
+from tiny_perceptron.model import ModelConfig, TinyLM, loss_sum
+
+root = Path("docs/technical-reviews/artifacts")
+report_path = Path("docs/course-experiments/results/text_foundation.json")
+formal = json.loads(report_path.read_bytes())
+environment = {"python": platform.python_version(), "torch": torch.__version__, "torch_git_version": torch.version.git_version, "device": "cpu", "threads": str(torch.get_num_threads())}
+out = {"environment": environment, "formal_report_sha256": hashlib.sha256(report_path.read_bytes()).hexdigest(), "formal_environment": {key: formal[key] for key in ("revision", "device", "seed", "torch_version", "python_version", "gpu", "step_scale", "evidence_status")}}
+for stem, source in [("common", "scripts/course_experiments/common.py"), ("text", "scripts/course_experiments/text.py")]:
+    digest = hashlib.sha256((root / f"5.13-frozen-{stem}.txt").read_bytes()).hexdigest()
+    assert digest == formal["code_sha256"][source]
+for source in ("tiny_perceptron/model.py", "tiny_perceptron/attention.py", "tiny_perceptron/modern.py", "tiny_perceptron/data.py"):
+    assert hashlib.sha256(Path(source).read_bytes()).hexdigest() == formal["code_sha256"][source]
+out["frozen_code_hashes_match"] = True
+
+# Execute only the frozen pure data helpers. No training routine is executed.
+tree = ast.parse((root / "5.13-frozen-common.txt").read_text())
+safe_functions = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in {"split_records", "records_sha256", "text_examples"}]
+namespace = {"random": random, "json": json, "hashlib": hashlib, "ByteTokenizer": ByteTokenizer, "shifted": shifted}
+exec(compile(ast.Module(body=safe_functions, type_ignores=[]), "5.13-frozen-common-pure-functions", "exec"), namespace)
+pool = [{"text": f"object={index};color={color};shape={shape}.", "family": str(index)} for index in range(80) for color, shape in [("red" if index % 2 else "blue", "circle" if index % 3 else "square")]]
+parts = namespace["split_records"](pool, seed=42)
+out["splits"] = {}
+for side, rows in parts.items():
+    raw = "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows).encode()
+    digest = hashlib.sha256(raw).hexdigest()
+    manifest = formal["results"]["scaling_data"][side]
+    assert digest == manifest["sha256"]
+    examples = namespace["text_examples"](rows)
+    out["splits"][side] = {"records": len(rows), "sha256": digest, "families": [row["family"] for row in rows], "effective_targets": sum(len(y) for x, y in examples), "raw_bytes": sum(len(row["text"].encode()) for row in rows)}
+assert set(out["splits"]["train"]["families"]).isdisjoint(out["splits"]["validation"]["families"])
+assert set(out["splits"]["train"]["families"]).isdisjoint(out["splits"]["test"]["families"])
+assert set(out["splits"]["validation"]["families"]).isdisjoint(out["splits"]["test"]["families"])
+
+# Only count the supervision positions selected by the frozen sampler.
+# There is no forward pass, backward pass, optimizer, checkpoint or training call.
+out["exposure_counts"] = {}
+for count in (16, 64):
+    rows = parts["train"][:count]
+    examples = namespace["text_examples"](rows)
+    lengths = [len(y) for x, y in examples]
+    sampler = random.Random(42)
+    chosen = sampler.choices(list(range(len(lengths))), k=600)
+    targets = sum(lengths[index] for index in chosen)
+    exposures = Counter(chosen)
+    digest = namespace["records_sha256"](rows)
+    out["exposure_counts"][str(count)] = {"draws": len(chosen), "effective_targets": targets, "distinct_records": len(rows), "records_sha256": digest, "target_lengths": dict(Counter(lengths)), "average_draws_per_record": len(chosen) / count, "min_draws": min(exposures.values()), "max_draws": max(exposures.values()), "full_train_evaluation_targets": sum(lengths)}
+    for width in (16, 32):
+        training = formal["results"]["scaling"][f"scaling-w{width}-n{count}"]["training"]
+        assert targets == training["effective_tokens"]
+        assert digest == training["records_sha256"]
+        assert training["steps"] == 150
+
+out["parameters"] = {}
+for width in (8, 16, 32):
+    model = TinyLM(ModelConfig(width=width))
+    count = model.description()["parameters"]
+    expected = 12 * width**2 + 667 * width
+    assert count == expected
+    out["parameters"][str(width)] = {"parameters": count, "formula": expected, "config": model.description()["config"]}
+
+out["formal_table"] = {}
+for name, row in formal["results"]["scaling"].items():
+    training = row["training"]
+    item = {"parameters": row["parameters"], "unique_training_records": row["unique_training_records"], "steps": training["steps"], "cumulative_effective_targets": training["effective_tokens"], "train_post_update_nll": training["final_loss"], "evaluation": {}}
+    for side, evaluation in row["evaluation"].items():
+        division = evaluation["nll_sum"] / evaluation["effective_tokens"]
+        assert abs(division - evaluation["nll"]) < 1e-12
+        assert evaluation["effective_tokens"] == out["splits"][side]["effective_targets"]
+        item["evaluation"][side] = {key: evaluation[key] for key in ("nll", "nll_sum", "effective_tokens", "records", "examples", "raw_utf8_bytes")}
+    item["printed_values"] = [f"{training['final_loss']:.5f}"] + [f"{row['evaluation'][side]['nll']:.5f}" for side in ("validation", "test")]
+    out["formal_table"][name] = item
+
+out["linear_arithmetic"] = {str(width): {"multiplications": width**2, "minimal_sum_additions": width * (width - 1), "exact_without_bias": 2 * width**2 - width, "approximation": 2 * width**2} for width in (8, 16)}
+layer = torch.nn.Linear(8, 8)
+with torch.no_grad():
+    inputs = torch.arange(8, dtype=torch.float32)
+    assert layer.weight.shape == (8, 8)
+    assert torch.allclose(layer(inputs), layer.weight @ inputs + layer.bias)
+logits = torch.zeros(2, 4, 5)
+labels = torch.tensor([[1, 2, 3, 4], [1, -100, -100, -100]])
+total, count = loss_sum(logits, labels)
+assert count.item() == 5
+out["ignored_targets"] = {"effective": count.item(), "sum_nll": total.item(), "mean_nll": (total / count).item()}
+out["training_updates_executed"] = 0
+print(json.dumps(out, ensure_ascii=False, indent=2))
