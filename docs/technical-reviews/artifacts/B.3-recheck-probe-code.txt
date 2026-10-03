@@ -1,0 +1,52 @@
+import hashlib
+import json
+import platform
+from pathlib import Path
+from types import SimpleNamespace
+import torch
+import scripts.course_experiments.applications as app
+from tiny_perceptron.retrieval import call_tool
+
+original=json.loads(Path('docs/technical-reviews/artifacts/B.3-original-revise-report-4f95fd.json').read_bytes())
+pins={s['path']:s['sha256'] for s in original['sources'] if s['kind']=='repository_code'}
+for p,h in pins.items():
+    assert hashlib.sha256(Path(p).read_bytes()).hexdigest()==h
+rows=app._tool_records()
+assert len(rows)==210
+system_rows,request_jsons,done_jsons,external_results=0,0,0,0
+for row in rows:
+    messages=row['messages']
+    assert messages[0]=={'role':'system','content':app._TOOLS_SYSTEM}
+    system_rows+=1
+    assistant=[m for m in messages if m['role']=='assistant']
+    for message in assistant:
+        action=app._parse_json_action(message['content'])
+        if 'done' in action:
+            assert action=={'done':True,'answer':row['answer']}
+            done_jsons+=1
+        else:
+            assert action=={'name':row['operation'],'arguments':{'a':row['a'],'b':row['b']}}
+            result=call_tool(action)
+            assert result==row['answer']
+            assert messages[3]=={'role':'user','content':f'TOOL_RESULT:{result}'}
+            external_results+=1
+            request_jsons+=1
+assert (system_rows,request_jsons,done_jsons,external_results)==(210,200,210,200)
+record=next(r for r in rows if r['operation']=='add' and r['a']==9 and r['b']==9)
+real_sample=app._sample
+cases=[]
+try:
+    for answer in (18,17):
+        raw=json.dumps({'done':True,'answer':answer},separators=(',',':'))
+        def direct_done(model,messages,ctx,tokens):
+            return {'samples':[{'generated':raw,'invalid_special_tokens':[]}], 'generated_tokens':len(raw)}
+        app._sample=direct_done
+        episode=app._tool_episode(None,record,SimpleNamespace(device='cpu'),max_steps=3)
+        case={k:episode[k] for k in ('question','status','answer','actual_tool_calls','answer_correct','required_tool_behavior','correct')}
+        assert case['status']=='done' and case['actual_tool_calls']==0
+        assert case['answer_correct']==(answer==18)
+        assert not case['required_tool_behavior'] and not case['correct']
+        cases.append(case)
+finally:
+    app._sample=real_sample
+print(json.dumps({'environment':{'python':platform.python_version(),'torch':str(torch.__version__),'device':'cpu','OMP_NUM_THREADS':'1','MKL_NUM_THREADS':'1'}, 'scope':'針對新增說明的離線有界檢查：核210筆deterministic示範資料協議及兩個人工direct-done輸入。未執行訓練、正式排程、GPU或模型再生成；人工樣本不計正式20題分數。', 'required_sources_unchanged':True, '_TOOLS_SYSTEM':app._TOOLS_SYSTEM, 'demonstration_records':{'total':len(rows),'system_rules_messages':system_rows,'assistant_request_jsons':request_jsons,'assistant_done_jsons':done_jsons,'user_external_results':external_results}, 'artificial_done_cases':cases},ensure_ascii=False,indent=2))

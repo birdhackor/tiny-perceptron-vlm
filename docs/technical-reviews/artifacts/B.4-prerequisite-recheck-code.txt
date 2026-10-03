@@ -1,0 +1,99 @@
+import difflib
+import hashlib
+import json
+import os
+import platform
+import re
+from pathlib import Path
+
+base = Path("docs/technical-reviews/artifacts")
+old = (base / "B.4-prerequisite-old-070f191d.txt").read_bytes()
+whole = Path("course/chapters/0B.md").read_bytes()
+headings = list(re.finditer(rb"(?m)^## ([A-Z\d]+\.\d+) [^\r\n]+", whole))
+
+def section(identifier):
+    index = next(i for i, item in enumerate(headings) if item[1].decode() == identifier)
+    end = headings[index + 1].start() if index + 1 < len(headings) else len(whole)
+    return whole[headings[index].start():end]
+
+def sha(raw):
+    return hashlib.sha256(raw).hexdigest()
+
+new = section("B.3")
+primary = section("B.4")
+assert sha(old) == "070f191d4d5dc996a86d597e8c1285c852a5b16e278e1f0080bbb46f8fbc4e7f"
+assert sha(new) == "e33e940af8b6ea3c0a7dccf714261195ae133f3e11980d81d029fcc2ebb1c7ec"
+assert sha(primary) == "6fa0003430cba6cb2234e66428b2d56abdc2493fa9af6a34cc8b7e8b1d8ae03a"
+old_text, new_text = old.decode("utf-8"), new.decode("utf-8")
+old_lines, new_lines = old_text.splitlines(keepends=True), new_text.splitlines(keepends=True)
+diff_lines = list(difflib.unified_diff(old_lines, new_lines,
+    fromfile="B.3-old-070f191d", tofile="B.3-current-e33e940a", n=3, lineterm="\n"))
+diff_text = "".join(diff_lines)
+
+def apply_unified(original_lines, patch_lines):
+    # Preserve every line's bytes after its one-character diff prefix.
+    reconstructed = []
+    old_position = 0
+    i = 2
+    while i < len(patch_lines):
+        header = re.fullmatch(r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@\n", patch_lines[i])
+        assert header is not None, patch_lines[i]
+        start = int(header[1]) - 1
+        old_count = int(header[2]) if header[2] is not None else 1
+        new_count = int(header[4]) if header[4] is not None else 1
+        reconstructed.extend(original_lines[old_position:start])
+        old_position = start
+        consumed = produced = 0
+        i += 1
+        while i < len(patch_lines) and not patch_lines[i].startswith("@@ "):
+            line = patch_lines[i]
+            marker, content = line[0], line[1:]
+            if marker in (" ", "-"):
+                assert original_lines[old_position] == content
+                old_position += 1
+                consumed += 1
+            if marker in (" ", "+"):
+                reconstructed.append(content)
+                produced += 1
+            assert marker in (" ", "+", "-")
+            i += 1
+        assert consumed == old_count and produced == new_count
+    reconstructed.extend(original_lines[old_position:])
+    return "".join(reconstructed).encode("utf-8")
+
+reconstructed = apply_unified(old_lines, diff_lines)
+assert reconstructed == new
+assert "".join(diff_lines) == diff_text
+assert old_text.encode("utf-8") == old and new_text.encode("utf-8") == new
+old_python = re.findall(rb"```python\n(.*?)```", old, re.S)
+new_python = re.findall(rb"```python\n(.*?)```", new, re.S)
+old_text_fences = re.findall(rb"```text\n(.*?)```", old, re.S)
+new_text_fences = re.findall(rb"```text\n(.*?)```", new, re.S)
+assert old_python == new_python and old_text_fences == new_text_fences
+prior = json.loads((base / "B.4-prior-genuine-report-450eb8c1.json").read_bytes())
+figure_checks = {path: {"prior_sha256": digest, "current_sha256": sha(Path(path).read_bytes())}
+                 for path, digest in prior["figure_sha256"].items()}
+assert all(item["prior_sha256"] == item["current_sha256"] for item in figure_checks.values())
+code_checks = {source["path"]: {"prior_sha256": source["sha256"], "current_sha256": sha(Path(source["path"]).read_bytes())}
+               for source in prior["sources"] if source["kind"] == "repository_code"}
+assert all(item["prior_sha256"] == item["current_sha256"] for item in code_checks.values())
+for identifier in ("a_original_code", "a_exercise_code", "a_prereq_code", "a_prereq_ex_code"):
+    artifact = next(item for item in prior["artifacts"] if item["id"] == identifier)
+    assert sha(Path(artifact["path"]).read_bytes()) == artifact["sha256"]
+snapshot = {"old_raw_sha256": sha(old), "new_raw_sha256": sha(new), "old_raw_utf8": old_text,
+            "new_raw_utf8": new_text, "old_raw_bytes": len(old), "new_raw_bytes": len(new),
+            "unified_diff_utf8": diff_text, "unified_diff_lines": diff_lines,
+            "raw_diff_sha256": sha(diff_text.encode("utf-8")),
+            "roundtrip": {"apply_unified_old_equals_new": True, "reconstructed_new_sha256": sha(reconstructed),
+                          "old_utf8_reencode_equals_raw": True, "new_utf8_reencode_equals_raw": True,
+                          "diff_lines_join_equals_diff_utf8": True},
+            "preservation": "原 UTF-8、空 context 行的 diff prefix、原 EOF 與空行皆保留；JSON 字串與 line-array 不使用 strip/rstrip。"}
+(base / "B.4-prerequisite-current-e33e940a.txt").write_bytes(new)
+(base / "B.4-prerequisite-lossless-diff.json").write_text(json.dumps(snapshot, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+print(json.dumps({"primary_sha256": sha(primary), "old_prerequisite_sha256": sha(old), "current_prerequisite_sha256": sha(new),
+                  "raw_diff_sha256": snapshot["raw_diff_sha256"], "roundtrip": snapshot["roundtrip"],
+                  "python_fences_unchanged": old_python == new_python, "text_fences_unchanged": old_text_fences == new_text_fences,
+                  "figure_sha_checks": figure_checks, "code_sha_checks": code_checks,
+                  "environment": {"python": platform.python_version(), "device": "cpu", "OMP_NUM_THREADS": os.environ["OMP_NUM_THREADS"],
+                                  "MKL_NUM_THREADS": os.environ["MKL_NUM_THREADS"]},
+                  "scope": "本次只作 raw source/diff/程式與圖 SHA 比較與 roundtrip，沒有重跑原 CPU 範例、模型生成或渲染。"}, ensure_ascii=False, indent=2))

@@ -1,0 +1,42 @@
+import copy
+import json
+import platform
+from types import SimpleNamespace
+from pathlib import Path
+import torch
+import scripts.course_experiments.applications as app
+from scripts.course_experiments.common import split_records
+
+frozen=json.loads(Path('docs/course-experiments/results/tools.json').read_bytes())['results']
+records={r['messages'][1]['content']:r for r in split_records(app._tool_records(),42)['test']}
+ctx=SimpleNamespace(device='cpu')
+real_sample=app._sample
+results=[]
+try:
+    for question,cap in [('CALC:add(9,9)',3),('CALC:multiply(9,9)',3),('CALC:add(9,9)',1),('COPY:8',3)]:
+        history=next(s for s in frozen['samples'] if s['question']==question)
+        cursor=[0]
+        def recorded_sample(model,messages,ctx,tokens):
+            event=history['trace'][cursor[0]]
+            cursor[0]+=1
+            assert app._prompt_ids(messages,app.ByteTokenizer())==event['generation']['input_ids']
+            return copy.deepcopy(event['generation'])
+        app._sample=recorded_sample
+        episode=app._tool_episode(None,records[question],ctx,max_steps=cap)
+        row={k:episode[k] for k in ('question','status','answer','actual_tool_calls','correct','max_steps')}
+        row['executed_results']=[e['tool_result'] for e in episode['trace'] if e.get('executed')]
+        if cap==1:assert row['status']=='step_limit' and row['actual_tool_calls']==1 and not row['correct']
+        elif question=='CALC:multiply(9,9)':assert row['status']=='invalid_request' and row['executed_results']==[81] and not row['correct']
+        elif question=='COPY:8':assert row['status']=='done' and row['actual_tool_calls']==0 and row['correct']
+        else:assert row['status']=='done' and row['executed_results']==[18] and row['correct']
+        results.append(row)
+    def direct_done(model,messages,ctx,tokens):
+        return {'samples':[{'generated':'{"done":true,"answer":18}','invalid_special_tokens':[]}], 'generated_tokens':25}
+    app._sample=direct_done
+    episode=app._tool_episode(None,records['CALC:add(9,9)'],ctx,max_steps=3)
+    row={k:episode[k] for k in ('question','status','answer','actual_tool_calls','answer_correct','required_tool_behavior','correct')}
+    assert row['status']=='done' and row['answer_correct'] and not row['required_tool_behavior'] and not row['correct']
+    results.append(row)
+finally:
+    app._sample=real_sample
+print(json.dumps({'environment':{'python':platform.python_version(),'torch':str(torch.__version__),'device':'cpu','OMP_NUM_THREADS':'1','MKL_NUM_THREADS':'1'}, 'scope':'以凍結生成文字替代 _sample，真執行同 pin _tool_episode 的 parser/call_tool/停止/評分邏輯；重播不重新抽樣模型，也不代表新品質實測。最後直接 done 是人工合成反例。', 'replayed_episodes':results},ensure_ascii=False,indent=2))

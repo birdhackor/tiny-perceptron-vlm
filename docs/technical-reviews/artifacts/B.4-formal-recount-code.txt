@@ -1,0 +1,133 @@
+import copy
+import hashlib
+import json
+import math
+import platform
+import re
+from collections import Counter
+from pathlib import Path
+
+import torch
+from tiny_perceptron.data import ByteTokenizer
+from tiny_perceptron.retrieval import call_tool
+from scripts.course_experiments.applications import _TOOLS_SYSTEM, _parse_json_action, _prompt_ids, _tool_records
+from scripts.course_experiments.common import records_sha256, split_records
+
+original = Path("docs/course-experiments/results/tools.json")
+raw = original.read_bytes()
+document = json.loads(raw)
+results = document["results"]
+tokenizer = ByteTokenizer()
+environment = {"python": platform.python_version(), "torch": str(torch.__version__), "torch_commit": torch.version.git_version,
+               "torch_file": torch.__file__, "device": "cpu", "threads": str(torch.get_num_threads()),
+               "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"}
+source_paths = ["tiny_perceptron/retrieval.py", "tiny_perceptron/data.py", "scripts/course_experiments/applications.py",
+                "scripts/course_experiments/common.py", "scripts/course_experiments/run.py"]
+code_pins = {path: {"current_sha256": hashlib.sha256(Path(path).read_bytes()).hexdigest(),
+                    "formal_sha256": document["code_sha256"][path]} for path in source_paths}
+assert all(pin["current_sha256"] == pin["formal_sha256"] for pin in code_pins.values())
+splits = split_records(_tool_records(), document["seed"])
+split_check = {key: {"records": len(rows), "families": len({row["family"] for row in rows}),
+                    "sha256": records_sha256(rows)} for key, rows in splits.items()}
+assert split_check == results["split"]
+test_by_question = {row["messages"][1]["content"]: row for row in splits["test"]}
+summaries = {}
+saved_rows = {}
+for group in ("samples", "one_step_cap_samples"):
+    rows = []
+    for index, episode in enumerate(results[group]):
+        record = test_by_question[episode["question"]]
+        messages = copy.deepcopy(record["messages"][:2])
+        calls = []
+        answer = None
+        status = "step_limit"
+        event_rows = []
+        for event in episode["trace"]:
+            generation = event["generation"]
+            sample = generation["samples"][0]
+            ids = sample["generated_ids"]
+            assert generation["input_ids"] == _prompt_ids(messages, tokenizer)
+            assert generation["input_tokens"] == len(generation["input_ids"])
+            assert sample["eos"] is True and ids[-1] == tokenizer.eos_id
+            assert sample["invalid_special_tokens"] == []
+            assert ids[:-1] == tokenizer.encode(sample["generated"])
+            assert len(ids) == sample["generated_tokens"] == generation["generated_tokens"]
+            assert generation["candidate_count"] == 1 and generation["temperature"] == 0.0
+            assert generation["max_new_tokens"] == 64
+            own_event = {"step": event["step"], "actual_input_messages": copy.deepcopy(messages),
+                         "input_ids": generation["input_ids"], "generated": sample["generated"], "generated_ids": ids,
+                         "eos": sample["eos"], "invalid_special_tokens": sample["invalid_special_tokens"],
+                         "generated_tokens": len(ids), "generation_seconds": generation["seconds"]}
+            try:
+                action = _parse_json_action(sample["generated"])
+                assert event["parsed"] == action
+                own_event["parsed"] = action
+                if "done" in action:
+                    status, answer = "done", action["answer"]
+                    assert not event["executed"] and event["done"] is True
+                else:
+                    value = call_tool(action)
+                    wanted = {"name": record["operation"], "arguments": {"a": record["a"], "b": record["b"]}}
+                    matched = action == wanted
+                    assert event["executed"] and event["tool_result"] == value
+                    assert event["finite_result"] and math.isfinite(value)
+                    assert event["request_matches_question"] == matched
+                    calls.append((action, value, matched))
+                    own_event.update({"executed": True, "tool_result": value, "matches_original_question": matched})
+                    messages.extend([{"role": "assistant", "content": sample["generated"]},
+                                     {"role": "user", "content": f"TOOL_RESULT:{value}"}])
+            except (ValueError, TypeError, KeyError, OverflowError) as error:
+                status = "invalid_request"
+                assert not event["executed"] and event["error"] == str(error)
+                own_event["error"] = str(error)
+            event_rows.append(own_event)
+        answer_correct = status == "done" and type(answer) in (int, float) and answer == record["answer"]
+        required = not calls if record["operation"] == "copy" else bool(calls and any(c[2] for c in calls) and answer == calls[-1][1])
+        correct = answer_correct and required
+        assert (episode["expected"], episode["answer"], episode["status"]) == (record["answer"], answer, status)
+        assert (episode["answer_correct"], episode["required_tool_behavior"], episode["correct"]) == (answer_correct, required, correct)
+        assert episode["actual_tool_calls"] == len(calls)
+        assert episode["generated_tokens"] == sum(e["generated_tokens"] for e in event_rows)
+        if group == "one_step_cap_samples":
+            assert record["operation"] != "copy" and episode["max_steps"] == 1 and len(event_rows) == 1
+            assert len(event_rows[0]["actual_input_messages"]) == 2 and status == "step_limit" and answer is None
+        else:
+            assert episode["max_steps"] == 3
+        rows.append({"index": index, "question": episode["question"], "truth": record["answer"],
+                     "status": status, "answer": answer, "answer_correct": answer_correct,
+                     "required_tool_behavior": required, "correct": correct, "calls": len(calls),
+                     "max_steps": episode["max_steps"], "episode_seconds": episode["seconds"], "events": event_rows})
+    events = [e for row in rows for e in row["events"]]
+    summaries[group] = {"episodes": len(rows), "first_action_object": sum("parsed" in row["events"][0] for row in rows),
+                        "done": sum(row["status"] == "done" for row in rows),
+                        "answer_correct": sum(row["answer_correct"] for row in rows), "success": sum(row["correct"] for row in rows),
+                        "status_counts": dict(Counter(row["status"] for row in rows)), "calls": sum(row["calls"] for row in rows),
+                        "matched_calls": sum(e.get("matches_original_question", False) for e in events),
+                        "generations": len(events), "eos_count": sum(e["eos"] for e in events),
+                        "illegal_control_count": sum(bool(e["invalid_special_tokens"]) for e in events),
+                        "generated_tokens": sum(e["generated_tokens"] for e in events),
+                        "model_generation_seconds_sum": sum(e["generation_seconds"] for e in events),
+                        "episode_seconds_sum": sum(row["episode_seconds"] for row in rows)}
+    saved_rows[group] = rows
+assert summaries["samples"]["episodes"] == 20
+assert summaries["samples"]["success"] == summaries["samples"]["done"] == summaries["samples"]["answer_correct"] == 19
+assert summaries["samples"]["first_action_object"] == 20
+assert summaries["samples"]["calls"] == summaries["samples"]["matched_calls"] == 18
+assert summaries["one_step_cap_samples"]["episodes"] == 18
+assert summaries["one_step_cap_samples"]["status_counts"] == {"step_limit": 18}
+assert summaries["one_step_cap_samples"]["calls"] == 18
+assert sum(s["generations"] for s in summaries.values()) == 56
+assert sum(s["eos_count"] for s in summaries.values()) == 56
+assert sum(s["generated_tokens"] for s in summaries.values()) == results["generated_tokens"] == 2072
+scope = "離線 CPU 逐筆重新解析凍結原生成、重算真值與本地工具，沒有重新生成模型文字、載入權重或重訓；品質數字仍只屬原 seed=42 的 20 題。"
+snapshot = {"original_path": str(original), "original_sha256": hashlib.sha256(raw).hexdigest(),
+            "original_revision": document["revision"], "original_environment": {key: document[key] for key in ["seed", "device", "gpu", "torch_version", "python_version", "step_scale"]},
+            "original_timing": {"elapsed_seconds": document["elapsed_seconds"], "timing_scope": document["timing_scope"],
+                                "results_seconds": results["seconds"], "training_seconds": results["training"]["seconds"]},
+            "original_protocol": results["protocol"], "code_pins": code_pins, "split_recomputed": split_check,
+            "rows": saved_rows, "summaries_recomputed": summaries, "scope": scope,
+            "input_record_note": "原 _sample 回傳 messages 的參照，後續 += 會使早期 messages 欄位含未來內容；本審查以逐次凍結 input_ids 核對當次實際輸入。這是來源欄位限制，正文沒有宣稱 messages 欄位不可變。"}
+destination = Path("docs/technical-reviews/artifacts/B.4-formal-records.json")
+destination.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8")
+print(json.dumps({"environment": environment, "formal_source_sha256": snapshot["original_sha256"], "code_pins": code_pins,
+                  "split_check": split_check, "recomputed": summaries, "original_timing": snapshot["original_timing"], "scope": scope}, ensure_ascii=False, indent=2))

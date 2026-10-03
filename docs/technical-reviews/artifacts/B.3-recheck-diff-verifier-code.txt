@@ -1,0 +1,55 @@
+import hashlib
+import json
+import platform
+import re
+from pathlib import Path
+
+base=Path('docs/technical-reviews/artifacts')
+raws={'original':(base/'B.3-source.txt').read_bytes(),'intermediate':(base/'B.3-intermediate-historical-source.txt').read_bytes(),'current':(base/'B.3-recheck-source.txt').read_bytes()}
+def apply(before,text):
+    lines=before.decode().splitlines(keepends=True)
+    result=[]
+    position=0
+    d=text.splitlines(keepends=True)
+    j=2
+    while j<len(d):
+        match=re.match(r'^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@',d[j])
+        assert match
+        oldstart=int(match[1])-1
+        result.extend(lines[position:oldstart])
+        position=oldstart
+        j+=1
+        while j<len(d) and not d[j].startswith('@@ '):
+            line=d[j]
+            prefix=line[0]
+            payload=line[1:]
+            if prefix==' ':
+                assert lines[position]==payload
+                result.append(payload)
+                position+=1
+            elif prefix=='-':
+                assert lines[position]==payload
+                position+=1
+            elif prefix=='+':
+                result.append(payload)
+            else:
+                raise AssertionError(line)
+            j+=1
+    result.extend(lines[position:])
+    return ''.join(result).encode()
+checks=[]
+for name in ('original-current','original-intermediate','intermediate-current'):
+    p=base/f'B.3-recheck-diff-{name}.json'
+    d=json.loads(p.read_bytes())
+    oldkey,newkey=name.split('-')
+    old,new=raws[oldkey],raws[newkey]
+    assert hashlib.sha256(old).hexdigest()==d['old_sha256']
+    assert hashlib.sha256(new).hexdigest()==d['new_sha256']
+    diff=d['unified_diff']
+    assert hashlib.sha256(diff.encode()).hexdigest()==d['raw_diff_sha256']
+    assert len(diff.encode())==d['raw_diff_utf8_bytes']
+    rebuilt=apply(old,diff)
+    assert rebuilt==new
+    assert rebuilt.endswith(b'\n\n')
+    checks.append({'container':str(p),'container_sha256':hashlib.sha256(p.read_bytes()).hexdigest(),'old_sha256':d['old_sha256'],'new_sha256':d['new_sha256'],'raw_diff_sha256':d['raw_diff_sha256'],'roundtrip_exact_bytes':True,'EOF_two_newlines_preserved':True})
+print(json.dumps({'environment':{'python':platform.python_version(),'device':'cpu','OMP_NUM_THREADS':'1','MKL_NUM_THREADS':'1'},'method':'逐行apply完整JSON decoded unified diff，包含空context單space prefix；未strip/rstrip原文或diff。','checks':checks},ensure_ascii=False,indent=2))

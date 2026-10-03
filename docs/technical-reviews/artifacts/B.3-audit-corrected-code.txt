@@ -1,0 +1,130 @@
+import copy
+import hashlib
+import json
+import math
+import platform
+import re
+from pathlib import Path
+import torch
+from tiny_perceptron.data import ByteTokenizer, render_chat
+from tiny_perceptron.retrieval import call_tool
+from scripts.course_experiments.applications import _TOOLS_SYSTEM, _parse_json_action, _prompt_ids, _tool_records
+from scripts.course_experiments.common import split_records, records_sha256
+
+root = Path('.')
+out = root / 'docs/technical-reviews/artifacts'
+p = root / 'docs/course-experiments/results/tools.json'
+frozen = json.loads(p.read_bytes())
+r = frozen['results']
+tok = ByteTokenizer()
+summary = {
+    'environment': {'python': platform.python_version(), 'torch': str(torch.__version__), 'device': 'cpu', 'torch_file': torch.__file__, 'torch_git_version': torch.version.git_version, 'OMP_NUM_THREADS': '1', 'MKL_NUM_THREADS': '1'},
+    'execution_scope': '離線 CPU 重算固定工具、解析既有生成文字、核對保存的 byte token 與對話回填。沒有重新生成模型回答、重訓、下載權重或執行正式排程。',
+    'formal_source': {'path': str(p), 'sha256': hashlib.sha256(p.read_bytes()).hexdigest(), 'revision': frozen['revision'], 'seed': frozen['seed'], 'device': frozen['device'], 'python': frozen['python_version'], 'torch': frozen['torch_version'], 'step_scale': frozen['step_scale'], 'evidence_status': frozen['evidence_status']},
+    'pin_comparisons': {}, 'episode_checks': [], 'mutated_generation_messages_count': 0,
+}
+needed = ('tiny_perceptron/retrieval.py', 'tiny_perceptron/data.py', 'scripts/course_experiments/applications.py', 'scripts/course_experiments/common.py', 'scripts/course_experiments/run.py')
+for filename in needed:
+    current = hashlib.sha256((root / filename).read_bytes()).hexdigest()
+    formal = frozen['code_sha256'][filename]
+    assert current == formal
+    summary['pin_comparisons'][filename] = {'current_sha256': current, 'formal_sha256': formal, 'identical': True}
+
+splits = split_records(_tool_records(), frozen['seed'])
+for split, rows in splits.items():
+    assert len(rows) == r['split'][split]['records']
+    assert records_sha256(rows) == r['split'][split]['sha256']
+summary['reconstructed_splits'] = {k: {'records': len(v), 'sha256': records_sha256(v)} for k, v in splits.items()}
+assert [row['messages'][1]['content'] for row in splits['test']] == [s['question'] for s in r['samples']]
+
+calls, matching, finite, copy_no_call, raw_token_sequences, fed_back = 0, 0, 0, 0, 0, 0
+for sample in r['samples']:
+    check = {k: sample[k] for k in ('question', 'operation', 'expected', 'status', 'answer', 'actual_tool_calls')}
+    check['events'] = []
+    actual = 0
+    current_messages = [{'role':'system', 'content':_TOOLS_SYSTEM}, {'role':'user', 'content':sample['question']}]
+    for idx, event in enumerate(sample['trace']):
+        g = event['generation']
+        raw = g['samples'][0]
+        assert _prompt_ids(current_messages, tok) == g['input_ids']
+        if g['messages'] != current_messages:
+            summary['mutated_generation_messages_count'] += 1
+        ids = raw['generated_ids']
+        content_ids = ids[:-1] if ids and ids[-1] == tok.eos_id else ids
+        assert tok.decode(content_ids) == raw['generated']
+        assert content_ids == tok.encode(raw['generated'])
+        assert raw['invalid_special_tokens'] == []
+        assert g['temperature'] == 0.0 and g['candidate_count'] == 1 and g['max_new_tokens'] == 64
+        raw_token_sequences += 1
+        e = {'step': event['step'], 'generated': raw['generated'], 'byte_ids_match': True, 'executed': event['executed']}
+        try:
+            action = _parse_json_action(raw['generated'])
+        except ValueError as error:
+            assert sample['status'] == 'invalid_request' and 'error' in event and not event['executed']
+            e['parse_rejected'] = str(error)
+        else:
+            assert action == event['parsed']
+            e['parsed'] = action
+            if event['executed']:
+                a = re.fullmatch(r'CALC:(add|multiply)\((\d+),(\d+)\)', sample['question'])
+                expected_request = {'name': a[1], 'arguments': {'a': int(a[2]), 'b': int(a[3])}}
+                assert action == expected_request
+                calculated = call_tool(action)
+                assert calculated == event['tool_result'] == sample['expected']
+                assert type(calculated) is int or math.isfinite(calculated)
+                assert event['finite_result'] and event['request_matches_question']
+                calls += 1; actual += 1; matching += 1; finite += 1
+                e['recalculated_tool_result'] = calculated
+                if idx + 1 < len(sample['trace']):
+                    current_messages += [{'role': 'assistant', 'content': raw['generated']}, {'role': 'user', 'content': f'TOOL_RESULT:{calculated}'}]
+                    next_generation = sample['trace'][idx + 1]['generation']
+                    assert next_generation['input_ids'] == _prompt_ids(current_messages, tok)
+                    fed_back += 1
+                    e['next_user_result'] = current_messages[-1]
+            else:
+                assert action.get('done') is True
+        check['events'].append(e)
+    assert all(e['generation']['messages'] == current_messages for e in sample['trace'])
+    assert actual == sample['actual_tool_calls']
+    if sample['operation'] == 'copy':
+        assert actual == 0 and sample['status'] == 'done' and sample['answer'] == sample['expected']
+        copy_no_call += 1
+    summary['episode_checks'].append(check)
+assert calls == 18 and matching == 18 and finite == 18 and copy_no_call == 2 and fed_back == 18
+summary['generation_messages_caveat'] = '先前步的 generation.messages 是與外層 messages 共用的可變 list，18 個首步記錄後來被原地追加為四筆；不能拿它當首步即時輸入。本人改用當次不可回填的 input_ids、原始生成 ids、_prompt_ids 和逐步重建上下文核對 18 次回填。此現象不改寫模型實際輸入或工具返回值。'
+summary['denominators'] = {'held_out_records': len(r['samples']), 'arithmetic_questions': sum(s['operation'] != 'copy' for s in r['samples']), 'copy_questions': copy_no_call, 'actual_tool_calls': calls, 'correct_name_and_arguments': matching, 'finite_results': finite, 'serialized_result_feedbacks': fed_back, 'raw_generated_token_sequences_checked': raw_token_sequences, 'model_seed': frozen['seed'], 'model_updates': r['training']['steps']}
+summary['printed_math'] = {'123*45': call_tool({'name': 'multiply', 'arguments': {'a': 123, 'b': 45}}), '123*54': call_tool({'name': 'multiply', 'arguments': {'a': 123, 'b': 54}}), '123*46': call_tool({'name': 'multiply', 'arguments': {'a': 123, 'b': 46}}), '9+9': call_tool({'name': 'add', 'arguments': {'a': 9, 'b': 9}}), '9*9': call_tool({'name': 'multiply', 'arguments': {'a': 9, 'b': 9}}), '5355_differs_from_5535': 5355 != 5535}
+assert summary['printed_math'] == {'123*45': 5535, '123*54': 6642, '123*46': 5658, '9+9': 18, '9*9': 81, '5355_differs_from_5535': True}
+
+trace = [{'role': 'assistant', 'tool_request': {'name': 'multiply', 'arguments': {'a':123, 'b':45}}}, {'role': 'tool', 'result':5535}]
+try:
+    render_chat(trace)
+except ValueError as error:
+    summary['raw_trace_rejected_by_render_chat'] = str(error)
+else:
+    raise AssertionError('raw trace unexpectedly accepted')
+try:
+    render_chat([{'role': 'tool', 'content': '5535'}, {'role': 'assistant', 'content': '5535'}])
+except ValueError as error:
+    summary['tool_role_rejected_by_render_chat'] = str(error)
+else:
+    raise AssertionError('tool role unexpectedly accepted')
+messages = [{'role': 'system', 'content': _TOOLS_SYSTEM}, {'role':'user', 'content':'CALC:add(9,9)'}, {'role':'assistant', 'content':'{"name":"add","arguments":{"a":9,"b":9}}'}, {'role':'user', 'content':'TOOL_RESULT:18'}, {'role':'assistant', 'content':'{"done":true,"answer":18}'}]
+x, labels = render_chat(messages)
+summary['formal_serialization_accepted'] = {'roles': [m['role'] for m in messages], 'system': _TOOLS_SYSTEM, 'input_tokens': len(x), 'target_tokens': len(labels)}
+
+material = {'source': summary['formal_source'], 'training_configuration': {'seed': r['seed'], 'steps': r['training']['steps'], 'planned_steps': r['training']['planned_steps'], 'step_scale': r['training']['step_scale'], 'records': r['training']['records'], 'records_sha256': r['training']['records_sha256']}, 'split': r['split'], 'model_config': r['model']['config'], 'protocol': r['protocol'], 'code_pins': {k:frozen['code_sha256'][k] for k in needed}, 'empirical_checks': summary['episode_checks']}
+for directory in ('releases', 'public-releases'):
+    p = root / 'docs/course-experiments' / directory / 'tools.json'
+    d = json.loads(p.read_bytes())
+    selected = {'path': str(p), 'sha256': hashlib.sha256(p.read_bytes()).hexdigest()}
+    if directory == 'releases':
+        selected.update({'revision': d['revision'], 'original_checkpoint': {k:d['files'][0][k] for k in ('path', 'sha256', 'kind', 'architecture')}, 'inference': d['inference']})
+    else:
+        release = d['release']
+        selected.update({k: release[k] for k in ('repo', 'revision', 'weights_revision')})
+        selected['public_checkpoint'] = next({k:f[k] for k in ('path','sha256','bytes')} for f in release['public_manifest']['files'] if f['output']=='model.pt')
+        selected['immutable_url'] = 'https://huggingface.co/' + release['repo'] + '/resolve/' + release['revision'] + '/' + selected['public_checkpoint']['path']
+    material[directory] = selected
+(out / 'B.3-frozen-material.json').write_text(json.dumps(material, ensure_ascii=False, indent=2) + '\n')
+print(json.dumps(summary, ensure_ascii=False, indent=2))
