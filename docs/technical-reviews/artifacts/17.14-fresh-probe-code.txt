@@ -1,0 +1,44 @@
+import copy
+import hashlib
+import json
+import platform
+from pathlib import Path
+import torch
+from torch import nn
+from tiny_perceptron.training import load_checkpoint
+from tiny_perceptron.quantization import QuantizedLinear, quantize_symmetric
+from scripts.course_experiments.compression import _qat_layers, _QATLinear, _example, _storage
+
+torch.set_num_threads(1)
+print(json.dumps({'python':platform.python_version(),'torch':str(torch.__version__),'torch_git_version':torch.version.git_version,'device':'cpu','threads':torch.get_num_threads()}))
+models = {}
+for name in ('model.pt','matched_ptq4.pt','qat_float.pt'):
+    path = Path('checkpoints/course/qat') / name
+    model, payload = load_checkpoint(path, 'cpu')
+    model.eval()
+    models[name] = model
+    print(json.dumps({'name':name,'sha256':hashlib.sha256(path.read_bytes()).hexdigest(),'immutable_url':'https://huggingface.co/birdhackor/tiny-perceptron-course-models/resolve/30ea5592953d0f0db4a0827fe6b7f30bc53805f0/course/course-v1/qat/'+name,'format':payload['format_version'],'file_bytes':path.stat().st_size,'optimizer':payload.get('optimizer'),'qat_wrappers':sum(isinstance(m,_QATLinear) for m in model.modules()),'linear_layers':sum(type(m) is nn.Linear for m in model.modules()),'quantized_layers':sum(isinstance(m,QuantizedLinear) for m in model.modules()),'storage':_storage(model,path)},ensure_ascii=False))
+result = json.loads(Path('docs/course-experiments/results/qat.json').read_text())['results']
+sample = result['runs']['qat_packed4']['test']['generated_samples'][0]
+record = {'family':sample['family'],'question':sample['question'],'answer':sample['expected']}
+x, labels = _example(record, models['model.pt'].config.max_length)
+master = models['qat_float.pt']
+wrapped = _qat_layers(copy.deepcopy(master))
+with torch.no_grad():
+    fake_logits = wrapped(x[None])['logits']
+    deployed_logits = models['model.pt'](x[None])['logits']
+    master_logits = master(x[None])['logits']
+print(json.dumps({'record':record,'input_shape':list(x[None].shape),'full_gold_answer_in_input':True,'answer_targets_with_eos':int((labels!=-100).sum()),'fake_deployed_cpu_max_logit_difference':float((fake_logits-deployed_logits).abs().max()),'ordinary_master_deployed_cpu_max_logit_difference':float((master_logits-deployed_logits).abs().max()),'wrapped_layers':sum(isinstance(m,_QATLinear) for m in wrapped.modules()),'scope':'one gold-prefix test input; CPU reference equality, not accuracy or speed'}))
+scales_equal = []
+for name, layer in wrapped.named_modules():
+    if isinstance(layer,_QATLinear):
+        packed = dict(models['model.pt'].named_modules())[name]
+        q,s = quantize_symmetric(layer.weight.detach(),4,per_channel=True)
+        scales_equal.append({'name':name,'shape':list(q.shape),'scale_shape':list(s.shape),'scale_matches':torch.equal(s,packed.scale),'minimum':int(q.min()),'maximum':int(q.max())})
+print(json.dumps({'row_scale_checks':scales_equal}))
+original = torch.tensor([.1,.4,.9],requires_grad=True)
+hard = original.detach().clone().requires_grad_()
+(hard/.9*7).round().sum().backward()
+print(json.dumps({'hard_leaf':hard.is_leaf,'hard_grad_fn':str(hard.grad_fn),'separate_storage':hard.data_ptr()!=original.data_ptr(),'hard_grad':hard.grad.tolist(),'original_grad':original.grad,'scope':'detach before clone does not reconnect original graph'}))
+optimizer = torch.optim.AdamW(wrapped.parameters(),lr=.003,weight_decay=.01)
+print(json.dumps({'optimizer_constructed_after_wrappers':True,'optimizer_param_count':len(optimizer.param_groups[0]['params']),'optimizer_lr':optimizer.param_groups[0]['lr'],'optimizer_updates':0,'training_checkpoint_not_available_and_not_resumed':True}))

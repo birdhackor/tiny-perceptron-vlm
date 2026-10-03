@@ -1,0 +1,37 @@
+import hashlib
+import json
+from pathlib import Path
+from tiny_perceptron.data import ByteTokenizer
+
+def sha(p): return hashlib.sha256(Path(p).read_bytes()).hexdigest()
+tok=ByteTokenizer()
+p=Path('docs/course-experiments/results/qat.json')
+report=json.loads(p.read_text()); r=report['results']
+print(json.dumps({'source_path':str(p),'source_sha256':sha(p),'original_environment':{k:report[k] for k in ('revision','device','seed','torch_version','python_version','gpu','step_scale','evidence_status','status')},'formal_run_not_reexecuted':True,'training':r['training'],'teacher_provenance':r['teacher_provenance'],'data':r['data'],'fake_quantization':r['fake_quantization'],'activation_quantization':r['activation_quantization'],'fake_deployed_max_logit_difference':r['fake_deployed_max_logit_difference']},ensure_ascii=False))
+rows=[]
+for name,run in r['runs'].items():
+    item={'variant':name,'storage':run['storage'],'split_audits':{}}
+    for split in ('validation','test'):
+        s=run[split]; samples=s['generated_samples']
+        targets=sum(len(tok.encode(x['expected']))+1 for x in samples)
+        invalid=[]; hits=0; ended=0
+        for i,x in enumerate(samples):
+            ids=x['generated_ids']; raw=ids[:-1] if ids and ids[-1]==tok.eos_id else ids
+            hits += raw==tok.encode(x['expected'])
+            ended += bool(ids and ids[-1]==tok.eos_id)
+            invalid += [{'row':i,'id':n} for n in raw if n<8 or n>=tok.vocab_size]
+        item['split_audits'][split]={'stored':{k:v for k,v in s.items() if k!='generated_samples'},'recounted_samples':len(samples),'recounted_answer_eos_targets':targets,'recounted_matches':hits,'recounted_eos':ended,'invalid_control_ids':invalid,'recomputed_nll':s['nll_sum']/targets,'nll_equal':s['answer_nll']==s['nll_sum']/targets,'selected_prompt_sample':[x for x in samples if x['question']=='color=red;shape=square;pitch=high;describe']}
+        assert targets==s['supervised_tokens'] and hits==s['correct'] and ended==s['eos_count']
+        assert not invalid and len(samples)==s['examples']
+    rows.append(item)
+print(json.dumps({'rows':rows,'delta_nll':r['runs']['qat_packed4']['test']['answer_nll']-r['runs']['matched_ptq4']['test']['answer_nll'],'difference_in_correct':r['runs']['qat_packed4']['test']['correct']-r['runs']['matched_ptq4']['test']['correct'],'same_initialization':r['training']['fp_finetuning']['initialization_sha256']==r['training']['qat']['initialization_sha256'],'same_batch_plan':r['training']['fp_finetuning']['batch_plan_sha256']==r['training']['qat']['batch_plan_sha256']},ensure_ascii=False))
+sft=json.loads(Path('docs/course-experiments/results/sft.json').read_text())
+print(json.dumps({'sft_sha256':sha('docs/course-experiments/results/sft.json'),'sft_revision':sft['revision'],'matching_original_source_artifacts':[x for x in sft['artifacts'] if x['path'] in ('model.pt','dataset.json')],'sft_main_training':sft['results']['training']},ensure_ascii=False))
+release=json.loads(Path('docs/course-experiments/public-releases/qat.json').read_text())
+weights=[]
+for file in release['release']['public_manifest']['files']:
+    if file['output'] in ('model.pt','matched_ptq4.pt','qat_float.pt','README.md'):
+        local=Path('checkpoints/course/qat')/file['output']
+        weights.append({'original_manifest_entry':file,'local_sha256':sha(local),'local_bytes':local.stat().st_size,'matches':sha(local)==file['sha256']})
+        assert weights[-1]['matches']
+print(json.dumps({'public_source_pin':release['release']['revision'],'read_original_releases':{'approval_sha256':sha('docs/course-experiments/releases/qat.json'),'public_releases_sha256':sha('docs/course-experiments/public-releases/qat.json'),'student_check_sha256':sha('docs/course-experiments/student-checks/qat.json')},'verified_existing_public_inputs':weights,'scope':'mechanical frozen-artifact audit; does not rerun 350-step GPU schedule or establish general quality'},ensure_ascii=False))

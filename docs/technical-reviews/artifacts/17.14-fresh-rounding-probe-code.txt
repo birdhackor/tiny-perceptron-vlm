@@ -1,0 +1,33 @@
+import copy
+import json
+from pathlib import Path
+import torch
+from tiny_perceptron.quantization import quantize_symmetric,unpack_int4,replace_linear_layers
+from tiny_perceptron.training import load_checkpoint
+from scripts.course_experiments.compression import _qat_layers,_QATLinear,_example
+from scripts.course_experiments.run import experiment_spec
+from scripts.course_experiments.common import Context
+
+torch.set_num_threads(1)
+master,_=load_checkpoint('checkpoints/course/qat/qat_float.pt','cpu')
+public,_=load_checkpoint('checkpoints/course/qat/model.pt','cpu')
+wrapped=_qat_layers(copy.deepcopy(master)).eval()
+local=replace_linear_layers(copy.deepcopy(master),4).eval()
+checks=[]
+for name,w in wrapped.named_modules():
+    if isinstance(w,_QATLinear):
+        q,s=quantize_symmetric(w.weight.detach(),4,per_channel=True)
+        p=dict(public.named_modules())[name]
+        checks.append({'name':name,'integer_codes_equal':torch.equal(q,unpack_int4(p.values,p.shape)),'scale_max_absolute_difference':float((s-p.scale).abs().max()),'scale_max_relative_difference':float(((s-p.scale).abs()/p.scale).max()),'packed_scale_dtype':str(p.scale.dtype)})
+r=json.loads(Path('docs/course-experiments/results/qat.json').read_text())['results']['runs']['qat_packed4']['test']['generated_samples'][0]
+x,y=_example({'question':r['question'],'answer':r['expected']},128)
+with torch.no_grad():
+    fake=wrapped(x[None])['logits'];cpu_packed=local(x[None])['logits'];exported=public(x[None])['logits']
+print(json.dumps({'rounding_checks':checks,'cpu_fake_vs_fresh_cpu_packed':float((fake-cpu_packed).abs().max()),'cpu_fake_vs_public_packed':float((fake-exported).abs().max()),'tolerance':1e-4,'scope':'FP32 same per-row rule; CUDA-origin scales and CPU arithmetic need not be bit-identical. Formal frozen 0.0 is its original L4 measurement.'}))
+spec=experiment_spec('qat')
+ctx=Context('cpu',Path('/tmp/17.14-not-created-qat'),Path('outputs/course-experiments/course-v1'),Path('assets/training'))
+dependencies={}
+for n in ('model.pt','dataset.json'):
+    try: ctx.dependency('sft',n)
+    except FileNotFoundError as e: dependencies[n]=str(e)
+print(json.dumps({'selected_spec':spec,'missing_original_sft_dependencies':dependencies,'full_schedule_executed':False,'resume_entrypoint':False,'scope':'read-only dispatch and dependency checks; no execute() call, schedule, save, GPU, or Git command'}))
