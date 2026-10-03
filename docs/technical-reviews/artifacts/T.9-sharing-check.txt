@@ -1,0 +1,45 @@
+import hashlib
+import json
+import platform
+import subprocess
+import sys
+from pathlib import Path
+
+import torch
+from tiny_perceptron.model import ModelConfig, TinyLM
+from tiny_perceptron.training import load_checkpoint, save_checkpoint
+
+torch.set_num_threads(1)
+torch.manual_seed(0)
+temporary = Path('/tmp/T.9-sharing')
+temporary.mkdir(exist_ok=True)
+model = TinyLM(ModelConfig(width=8, layers=1, tied=True))
+assert model.output.weight is model.embedding.weight
+source = temporary / 'tied-fp32.pt'
+target = temporary / 'tied-packed4.pt'
+save_checkpoint(source, model, step=0)
+original = torch.load(source, weights_only=True)
+assert original['optimizer'] is None
+assert 'torch_rng' in original and 'python_rng' in original
+assert original['step'] == 0
+command = [sys.executable, 'scripts/quantize.py', str(source), '--bits', '4', '--output', str(target)]
+result = subprocess.run(command, capture_output=True, text=True, timeout=30)
+assert result.returncode == 0, result.stderr
+report = json.loads(result.stdout)
+assert report['input_output_sharing_removed'] is True
+reloaded, payload = load_checkpoint(target)
+assert reloaded.config.tied is False
+assert 'output.values' in payload['model'] and 'embedding.weight' in payload['model']
+assert payload['metadata']['input_output_sharing_removed'] is True
+evidence = {
+    'command': command, 'stdout': result.stdout, 'stderr': result.stderr, 'exit_code': result.returncode,
+    'environment': {'python': platform.python_version(), 'torch': str(torch.__version__), 'device': 'cpu',
+                    'num_threads': str(torch.get_num_threads()), 'OMP_NUM_THREADS': '1', 'MKL_NUM_THREADS': '1'},
+    'native_checkpoint_keys': list(original), 'native_optimizer': 'None', 'native_step': 0,
+    'original_config_tied': model.config.tied, 'reloaded_config_tied': reloaded.config.tied,
+    'output_buffer_shape': list(payload['model']['output.values'].shape),
+    'embedding_shape': list(payload['model']['embedding.weight'].shape),
+    'scope': '新的有界CPU機制檢查：隨機width8/layers1/tied=True模型只保存和轉換，沒有任何參數更新；不當作品質或正式120步重跑。'
+}
+Path('docs/technical-reviews/artifacts/T.9-sharing-result.json').write_text(json.dumps(evidence, ensure_ascii=False, indent=2) + '\n')
+print(json.dumps(evidence, ensure_ascii=False, indent=2))

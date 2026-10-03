@@ -1,0 +1,146 @@
+import contextlib
+import hashlib
+import io
+import json
+import os
+import platform
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+import torch
+
+ROOT = Path.cwd()
+OUT = ROOT / 'docs/technical-reviews/artifacts'
+TMP = Path('/tmp/T.9-cpu')
+TMP.mkdir(exist_ok=True)
+torch.set_num_threads(1)
+
+def sha(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+def section(path, identifier):
+    raw = Path(path).read_bytes()
+    heads = list(re.finditer(rb'(?m)^## ([A-Z\d]+\.\d+) [^\r\n]+', raw))
+    index = next(i for i, h in enumerate(heads) if h[1].decode() == identifier)
+    return raw[heads[index].start():heads[index + 1].start() if index + 1 < len(heads) else len(raw)]
+
+env = {'python': platform.python_version(), 'torch': str(torch.__version__),
+       'device': 'cpu', 'torch_git_version': str(torch.version.git_version),
+       'num_threads': str(torch.get_num_threads()), 'OMP_NUM_THREADS': os.getenv('OMP_NUM_THREADS'),
+       'MKL_NUM_THREADS': os.getenv('MKL_NUM_THREADS'), 'network': 'offline execution; no downloads'}
+records = []
+prerequisites = []
+for path, identifier in [('course/chapters/17.md','17.2'), ('course/chapters/17.md','17.8'),
+                         ('course/chapters/17.md','17.9'), ('course/chapters/17.md','17.14'),
+                         ('course/chapters/17.md','17.10'), ('course/chapters/04.md','4.1'),
+                         ('course/training.md','T.4')]:
+    raw = section(path, identifier)
+    prerequisites.append({'source': path + '#' + identifier,
+                          'raw_sha256': hashlib.sha256(raw).hexdigest(), 'raw_utf8': raw.decode()})
+    if identifier == 'T.4':
+        continue
+    code = re.search(r'```python\n(.*?)\n```', raw.decode(), re.S)[1]
+    exercise = code
+    if identifier == '17.2': exercise = code.replace('scale = 0.5', 'scale = 0.25')
+    if identifier == '17.8': exercise = code.replace('7, 2, 3]', '7, 2, 3, 4]')
+    if identifier in ('17.9','17.10'): exercise = code.replace('bits=4', 'bits=8')
+    if identifier == '17.14': exercise = code.replace('y.sum().backward()', 'y.square().sum().backward()')
+    if identifier == '4.1':
+        exercise = code.replace('ids = torch.tensor', '    p.weight.zero_()\nids = torch.tensor').replace('assert not torch.equal', 'assert torch.equal')
+    for label, source in [('original',code), ('exercise',exercise)]:
+        namespace = {}
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output): exec(compile(source, identifier + '-' + label, 'exec'), namespace)
+        if identifier == '17.2':
+            assert namespace['q'].tolist() == ([-1,0,1,2] if label=='original' else [-3,1,3,5])
+        if identifier == '17.8':
+            assert namespace['packed'].tolist() == ([112,152,175,139] if label=='original' else [112,152,175,203])
+        if identifier == '17.9':
+            assert namespace['before'].shape == (1,3,264)
+            assert torch.equal(namespace['before'], namespace['original_again'])
+        if identifier == '17.14':
+            target = torch.ones(3) if label=='original' else 2 * namespace['y'].detach()
+            assert torch.equal(namespace['x'].grad, target)
+            assert torch.equal(namespace['hard'].grad, torch.zeros(3))
+        if identifier == '17.10':
+            assert namespace['float_bytes'] == 8320
+            assert namespace['compressed'].storage_bytes() == (1280 if label=='original' else 2304)
+        records.append({'id':identifier + '-' + label, 'source':source, 'stdout':output.getvalue(), 'result':'assertions passed', 'environment':env})
+
+raw = section('course/training.md','T.9')
+(OUT/'T.9-source.txt').write_bytes(raw)
+(OUT/'T.9-prerequisites.json').write_text(json.dumps(prerequisites,ensure_ascii=False,indent=2)+'\n')
+
+commands = [
+    [sys.executable,'-m','scripts.course_experiments.run','--help'],
+    [sys.executable,'scripts/quantize.py','--help'],
+    [sys.executable,'scripts/infer.py','checkpoints/course/quantization/fp32.pt','--chat','--prompt','color=blue;shape=circle;pitch=low;color?','--tokens','24','--json'],
+    [sys.executable,'scripts/infer.py','checkpoints/course/quantization/model.pt','--chat','--prompt','color=blue;shape=circle;pitch=low;color?','--tokens','24','--json'],
+    [sys.executable,'scripts/quantize.py','checkpoints/course/quantization/fp32.pt','--bits','4','--output',str(TMP/'repacked4.pt')]
+]
+for argv in commands:
+    completed = subprocess.run(argv, capture_output=True, text=True, timeout=30)
+    assert completed.returncode == 0, completed.stderr
+    records.append({'id':'T.9-cli-' + str(len(records)), 'argv':argv, 'stdout':completed.stdout,
+                    'stderr':completed.stderr,'exit_code':completed.returncode,'environment':env})
+
+from tiny_perceptron.training import load_checkpoint
+from scripts.course_experiments.compression import _evaluate, _storage
+receipt_path = ROOT/'docs/course-experiments/results/quantization.json'
+receipt = json.loads(receipt_path.read_text())
+release = json.loads((ROOT/'docs/course-experiments/public-releases/quantization.json').read_text())
+manifest_path = ROOT/'checkpoints/course/quantization/download-manifest.json'
+manifest = json.loads(manifest_path.read_text())
+public_weights_pin = release['release']['weights_revision']
+exercise_records = [{'family':s['family'],'question':s['question'],'answer':s['expected']}
+                    for s in receipt['results']['runs']['fp32']['validation']['generated_samples']]
+tests = [{'family':s['family'],'question':s['question'],'answer':s['expected']}
+         for s in receipt['results']['runs']['fp32']['test']['generated_samples']]
+models = {}
+weights = []
+for variant, filename in [('fp32','fp32.pt'),('packed4','model.pt'),('packed8','packed8.pt')]:
+    path=ROOT/'checkpoints/course/quantization'/filename
+    entry=next(item for item in manifest['files'] if item['output']==filename)
+    assert sha(path)==entry['sha256']
+    assert path.stat().st_size==entry['bytes']
+    model,payload=load_checkpoint(path,'cpu')
+    validation=_evaluate(model,exercise_records,'cpu',tokens=24)
+    test=_evaluate(model,tests,'cpu',tokens=24)
+    for split, actual in [('validation',validation),('test',test)]:
+        frozen=receipt['results']['runs'][variant][split]
+        assert actual['correct']==frozen['correct']
+        assert actual['supervised_tokens']==frozen['supervised_tokens']
+        assert [s['generated_ids'] for s in actual['generated_samples']]==[s['generated_ids'] for s in frozen['generated_samples']]
+        assert abs(actual['answer_nll']-frozen['answer_nll'])<1e-5
+    storage=_storage(model,path)
+    assert storage['tensor_bytes']==receipt['results']['runs'][variant]['storage']['tensor_bytes']
+    weights.append({'variant':variant,'local_path':str(path.relative_to(ROOT)),'hydrated_sha256':sha(path),
+                    'source_kind':'ignored public checkpoint input; not Git-index repository code',
+                    'public_url':f'https://huggingface.co/{manifest["repo"]}/resolve/{public_weights_pin}/course/course-v1/quantization/{filename}',
+                    'revision':public_weights_pin,'config':payload['config'],'format_version':payload['format_version'],
+                    'optimizer_present':payload.get('optimizer') is not None,
+                    'payload_keys':list(payload),'storage':storage,
+                    'tensor_configuration':[{'name':n,'shape':list(t.shape),'dtype':str(t.dtype),'bytes':t.numel()*t.element_size()} for n,t in payload['model'].items()],
+                    'validation':validation,'test':test})
+    models[variant]=model
+changed=[]
+for left,right in zip(weights[0]['validation']['generated_samples'],weights[1]['validation']['generated_samples'],strict=True):
+    changed.append({'family':left['family'],'question':left['question'],'expected':left['expected'],
+                    'fp32_ids':left['generated_ids'],'packed4_ids':right['generated_ids'],
+                    'answer_changed':left['generated_ids']!=right['generated_ids'],'fp32_exact':left['exact'],'packed4_exact':right['exact']})
+exercise={'id':'T.9-exercise','public_fp32_file_bytes':weights[0]['storage']['file_bytes'],
+          'public_packed4_file_bytes':weights[1]['storage']['file_bytes'],
+          'public_bytes_saved':weights[0]['storage']['file_bytes']-weights[1]['storage']['file_bytes'],
+          'private_receipt_bytes_saved':receipt['results']['runs']['fp32']['storage']['file_bytes']-receipt['results']['runs']['packed4']['storage']['file_bytes'],
+          'validation_questions':len(changed),'answers_changed':sum(row['answer_changed'] for row in changed),'rows':changed,
+          'scope':'Original exercise using the pre-existing immutable public exports, with exactly the frozen five validation questions; no training or GPU rerun.'}
+result={'environment':env,'section_sha256':hashlib.sha256(raw).hexdigest(),'read_on_utc':'2026-10-03',
+        'execution_records':records,'weights':weights,'exercise':exercise,
+        'original_formal_training_command':'Not executed: formal 120-update experiment prohibited by task; inspected original CLI/source and frozen receipt.',
+        'path_substitution':'The two original infer commands use pre-existing public checkpoint paths instead of nonexistent private run output paths.',
+        'receipt_sha256':sha(receipt_path),'public_release_sha256':sha(ROOT/'docs/course-experiments/public-releases/quantization.json'),
+        'download_manifest_sha256':sha(manifest_path)}
+(OUT/'T.9-cpu-results.json').write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\n')
+print(json.dumps({'environment':env,'originals_and_exercises':len(records)-len(commands),'cli_runs':len(commands),'exercise':exercise},ensure_ascii=False,indent=2))

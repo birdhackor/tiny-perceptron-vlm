@@ -1,0 +1,82 @@
+import difflib
+import hashlib
+import json
+import platform
+import random
+from pathlib import Path
+
+import torch
+from tiny_perceptron.data import ByteTokenizer, IGNORE, render_chat
+
+ROOT = Path.cwd()
+OUT = ROOT / 'docs/technical-reviews/artifacts'
+
+def sha(data):
+    return hashlib.sha256(data).hexdigest()
+
+def file_sha(path):
+    return sha(Path(path).read_bytes())
+
+receipt = json.loads((ROOT / 'docs/course-experiments/results/quantization.json').read_text())
+dataset_path = ROOT / 'outputs/text-behavior-interface-check/sft/dataset.json'
+raw = dataset_path.read_bytes()
+assert sha(raw) == receipt['results']['data']['sha256']
+parts = json.loads(raw)
+(OUT / 'T.9-sft-dataset.json').write_bytes(raw)
+families = {split:set(row['family'] for row in records) for split, records in parts.items()}
+for a,b in [('train','validation'),('train','test'),('validation','test')]: assert not families[a]&families[b]
+counts = {split:sum(int((render_chat(row['messages'])[1]!=IGNORE).sum()) for row in records) for split,records in parts.items()}
+rng = random.Random(42)
+plan = [[rng.randrange(len(parts['train'])) for _ in range(16)] for _ in range(120)]
+train_denominators = [int((render_chat(row['messages'])[1]!=IGNORE).sum()) for row in parts['train']]
+effective = sum(train_denominators[index] for step in plan for index in step)
+assert effective == 13610
+assert sha(json.dumps(plan).encode()) == receipt['results']['training']['batch_plan_sha256']
+cpu = json.loads((OUT / 'T.9-cpu-results.json').read_text())
+runs = {}
+for name, run in receipt['results']['runs'].items():
+    row = {'storage':run['storage'],'timing':run['timing']}
+    if name != 'fp32':
+        row['buffer_sums_by_suffix'] = {suffix:sum(value for key,value in run['storage']['buffers'].items() if key.endswith(suffix)) for suffix in ('.values','.scale','.bias')}
+        assert row['buffer_sums_by_suffix']['.scale'] == 5664
+        assert row['buffer_sums_by_suffix']['.bias'] == 2560
+    for split in ('validation','test'):
+        frozen = run[split]
+        assert frozen['supervised_tokens'] == counts[split]
+        assert frozen['answer_nll'] == frozen['nll_sum']/counts[split]
+        samples = frozen['generated_samples']
+        assert frozen['correct'] == sum(s['exact'] for s in samples)
+        assert frozen['completed_correct'] == sum(s['exact'] and s['ended_with_eos'] for s in samples)
+        assert frozen['eos_count'] == sum(s['ended_with_eos'] for s in samples)
+        assert len(samples)==len(parts[split])
+        for s,original in zip(samples,parts[split],strict=True):
+            assert s['question']==original['messages'][0]['content']
+            assert s['expected']==original['messages'][1]['content']
+            ids=s['generated_ids']
+            assert ids[-1]==2 and all(value>=8 for value in ids[:-1])
+            assert s['exact']==(ids[:-1]==ByteTokenizer().encode(s['expected']))
+        row[split] = {k:v for k,v in frozen.items() if k!='seconds'}
+    row['prefill_ms']=1000*run['timing']['prefill_seconds']
+    row['decode_ms_per_token']=1000*run['timing']['decode_seconds_per_token']
+    assert run['timing']['decode_tokens']==8 and run['timing']['repetitions']==3
+    assert run['timing']['prompt_tokens']==46
+    runs[name]=row
+old=(Path('/tmp/T.9-sources/historical-compression.py')).read_bytes()
+new=(ROOT/'scripts/course_experiments/compression.py').read_bytes()
+assert sha(old)==receipt['code_sha256']['scripts/course_experiments/compression.py']
+diff=''.join(difflib.unified_diff(old.decode().splitlines(True),new.decode().splitlines(True),fromfile='5af615e5d7c9642afee800390fa072257f895d0c/compression.py',tofile='current/compression.py'))
+(OUT/'T.9-compression-diff.json').write_text(json.dumps({'old_raw_sha256':sha(old),'new_raw_sha256':sha(new),'raw_diff_sha256':sha(diff.encode()),'unified_diff':diff,'inspection':'差異只在run_multimodal_distillation教師task檢查與metadata；T.9 quantization、_fit_text、_packed、_storage、_evaluate、_timing區塊相同。'},ensure_ascii=False,indent=2)+'\n')
+for filename in ('download-manifest.json','export-manifest.json'):
+    (OUT/('T.9-public-'+filename)).write_bytes((ROOT/'checkpoints/course/quantization'/filename).read_bytes())
+result = {'environment':{'python':platform.python_version(),'torch':str(torch.__version__),'device':'cpu','OMP_NUM_THREADS':'1','MKL_NUM_THREADS':'1'},
+          'receipt_path':'docs/course-experiments/results/quantization.json','receipt_sha256':file_sha(ROOT/'docs/course-experiments/results/quantization.json'),
+          'receipt_original_environment':{k:receipt[k] for k in ('revision','device','seed','torch_version','python_version','gpu','evidence_status','unfinished_schedules')},
+          'data':receipt['results']['data'],'dataset_snapshot_sha256':sha(raw),'dataset_counts':{k:len(v) for k,v in parts.items()},
+          'family_counts':{k:len(v) for k,v in families.items()},'effective_targets':counts,
+          'training':receipt['results']['training'],'recomputed_training_effective_targets':effective,
+          'teacher':receipt['results']['teacher_provenance'],'runs':runs,
+          'test_ids_equal':all([s['generated_ids'] for s in runs[name]['test']['generated_samples']]==[s['generated_ids'] for s in runs['fp32']['test']['generated_samples']] for name in ('packed4','packed8')),
+          'scope':'親讀凍結L4實報並離線重算其分母、NLL、原始ID匹配與時間單位；並未重跑GPU或任何正式訓練。',
+          'original_commands_preflight':{'private_output_files_present':all((ROOT/'outputs/course-experiments/course-v1/quantization'/n).exists() for n in ('fp32.pt','model.pt')),'conditional_dependency':'正文要求先完成直接SFT的model.pt與原dataset.json；run_quantization使用ctx.dependency讀入；未執行正式120步排程。'}}
+(OUT/'T.9-receipt-audit.json').write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\n')
+print(json.dumps({'result':'all assertions passed','counts':result['dataset_counts'],'families':result['family_counts'],'effective_targets':counts,'training_effective':effective,'timings_ms':{k:r['decode_ms_per_token'] for k,r in runs.items()}},ensure_ascii=False))
