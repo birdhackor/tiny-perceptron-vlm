@@ -1,0 +1,81 @@
+import ast
+import hashlib
+import json
+import os
+import sys
+from pathlib import Path
+import torch
+from tiny_perceptron.data import ByteTokenizer
+
+def sha(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+print('ENV', sys.version.split()[0], torch.__version__, torch.version.git_version,
+      'cpu', os.environ['OMP_NUM_THREADS'], os.environ['MKL_NUM_THREADS'])
+base = Path('docs/course-experiments')
+result_path = base/'results/distillation.json'
+release_path = base/'releases/distillation.json'
+public_path = base/'public-releases/distillation.json'
+student_path = base/'student-checks/distillation.20261002T221133313058Z.json'
+result = json.loads(result_path.read_bytes())
+release = json.loads(release_path.read_bytes())
+public = json.loads(public_path.read_bytes())
+student = json.loads(student_path.read_bytes())
+for p in [result_path, release_path, public_path, student_path]:
+    print('fixed_file', str(p), 'sha256', sha(p), 'bytes', p.stat().st_size)
+assert result['revision'] == release['revision'] == '5af615e5d7c9642afee800390fa072257f895d0c'
+assert public['approval']['approval_sha256'] == sha(release_path)
+assert public['release']['revision'] == student['public_source']['revision']
+print('formal_environment', {k:result[k] for k in ['revision','seed','device','torch_version','python_version','gpu','evidence_status','step_scale','unfinished_schedules']})
+print('private_backup_pin', result['hf']['repo'], result['hf']['revision'], result['hf']['prefix'])
+print('public_pin', public['release']['repo'], public['release']['revision'], public['release']['weights_revision'])
+print('student_check_scope', student['checked_at'], student['environment'], student['scope'])
+frozen_path = Path('outputs/technical-sources/17.9-compression-5af615e.py')
+assert sha(frozen_path) == result['code_sha256']['scripts/course_experiments/compression.py']
+print('frozen_code', sha(frozen_path), 'current_code', sha('scripts/course_experiments/compression.py'))
+tree = ast.parse(frozen_path.read_text())
+fit = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == '_fit_text')
+defaults = dict(zip([a.arg for a in fit.args.args][-len(fit.args.defaults):], [ast.literal_eval(v) for v in fit.args.defaults]))
+assert defaults['alpha'] == 0.5 and defaults['temperature'] == 2.0
+print('fit_defaults', defaults, 'source_lines', fit.lineno, fit.end_lineno)
+for p in ['tiny_perceptron/alignment.py','tiny_perceptron/model.py','tiny_perceptron/data.py']:
+    assert sha(p) == result['code_sha256'][p]
+    print('matched_helper', p, sha(p))
+for task, data in result['results']['tasks'].items():
+    for name, run in data['runs'].items():
+        if not name.endswith('ce_kl'):
+            continue
+        t = run['training']
+        assert t['alpha'] == 0.5 and t['temperature'] == 2.0 and t['temperature_squared_applied_once']
+        residuals = [abs(row['loss']-(0.5*row['ce']+0.5*row['kl'])) for row in t['loss_trace']]
+        assert max(residuals) < 2e-6
+        print('branch', task, name, {k:t[k] for k in ['steps','optimizer_updates','batch_size','training_examples','training_sequence_chunks','effective_supervised_tokens','alpha','temperature','temperature_squared_applied_once','objective']}, 'trace_count', len(residuals), 'max_mix_residual', max(residuals))
+        print('gold_eval_denominators', task, name, {s:{k:run[s][k] for k in ['examples','supervised_tokens','nll_sequence_chunks']} for s in ['validation','test']})
+cache_path = Path('outputs/private-review-artifacts/original-distillation/sft-teacher-logits.pt')
+hard_path = Path('outputs/private-review-artifacts/original-distillation/sft-hard-targets.json')
+manifest = {x['path']:x for x in result['artifacts']}
+for p in [cache_path, hard_path]:
+    assert sha(p) == manifest[p.name]['sha256'] and p.stat().st_size == manifest[p.name]['bytes']
+    print('original_private_bytes', p.name, 'sha256', sha(p), 'bytes', p.stat().st_size)
+cache = torch.load(cache_path, map_location='cpu', weights_only=True)
+hard = json.loads(hard_path.read_bytes())
+tok = ByteTokenizer()
+gold_lengths = [len(tok.encode(row['gold_answer'])) + 1 for row in hard['audit']]
+assert len(cache['logits']) == len(gold_lengths) == 45
+assert [x.shape[0] for x in cache['logits']] == gold_lengths
+assert all(x.shape[1] == 264 and x.dtype == torch.float32 and torch.isfinite(x).all() for x in cache['logits'])
+assert cache['teacher_sha256'] == result['results']['tasks']['attributes']['teacher_provenance']['sha256']
+print('cache_metadata', {k:v for k,v in cache.items() if k != 'logits'})
+print('cache_shapes', [list(x.shape) for x in cache['logits']], 'total_gold_targets_with_EOS',sum(gold_lengths),'finite',True,'dtype','torch.float32')
+print('private_retrieval_provenance', 'Coordinator/root read original Modal Volume course-v1/distillation bytes; no generation, GPU function or HF download in this audit')
+first = cache['logits'][0][0]
+for temperature in [1.0,2.0]:
+    p = (first / temperature).softmax(-1)
+    print('original_first_row_temperature', temperature, 'probability_sum', p.sum().item(), 'maximum_probability',p.max().item())
+card_path = Path('checkpoints/course/distillation/README.md')
+card_record = next(x for x in public['release']['public_manifest']['files'] if x['output']=='README.md')
+assert sha(card_path) == card_record['sha256'] and card_path.stat().st_size == card_record['bytes']
+assert next(x for x in student['verified_files'] if x['output']=='README.md')['sha256'] == sha(card_path)
+print('original_public_card', sha(card_path), card_path.stat().st_size,
+      'immutable_URL', 'https://huggingface.co/'+public['release']['repo']+'/resolve/'+public['release']['revision']+'/'+card_record['path'])
+print('PASS; inspection and arithmetic only; no formal schedule executed, no teacher/student retraining, no GPU')

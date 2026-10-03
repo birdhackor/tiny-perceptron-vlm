@@ -1,0 +1,49 @@
+import json
+import math
+import os
+import sys
+import torch
+from tiny_perceptron.alignment import distillation_loss, distillation_kl
+from tiny_perceptron.model import masked_loss
+
+print('ENV', sys.version.split()[0], torch.__version__, torch.version.git_version,
+      'cpu', os.environ['OMP_NUM_THREADS'], os.environ['MKL_NUM_THREADS'])
+s = torch.zeros(1, 2, 2, requires_grad=True)
+t = torch.tensor([[[0.8, 0.2], [0.8, 0.2]]]).log().requires_grad_()
+y = torch.tensor([[0, 1]])
+ce = masked_loss(s, y)
+k = distillation_kl(s, t, y, temperature=1.0)
+assert abs(ce.item() - math.log(2)) < 1e-7
+assert abs(k.item() - (0.8 * math.log(1.6) + 0.2 * math.log(0.4))) < 1e-7
+print('shapes/dtypes', list(s.shape), list(t.shape), list(y.shape), str(s.dtype), str(y.dtype))
+print('student_probabilities', s.softmax(-1).detach().tolist())
+print('teacher_probabilities', t.softmax(-1).detach().tolist())
+print('unrounded_CE/K', ce.item(), k.item())
+for a in [0.0, 0.25, 0.5, 1.0]:
+    loss = distillation_loss(s, t, y, alpha=a, temperature=1.0)
+    g = torch.autograd.grad(loss, s)[0]
+    expected = ((1-a) * (s.softmax(-1) - torch.nn.functional.one_hot(y, 2))
+                + a * (s.softmax(-1) - t.softmax(-1))) / 2
+    assert torch.allclose(g, expected)
+    print('mixture', a, loss.item(), 'gradient', g.tolist())
+assert torch.equal(distillation_loss(s, t, y, alpha=0, temperature=1), ce)
+assert torch.equal(distillation_loss(s, t, y, alpha=1, temperature=1), k)
+T = 2.0
+p = (t.detach() / T).softmax(-1)
+log_q = (s / T).log_softmax(-1)
+raw_kl = (p * (p.log() - log_q)).sum(-1).mean()
+scaled = distillation_kl(s, t, y, temperature=T)
+assert torch.allclose(scaled, raw_kl * T**2, atol=1e-7)
+combined = distillation_loss(s, t, y, alpha=0.5, temperature=T)
+assert torch.allclose(combined, 0.5*ce + 0.5*raw_kl*T**2, atol=1e-7)
+combined.backward()
+assert t.grad is None
+print('T2', 'teacher_p', p.tolist(), 'raw_KL', raw_kl.item(),
+      'helper_K', scaled.item(), 'combined', combined.item(), 'teacher_grad', t.grad)
+y_mask = torch.tensor([[-100, 1]])
+mask_k = distillation_kl(s, t, y_mask, temperature=1)
+mask_g = torch.autograd.grad(mask_k, s)[0]
+assert torch.equal(mask_g[0, 0], torch.zeros(2))
+print('mask', mask_k.item(), mask_g.tolist())
+assert torch.equal(s.detach(), torch.zeros_like(s))
+print('PASS; no optimizer, no parameter update, no accuracy or GPU measurement')
