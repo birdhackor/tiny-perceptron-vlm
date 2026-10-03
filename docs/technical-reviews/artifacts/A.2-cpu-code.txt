@@ -1,0 +1,131 @@
+"""A.2 有界 CPU 核對；不呼叫 run_rag、不更新任何模型參數。"""
+import contextlib
+import copy
+import hashlib
+import io
+import inspect
+import json
+import os
+import platform
+import random
+import re
+import sys
+from pathlib import Path
+
+import torch
+
+ROOT = Path.cwd()
+mode = sys.argv[1]
+torch.set_num_threads(1)
+environment = {
+    "python": platform.python_version(),
+    "torch": str(torch.__version__),
+    "torch_git_version": str(torch.version.git_version),
+    "device": "cpu",
+    "OMP_NUM_THREADS": os.environ.get("OMP_NUM_THREADS", ""),
+    "MKL_NUM_THREADS": os.environ.get("MKL_NUM_THREADS", ""),
+    "torch_threads": str(torch.get_num_threads()),
+}
+raw = Path("course/chapters/0A.md").read_bytes()
+start = raw.index(b"## A.2 ")
+end = raw.find(b"\n## ", start + 1)
+section = raw[start:end + 1] if end != -1 else raw[start:]
+code = re.search(r"```python\n(.*?)```", section.decode(), re.S)[1]
+if mode in ("original", "exercise"):
+    if mode == "exercise":
+        assert code.count('"address": "青街8號"') == 1
+        code = code.replace('"address": "青街8號"', '"address": "紅街9號"')
+    stdout = io.StringIO()
+    namespace = {}
+    with contextlib.redirect_stdout(stdout):
+        exec(compile(code, "A.2-original-fence", "exec"), namespace)
+    address = "青街8號" if mode == "original" else "紅街9號"
+    expected = f"[來源公告1] 小小書店在2027年3月1日搬到{address}。\n問題：書店新地址？請依資料回答並標示來源。\n由資料確定的答案 {address}\n"
+    assert stdout.getvalue() == expected
+    assert namespace["source"]["date"] == "2027年3月1日"
+    assert len(stdout.getvalue().splitlines()) == 3
+    print(json.dumps({"mode": mode, "environment": environment, "source_sha256": hashlib.sha256(section).hexdigest(), "executed_code": code, "stdout": stdout.getvalue(), "expected": expected, "matched": True, "lines": 3, "model_loaded": False, "parameter_updates": 0}, ensure_ascii=False, indent=2))
+elif mode == "formal-audit":
+    from scripts.course_experiments.applications import _rag_splits, _icl_records, _grounding, _rag_counterfactual_contexts
+    from scripts.course_experiments.common import Context, fit_lm, new_lm, split_records, records_sha256, text_examples
+    from tiny_perceptron.data import IGNORE, pad_batch
+    from tiny_perceptron.model import masked_loss
+
+    result = json.loads(Path("docs/course-experiments/results/rag.json").read_text())
+    required_code = ["scripts/course_experiments/applications.py", "scripts/course_experiments/common.py", "scripts/course_experiments/run.py", "tiny_perceptron/retrieval.py", "tiny_perceptron/data.py", "tiny_perceptron/model.py", "tiny_perceptron/training.py", "tiny_perceptron/attention.py", "tiny_perceptron/modern.py"]
+    pins = {}
+    for path in required_code:
+        actual = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+        frozen = result["code_sha256"][path]
+        assert actual == frozen, (path, actual, frozen)
+        pins[path] = {"actual_sha256": actual, "frozen_sha256": frozen, "match": True}
+    splits = _rag_splits(42)
+    icl = split_records(_icl_records(), 42)
+    split_notes = {}
+    for name, rows in splits.items():
+        actual = {"records": len(rows), "families": len({r["family"] for r in rows}), "sha256": records_sha256(rows)}
+        assert actual == result["results"]["split"][name]
+        keys = {r["key"] for r in rows}
+        assert all(d["text"].split()[0] in keys for r in rows for d in r["documents"])
+        split_notes[name] = actual
+    assert not (set(r["family"] for r in splits["train"]) & set(r["family"] for r in splits["test"]))
+    for name, rows in icl.items():
+        assert {"records": len(rows), "families": len({r["family"] for r in rows}), "sha256": records_sha256(rows)} == result["results"]["icl_split"][name]
+    train = splits["train"] + icl["train"]
+    assert records_sha256(train) == result["results"]["training"]["records_sha256"]
+    examples = text_examples(train, mode="sft", max_length=160)
+    sampler = random.Random(42)
+    effective_tokens = sum(int((y != IGNORE).sum()) for _ in range(1000) for x, y in sampler.choices(examples, k=24))
+    assert effective_tokens == result["results"]["training"]["effective_tokens"]
+    context = Context("cpu", Path("/tmp/A.2-unused-output"), Path("/tmp/A.2-unused-dependencies"), Path("/tmp/A.2-unused-assets"), seed=42)
+    model = new_lm(context, width=64, layers=2, max_length=160, heads=2, backend="sdpa")
+    x, y, valid = pad_batch(examples[:24])
+    with torch.no_grad():
+        logits = model(x, valid=valid)["logits"]
+        loss = masked_loss(logits, y)
+    assert torch.isfinite(loss)
+    assert model.description() == result["results"]["model"]
+    cpu_forward = {"config": model.description(), "batch_size": str(x.shape[0]), "logits_shape": list(logits.shape), "loss": float(loss), "parameter_updates": 0, "gradient_enabled_during_forward": False}
+    samples = result["results"]["samples"]
+    assert len(samples) == 84
+    mode_counts = {}
+    sample_notes = []
+    baseline = {}
+    for row in samples:
+        sample = row["generation"]["samples"][0]
+        actual_grounding = _grounding(sample, row["documents"], row["expected"])
+        assert all(row[k] == v for k, v in actual_grounding.items())
+        fact_answer = f"{row['context_fact']['address']}[{row['context_fact']['source']}]"
+        correct = sample["generated"] == fact_answer and not sample["invalid_special_tokens"]
+        assert correct == row["fact_answer_correct"]
+        counts = mode_counts.setdefault(row["mode"], {"correct": 0, "count": 0})
+        counts["correct"] += correct
+        counts["count"] += 1
+        if row["mode"] == "correct_context":
+            baseline[row["family"]] = correct
+        sample_notes.append({"family": row["family"], "mode": row["mode"], "documents": row["documents"], "prompt": row["generation"]["messages"][0]["content"], "generated": sample["generated"], "expected": row["expected"], "fact_answer_correct": correct})
+    paired = {}
+    for mode_name in ("changed_address_context", "changed_source_context"):
+        rows = [r for r in samples if r["mode"] == mode_name]
+        both = sum(r["fact_answer_correct"] and baseline[r["family"]] for r in rows)
+        assert both == result["results"]["paired_counterfactuals"][mode_name]["both_answers_correct"]["numerator"]
+        paired[mode_name] = {"both_correct": both, "count": len(rows)}
+        for row in rows:
+            original = copy.deepcopy(row["fact"])
+            case = _rag_counterfactual_contexts(row["fact"])[mode_name]
+            assert row["fact"] == original
+            assert case["fact"] == row["context_fact"] and case["documents"] == row["documents"]
+    rng = random.Random(142)
+    facts = [{"family": key, "key": key, "source": f"D{rng.randrange(10)}", "address": f"{rng.choice('ABCD')}{rng.randrange(10)}"} for key in sorted({r["key"] for r in splits["test"]})]
+    assert records_sha256(facts) == result["results"]["test_facts_sha256"]
+    assert all(any(row["fact"] == fact for row in samples) for fact in facts)
+    spec = json.loads(Path("docs/course-experiments/plan.json").read_text())
+    rag_spec = next(x for x in spec["sequence"] + spec.get("supporting_experiments", []) if x["id"] == "rag")
+    assert rag_spec["module"] == "applications" and rag_spec["function"] == "run_rag"
+    assert rag_spec["assets"] == []
+    rag_spec = {k: rag_spec[k] for k in ("id", "module", "function", "dependencies", "assets")}
+    recipe = {"learning_rate_default": inspect.signature(fit_lm).parameters["lr"].default, "seed": result["seed"], "batch_size_literal_in_run_rag": 24, "completed_steps_frozen": result["results"]["training"]["steps"], "last_history_step_frozen": result["results"]["training"]["history"][-1]["step"], "effective_target_definition": "labels != IGNORE，包含 assistant 文字與結束 EOS，排除 user 與 padding；1000 次各 24 筆抽样只重算計數。", "frozen_artifact_names": [a["path"] for a in result["artifacts"]]}
+    assert recipe["learning_rate_default"] == 0.003 and recipe["completed_steps_frozen"] == 1000 and recipe["last_history_step_frozen"] == 1000
+    print(json.dumps({"mode": mode, "environment": environment, "frozen_revision": result["revision"], "formal_environment": {"device": result["device"], "gpu": result["gpu"], "torch": result["torch_version"], "python": result["python_version"]}, "code_pins": pins, "split": split_notes, "rag_train_records": len(splits["train"]), "icl_train_records": len(icl["train"]), "combined_train_records": len(train), "effective_answer_targets_recomputed_without_training": effective_tokens, "test_facts_sha256": records_sha256(facts), "mode_counts_recomputed": mode_counts, "paired_recomputed": paired, "claimed_examples": [n for n in sample_notes if n["family"] in ("K017", "K028") and n["mode"] in ("correct_context", "changed_address_context", "changed_source_context")], "sample_notes": sample_notes, "rag_spec": rag_spec, "recipe": recipe, "cpu_forward": cpu_forward, "parameter_updates": 0, "new_generation": False, "note": "此核對重算凍結生成的分子與分母，沒有重跑正式訓練或冒稱 CPU 生成證明 L4 品質或速度。"}, ensure_ascii=False, indent=2))
+else:
+    raise ValueError(mode)
