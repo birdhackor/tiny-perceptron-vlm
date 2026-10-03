@@ -1,0 +1,149 @@
+from pathlib import Path
+from collections import defaultdict
+import hashlib
+import json
+import math
+import os
+import random
+import re
+import sys
+
+import torch
+
+from scripts.course_experiments.applications import _rag_splits, _rag_counterfactual_contexts
+from scripts.course_experiments.common import records_sha256
+from tiny_perceptron.retrieval import retrieve
+from tiny_perceptron.model import loss_sum, masked_loss
+
+base = Path("docs/technical-reviews/artifacts")
+raw_path = Path("docs/course-experiments/results/rag.json")
+manifest = json.loads(raw_path.read_text())
+data = manifest["results"]
+code_pins = {}
+for filename in ["scripts/course_experiments/applications.py", "scripts/course_experiments/common.py", "scripts/course_experiments/run.py", "tiny_perceptron/retrieval.py", "tiny_perceptron/model.py", "tiny_perceptron/data.py"]:
+    current = hashlib.sha256(Path(filename).read_bytes()).hexdigest()
+    assert current == manifest["code_sha256"][filename]
+    code_pins[filename] = current
+
+# This calls only pure procedural fixture construction. It never calls run_rag,
+# fit_lm, _fit, model initialization, training, GPU, network or checkpoints.
+splits = _rag_splits(42)
+heldout = sorted({r["key"] for r in splits["test"]})
+assert len(heldout) == 12
+assert not (set(heldout) & {r["key"] for r in splits["train"]})
+rng = random.Random(142)
+facts = []
+for key in heldout:
+    source = f"D{rng.randrange(10)}"
+    address = f"{rng.choice('ABCD')}{rng.randrange(10)}"
+    facts.append({"family": key, "key": key, "address": address, "source": source})
+assert records_sha256(facts) == data["test_facts_sha256"]
+corpus = [{"id": f"doc-{r['key']}", "text": f"{r['key']} address={r['address']}"} for r in facts]
+corpus += [{"id": f"noise-{i}", "text": f"Z{i:03d} address={rng.choice('ABCD')}{rng.randrange(10)}"} for i in range(60)]
+assert len(corpus) == 72
+assert records_sha256(corpus) == data["corpus_sha256"]
+groups = defaultdict(list)
+samples = []
+for row in data["samples"]:
+    generation = row["generation"]
+    sample = generation["samples"][0]
+    assert generation["candidate_count"] == 1
+    assert generation["temperature"] == 0.0
+    assert generation["max_new_tokens"] == 16
+    assert len(generation["samples"]) == 1
+    assert sample["eos"] and not sample["invalid_special_tokens"]
+    text = sample["generated"]
+    clean = not sample["invalid_special_tokens"]
+    docs = row["documents"]
+    key = row["fact"]["key"]
+    relevant = [d for d in docs if d["text"].startswith(key + " address=")]
+    assert len(relevant) <= 1
+    expected = relevant[0]["text"].split("address=")[1] + "[" + relevant[0]["id"] + "]" if relevant else "UNKNOWN"
+    assert expected == row["expected"]
+    parsed = re.fullmatch(r"([A-E][0-9])\[(D[0-9])\]", text)
+    address, citation = (parsed[1], parsed[2]) if parsed else (None, None)
+    context_fact = row["context_fact"]
+    recomputed = {
+        "exact_match": clean and text == expected,
+        "fact_answer_correct": clean and text == f"{context_fact['address']}[{context_fact['source']}]",
+        "citation_valid": clean and citation in {d["id"] for d in docs},
+        "supported_by_cited_source": clean and bool(parsed) and any(d["id"] == citation and f"address={address}" in d["text"] for d in docs),
+        "unknown": clean and text == "UNKNOWN",
+    }
+    for field, observed in recomputed.items():
+        assert observed == row[field], (key, row["mode"], field)
+    if row["mode"] == "retrieved_context":
+        hits = retrieve(row["query"], corpus, k=1)
+        assert [h["id"] for h in hits] == row["retrieved_ids"]
+        assert any(h["id"] == f"doc-{key}" for h in hits) == row["retrieval_hit"]
+    if row["mode"] in ("changed_address_context", "changed_source_context"):
+        intervention = _rag_counterfactual_contexts(row["fact"])[row["mode"]]
+        assert context_fact == intervention["fact"]
+        assert docs == intervention["documents"]
+    compact = {k: row[k] for k in ["family", "mode", "fact", "context_fact", "query", "retrieved_ids", "retrieval_hit", "citation_id_map", "documents", "expected"]}
+    compact["generation"] = {"messages": generation["messages"], "temperature": generation["temperature"], "max_new_tokens": generation["max_new_tokens"], "input_tokens": generation["input_tokens"], "samples": generation["samples"]}
+    compact["recomputed"] = recomputed
+    groups[row["mode"]].append(compact)
+    samples.append(compact)
+
+metrics = {}
+fields = ["exact_match", "fact_answer_correct", "citation_valid", "supported_by_cited_source", "unknown"]
+for mode, rows in groups.items():
+    assert len(rows) == 12
+    assert sorted(r["family"] for r in rows) == heldout
+    metrics[mode] = {field: {"numerator": sum(r["recomputed"][field] for r in rows), "denominator": len(rows)} for field in fields}
+    for field in fields:
+        assert metrics[mode][field]["numerator"] == data["metrics"][mode][field]["numerator"]
+        assert metrics[mode][field]["denominator"] == data["metrics"][mode][field]["denominator"]
+assert len(samples) == 84
+retrieved = groups["retrieved_context"]
+hit_count = sum(r["retrieval_hit"] for r in retrieved)
+assert hit_count == 9
+miss_unknown = sum(not r["retrieval_hit"] and r["recomputed"]["unknown"] for r in retrieved)
+assert miss_unknown == 3
+baseline = {r["family"]: r for r in groups["correct_context"]}
+pairs = {}
+for mode in ["changed_address_context", "changed_source_context"]:
+    both = sum(r["recomputed"]["fact_answer_correct"] and baseline[r["family"]]["recomputed"]["fact_answer_correct"] for r in groups[mode])
+    pairs[mode] = {"numerator": both, "denominator": 12}
+    assert both == data["paired_counterfactuals"][mode]["both_answers_correct"]["numerator"]
+    assert 12 == data["paired_counterfactuals"][mode]["both_answers_correct"]["denominator"]
+
+probabilities = torch.tensor([[[0.25, 0.75], [0.1, 0.9], [0.6, 0.4]]], dtype=torch.float64)
+labels = torch.tensor([[1, -100, 0]], dtype=torch.int64)
+logits = probabilities.log()
+total, count = loss_sum(logits, labels)
+mean = masked_loss(logits, labels)
+expected_total = -math.log(0.75) - math.log(0.6)
+assert int(count) == 2
+assert math.isclose(float(total), expected_total, rel_tol=0, abs_tol=1e-12)
+assert math.isclose(float(mean), expected_total / 2, rel_tol=0, abs_tol=1e-12)
+
+snapshot = {
+    "original_result_path": str(raw_path),
+    "original_result_sha256": hashlib.sha256(raw_path.read_bytes()).hexdigest(),
+    "revision": manifest["revision"],
+    "seed": manifest["seed"],
+    "formal_device": manifest["device"],
+    "formal_torch": manifest["torch_version"],
+    "evidence_status": manifest["evidence_status"],
+    "code_pins_verified_current_bytes": code_pins,
+    "test_facts_sha256": data["test_facts_sha256"],
+    "corpus_sha256": data["corpus_sha256"],
+    "heldout": heldout,
+    "recomputed_metrics": metrics,
+    "paired_both_correct": pairs,
+    "samples": samples,
+    "scope": "84 筆既有正式生成的獨立計數核對；小 ASCII 公告世界、seed 42、同一權重、溫度 0、最多 16 新 token。純 fixture 重建與指標重算，沒有重新訓練或重新生成正式組。",
+}
+(base / "A.5-fresh-formal-snapshot.json").write_text(json.dumps(snapshot, ensure_ascii=False, indent=2) + "\n")
+environment = {"python": sys.version, "torch": str(torch.__version__), "torch_git_version": str(torch.version.git_version), "device": "cpu", "OMP_NUM_THREADS": os.environ.get("OMP_NUM_THREADS", ""), "MKL_NUM_THREADS": os.environ.get("MKL_NUM_THREADS", "")}
+record = {
+    "command": "OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 .venv/bin/python docs/technical-reviews/artifacts/A.5-fresh-formal-audit-code.txt",
+    "environment": environment,
+    "exit_code": 0,
+    "result": {"rows": 84, "per_condition": 12, "conditions": 7, "corpus_documents": 72, "retrieval_hit": hit_count, "retrieval_miss_and_unknown": miss_unknown, "metrics": metrics, "paired_both_correct": pairs, "masked_nll": {"probabilities": probabilities.tolist(), "labels": labels.tolist(), "dtype": "float64", "expected_sum": expected_total, "observed_sum": float(total), "effective_targets": int(count), "expected_mean": expected_total / 2, "observed_mean": float(mean), "absolute_tolerance": 1e-12}},
+    "boundary": "只重建程式生成的合成 fixture 與核對原始 samples；不呼叫 run_rag、fit_lm、GPU、checkpoint、網路；沒有品質與速度外推。",
+}
+(base / "A.5-fresh-formal-execution.json").write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n")
+print(json.dumps({"rows": 84, "per_condition": 12, "conditions": 7, "retrieval_hit": hit_count, "miss_unknown": miss_unknown, "paired": pairs, "nll_sum": float(total), "nll_mean": float(mean), "effective_targets": int(count), "all_assertions": "passed"}, ensure_ascii=False))
