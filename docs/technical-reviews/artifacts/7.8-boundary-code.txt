@@ -1,0 +1,77 @@
+import inspect
+import json
+import sys
+import torch
+from tiny_perceptron.model import TinyLM, ModelConfig, generate
+
+def forbid_external(event, args):
+    if event.startswith("socket.") or event in ("subprocess.Popen", "os.system", "os.exec", "os.posix_spawn"):
+        raise RuntimeError("bounded offline review forbids external operations")
+
+sys.addaudithook(forbid_external)
+valid = torch.tensor([[True, True, False, False], [False, True, True, True]])
+one_positions = torch.arange(4)[None]
+positions = one_positions.expand_as(valid)
+masked = positions.masked_fill(~valid, -1)
+last = masked.amax(-1)
+logits = torch.arange(40, dtype=torch.float32).reshape(2, 4, 5)
+logits_before = logits.clone()
+selected = logits[torch.arange(2), last]
+count_based = valid.sum(-1) - 1
+empty = torch.zeros((1, 4), dtype=torch.bool)
+empty_last = torch.arange(4)[None].masked_fill(~empty, -1).amax(-1)
+empty_selected = logits[:1][torch.arange(1), empty_last]
+assert positions.tolist() == [[0, 1, 2, 3], [0, 1, 2, 3]]
+assert masked.tolist() == [[0, 1, -1, -1], [-1, 1, 2, 3]]
+assert count_based.tolist() == [1, 2]
+assert selected.shape == (2, 5)
+assert torch.equal(logits, logits_before)
+assert selected.sum(-1).tolist() == [35.0, 185.0]
+assert empty_last.tolist() == [-1]
+assert empty_selected.tolist() == [[15, 16, 17, 18, 19]]
+
+torch.manual_seed(42)
+model = TinyLM(ModelConfig(vocab_size=10, width=8))
+before = {name: value.clone() for name, value in model.state_dict().items()}
+base_ids = torch.tensor([[1, 2, 3]])
+padded_ids = torch.tensor([[0, 0, 1, 2, 3]])
+model_valid = padded_ids != 0
+model_positions = torch.tensor([[0, 0, 0, 1, 2]])
+with torch.no_grad():
+    base = model(base_ids)["logits"]
+    correct = model(padded_ids, valid=model_valid, positions=model_positions)["logits"][:, 2:]
+    wrong_valid = model(padded_ids, positions=model_positions)["logits"][:, 2:]
+    wrong_position = model(padded_ids, valid=model_valid)["logits"][:, 2:]
+    generated = generate(model, base_ids, max_new_tokens=1, eos_id=-100)
+assert torch.allclose(base, correct, atol=1e-6)
+assert not torch.allclose(base, wrong_valid, atol=1e-6)
+assert not torch.allclose(base, wrong_position, atol=1e-6)
+assert all(torch.equal(before[name], value) for name, value in model.state_dict().items())
+assert model.training
+assert generated.shape == (1, 4)
+try:
+    generate(model, padded_ids, max_new_tokens=1, valid=model_valid, positions=model_positions)
+except TypeError as error:
+    unsupported_kwargs = str(error)
+else:
+    raise AssertionError("generate unexpectedly exposes valid and positions")
+
+print(json.dumps({
+    "environment": {"python": sys.version, "torch": str(torch.__version__),
+        "torch_commit": str(torch.version.git_version), "device": "cpu", "threads": str(torch.get_num_threads())},
+    "primitives": {"arange": torch.arange(4).tolist(), "none_shape": list(one_positions.shape),
+        "expanded": positions.tolist(), "expanded_stride": list(positions.stride()),
+        "not_valid": (~valid).tolist(), "masked_positions": masked.tolist(), "last": last.tolist(),
+        "count_minus_one": count_based.tolist(), "selected": selected.tolist(), "selected_shape": list(selected.shape),
+        "wrong_last_column": logits[:, -1].tolist(), "logits_unchanged": torch.equal(logits, logits_before),
+        "selected_row_sums": selected.sum(-1).tolist(), "empty_last": empty_last.tolist(),
+        "empty_selection_without_error": empty_selected.tolist()},
+    "model_probe": {"seed": 42, "config": model.description()["config"],
+        "correct_mask_positions_max_diff": (base-correct).abs().max().item(),
+        "without_valid_max_diff": (base-wrong_valid).abs().max().item(),
+        "without_positions_max_diff": (base-wrong_position).abs().max().item(),
+        "generate_signature": str(inspect.signature(generate)), "unsupported_kwargs_error": unsupported_kwargs,
+        "generated_shape": list(generated.shape), "generated": generated.tolist(),
+        "parameters_unchanged": True, "training_mode_restored": bool(model.training)},
+    "scope": "單次未訓練模型的離線CPU機制探查；不可當GPU速度或模型品質證據。generate支援未補齊契約，不代表會主動拒絕含PAD的ids。"
+}, ensure_ascii=False, indent=2))

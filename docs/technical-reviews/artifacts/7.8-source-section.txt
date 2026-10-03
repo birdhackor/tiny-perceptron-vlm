@@ -1,0 +1,29 @@
+## 7.8 補了 PAD 該取哪個輸出？
+
+短問題兩格、長問題四格一起放batch，短題右邊補兩PAD。要生成下一項時，短題應該取第1格的logits，而不是整張表最後第3格；後者是填充位置。若一律 `logits[:,-1]`，長題可對、短題卻錯。需要每筆分別找最後有效位置，再拿它的下一token分數。
+
+valid來自 [7.7](#7.7) 的有效位置表。第一筆 `[True,True,False,False]` 最後有效索引1；第二筆示範左PAD `[False,True,True,True]`，最後有效索引3。左填充時 `sum(valid)-1` 得2，卻不是物理格3，所以不能只數有幾個token推末尾格，應直接找True所在位置最大值。
+
+```python
+import torch
+
+valid = torch.tensor([[True, True, False, False], [False, True, True, True]])
+positions = torch.arange(4)[None].expand_as(valid)
+last = positions.masked_fill(~valid, -1).amax(dim=-1)
+logits = torch.arange(40, dtype=torch.float32).reshape(2, 4, 5)
+selected = logits[torch.arange(2), last]
+print("最後有效索引", last)
+print("取出的候選分數", selected)
+assert last.tolist() == [1, 3]
+```
+
+輸入兩筆有效表和人為編號的候選分數，每位置五候選。`arange(4)` 產生0到3，`[None]` 加筆軸，`expand_as` 讓每筆共用這排物理位置編號。`~valid` 將真/假反過來，`masked_fill` 把無效格位置設-1，再沿各筆取最大 `amax`，得到 `[1,3]`。
+
+logits用0到39排成 `[2,4,5]`，數字只為取值清楚。`logits[torch.arange(2),last]` 同時指定兩筆各自的末格：第0筆格1是 `[5,6,7,8,9]`，第1筆格3是 `[35,36,37,38,39]`。輸出形狀 `[2,5]`，每筆一組下一項候選，而不是再多取一個位置軸。
+
+這種索引選取不會改變模型，也不會自動做softmax；下一步才按 [1.15](01.md#1.15) 選擇候選。它解決的是「從哪些當前位置結果開始生成」，若前面的有效mask或位置ID錯了，即使取對末格仍可能使用錯誤預測。
+
+若某筆全False，last=-1會在Python索引裡表示最後一格，而不是自動報告沒有有效輸入；正式生成前應明確拒絕這種空題。本例兩筆都有True，所以先集中看左右PAD差別。專案的簡單generate入口僅接受未補齊的路線，batch生成需要把這一步與其他規則完整接上。
+
+練習只把第一筆改成 `[False,False,True,True]`，先預測last從1變3，取值變 `[15,16,17,18,19]`，第二筆保持不動，再執行並改檢查核對。這次有效數仍兩格，卻末索引不同，直接證明數量與最後位置是不同資訊。
+
