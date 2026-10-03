@@ -1,0 +1,73 @@
+"""10.3 有界離線 CPU 核對；原例、改寬度練習與獨立性質檢查。"""
+import json
+import platform
+import re
+import sys
+from pathlib import Path
+import torch
+from torch import nn
+from tiny_perceptron.multimodal import scene, patchify
+
+def guard(event, args):
+    if event.startswith('socket.') or event in {'subprocess.Popen', 'os.system', 'os.posix_spawn'}:
+        raise RuntimeError('本次 CPU 核對禁止網路與子程序')
+sys.addaudithook(guard)
+torch.set_num_threads(1)
+print('ENVIRONMENT', json.dumps({'python': platform.python_version(), 'torch': str(torch.__version__), 'torch_git_version': str(torch.version.git_version), 'device': 'cpu', 'dtype': str(torch.get_default_dtype()), 'threads': str(torch.get_num_threads())}, ensure_ascii=False))
+section = Path('docs/technical-reviews/artifacts/10.3-source.txt').read_text()
+original = re.findall(r'```python\n(.*?)\n```', section, re.S)[0]
+print('ORIGINAL')
+ns = {}
+exec(compile(original, '<10.3 exact original fence>', 'exec'), ns)
+patches, embedding, features = (ns[x] for x in ('patches', 'embedding', 'features'))
+assert tuple(patches.shape) == (1, 16, 48)
+assert tuple(features.shape) == (1, 16, 8)
+assert tuple(embedding.weight.shape) == (8, 48)
+print('EXERCISE only Linear output width 8 to 16')
+exercise = original.replace('nn.Linear(48, 8)', 'nn.Linear(48, 16)')
+exercise_ns = {}
+exec(compile(exercise, '<10.3 width exercise>', 'exec'), exercise_ns)
+assert tuple(exercise_ns['features'].shape) == (1, 16, 16)
+assert tuple(exercise_ns['embedding'].weight.shape) == (16, 48)
+print('INDEPENDENT CHECKS')
+image = scene()[None]
+manual_patches = torch.stack([image[0, :, r:r+4, c:c+4].reshape(-1) for r in range(0,16,4) for c in range(0,16,4)])[None]
+print('manual row-major RGB patch values equal:', torch.equal(patches, manual_patches))
+assert torch.equal(patches, manual_patches)
+manual_features = patches @ embedding.weight.T + embedding.bias
+print('affine formula max absolute error:', (manual_features-features).abs().max().item())
+assert torch.allclose(features, manual_features, atol=1e-7, rtol=1e-6)
+flat_result = torch.stack([embedding(patches[0,i]) for i in range(16)])[None]
+print('individual patch projection max absolute error:', (flat_result-features).abs().max().item())
+assert torch.allclose(features, flat_result, atol=1e-7, rtol=1e-6)
+doubled = torch.cat([patches, patches.flip(1)], dim=0)
+print('batch and reversed patch output shape:', tuple(embedding(doubled).shape))
+assert tuple(embedding(doubled).shape)==(2,16,8)
+assert torch.allclose(embedding(doubled)[1],features[0].flip(0),atol=1e-7,rtol=1e-6)
+same_patch = patches[:, 0:1].expand(1,16,48)
+print('identical patches produce identical features:', torch.equal(embedding(same_patch)[:,0],embedding(same_patch)[:,15]))
+assert torch.equal(embedding(same_patch)[:,0],embedding(same_patch)[:,15])
+torch.manual_seed(0)
+repeat = nn.Linear(48,8)
+print('seed 0 recreates weight and bias:', torch.equal(repeat.weight,embedding.weight),torch.equal(repeat.bias,embedding.bias))
+assert torch.equal(repeat.weight,embedding.weight) and torch.equal(repeat.bias,embedding.bias)
+print('parameters trainable:', embedding.weight.requires_grad,embedding.bias.requires_grad,'bias shape:',tuple(embedding.bias.shape))
+assert embedding.weight.requires_grad and embedding.bias.requires_grad
+small=nn.Linear(2,1,bias=True)
+with torch.no_grad():
+    small.weight.copy_(torch.tensor([[0.5,0.5]]))
+    small.bias.zero_()
+small_inputs=torch.tensor([[1.,0.],[0.,1.]])
+print('two brightness example:',small(small_inputs).tolist())
+assert torch.equal(small(small_inputs),torch.tensor([[0.5],[0.5]]))
+y1=embedding(patches)
+y255=embedding(255*patches)
+err=((y255-embedding.bias)-255*(y1-embedding.bias)).abs().max().item()
+print('scene image range:',image.min().item(),image.max().item())
+print('input scaled 255: output differs:',not torch.allclose(y1,y255),'affine scaling residual:',err)
+assert not torch.allclose(y1,y255)
+assert err<0.0001
+lookup=nn.Embedding(4,8)
+print('index 2 reads row 2:',torch.equal(lookup(torch.tensor([2]))[0],lookup.weight[2]),'shape:',tuple(lookup(torch.tensor([2])).shape))
+assert torch.equal(lookup(torch.tensor([2]))[0],lookup.weight[2])
+print('PASS original, exercise, numeric example, seed, shared projection, patch ordering, scaling and lookup')
