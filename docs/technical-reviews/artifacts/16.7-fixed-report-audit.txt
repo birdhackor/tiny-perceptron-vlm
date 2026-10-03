@@ -1,0 +1,84 @@
+import hashlib
+import json
+import os
+import platform
+import random
+import statistics
+from datetime import datetime, timezone
+from pathlib import Path
+
+import torch
+
+from scripts.prepare_data import generate_records
+from scripts.course_experiments.common import records_sha256, split_records, text_examples
+from tiny_perceptron.data import ByteTokenizer, IGNORE, pad_batch
+from tiny_perceptron.model import ModelConfig, TinyLM
+
+torch.set_num_threads(1)
+result_path = Path('docs/course-experiments/results/precision.json')
+report = json.loads(result_path.read_bytes())
+sft_path = Path('docs/course-experiments/results/sft.json')
+sft = json.loads(sft_path.read_bytes())
+data = split_records(generate_records('attributes-sft'), seed=42)
+data_audit = {}
+for split, records in data.items():
+    examples = text_examples(records, 'sft', 128)
+    x, y, valid = pad_batch(examples)
+    data_audit[split] = {'records': len(records), 'families': sorted({r['family'] for r in records}), 'records_sha256': records_sha256(records), 'effective_tokens': sum(int((labels != IGNORE).sum()) for _, labels in examples), 'padded_shape': list(x.shape), 'valid_inputs': int(valid.sum())}
+    assert data_audit[split]['records_sha256'] == report['results']['dataset'][split]['sha256']
+train_examples = text_examples(data['train'], 'sft', 128)
+sampler = random.Random(42)
+per_attempt = [sum(int((labels != IGNORE).sum()) for _, labels in sampler.choices(train_examples, k=16)) for _ in range(200)]
+assert sum(per_attempt) == 22493
+families = [set(v['families']) for v in data_audit.values()]
+assert not any(families[i] & families[j] for i in range(3) for j in range(i))
+tok = ByteTokenizer()
+variants = {}
+for name, variant in report['results']['variants'].items():
+    training = variant['training']
+    heldout = {}
+    for split, metrics in variant['heldout'].items():
+        samples = metrics['samples']
+        raw_matches = []
+        for sample, record in zip(samples, data[split], strict=True):
+            assert sample['messages'] == record['messages'][:-1]
+            assert sample['expected'] == record['messages'][-1]['content']
+            ids = sample['generated_ids']
+            raw = ids[:ids.index(tok.eos_id)] if tok.eos_id in ids else ids
+            assert tok.decode(raw) == sample['generated']
+            exact = raw == tok.encode(sample['expected'])
+            assert exact == sample['exact']
+            assert (tok.eos_id in ids) == sample['eos']
+            assert len(ids) <= 32
+            raw_matches.append(exact)
+        assert sum(raw_matches) == metrics['matches']
+        assert len(samples) == metrics['records']
+        assert sum(raw_matches) / len(samples) == metrics['exact_match']
+        assert sum(s['eos'] for s in samples) / len(samples) == metrics['eos_rate']
+        recomputed_nll = metrics['nll_sum'] / metrics['effective_tokens']
+        assert recomputed_nll == metrics['nll']
+        heldout[split] = {'nll': metrics['nll'], 'nll_sum': metrics['nll_sum'], 'nll_recomputed': recomputed_nll, 'rounded_nll5': round(recomputed_nll, 5), 'effective_tokens': metrics['effective_tokens'], 'matches': metrics['matches'], 'records': metrics['records'], 'eos_rate': metrics['eos_rate'], 'samples': samples, 'raw_id_matches_recomputed': raw_matches}
+    inference = variant['inference']
+    assert statistics.median(inference['samples_seconds']) == inference['median_seconds']
+    memory_keys = ['memory_allocated_before_bytes', 'peak_memory_allocated_bytes', 'peak_additional_allocated_bytes']
+    assert training[memory_keys[1]] - training[memory_keys[0]] == training[memory_keys[2]]
+    assert training['steps'] == training['optimizer_updates'] + training['skipped_updates'] == 200
+    assert training['effective_tokens'] == sum(per_attempt)
+    assert all(torch.isfinite(torch.tensor(row['loss'])) for row in training['history'])
+    variants[name] = {'model': variant['model'], 'training': training, 'heldout': heldout, 'inference': inference, 'rounded_timing_ms3': {'training': round(training['warm_step_median_seconds'] * 1000, 3), 'forward': round(inference['median_seconds'] * 1000, 3)}, 'memory_bytes': {k: training[k] for k in memory_keys}, 'memory_MiB3': {k: round(training[k] / 2**20, 3) for k in memory_keys}, 'weights_dtype': variant['weights_dtype'], 'observed_logits_dtype': variant['observed_logits_dtype'], 'logits_finite': variant['logits_finite']}
+model = TinyLM(ModelConfig(width=64, layers=2, heads=1, max_length=128))
+parameter_tables = {name: {'shape': list(p.shape), 'numel': p.numel(), 'bytes': p.numel() * p.element_size(), 'dtype': str(p.dtype)} for name, p in model.named_parameters()}
+assert sum(p['numel'] for p in parameter_tables.values()) == 141568
+assert sum(p['bytes'] for p in parameter_tables.values()) == 566272
+formal_source = Path('outputs/technical-sources/15.11-originals/architecture-frozen.py')
+formal_raw = formal_source.read_bytes()
+assert hashlib.sha256(formal_raw).hexdigest() == report['code_sha256']['scripts/course_experiments/architecture.py']
+source_lines = formal_raw.decode().splitlines(keepends=True)
+frozen_snapshot = {'url': 'https://raw.githubusercontent.com/birdhackor/tiny-perceptron-vlm/' + report['revision'] + '/scripts/course_experiments/architecture.py', 'revision': report['revision'], 'full_sha256': hashlib.sha256(formal_raw).hexdigest(), 'inspection': '親讀當時_train、_benchmark、run_precision；同一SFT基模deepcopy，非efficiency四頭；逐支reset、固定資料抽樣；保存原碼必要片段。', 'ranges': {str(lo) + '-' + str(hi): ''.join(source_lines[lo-1:hi]) for lo, hi in [(152, 287), (494, 510), (997, 1060)]}}
+Path('docs/technical-reviews/artifacts/16.7-frozen-source.json').write_text(json.dumps(frozen_snapshot, ensure_ascii=False, indent=2) + '\n')
+source_hashes = {}
+for path in ['scripts/course_experiments/common.py', 'tiny_perceptron/model.py', 'tiny_perceptron/data.py', 'tiny_perceptron/attention.py', 'tiny_perceptron/modern.py', 'scripts/course_experiments/text.py', 'scripts/prepare_data.py']:
+    value = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    source_hashes[path] = {'sha256': value, 'matches_precision_record': value == report['code_sha256'].get(path), 'matches_sft_record': value == sft['code_sha256'].get(path)}
+output = {'accessed_at': datetime.now(timezone.utc).isoformat(), 'environment': {'python': platform.python_version(), 'torch': str(torch.__version__), 'torch_commit': torch.version.git_version, 'device': 'cpu', 'OMP_NUM_THREADS': os.environ.get('OMP_NUM_THREADS'), 'MKL_NUM_THREADS': os.environ.get('MKL_NUM_THREADS')}, 'source': {'path': str(result_path), 'sha256': hashlib.sha256(result_path.read_bytes()).hexdigest(), 'revision': report['revision'], 'gpu': report['gpu'], 'torch_version': report['torch_version'], 'python_version': report['python_version'], 'seed': report['seed'], 'hf_revision': report['hf']['revision'], 'hf_result_revision': report['hf']['result_revision']}, 'sft_source': {'path': str(sft_path), 'sha256': hashlib.sha256(sft_path.read_bytes()).hexdigest(), 'revision': sft['revision'], 'data': sft['results']['data'], 'training': {k:v for k,v in sft['results']['training'].items() if k!='history'}, 'precision_initial_fp32_nll': variants['fp32']['training']['initial']['nll'], 'sft_final_train_nll': sft['results']['training']['final_loss']}, 'runtime': report['results']['runtime'], 'data_audit': data_audit, 'sampler_audit': {'seed': 42, 'batch_size': 16, 'attempts': 200, 'effective_tokens': sum(per_attempt), 'per_attempt_tokens': per_attempt}, 'variants': variants, 'parameter_tables': parameter_tables, 'code_sha256': source_hashes, 'baseline_differences_MiB': {name: (variants[name]['memory_bytes']['memory_allocated_before_bytes'] - variants['fp32']['memory_bytes']['memory_allocated_before_bytes']) / 2**20 for name in ['bf16', 'fp16']}, 'exit_code': 0, 'scope': '親讀固定L4 JSON並重新計算其分母、ID匹配、四捨五入、中位數；僅在記憶體重建自產題目、抽樣序列與未訓練參數表，未下載資料或權重，未重跑正式訓練／GPU量測。'}
+print(json.dumps(output, ensure_ascii=False, indent=2, allow_nan=False))

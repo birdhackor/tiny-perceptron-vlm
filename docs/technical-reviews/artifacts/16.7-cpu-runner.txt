@@ -1,0 +1,48 @@
+import contextlib
+import hashlib
+import io
+import json
+import os
+import platform
+import re
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+import torch
+
+torch.set_num_threads(1)
+mode = sys.argv[1]
+raw = Path('docs/technical-reviews/artifacts/16.7-source-raw.txt').read_bytes()
+code = re.findall(r'```python\n(.*?)```', raw.decode(), re.S)[0]
+line = 'a = torch.tensor([[1.001, 2.002], [3.003, 4.004]])'
+if mode == 'x10':
+    code = code.replace(line, line + ' * 10')
+elif mode == 'integer':
+    code = code.replace(line, 'a = torch.tensor([[1.0, 2.0], [3.0, 4.0]])')
+elif mode != 'original':
+    raise ValueError(mode)
+out = io.StringIO()
+namespace = {}
+with contextlib.redirect_stdout(out):
+    exec(compile(code, '<16.7-' + mode + '>', 'exec'), namespace)
+a, b, full, low = [namespace[k] for k in ['a', 'b', 'full', 'low']]
+result = {
+    'mode': mode,
+    'accessed_at': datetime.now(timezone.utc).isoformat(),
+    'command': 'OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 .venv/bin/python docs/technical-reviews/artifacts/16.7-cpu-runner.txt ' + mode,
+    'environment': {'python': platform.python_version(), 'torch': str(torch.__version__), 'torch_commit': torch.version.git_version, 'device': 'cpu', 'platform': platform.platform(), 'OMP_NUM_THREADS': os.environ.get('OMP_NUM_THREADS'), 'MKL_NUM_THREADS': os.environ.get('MKL_NUM_THREADS'), 'torch_threads': torch.get_num_threads(), 'default_dtype': str(torch.get_default_dtype())},
+    'source_sha256': hashlib.sha256(raw).hexdigest(),
+    'executed_code': code,
+    'executed_code_sha256': hashlib.sha256(code.encode()).hexdigest(),
+    'stdout': out.getvalue(),
+    'a': a.tolist(), 'b': b.tolist(), 'a_dtype': str(a.dtype), 'b_dtype': str(b.dtype),
+    'full': full.tolist(), 'full_dtype': str(full.dtype), 'low': low.float().tolist(), 'low_dtype': str(low.dtype),
+    'difference': (full - low.float()).tolist(),
+    'max_difference': (full - low.float()).abs().max().item(),
+    'max_difference_rounded4': round((full - low.float()).abs().max().item(), 4),
+    'a_bf16_representable': a.bfloat16().float().tolist(),
+    'exit_code': 0,
+    'scope': '從頭執行單一原範例／指定練習；CPU、無下載、無模型訓練。',
+}
+print(json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False))

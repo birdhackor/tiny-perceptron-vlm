@@ -1,0 +1,48 @@
+import json
+import math
+import os
+import platform
+from datetime import datetime, timezone
+
+import torch
+
+torch.set_num_threads(1)
+formats = {}
+for dtype in [torch.float32, torch.float16, torch.bfloat16]:
+    info = torch.finfo(dtype)
+    formats[str(dtype)] = {'bytes': torch.empty((), dtype=dtype).element_size(), 'bits': info.bits, 'max': info.max, 'eps': info.eps, 'tiny': info.tiny}
+formulas = {'fp16': (2 - 2 ** -10) * 2 ** 15, 'bf16': (2 - 2 ** -7) * 2 ** 127, 'fp32': (2 - 2 ** -23) * 2 ** 127}
+assert [formulas[k] for k in ['fp16', 'bf16', 'fp32']] == [torch.finfo(d).max for d in [torch.float16, torch.bfloat16, torch.float32]]
+special = {'fp16_underflow_1e-10': torch.tensor(1e-10).half().float().item(), 'overflow_is_inf': bool(torch.isinf(torch.tensor(1e10).half())), 'zero_div_zero_is_nan': bool(torch.isnan(torch.tensor(0.) / torch.tensor(0.))), 'zero_is_finite': bool(torch.isfinite(torch.tensor(0.))), 'inf_is_finite': bool(torch.isfinite(torch.tensor(float('inf')))), 'nan_is_finite': bool(torch.isfinite(torch.tensor(float('nan'))))}
+scale = 1024.
+w = torch.tensor(1., requires_grad=True)
+loss = (w - 3).square()
+(loss * scale).backward()
+scaled_gradient = w.grad.item()
+w.grad.div_(scale)
+gradient = w.grad.item()
+with torch.no_grad():
+    w -= .1 * w.grad
+scaling = {'loss': loss.item(), 'scale': scale, 'scaled_gradient': scaled_gradient, 'unscaled_gradient': gradient, 'updated_parameter': w.item(), 'updated_loss': (w - 3).square().item()}
+skip_checks = []
+for bad in ['inf', 'nan']:
+    p = torch.nn.Parameter(torch.tensor(1.))
+    optimizer = torch.optim.SGD([p], lr=.1)
+    scaler = torch.amp.GradScaler('cpu', init_scale=1024.)
+    scaler.scale(p.square()).backward()
+    p.grad.fill_(float(bad))
+    before = p.detach().item()
+    scaler.step(optimizer)
+    scaler.update()
+    skip_checks.append({'gradient': bad, 'before': before, 'after': p.detach().item(), 'scale_after': scaler.get_scale(), 'skipped': before == p.detach().item()})
+    assert before == p.detach().item()
+model = torch.nn.Linear(2, 2)
+optimizer = torch.optim.AdamW(model.parameters(), lr=.003)
+with torch.autocast('cpu', dtype=torch.bfloat16):
+    prediction = model(torch.tensor([[1., 2.]]))
+    loss = prediction.float().square().mean()
+loss.backward()
+optimizer.step()
+states = {str(p.dtype): {k: str(v.dtype) for k, v in optimizer.state[p].items() if isinstance(v, torch.Tensor)} for p in model.parameters()}
+adam = {'parameter_dtypes': sorted({str(p.dtype) for p in model.parameters()}), 'prediction_dtype': str(prediction.dtype), 'loss_dtype': str(loss.dtype), 'state_dtypes': states, 'scope': '全新兩輸入兩輸出線性層的一次CPU教學更新；未重跑正式課程排程。'}
+print(json.dumps({'accessed_at': datetime.now(timezone.utc).isoformat(), 'environment': {'python': platform.python_version(), 'torch': str(torch.__version__), 'torch_commit': torch.version.git_version, 'device': 'cpu', 'OMP_NUM_THREADS': os.environ.get('OMP_NUM_THREADS'), 'MKL_NUM_THREADS': os.environ.get('MKL_NUM_THREADS')}, 'formats': formats, 'max_value_formulas': formulas, 'special_values': special, 'scaling_1024': scaling, 'gradscaler_skip_cpu': skip_checks, 'adamw_bf16_probe': adam, 'exit_code': 0}, ensure_ascii=False, indent=2, allow_nan=False))
