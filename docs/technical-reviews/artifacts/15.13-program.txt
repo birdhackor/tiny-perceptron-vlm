@@ -1,0 +1,121 @@
+import ast
+import contextlib
+import io
+import json
+import os
+import platform
+import re
+import sys
+from dataclasses import replace
+from pathlib import Path
+
+import torch
+
+from tiny_perceptron.model import ModelConfig, TinyLM
+from tiny_perceptron.modern import MoEFFN
+from scripts.course_experiments.common import text_examples
+
+torch.set_num_threads(1)
+assert os.environ['OMP_NUM_THREADS'] == '1'
+assert os.environ['MKL_NUM_THREADS'] == '1'
+assert not torch.cuda.is_available()
+print(json.dumps({'python': platform.python_version(), 'torch': str(torch.__version__), 'device': 'cpu', 'threads': torch.get_num_threads(), 'OMP_NUM_THREADS': os.environ['OMP_NUM_THREADS'], 'MKL_NUM_THREADS': os.environ['MKL_NUM_THREADS']}, ensure_ascii=False))
+artifacts = Path('docs/technical-reviews/artifacts')
+raw = (artifacts / '15.13-source.txt').read_text()
+fence = re.search(r'```python\n(.*?)```', raw, re.S).group(1)
+case = sys.argv[1]
+if case in ('original', 'exercise'):
+    if case == 'exercise':
+        assert fence.count('width, expert_hidden, experts = 4, 2, 4') == 1
+        fence = fence.replace('width, expert_hidden, experts = 4, 2, 4', 'width, expert_hidden, experts = 4, 2, 8')
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        exec(compile(fence, '15.13-exact-fence', 'exec'), {})
+    text = output.getvalue()
+    print(text, end='')
+    expected = (
+        'k 1 MoE總權重 80 使用估計 32\n同總參數Dense寬度 10.0 同使用估計Dense寬度 4.0\nk 2 MoE總權重 80 使用估計 48\n同總參數Dense寬度 10.0 同使用估計Dense寬度 6.0\n'
+        if case == 'original' else
+        'k 1 MoE總權重 160 使用估計 48\n同總參數Dense寬度 20.0 同使用估計Dense寬度 6.0\nk 2 MoE總權重 160 使用估計 64\n同總參數Dense寬度 20.0 同使用估計Dense寬度 8.0\n'
+    )
+    assert text == expected
+    print('ASSERTIONS_PASSED', case)
+elif case == 'frozen':
+    snapshot = json.loads((artifacts / '15.13-frozen-code.json').read_text())
+    functions = {f['name']: ''.join(f['lines']) for f in snapshot['functions']}
+    namespace = {'TinyLM': TinyLM, 'MoEFFN': MoEFFN, 'replace': replace}
+    for name in ('_parameter_budget', '_matched_width'):
+        exec(compile(functions[name], 'fixed-48a4f3-' + name, 'exec'), namespace)
+    config = ModelConfig(width=64, layers=2, heads=4, max_length=128)
+    for k in (1, 2):
+        model = TinyLM(replace(config, experts=4, top_k=k))
+        budget = namespace['_parameter_budget'](model)
+        assert budget['total_parameters'] == 340608
+        assert budget['expert_parameters'] == 264704
+        assert budget['router_parameters'] == 512
+        assert budget['active_parameter_proxy_per_token'] == {1: 142080, 2: 208256}[k]
+        print('reconstructed_moe', k, json.dumps(budget))
+    for target, width, difference in ((142080, 64, -512), (208256, 80, -576), (340608, 104, -10720)):
+        observed = namespace['_matched_width'](config, target)
+        assert observed == (width, difference), observed
+        model = TinyLM(replace(config, width=width))
+        count = sum(p.numel() for p in model.parameters())
+        assert count == target + difference
+        print('matched', target, width, count, difference, 'relative_shortfall_percent', -difference / target * 100)
+        print('shapes', {n: list(p.shape) for n, p in model.named_parameters() if n in ('embedding.weight', 'position.weight', 'output.weight', 'blocks.0.attention.q.weight')})
+    data = json.loads(Path('docs/course-experiments/results/moe.json').read_text())
+    expected = {
+        'dense_active_top1': (141568, 141568, '2.29999', '2.32093'),
+        'dense_active_top2': (207680, 207680, '2.28200', '2.30906'),
+        'dense_total': (329888, 329888, '2.22603', '2.24943'),
+        'top1_aux0': (340608, 142080, '2.30115', '2.32369'),
+        'top1_aux0.01': (340608, 142080, '2.29775', '2.31963'),
+        'top2_aux0': (340608, 208256, '2.28011', '2.30320'),
+        'top2_aux0.01': (340608, 208256, '2.27819', '2.30170'),
+    }
+    assert data['seed'] == 42 and data['step_scale'] == 1.0
+    for name, v in data['results']['variants'].items():
+        t, h, b = v['training'], v['heldout'], v['budget']
+        observed = (b['total_parameters'], b['active_parameter_proxy_per_token'], format(h['validation']['nll'], '.5f'), format(h['test']['nll'], '.5f'))
+        assert observed == expected[name]
+        assert t['optimizer_updates'] == t['steps'] == t['requested_steps'] == 180
+        assert t['skipped_updates'] == 0 and t['effective_tokens'] == 337761
+        for split, count, records in (('validation', 39256, 51), ('test', 41914, 52)):
+            x = h[split]
+            assert x['effective_tokens'] == count and x['records'] == records
+            assert len(x['samples']) == 8
+            assert abs(x['nll_sum'] / count - x['nll']) < 1e-12
+        routing = v['validation_routing']
+        if routing:
+            k = v['model']['config']['top_k']
+            for layer in routing['layers']:
+                assert sum(layer['dispatch_counts']) == layer['dispatch_denominator'] == 39256 * k
+                assert all(abs(c / layer['dispatch_denominator'] - f) < 1e-15 for c, f in zip(layer['dispatch_counts'], layer['load_fraction']))
+        print('frozen_table_verified', name, observed, 'train_targets', t['effective_tokens'], 'validation_targets', h['validation']['effective_tokens'], 'test_targets', h['test']['effective_tokens'])
+    variants = data['results']['variants']
+    for split in ('validation', 'test'):
+        assert variants['top2_aux0.01']['heldout'][split]['nll'] < variants['dense_active_top2']['heldout'][split]['nll']
+        assert variants['top2_aux0.01']['heldout'][split]['nll'] > variants['dense_total']['heldout'][split]['nll']
+    assert data['results']['teacher_variant'] == 'top2_aux0.01'
+    first = variants['top2_aux0.01']['heldout']['test']['samples'][0]
+    assert first['prompt'] == 'Once upon a time, there '
+    assert first['generated'] == 'tthe the the the the the the the'
+    print('teacher_first_test_sample', json.dumps(first))
+    # A short mechanism check of EOS and chunk accounting, without training.
+    text = 'a' * 260
+    chunks = text_examples([{'text': text}], max_length=128)
+    assert [len(y) for _, y in chunks] == [128, 128, 5]
+    assert sum(int((y == 2).sum()) for _, y in chunks) == 1
+    assert sum(len(y) for _, y in chunks) == len(text.encode('utf-8')) + 1
+    print('EOS_chunk_check', [len(y) for _, y in chunks], 'targets', 261, 'EOS_count', 1)
+    torch.manual_seed(42)
+    init1 = TinyLM(config).embedding.weight.detach().clone()
+    torch.manual_seed(42)
+    init2 = TinyLM(config).embedding.weight.detach().clone()
+    torch.manual_seed(43)
+    init3 = TinyLM(config).embedding.weight.detach().clone()
+    assert torch.equal(init1, init2) and not torch.equal(init1, init3)
+    print('seed_initialization_check', 'same_seed_equal', True, 'different_seed_equal', False)
+    print('ASSERTIONS_PASSED frozen; no training, GPU, timing or full experiment schedule executed')
+else:
+    raise ValueError(case)

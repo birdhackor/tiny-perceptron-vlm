@@ -1,0 +1,85 @@
+import hashlib
+import json
+import os
+import platform
+from pathlib import Path
+
+import torch
+from tiny_perceptron.modern import DenseFFN, MoEFFN
+
+torch.set_num_threads(1)
+def setup():
+    torch.manual_seed(0)
+    x = torch.randn(2, 8, 8)
+    layers = [DenseFFN(8, hidden=16), MoEFFN(8, experts=4, top_k=2, hidden=4)]
+    return x, layers
+
+x, layers = setup()
+x2, layers2 = setup()
+assert torch.equal(x, x2)
+assert all(torch.equal(a, b) for m, n in zip(layers, layers2) for a, b in zip(m.parameters(), n.parameters()))
+inspection = []
+for layer in layers:
+    row = {
+        "class": type(layer).__name__,
+        "parameters": [{"name": n, "shape": list(p.shape), "numel": p.numel()} for n, p in layer.named_parameters()],
+        "parameter_count": sum(p.numel() for p in layer.parameters()),
+        "activation": [e.activation for e in layer.experts] if isinstance(layer, MoEFFN) else [layer.activation],
+    }
+    layer.eval()
+    with torch.no_grad():
+        y = layer(x)
+    ys = y if isinstance(y, tuple) else (y,)
+    row["output_shapes"] = [list(t.shape) for t in ys]
+    row["output_requires_grad"] = [t.requires_grad for t in ys]
+    row["training_mode"] = layer.training
+    inspection.append(row)
+assert [r["parameter_count"] for r in inspection] == [280, 336]
+assert inspection[0]["activation"] == ["gelu"] and inspection[1]["activation"] == ["gelu"] * 4
+assert layers[1].router.bias is None
+print(json.dumps({"inspection": inspection, "x_shape": list(x.shape), "x_min": x.min().item(), "x_max": x.max().item(), "repeated_setup_exactly_equal": True}, ensure_ascii=False, indent=2))
+
+p = Path("docs/course-experiments/results/moe.json")
+d = json.loads(p.read_bytes())
+expected = {
+    "dense_active_top1": [12.676, 35.693, 112.648],
+    "dense_active_top2": [11.965, 67.945, 119.091],
+    "dense_total": [14.054, 68.413, 129.432],
+    "top1_aux0.01": [27.630, 68.454, 120.711],
+    "top2_aux0.01": [27.242, 68.454, 133.961],
+}
+selected = {}
+for name, target in expected.items():
+    v = d["results"]["variants"][name]
+    t = v["training"]
+    actual = [round(t["warm_step_median_seconds"] * 1000, 3), round(t["memory_allocated_before_bytes"] / 2**20, 3), round(t["peak_memory_allocated_bytes"] / 2**20, 3)]
+    assert actual == target
+    assert t["steps"] == t["optimizer_updates"] == 180 and t["skipped_updates"] == 0
+    assert t["batch_size"] == 16 and v["model"]["config"]["max_length"] == 128
+    assert t["effective_tokens"] == 337761
+    assert t["peak_memory_allocated_bytes"] - t["memory_allocated_before_bytes"] == t["peak_additional_allocated_bytes"]
+    selected[name] = {
+        "config": v["model"]["config"],
+        "training": {k: v for k, v in t.items() if k not in ("initial", "final", "history")},
+        "table_observed": actual,
+        "table_expected": target,
+        "median_denominator": "180 更新時間略過前三步，餘 177 個樣本",
+    }
+snapshot = {
+    "original_path": str(p), "original_sha256": hashlib.sha256(p.read_bytes()).hexdigest(),
+    "revision": d["revision"], "frozen_architecture_sha256": d["code_sha256"]["scripts/course_experiments/architecture.py"],
+    "seed": d["seed"], "device": d["device"], "gpu": d["gpu"], "torch_version": d["torch_version"], "python_version": d["python_version"],
+    "dataset": d["results"]["dataset"], "variants": selected,
+    "scope_note": "只計算凍結結果欄位及核對分母；沒有重跑訓練或 GPU 量測。未保存模型權重。",
+}
+Path("docs/technical-reviews/artifacts/15.11-frozen-results-subset.json").write_text(json.dumps(snapshot, ensure_ascii=False, indent=2) + "\n")
+print(json.dumps(snapshot, ensure_ascii=False, indent=2))
+for name in ("original", "exercise"):
+    r = json.loads(Path(f"docs/technical-reviews/artifacts/15.11-{name}-execution.json").read_bytes())
+    ratios = []
+    for run in r["runs"]:
+        rows = run["stdout"].splitlines()
+        dense, moe = [float(row.rsplit(" ", 1)[1]) for row in rows]
+        ratios.append(moe / dense)
+    print(name, "MoE/Dense_ratio", ratios)
+print("environment", json.dumps({"python": platform.python_version(), "torch": torch.__version__, "device": "cpu", "num_threads": str(torch.get_num_threads()), "OMP_NUM_THREADS": os.environ.get("OMP_NUM_THREADS"), "MKL_NUM_THREADS": os.environ.get("MKL_NUM_THREADS")}, ensure_ascii=False))

@@ -1,0 +1,164 @@
+import difflib
+import hashlib
+import json
+import os
+import platform
+import re
+import sys
+from pathlib import Path
+
+ROOT = Path.cwd()
+ART = ROOT / 'docs/technical-reviews/artifacts'
+
+
+def sha(raw):
+    return hashlib.sha256(raw).hexdigest()
+
+
+def save_json(name, value):
+    path = ART / name
+    path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+    return {'path': str(path.relative_to(ROOT)), 'sha256': sha(path.read_bytes())}
+
+
+def sections(raw):
+    heads = list(re.finditer(rb'(?m)^## [^\r\n]+', raw))
+    return {h[0].decode().split()[1]: raw[h.start():heads[i + 1].start() if i + 1 < len(heads) else len(raw)] for i, h in enumerate(heads)}
+
+
+def python_fences(raw):
+    return re.findall(rb'(?ms)^```python\n(.*?)^```\s*$', raw)
+
+
+def all_fences(raw):
+    return re.findall(rb'(?ms)^```([^\r\n]*)\n(.*?)^```[ \t]*\r?$', raw)
+
+
+old_path = Path('/tmp/root-chapter-15-before-late-fixes/04cb4e9cd87e6b1d170cd2f1b054e3eafe24d7a3d14eb1f5a1bc7867ce2971e5.md')
+old = old_path.read_bytes()
+current = (ROOT / 'course/chapters/15.md').read_bytes()
+assert len(old) == 52692 and sha(old) == '04cb4e9cd87e6b1d170cd2f1b054e3eafe24d7a3d14eb1f5a1bc7867ce2971e5'
+old_report_path = ART / '15.1-own-report-before-intro-recheck.json'
+assert not old_report_path.exists(), 'Preserve the first original report; never overwrite its bytes.'
+old_report_raw = (ROOT / 'docs/technical-reviews/15.1.json').read_bytes()
+old_report_path.write_bytes(old_report_raw)
+report = json.loads(old_report_raw)
+historical = json.loads((ART / '15.1-own-intro-execution.json').read_bytes())
+recorded = {item['lesson']: item for item in historical['bounded_examples']}
+original, revised = sections(old), sections(current)
+matrix = []
+for lesson in original:
+    a, b = original[lesson], revised[lesson]
+    ap, bp = python_fences(a), python_fences(b)
+    af, bf = all_fences(a), all_fences(b)
+    ac, bc = b'\n'.join(ap), b'\n'.join(bp)
+    ae, be = a[a.index('練習'.encode()):], b[b.index('練習'.encode()):]
+    assert sha(a) == recorded[lesson]['raw_sha256']
+    assert ap == bp and af == bf and ac.decode() == recorded[lesson]['code']
+    assert sha(ac) == sha(bc) == recorded[lesson]['code_sha256'] and ae == be
+    matrix.append({
+        'lesson': lesson,
+        'old_raw_sha256': sha(a), 'current_raw_sha256': sha(b),
+        'old_raw_matches_own_original_execution': True,
+        'raw_unchanged': a == b,
+        'python_fence_count': len(ap), 'all_fence_count': len(af),
+        'python_fence_sha256': [sha(f) for f in bp],
+        'combined_code_sha256': sha(bc),
+        'all_fences_exactly_unchanged': True,
+        'matches_own_original_executed_code_bytes': True,
+        'exercise_raw_sha256': sha(ae), 'exercise_exactly_unchanged': True,
+    })
+assert [x['lesson'] for x in matrix if not x['raw_unchanged']] == ['15.8', '15.11']
+assert revised['15.8'] and sha(revised['15.8']) == '29327b3657052c7011ea0fe06c6d617d4562238939d7012bd7764d953f2bccc1'
+assert revised['15.11'] and sha(revised['15.11']) == 'cf9dca16fe36528c58c4503741d4729fed9621bd050311f3f863993fd41417a7'
+intro_old, intro_current = old[:old.index(b'## ')], current[:current.index(b'## ')]
+assert intro_old == intro_current == (ART / '15.1-own-intro-raw.txt').read_bytes()
+assert original['15.1'] == revised['15.1'] == (ART / '15.1-own-source-raw.txt').read_bytes()
+assert sha(revised['15.1']) == report['source_sha256'] and sha(intro_current) == report['intro_sha256']
+unchanged_sources = []
+for source in report['sources']:
+    if source['kind'] == 'repository_code':
+        actual = sha((ROOT / source['path']).read_bytes())
+        assert actual == source['sha256']
+        unchanged_sources.append({'path': source['path'], 'sha256': actual, 'unchanged': True})
+unchanged_artifacts = []
+for item in report['artifacts']:
+    actual = sha((ROOT / item['path']).read_bytes())
+    assert actual == item['sha256']
+    unchanged_artifacts.append({'id': item['id'], 'path': item['path'], 'sha256': actual, 'unchanged': True})
+unchanged_figures = []
+for path, expected in report['figure_sha256'].items():
+    assert sha((ROOT / path).read_bytes()) == expected
+    unchanged_figures.append({'path': path, 'sha256': expected, 'unchanged': True, 'prior_render_and_view_reused': True})
+unchanged_prerequisites = []
+for item in json.loads((ART / '15.1-own-direct-prerequisites.json').read_bytes()):
+    path, lesson = item['source'].split('#')
+    raw = sections((ROOT / path).read_bytes())[lesson]
+    assert raw.decode() == item['raw_utf8'] and sha(raw) == item['raw_sha256']
+    unchanged_prerequisites.append({'source': item['source'], 'sha256': item['raw_sha256'], 'unchanged': True})
+notes = json.loads((ART / '15.1-own-original-source-notes.json').read_bytes())
+external_inputs = [
+    ('outputs/technical-sources/attention-2017.pdf', notes['papers'][0]['download_sha256']),
+    ('/tmp/15.1-own-shazeer-v1.pdf', notes['papers'][1]['download_sha256']),
+    ('outputs/technical-sources/switch-2021.pdf', notes['papers'][2]['download_sha256']),
+    ('/tmp/15.1-own-_torch_docs.py', notes['official_sources'][0]['download_sha256']),
+    ('/tmp/15.1-own-activation.py', notes['official_sources'][1]['download_sha256']),
+    ('/tmp/15.1-own-linear.py', notes['official_sources'][2]['download_sha256']),
+    ('/tmp/15.1-own-functional.py', notes['official_sources'][3]['download_sha256']),
+    ('/tmp/15.1-own-frozen-architecture.py', notes['fixed_experiment_code']['download_sha256']),
+]
+for path, expected in external_inputs:
+    assert sha(Path(path).read_bytes()) == expected
+saved = []
+for name, raw in [('15.1-own-intro-recheck-old-chapter-raw.txt', old), ('15.1-own-intro-recheck-current-chapter-raw.txt', current)]:
+    path = ART / name
+    path.write_bytes(raw)
+    saved.append({'path': str(path.relative_to(ROOT)), 'sha256': sha(raw)})
+diff = ''.join(difflib.unified_diff(old.decode().splitlines(keepends=True), current.decode().splitlines(keepends=True), fromfile='chapter15-old-04cb4e9c.md', tofile='chapter15-current-55dda9f5.md')).encode()
+saved.append(save_json('15.1-own-intro-recheck-complete-diff.json', {
+    'encoding': 'UTF-8; full unified diff in lossless JSON string; no trimming of context-prefix or EOF bytes',
+    'old_raw_sha256': sha(old), 'current_raw_sha256': sha(current),
+    'original_diff_bytes_sha256': sha(diff), 'original_diff_bytes_length': len(diff),
+    'unified_diff_utf8': diff.decode(),
+}))
+inspection = {
+    'reviewed_on': '2026-10-03',
+    'reviewer_task': '/root/technical_round_coordinator/technical_15_1_fresh',
+    'scope': '只重新核對15.8/15.11文字修訂對本人15.1章導言主張的支持影響；不給15.8或15.11 primary verdict。',
+    'actual_reading': '親讀兩節old/current完整原bytes及本人i1–i8；另親讀原固定revision architecture.py _routing L378–424。',
+    '15.8_impact': {
+        'own_claim_ids': ['i5', 'i7', 'i8'],
+        'old_support': '固定偏斜反例、實際分派計數及聚合統計支持「工作可能集中、要看實際分派」。原執行只保存兩個固定小例及stdout。',
+        'current_support': '新增輔助項/係數解釋與15.9連結；聚合欄位明確為按每批有效輸入數加權的輔助項平均。它沒有改變偏斜機制、分派例或導言的觀察目的。',
+        'original_code_locator': '固定48a4f3e912b483d70aee57c42c2aac226534a9a6 architecture.py _routing L378–424：aux_sum[index]加入batch_aux*len(probability)，input_tokens加current_valid.sum()，mean_batch_auxiliary=aux/input_tokens。',
+        'scope_conclusion': '本人導言主張仍受支持；既有短例執行適用於未變fence，不把歷史raw_sha冒稱現行raw。未另判此節全部實質主張。',
+    },
+    '15.11_impact': {
+        'own_claim_ids': ['i6', 'i7', 'i8'],
+        'old_support': 'CPU固定輸入、各自FFN/dispatch計時，且正式L4完整更新範圍另列；不能用單一速度決定品質。',
+        'current_support': '品質限制改為總參數與結構不同、程式未訓練；另明確NVIDIA L4是GPU。與現有兩模組280/336參數和Frozen GPU runtime一致，沒有改變fixed seed、時間方法或正式結果。',
+        'original_source_locators': '既有modern.py DenseFFN/MoEFFN；frozen moe.json gpu/device/runtime；原15.11 Python fence含no_grad/eval/seed0/5次warmup/30次測量，完整bytes不變。',
+        'scope_conclusion': '本人「容量與成本分開」「固定短例」「章末量測與公平比較」主張仍受支持；不由未訓練CPU時間推論品質或GPU速度。未另判此節primary。',
+    },
+    'other_own_claims': 'i1–i4與所有15.1 c1–c39的原文/支持材料未改，指紋和精確bytes已核；i5–i8仍為verified。',
+    'reuse_decision': '原例/唯一練習/13節短例與必要圖的原碼/原圖及相關來源全未變；維持原真實CPU execution/render/view證據，不重跑未變程式或圖。',
+    'issues_for_own_scope': [],
+}
+saved.append(save_json('15.1-own-intro-recheck-scope-inspection.json', inspection))
+result = {
+    'environment': {'python': platform.python_version(), 'executable': sys.executable, 'device': 'CPU byte/hash comparison only; no torch model execution', 'OMP_NUM_THREADS': os.environ.get('OMP_NUM_THREADS', ''), 'MKL_NUM_THREADS': os.environ.get('MKL_NUM_THREADS', '')},
+    'old_report': {'path': str(old_report_path.relative_to(ROOT)), 'sha256': sha(old_report_raw)},
+    'old_chapter_sha256': sha(old), 'current_chapter_sha256': sha(current),
+    'primary_sha256': sha(revised['15.1']), 'intro_sha256': sha(intro_current),
+    'primary_and_intro_exactly_unchanged': True,
+    'section_comparison': matrix,
+    'unchanged_repository_sources': unchanged_sources,
+    'unchanged_original_artifacts': unchanged_artifacts,
+    'unchanged_necessary_figures': unchanged_figures,
+    'unchanged_direct_prerequisites': unchanged_prerequisites,
+    'external_original_bytes_unchanged': [{'input_path': path, 'sha256': expected, 'unchanged': True} for path, expected in external_inputs],
+    'saved_raw_diff_inspection': saved,
+    'checks': '13 sections, all14 Python fences and all13 exercises match historical own code bytes; only15.8/15.11 prose changed; actual own scope inspection complete; no model execution/render rerun',
+}
+save_json('15.1-own-intro-recheck-execution.json', result)
+print(json.dumps({'old_report_sha256': sha(old_report_raw), 'old_chapter_sha256': sha(old), 'current_chapter_sha256': sha(current), 'primary_sha256': sha(revised['15.1']), 'intro_sha256': sha(intro_current), 'checks': result['checks'], 'own_scope_issues': []}, ensure_ascii=False, indent=2))

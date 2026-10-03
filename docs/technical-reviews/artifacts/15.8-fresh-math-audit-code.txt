@@ -1,0 +1,47 @@
+import json
+import math
+import platform
+import torch
+
+
+def entropy(fractions):
+    return sum(-f * math.log(f) if f > 0 else 0.0 for f in fractions)
+
+softmax_exact = {}
+for a in (8.0, 0.1):
+    denominator = math.exp(a) + 2
+    p = [math.exp(a) / denominator, 1 / denominator, 1 / denominator]
+    # 原例是 float32，透明手算用 Python float64。
+    tensor_p = torch.tensor([[a, 0.0, 0.0]]).softmax(-1).tolist()[0]
+    error = max(abs(x - y) for x, y in zip(p, tensor_p))
+    assert error < 1e-7
+    softmax_exact[str(a)] = {"denominator": denominator, "probabilities": p, "rounded4": [round(x, 4) for x in p], "float32_max_abs_error": error}
+
+uniform = [0.25] * 4
+single = [1.0, 0.0, 0.0, 0.0]
+assert abs(entropy(uniform) - math.log(4)) < 1e-15
+assert entropy(single) == 0.0
+batches = [[1.0 if i == j else 0.0 for i in range(4)] for j in range(4)]
+aggregate = [sum(batch[i] for batch in batches) / 4 for i in range(4)]
+assert aggregate == uniform
+assert all(entropy(batch) == 0.0 for batch in batches)
+
+# 負載不包含答案資訊：四位固定輸出 [0,1,1,1]，每筆目標 0。
+# 全派第一位 MSE=0；輪流平均派四位 MSE=3/4。
+quality_counterexample = {"target": 0.0, "expert_outputs": [0.0, 1.0, 1.0, 1.0], "single_expert_mse": 0.0, "balanced_mse": 0.75}
+
+print(json.dumps({
+    "environment": {"python": platform.python_version(), "torch": torch.__version__, "device": "cpu", "threads": str(torch.get_num_threads())},
+    "softmax": softmax_exact,
+    "e": math.e,
+    "log_quarter": math.log(0.25),
+    "quarter_entropy_term": -0.25 * math.log(0.25),
+    "log4": math.log(4),
+    "uniform_entropy": entropy(uniform),
+    "uniform_normalized_entropy": entropy(uniform) / math.log(4),
+    "single_entropy": entropy(single),
+    "single_normalized_entropy": entropy(single) / math.log(4),
+    "approaching_zero_terms": {str(f): -f * math.log(f) for f in (0.01, 1e-6, 1e-12)},
+    "batch_counterexample": {"batch_fractions": batches, "batch_entropies": [entropy(x) for x in batches], "aggregate_fractions": aggregate, "aggregate_normalized_entropy": entropy(aggregate) / math.log(4)},
+    "quality_counterexample": quality_counterexample,
+}, ensure_ascii=False, indent=2))
