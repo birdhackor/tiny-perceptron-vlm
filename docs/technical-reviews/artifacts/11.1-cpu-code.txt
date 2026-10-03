@@ -1,0 +1,180 @@
+import contextlib
+import hashlib
+import io
+import json
+import os
+from pathlib import Path
+import platform
+import re
+
+import torch
+from tiny_perceptron.data import ByteTokenizer
+from tiny_perceptron.multimodal import VisionEncoder, expand_modalities, scene
+
+root = Path.cwd()
+raw = (root / "course/chapters/11.md").read_bytes()
+headings = list(re.finditer(rb"(?m)^## [^\r\n]+", raw))
+section = raw[headings[0].start():headings[1].start()]
+code = re.findall(r"```python\n(.*?)```", section.decode(), re.S)[0]
+
+def execute(source):
+    scope = {}
+    stdout = io.StringIO()
+    with contextlib.redirect_stdout(stdout):
+        exec(compile(source, "course/chapters/11.md#11.1", "exec"), scope)
+    difference = scope["difference"]
+    return scope, {"stdout": stdout.getvalue(), "difference": difference.item(),
+                   "difference_shape": list(difference.shape),
+                   "shape": list(scope["projector"](scope["a"]).shape),
+                   "python_item_type": type(difference.item()).__name__}
+
+original_scope, original = execute(code)
+original["explicit_square_sum_sqrt"] = (original_scope["projector"](original_scope["a"]) - original_scope["projector"](original_scope["b"])).square().sum().sqrt().item()
+exercise_code = code.replace("difference =", "with torch.no_grad():\n    projector.weight.zero_()\ndifference =", 1)
+exercise_scope, exercise = execute(exercise_code)
+exercise["bias_same_as_original"] = torch.equal(exercise_scope["projector"].bias, original_scope["projector"].bias)
+exercise["a_b_identical"] = torch.equal(exercise_scope["projector"](exercise_scope["a"]), exercise_scope["projector"](exercise_scope["b"]))
+exercise["a_equals_bias"] = torch.equal(exercise_scope["projector"](exercise_scope["a"])[0], exercise_scope["projector"].bias)
+exercise["weight_nonzero_count"] = torch.count_nonzero(exercise_scope["projector"].weight).item()
+old_value = original_scope["difference"].item()
+with torch.no_grad():
+    original_scope["projector"].weight.zero_()
+late_zero = {"old_difference": original_scope["difference"].item(), "original_value": old_value,
+             "recomputed": (original_scope["projector"](original_scope["a"]) - original_scope["projector"](original_scope["b"])).norm().item()}
+example_weights = torch.tensor([1., 2., 0., 0.])
+manual_example = {"zero_input": (torch.zeros(4) @ example_weights + 0.5).item(),
+                  "ones_input": (torch.ones(4) @ example_weights + 0.5).item()}
+scores = torch.tensor([[0., 1., 2.], [1., 0., 3.]])
+same_wrong_answer = {"logits": scores.tolist(), "argmax": scores.argmax(-1).tolist(), "green_index": 2}
+
+tok = ByteTokenizer()
+vision = VisionEncoder(width=8)
+vision_features = vision(scene().unsqueeze(0))
+language_features = torch.nn.Linear(8,12)(vision_features)
+prefix = [tok.bos_id,tok.user_id,tok.image_id,tok.eos_id,tok.assistant_id]
+answer = tok.encode("red") + [tok.eos_id]
+ids = torch.tensor(prefix + answer)
+labels = torch.tensor([-100]*len(prefix) + answer)
+x, y = expand_modalities(ids,labels,torch.nn.Embedding(tok.vocab_size,12),{tok.image_id:language_features[0]},{tok.image_id})
+intro_interface = {"vision_shape": list(vision_features.shape), "projected_shape": list(language_features.shape),
+                   "expanded_and_shifted_shape": list(x.shape), "first_supervised_position": int((y[0]!=-100).nonzero()[0]),
+                   "supervised_targets": y[y!=-100].tolist(), "answer_ids": answer,
+                   "visual_labels_all_ignored": bool((y[0,1:17]==-100).all())}
+assert intro_interface["supervised_targets"] == answer and intro_interface["visual_labels_all_ignored"]
+def load(name):
+    path = root / f"docs/course-experiments/results/{name}.json"
+    data = json.loads(path.read_text())
+    return data, {"path": str(path.relative_to(root)), "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                  "revision": data["revision"], "seed": data["seed"], "device": data["device"],
+                  "torch": data["torch_version"], "gpu": data["gpu"], "hf": data.get("hf", {})}
+
+receipts = {}
+encoder, identity = load("encoders")
+vision = encoder["results"]["vision"]
+identity["vision"] = {"config": vision["config"], "classes": vision["classes"],
+                      "test_samples": vision["test"]["samples"],
+                      "recount_correct": sum(s["target"] == s["predicted"] for s in vision["test"]["samples"]),
+                      "test_count": len(vision["test"]["samples"]),
+                      "split_counts": {k:v["count"] for k,v in vision["data"]["splits"].items()},
+                      "split_offsets": {k:sorted({s["offset"] for s in v["records"]}) for k,v in vision["data"]["splits"].items()},
+                      "training": {k:v for k,v in vision["training"].items() if k not in ("history", "seconds", "elapsed")}}
+receipts["encoders"] = identity
+
+sft, identity = load("sft")
+r = sft["results"]
+samples = r["after"]["test"]["samples"]
+identity["direct_sft"] = {"checkpoint": r["checkpoint"], "data": r["data"],
+                          "training_steps": r["training"]["steps"], "config": r["training"].get("config"),
+                          "test_samples": samples,
+                          "correct": sum(s["generated_ids"][:s["generated_ids"].index(tok.eos_id)] == tok.encode(s["expected"]) for s in samples),
+                          "count": len(samples), "effective_tokens": r["after"]["test"]["effective_tokens"],
+                          "pretrain_then_sft_test_matches": r["pretrain_then_sft"]["after_sft"]["test"]["matches"],
+                          "pretraining_steps": r["pretrain_then_sft"]["pretraining"]["steps"]}
+receipts["sft"] = identity
+
+projector, identity = load("projector")
+r = projector["results"]
+def raw_match(sample, target_key="target"):
+    ids = sample["generated_ids"]
+    raw_answer = ids[:ids.index(tok.eos_id)] if tok.eos_id in ids else ids
+    return raw_answer == tok.encode(sample[target_key])
+identity["projector"] = {"training": {k:v for k,v in r["training"].items() if k not in ("history", "seconds", "elapsed")},
+                         "language_weights_unchanged": r["language_weights_unchanged"],
+                         "test_samples": r["test"]["samples"],
+                         "correct": sum(raw_match(s) for s in r["test"]["samples"]),
+                         "count": len(r["test"]["samples"]), "effective_tokens": r["test"]["effective_tokens"],
+                         "validation_correct": sum(raw_match(s) for s in r["validation"]["samples"]),
+                         "validation_count": len(r["validation"]["samples"]),
+                         "split_counts": {k:v["count"] for k,v in r["data"]["splits"].items()},
+                         "split_offsets": {k:sorted({s["offset"] for s in v["records"]}) for k,v in r["data"]["splits"].items()}}
+receipts["projector"] = identity
+
+vqa, identity = load("vqa")
+identity["variants"] = {}
+for name, variant in vqa["results"]["variants"].items():
+    if "text_after" not in variant:
+        continue
+    identity["variants"][name] = {
+        "vision_correct": sum(raw_match(s) for s in variant["test"]["samples"]), "vision_count": len(variant["test"]["samples"]),
+        "text_before": variant["text_before"]["matches"], "text_after": variant["text_after"]["matches"],
+        "text_count": variant["text_after"]["examples"],
+        "steps": variant["training"]["steps"], "effective_tokens": variant["training"]["effective_tokens"],
+        "trainable_parameters": variant["training"]["trainable_parameters"], "scope": variant["freeze_scope"],
+        "replay_probability": variant["replay_probability_per_example"]}
+receipts["vqa"] = identity
+
+ablation, identity = load("vision_ablation")
+interventions = ablation["results"]["interventions"]
+identity["interventions"] = {}
+for name, value in interventions.items():
+    if name == "edge_cropped":
+        continue
+    identity["interventions"][name] = {"correct": sum(raw_match(s) for s in value["samples"]), "count": len(value["samples"]), "groups": value["groups"]}
+original_shape = [s for s in interventions["none"]["samples"] if s["question"] == "shape?"]
+swapped_shape = [s for s in interventions["shape_swap_relabelled"]["samples"] if s["question"] == "shape?"]
+identity["shape_pairs"] = [{"original_target": a["target"], "new_target": b["target"], "original_answer": a["generated"],
+                            "new_answer": b["generated"], "raw_ids_identical": a["generated_ids"] == b["generated_ids"],
+                            "both_correct": raw_match(a) and raw_match(b)} for a,b in zip(original_shape,swapped_shape,strict=True)]
+identity["pairs_both_correct"] = sum(row["both_correct"] for row in identity["shape_pairs"])
+receipts["vision_ablation"] = identity
+
+ocr, identity = load("ocr")
+def edit_distance(a, b):
+    previous = list(range(len(b)+1))
+    for i, left in enumerate(a,1):
+        current = [i]
+        for j, right in enumerate(b,1):
+            current.append(min(current[-1]+1, previous[j]+1, previous[j-1]+(left!=right)))
+        previous = current
+    return previous[-1]
+r = ocr["results"]
+identity["ocr"] = {"correct": sum(raw_match(s) for s in r["test"]["samples"]), "count": len(r["test"]["samples"]),
+                   "reference_characters": sum(len(s["target"]) for s in r["test"]["samples"]),
+                   "edits": sum(edit_distance(s["generated"],s["target"]) for s in r["test"]["samples"]),
+                   "samples": [{k:s[k] for k in ["target","generated","eos"]} for s in r["test"]["samples"]],
+                   "family_counts": {k:len({s["family"] for s in v["records"]}) for k,v in r["data"]["splits"].items()},
+                   "image_counts": {k:v["count"] for k,v in r["data"]["splits"].items()},
+                   "steps": r["training"]["steps"], "effective_tokens": r["training"]["effective_tokens"], "scope": r["scope"]}
+receipts["ocr"] = identity
+
+intro_examples = {}
+for identifier in ["11.12", "11.13"]:
+    match = re.search(rb"(?m)^## " + re.escape(identifier.encode()) + rb" [^\r\n]+", raw)
+    following = re.search(rb"(?m)^## ",raw[match.end():])
+    end = match.end()+following.start() if following else len(raw)
+    local_section = raw[match.start():end].decode()
+    snippet = re.findall(r"```python\n(.*?)```",local_section,re.S)[0]
+    scope = {}
+    stdout = io.StringIO()
+    with contextlib.redirect_stdout(stdout):
+        exec(compile(snippet, f"course/chapters/11.md#{identifier}", "exec"), scope)
+    intro_examples[identifier] = {"stdout": stdout.getvalue(), "purpose": "導言數字字形與有序整串目標的必要原例；不產生該節判定，不做訓練"}
+
+assert original["shape"] == [1,8] and original["difference"] > 0
+assert exercise["difference"] == 0 and exercise["bias_same_as_original"] and exercise["a_b_identical"] and exercise["a_equals_bias"]
+assert late_zero["old_difference"] == late_zero["original_value"] > 0 and late_zero["recomputed"] == 0
+assert receipts["encoders"]["vision"]["recount_correct"] == 6
+assert receipts["sft"]["direct_sft"]["correct"] == 5
+assert receipts["projector"]["projector"]["correct"] == 0
+
+print(json.dumps({"command": "OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 .venv/bin/python docs/technical-reviews/artifacts/11.1-cpu-code.txt", "environment": {"python": platform.python_version(), "torch": torch.__version__, "device": "cpu", "torch_source_commit": torch.version.git_version, "threads": str(torch.get_num_threads()), "OMP_NUM_THREADS": os.environ.get("OMP_NUM_THREADS"), "MKL_NUM_THREADS": os.environ.get("MKL_NUM_THREADS")}, "section_sha256": hashlib.sha256(section).hexdigest(), "original": original, "exercise_weight_zero_before_difference": exercise, "late_zero_control": late_zero, "linear_numeric_example": manual_example, "different_logits_same_argmax": same_wrong_answer, "intro_interface": intro_interface, "frozen_receipt_recounts": receipts, "intro_required_examples": intro_examples, "scope": "本節原例與清零練習，各自從頭離線CPU執行；正式結果只重算凍結收據，不重訓或聲稱CPU重播正式模型"}, ensure_ascii=False, indent=2))
