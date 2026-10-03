@@ -1,0 +1,122 @@
+import hashlib
+import json
+import platform
+import sys
+from dataclasses import asdict
+from pathlib import Path
+
+import torch
+
+from tiny_perceptron.alignment import sequence_log_probability
+from tiny_perceptron.data import ByteTokenizer, render_chat
+from tiny_perceptron.model import generate
+from tiny_perceptron.training import load_checkpoint
+
+
+torch.set_num_threads(1)
+root = Path.cwd()
+formal_path = root / "docs/course-experiments/results/dpo.json"
+formal = json.loads(formal_path.read_text())
+branch = formal["results"]["format_only"]
+tok = ByteTokenizer()
+base_path = root / "checkpoints/course/style/content.pt"
+policy_path = root / "checkpoints/course/dpo/format-model.pt"
+base, base_payload = load_checkpoint(base_path, "cpu")
+policy, policy_payload = load_checkpoint(policy_path, "cpu")
+base.eval().requires_grad_(False)
+policy.eval().requires_grad_(False)
+
+
+def sha(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def score(model, prompt, answer):
+    x, y = render_chat([
+        {"role": "user", "content": prompt},
+        {"role": "assistant", "content": answer},
+    ])
+    valid = torch.ones_like(x, dtype=torch.bool)[None]
+    with torch.no_grad():
+        value = sequence_log_probability(model(x[None], valid=valid)["logits"], y[None])
+    return float(value), int((y != -100).sum())
+
+
+def replay(row):
+    values = {}
+    for name, model in (("reference", base), ("policy", policy)):
+        c, nc = score(model, row["prompt"], row["chosen"])
+        r, nr = score(model, row["prompt"], row["rejected"])
+        values[name + "_chosen_logp"] = c
+        values[name + "_rejected_logp"] = r
+        values[name + "_margin"] = c - r
+    values["relative_margin"] = values["policy_margin"] - values["reference_margin"]
+    values["answer_tokens"] = [nc, nr]
+    values["prompt"] = row["prompt"]
+    values["chosen"] = row["chosen"]
+    values["rejected"] = row["rejected"]
+    values["formal_error"] = {
+        key: values[key] - row[key]
+        for key in ("policy_chosen_logp", "policy_rejected_logp", "reference_margin", "policy_margin", "relative_margin")
+    }
+    assert max(abs(v) for v in values["formal_error"].values()) < 0.001
+    return values
+
+
+test = [replay(row) for row in branch["preference"]["test"]["samples"]]
+validation_0_3 = replay(next(row for row in branch["preference"]["validation"]["samples"] if row["prompt"] == "0+3=?"))
+generation = []
+for row in branch["preference"]["test"]["samples"]:
+    prompt = [tok.bos_id, tok.user_id] + tok.encode(row["prompt"]) + [tok.eos_id, tok.assistant_id]
+    with torch.no_grad():
+        ids = generate(policy, torch.tensor([prompt]), 32, temperature=0.0, eos_id=tok.eos_id)[0, len(prompt):].tolist()
+    body = ids[:ids.index(tok.eos_id)] if tok.eos_id in ids else ids
+    generation.append({"prompt": row["prompt"], "expected": row["chosen"], "generated": tok.decode(body), "generated_ids": ids, "exact": body == tok.encode(row["chosen"])})
+assert all(t["reference_margin"] > 0 and t["policy_margin"] > 0 and t["relative_margin"] > 0 for t in test)
+assert len(test) == 7 and sum(x["exact"] for x in generation) == 0
+assert generation[0]["prompt"] == "2+2=?" and generation[0]["generated"] == "3"
+assert branch["training"]["steps"] == 200
+
+weights = []
+for model_id, filename, path, model, payload in (
+    ("style", "content.pt", base_path, base, base_payload),
+    ("dpo", "format-model.pt", policy_path, policy, policy_payload),
+):
+    release = json.loads((root / f"docs/course-experiments/public-releases/{model_id}.json").read_text())["release"]
+    entry = next(v for v in release["public_manifest"]["files"] if v["output"] == filename)
+    assert sha(path) == entry["sha256"]
+    weights.append({
+        "path": str(path.relative_to(root)),
+        "sha256": sha(path),
+        "immutable_url": f"https://huggingface.co/{release['repo']}/resolve/{release['revision']}/{entry['path']}",
+        "public_revision": release["revision"],
+        "config": asdict(model.config),
+        "step": payload.get("step"),
+        "step_scope": (
+            "公開推論匯出未保留step；這是原style/content.pt起點，未將format支線200次算成此起點的更新數。"
+            if model_id == "style"
+            else "公開推論匯出未保留step；此format支線200次取自凍結正式result及原版本run_dpo。"
+        ),
+        "metadata": payload["metadata"],
+        "tensor_count": len(payload["model"]),
+        "tensor_parameters": sum(t.numel() for t in payload["model"].values()),
+        "tensor_dtypes": sorted({str(t.dtype) for t in payload["model"].values()}),
+        "card_sha256": sha(path.parent / "README.md"),
+        "card_url": f"https://huggingface.co/{release['repo']}/resolve/{release['revision']}/course/course-v1/{model_id}/README.md",
+        "evaluation_sha256": sha(path.parent / "evaluation.json"),
+    })
+
+print(json.dumps({
+    "environment": {"python": sys.version.split()[0], "torch": str(torch.__version__), "torch_git_version": torch.version.git_version, "device": "cpu", "threads": str(torch.get_num_threads()), "platform": platform.platform()},
+    "formal_result_sha256": sha(formal_path),
+    "formal_revision": formal["revision"],
+    "formal_environment": {k: formal[k] for k in ("seed", "torch_version", "python_version", "device", "gpu", "step_scale")},
+    "format_training": branch["training"],
+    "format_data": branch["data"],
+    "weights": weights,
+    "test": test,
+    "validation_0+3": validation_0_3,
+    "test_generation": generation,
+    "counts": {"test_records": len(test), "reference_short_higher": sum(t["reference_margin"] > 0 for t in test), "policy_short_higher": sum(t["policy_margin"] > 0 for t in test), "relative_margin_improved": sum(t["relative_margin"] > 0 for t in test), "generated_exact_matches": sum(x["exact"] for x in generation)},
+    "scope": "現成公開 pinned 原權重短 CPU 推論與固定結果核對，未訓練、未下載權重、未重播正式排程；不據此推論 GPU 速度或普遍品質。",
+}, ensure_ascii=False, indent=2))
