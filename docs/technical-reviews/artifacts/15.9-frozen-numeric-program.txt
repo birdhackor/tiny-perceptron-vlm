@@ -1,0 +1,55 @@
+import json
+import math
+import platform
+from pathlib import Path
+
+import torch
+
+print(json.dumps({"python": platform.python_version(), "torch": str(torch.__version__),
+                  "device": "cpu", "threads": torch.get_num_threads()}))
+snapshot = json.loads(Path("docs/technical-reviews/artifacts/15.9-frozen-results.json").read_text())
+expected = {
+    "top1_aux0": ([0.74231, 0.64755], 2.30115, 2.32369),
+    "top1_aux0.01": ([0.99499, 0.97937], 2.29775, 2.31963),
+    "top2_aux0": ([0.99800, 0.75365], 2.28011, 2.30320),
+    "top2_aux0.01": ([0.99944, 0.99254], 2.27819, 2.30170),
+}
+for name, (expected_entropy, expected_validation, expected_test) in expected.items():
+    variant = snapshot["variants"][name]
+    train = variant["training"]
+    assert train["steps"] == train["optimizer_updates"] == train["requested_steps"] == 180
+    assert train["skipped_updates"] == 0 and train["status"] == "completed"
+    assert train["effective_tokens"] == 337761
+    layers = variant["validation_routing"]["layers"]
+    for index, layer in enumerate(layers):
+        counts = layer["dispatch_counts"]
+        denominator = sum(counts)
+        assert denominator == layer["dispatch_denominator"]
+        assert denominator == variant["validation_routing"]["effective_input_tokens"] * variant["model"]["config"]["top_k"]
+        fractions = [count / denominator for count in counts]
+        entropy = -sum(f * math.log(f) for f in fractions if f > 0) / math.log(4)
+        assert abs(entropy - layer["normalized_load_entropy"]) < 1e-14
+        assert round(entropy, 5) == expected_entropy[index]
+        print(name, "layer", index + 1, "counts", counts, "denominator", denominator,
+              "recomputed_entropy", entropy, "rounded", f"{entropy:.5f}")
+    for split, target in [("validation", expected_validation), ("test", expected_test)]:
+        heldout = variant["heldout"][split]
+        recomputed = heldout["nll_sum"] / heldout["effective_tokens"]
+        assert abs(recomputed - heldout["nll"]) < 1e-14
+        assert round(recomputed, 5) == target
+        print(name, split, "nll_sum", heldout["nll_sum"], "tokens", heldout["effective_tokens"],
+              "stories", heldout["records"], "windows", heldout["examples"], "nll", recomputed)
+    print(name, "optimizer_updates", train["optimizer_updates"], "seed", snapshot["run_metadata"]["seed"])
+layer = snapshot["variants"]["top2_aux0.01"]["validation_routing"]["layers"][1]
+full_dataset_product = 4 * sum(f * p for f, p in zip(layer["load_fraction"], layer["mean_router_probability"], strict=True))
+assert round(layer["mean_batch_auxiliary"], 5) == 0.99063
+assert abs(full_dataset_product - layer["mean_batch_auxiliary"]) > 1e-10
+print("top2_aux0.01 layer2 mean_batch_auxiliary", layer["mean_batch_auxiliary"],
+      "full_dataset_f_p_product", full_dataset_product)
+for k in (1, 2):
+    before = snapshot["variants"][f"top{k}_aux0"]
+    after = snapshot["variants"][f"top{k}_aux0.01"]
+    assert all(a["normalized_load_entropy"] > b["normalized_load_entropy"]
+               for a, b in zip(after["validation_routing"]["layers"], before["validation_routing"]["layers"], strict=True))
+    assert all(after["heldout"][s]["nll"] < before["heldout"][s]["nll"] for s in ["validation", "test"])
+print("PASS; arithmetic verification of frozen run only, no GPU replication or model training")

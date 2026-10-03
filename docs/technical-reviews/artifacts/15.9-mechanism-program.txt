@@ -1,0 +1,93 @@
+import json
+import math
+import os
+import platform
+from types import SimpleNamespace
+
+import torch
+from scripts.course_experiments.architecture import _forward, _routing
+from scripts.course_experiments.common import split_records, text_examples
+from tiny_perceptron.data import IGNORE, pad_batch
+from tiny_perceptron.model import ModelConfig, TinyLM, loss_sum
+
+assert os.environ["OMP_NUM_THREADS"] == os.environ["MKL_NUM_THREADS"] == "1"
+assert torch.get_num_threads() == 1
+print(json.dumps({"python": platform.python_version(), "torch": str(torch.__version__),
+                  "torch_commit": torch.version.git_version, "device": "cpu",
+                  "threads": torch.get_num_threads()}, ensure_ascii=False))
+
+scores = torch.tensor([[math.log(0.8), math.log(0.1), math.log(0.1)]] * 3,
+                      requires_grad=True)
+prob = scores.softmax(-1)
+fraction = torch.bincount(prob.argmax(-1), minlength=3).float() / len(scores)
+auxiliary = 3 * (fraction.detach() * prob.mean(0)).sum()
+auxiliary.backward()
+assert not fraction.requires_grad
+assert torch.allclose(scores.grad, torch.tensor([[0.16, -0.08, -0.08]] * 3), atol=1e-7)
+print("concentrated_auxiliary", auxiliary.item(), "score_gradients", scores.grad.tolist())
+
+prob = torch.zeros(12, 3).softmax(-1)
+chosen = prob.argmax(-1)
+fraction = torch.bincount(chosen, minlength=3).float() / len(chosen)
+auxiliary = 3 * (fraction * prob.mean(0)).sum()
+assert chosen.tolist() == [0] * 12
+assert torch.allclose(auxiliary, torch.tensor(1.0))
+print("uniform_probability_tie", "dispatch", fraction.tolist(), "auxiliary", auxiliary.item())
+
+prob = torch.tensor([[0.5001, 0.4999]] * 3 + [[0.001, 0.999]])
+fraction = torch.bincount(prob.argmax(-1), minlength=2).float() / 4
+auxiliary = 2 * (fraction * prob.mean(0)).sum()
+assert auxiliary.item() < 1
+print("no_exact_lower_bound", fraction.tolist(), prob.mean(0).tolist(), auxiliary.item())
+
+torch.manual_seed(42)
+model = TinyLM(ModelConfig(width=8, heads=2, layers=2, max_length=16, experts=4, top_k=2))
+examples = text_examples([{"text": "a"}, {"text": "abcd"}], max_length=16)
+x, y, valid = pad_batch(examples)
+layer_records = []
+handles = []
+for index, block in enumerate(model.blocks):
+    def collect(module, args, result, index=index):
+        probability = module.router(args[0][valid]).float().softmax(-1)
+        chosen = result[2][valid.reshape(-1)]
+        counts = torch.bincount(chosen.flatten(), minlength=4)
+        fraction = counts.float() / (int(valid.sum()) * 2)
+        layer_aux = 4 * (fraction * probability.mean(0)).sum()
+        layer_records.append({"layer": index, "counts": counts.tolist(),
+                              "denominator": int(valid.sum()) * 2,
+                              "auxiliary": layer_aux.item()})
+    handles.append(block.ffn.register_forward_hook(collect))
+result = _forward(model, x, valid)
+for handle in handles:
+    handle.remove()
+expected = sum(layer["auxiliary"] for layer in layer_records)
+assert abs(result["auxiliary"].item() - expected) < 3e-7
+summed, target_count = loss_sum(result["logits"], y)
+assert int(valid.sum()) == int(target_count) == 7
+assert x.numel() == 10
+aux_gradients = torch.autograd.grad(result["auxiliary"], [b.ffn.router.weight for b in model.blocks])
+assert all(torch.isfinite(g).all() and float(g.norm()) > 0 for g in aux_gradients)
+masked_y = y.clone()
+masked_y[0, 0] = IGNORE
+_, masked_count = loss_sum(result["logits"], masked_y)
+assert int(masked_count) == 6 and int(valid.sum()) == 7
+print("two_layer_top2_mask", json.dumps(layer_records), "summed_auxiliary", result["auxiliary"].item(),
+      "task_nll", (summed / target_count).item(), "effective_inputs", int(valid.sum()),
+      "effective_targets", int(target_count), "masked_targets", int(masked_count),
+      "auxiliary_router_gradient_norms", [float(g.norm()) for g in aux_gradients])
+
+routing = _routing(model, examples, SimpleNamespace(device="cpu"))
+assert routing["effective_input_tokens"] == 7
+assert all(layer["dispatch_denominator"] == 14 for layer in routing["layers"])
+assert all(abs(layer["mean_batch_auxiliary"] - record["auxiliary"]) < 3e-7
+           for layer, record in zip(routing["layers"], layer_records, strict=True))
+print("routing_single_batch", json.dumps(routing))
+
+records = [{"family": str(i), "text": str(i)} for i in range(20)]
+data = split_records(records, seed=42)
+families = {name: {row["family"] for row in rows} for name, rows in data.items()}
+assert not families["train"] & families["validation"]
+assert not families["train"] & families["test"]
+assert not families["validation"] & families["test"]
+print("split_synthetic_family_disjoint", {name: len(rows) for name, rows in data.items()})
+print("PASS; no optimizer update, dataset download, checkpoint load, GPU or formal schedule")
