@@ -1,0 +1,59 @@
+import contextlib, io, json, math, pathlib, platform, random, hashlib, re, sys
+import torch
+import torch.nn.functional as F
+from tiny_perceptron.model import ModelConfig, TinyLM
+root = pathlib.Path.cwd()
+base = root / "docs/technical-reviews/artifacts"
+raw = (base / "14.2-source.md.txt").read_bytes()
+fence = re.search(rb"```python\n(.*?)```", raw, re.S)[1].decode()
+# 本節唯一練習：只在原始x建構後插入 x=x+10，再執行完整原fence。
+line = "x = torch.tensor([[2.0, 2.0, 2.0], [1.0, 2.0, 3.0]])"
+exercise = fence.replace(line, line + "\nx = x + 10")
+assert exercise != fence
+ns, out = {}, io.StringIO()
+with contextlib.redirect_stdout(out):
+    exec(compile(exercise, "14.2-exercise", "exec"), ns)
+x = torch.tensor([[2.0, 2.0, 2.0], [1.0, 2.0, 3.0]])
+eps = 1e-5
+before_ln = F.layer_norm(x, (3,), eps=eps)
+before_rms = x / torch.sqrt(x.square().mean(-1, keepdim=True)+eps)
+ln_same = torch.allclose(before_ln, ns["ln"], atol=1e-6, rtol=1e-6)
+rms_same = torch.allclose(before_rms, ns["rms"], atol=1e-6, rtol=1e-6)
+assert ln_same and not rms_same
+zero = torch.zeros(2,3)
+zero_ln = F.layer_norm(zero,(3,),eps=eps)
+zero_rms = zero / torch.sqrt(zero.square().mean(-1,keepdim=True)+eps)
+assert torch.isfinite(zero_ln).all() and torch.isfinite(zero_rms).all()
+config = dict(vocab_size=264,width=64,layers=2,heads=4,max_length=128)
+counts = {}
+for name,norm in [("baseline","layer"),("rmsnorm","rms")]:
+    torch.manual_seed(42)
+    model=TinyLM(ModelConfig(**config,norm=norm))
+    params = dict(model.named_parameters())
+    norm_params = {n:list(p.shape) for n,p in params.items() if "norm" in n}
+    counts[name] = {"parameters":sum(p.numel() for p in params.values()),"normalization_parameters":norm_params}
+assert counts["baseline"]["parameters"]==141568
+assert counts["rmsnorm"]["parameters"]==141248
+assert counts["baseline"]["parameters"]-counts["rmsnorm"]["parameters"]==5*64
+rpath=root/"docs/course-experiments/results/modern.json"
+rbytes=rpath.read_bytes(); r=json.loads(rbytes)
+variants={}
+for name in ["baseline","rmsnorm"]:
+    v=r["results"]["variants"][name]
+    heldout={side:{k:q for k,q in metrics.items() if k!="samples"} for side,metrics in v["heldout"].items()}
+    for q in heldout.values():
+        assert math.isclose(q["nll_sum"]/q["effective_tokens"],q["nll"],rel_tol=1e-12)
+    variants[name]={"model":v["model"],"changes":v["changes"],"training":v["training"],"heldout":heldout,"copied_initial_tables":v["copied_initial_tables"]}
+observed={name:{"validation_rounded":round(v["heldout"]["validation"]["nll"],5),"test_rounded":round(v["heldout"]["test"]["nll"],5),"milliseconds_rounded":round(1000*v["training"]["warm_step_median_seconds"],3)} for name,v in variants.items()}
+assert observed=={"baseline":{"validation_rounded":2.26331,"test_rounded":2.29163,"milliseconds_rounded":13.062},"rmsnorm":{"validation_rounded":2.25913,"test_rounded":2.28631,"milliseconds_rounded":13.952}}
+assert all(v["training"]["steps"]==240 and v["training"]["effective_tokens"]==452102 for v in variants.values())
+torch.manual_seed(42); r1=torch.rand(4)
+torch.manual_seed(42); r2=torch.rand(4)
+a=random.Random(42).choices(list(range(8)),k=16)
+b=random.Random(42).choices(list(range(8)),k=16)
+assert torch.equal(r1,r2) and a==b
+result={"command":'OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 CUDA_VISIBLE_DEVICES=\'\' HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1 TRANSFORMERS_OFFLINE=1 PYTHONDONTWRITEBYTECODE=1 timeout 60 .venv/bin/python -c \'from pathlib import Path; exec(compile(Path("docs/technical-reviews/artifacts/14.2-audit-script.txt").read_text(), "14.2-audit-script", "exec"))\'',"exit_code":0,"environment":{"python":platform.python_version(),"torch":str(torch.__version__),"torch_git_version":torch.version.git_version,"device":"cpu","dtype":str(x.dtype),"OMP_NUM_THREADS":"1","MKL_NUM_THREADS":"1"},"exercise":{"source":exercise,"stdout":out.getvalue(),"LN_shift_invariant_allclose":ln_same,"RMS_shift_allclose":rms_same,"LN_max_change":float((before_ln-ns["ln"]).abs().max()),"RMS_max_change":float((before_rms-ns["rms"]).abs().max()),"LN_raw":ns["ln"].tolist(),"RMS_raw":ns["rms"].tolist()},"probes":{"mean_keepdim_shape":list(x.square().mean(-1,keepdim=True).shape),"input_shape":list(x.shape),"LN_shape":list(before_ln.shape),"RMS_shape":list(before_rms.shape),"LN_raw":before_ln.tolist(),"RMS_raw":before_rms.tolist(),"zero_LN":zero_ln.tolist(),"zero_RMS":zero_rms.tolist(),"models_no_training":counts,"seed_random_sequence_identical":bool(torch.equal(r1,r2)),"sampler_sequence_identical":a==b}}
+(base/"14.2-exercise-execution.json").write_text(json.dumps(result,ensure_ascii=False,indent=2)+"\n")
+evidence={"核對性質":"本人只親讀凍結實報與原始碼；本次沒有排程、重訓或重測GPU。下列數值由實報讀出，當次CPU只是核算捨入與分母。","original_report_path":"docs/course-experiments/results/modern.json","original_report_sha256":hashlib.sha256(rbytes).hexdigest(),"original_revision":r["revision"],"original_device":r["device"],"original_gpu":r["gpu"],"original_python_version":r["python_version"],"original_torch_version":r["torch_version"],"seed":r["seed"],"runtime":r["results"]["runtime"],"dataset":r["results"]["dataset"],"variants":variants,"checked_rounded_values":observed,"原始代價分母已核算":True,"code_sha256":r["code_sha256"],"計時分母":{"每組更新":240,"省略前幾步":3,"中位數涵蓋剩餘步數":237},"限制":"每組僅seed42、byte字表、小型固定語料短訓；不是跨種子統計檢驗、GPU正規化函式microbenchmark或長度外推測試。"}
+(base/"14.2-modern-evidence.json").write_text(json.dumps(evidence,ensure_ascii=False,indent=2)+"\n")
+print(json.dumps({"exercise":result["exercise"],"probes":result["probes"],"formal_report_rounding":observed},ensure_ascii=False,indent=2))
