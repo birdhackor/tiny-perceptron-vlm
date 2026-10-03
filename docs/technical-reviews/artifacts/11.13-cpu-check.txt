@@ -1,0 +1,132 @@
+"""11.13 原例、兩個練習與凍結結果的短 CPU 核對；不載入或訓練模型。"""
+import argparse
+import ast
+import contextlib
+import hashlib
+import io
+import json
+from pathlib import Path
+import platform
+import re
+import sys
+
+import torch
+
+ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(ROOT))
+from tiny_perceptron.data import ByteTokenizer
+
+def digest(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+def function_from(path, name):
+    tree = ast.parse(path.read_text())
+    function = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == name)
+    namespace = {}
+    exec(compile(ast.Module(body=[function], type_ignores=[]), str(path), "exec"), namespace)
+    return namespace[name]
+
+parser = argparse.ArgumentParser()
+parser.add_argument("case", choices=["original", "exercise1", "exercise2", "results"])
+args = parser.parse_args()
+environment = {"python": platform.python_version(), "torch": str(torch.__version__),
+               "torch_git_version": str(torch.version.git_version), "device": "cpu",
+               "torch_threads": str(torch.get_num_threads())}
+output = {"case": args.case, "environment": environment}
+raw = (ROOT / "docs/technical-reviews/artifacts/11.13-source.txt").read_text()
+code = re.findall(r"```python\n(.*?)\n```", raw, re.S)[0]
+edit = function_from(ROOT / "scripts/course_experiments/modalities.py", "edit_distance")
+if args.case in ("original", "exercise1", "exercise2"):
+    if args.case == "exercise1":
+        code = code.replace('predicted = "1000"', 'predicted = "1010"').replace('1 / len(truth)', '0 / len(truth)')
+    if args.case == "exercise2":
+        code = code.replace('predicted = "1000"', 'predicted = "101"')
+    stream = io.StringIO()
+    namespace = {}
+    with contextlib.redirect_stdout(stream):
+        try:
+            exec(compile(code, "11.13-fence-1", "exec"), namespace)
+            output["exception"] = None
+        except AssertionError:
+            if args.case != "exercise2":
+                raise
+            output["exception"] = "AssertionError：不等長輸入在原有 assert 被拒絕"
+    output["executed_code"] = code
+    output["stdout"] = stream.getvalue()
+    expected = {"original": (3, False, 1), "exercise1": (4, True, 0)}
+    if args.case != "exercise2":
+        matched, exact, edits = expected[args.case]
+        assert namespace["matched"] == matched
+        assert (namespace["truth"] == namespace["predicted"]) is exact
+        assert edit(namespace["predicted"], namespace["truth"]) == edits
+    else:
+        assert output["exception"] is not None
+        assert edit("101", "1010") == 1
+        output["paper_exercise_check"] = {"predicted": "101", "truth": "1010", "edits": 1,
+                                          "operation": "在預測最後插入0", "CER": 0.25, "exact_match": False}
+else:
+    path = ROOT / "docs/course-experiments/results/ocr.json"
+    frozen = json.loads(path.read_text())
+    results = frozen["results"]
+    tok = ByteTokenizer()
+    output["frozen_result"] = {"path": str(path.relative_to(ROOT)), "sha256": digest(path),
+        "revision": frozen["revision"], "seed": frozen["seed"], "device": frozen["device"],
+        "gpu": frozen["gpu"], "torch": frozen["torch_version"], "step_scale": frozen["step_scale"],
+        "status": frozen["status"], "evidence_status": frozen["evidence_status"], "hf": frozen["hf"]}
+    output["training"] = {k: v for k, v in results["training"].items() if k != "history"}
+    history = results["training"]["history"]
+    assert len(history) == 500
+    assert sum(row["effective_targets"] for row in history) == 11584
+    output["history_recount"] = {"steps": len(history), "effective_targets": sum(row["effective_targets"] for row in history)}
+    output["code_hash_comparison"] = {}
+    for name in ["scripts/course_experiments/modalities.py", "tiny_perceptron/data.py", "tiny_perceptron/multimodal.py"]:
+        observed = digest(ROOT / name)
+        expected_hash = frozen["code_sha256"][name]
+        assert observed == expected_hash
+        output["code_hash_comparison"][name] = {"actual": observed, "frozen": expected_hash}
+    splits = results["data"]["splits"]
+    families = {key: {row["family"] for row in value["records"]} for key, value in splits.items()}
+    assert not families["train"] & families["test"]
+    assert not families["train"] & families["validation"]
+    assert not families["validation"] & families["test"]
+    output["splits"] = {k: {"count": len(v["records"]), "family_count": len(families[k]),
+                            "families": sorted(families[k], key=int)} for k, v in splits.items()}
+    output["evaluations"] = {}
+    official_edit = function_from(ROOT / "outputs/technical-sources/11.13-fresh/torchmetrics-helper.py", "_edit_distance")
+    for split in ["test", "validation", "blank"]:
+        measured = results[split]
+        records = splits["test" if split == "blank" else split]["records"]
+        samples = []
+        for record, sample in zip(records, measured["samples"], strict=True):
+            generated_ids = sample["generated_ids"]
+            raw_ids = generated_ids[:generated_ids.index(tok.eos_id)] if tok.eos_id in generated_ids else generated_ids
+            assert tok.decode(raw_ids) == sample["generated"]
+            exact = raw_ids == tok.encode(sample["target"])
+            assert exact == sample["exact_match"]
+            assert sample["target"] == record["answer"]
+            edits = edit(sample["generated"], sample["target"])
+            assert edits == official_edit(list(sample["generated"]), list(sample["target"]))
+            samples.append({"family": sample["family"], "offset": record["offset"], "target": sample["target"],
+                            "generated": sample["generated"], "ids": generated_ids, "exact_match": exact,
+                            "eos": tok.eos_id in generated_ids, "edits": edits,
+                            "invalid_special_tokens": sum(x < 8 for x in raw_ids)})
+        edits = sum(s["edits"] for s in samples)
+        characters = sum(len(s["target"]) for s in samples)
+        exact = sum(s["exact_match"] for s in samples)
+        assert exact == measured["correct"]
+        assert len(samples) == measured["examples"] == 30
+        assert sum(s["eos"] for s in samples) == 30
+        assert sum(s["invalid_special_tokens"] for s in samples) == 0
+        if split == "test":
+            assert edits == measured["character_edits"] == 40
+            assert characters == measured["reference_characters"] == 57
+            assert edits / characters == measured["character_error_rate"]
+        if split == "blank":
+            assert {s["generated"] for s in samples} == {"9"}
+        output["evaluations"][split] = {"examples": len(samples), "exact": exact, "reference_characters": characters,
+            "edits": edits, "CER": edits / characters, "eos_count": sum(s["eos"] for s in samples), "samples": samples}
+    output["numeric_examples"] = [{"predicted": pred, "truth": truth, "edits": edit(pred, truth),
+                                  "CER": edit(pred, truth) / len(truth)}
+                                  for pred, truth in [("1000", "1010"), ("10100", "1010"), ("010", "1010"), ("101", "1010"), ("9", "17")]]
+    output["scope"] = "CPU僅重算凍結結果與小例；未載權重、未生成資料、未執行正式訓練或GPU推論。"
+print(json.dumps(output, ensure_ascii=False, indent=2))
