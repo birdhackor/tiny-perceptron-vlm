@@ -1,0 +1,38 @@
+1: ## 18.12 MoE 教師能教 Dense 學生嗎？
+2:
+3: 教師內部有三位expert，學生只有一套Dense FFN，是否要先把教師所有專家搬進學生？如果我們比較的是下一個token分布，不需要。教師的內部路由怎樣得到結果，是它自己的運算；學生只需在相同前文後，產生相同候選意義下的分布。前置是[Dense與MoE](15.md#15.3)、[欄位與位置對齊](18.md#18.6)以及[KL目標](18.md#18.8)。
+4:
+5: 例如教師寬度16、三位expert每次選兩位，學生寬度8、一套Dense。兩邊內部特徵分別16與8，不能直接逐項相減；但詞表都264項，讀相同兩個token時，輸出都是 `[1,2,264]`。這個共同輸出介面讓分布蒸餾可行，不要求同樣層數、相同隱藏寬度或同樣專家數量。
+6:
+7: ```python
+8: import torch
+9: from tiny_perceptron.model import TinyLM, ModelConfig
+10: from tiny_perceptron.alignment import distillation_kl
+11:
+12: torch.manual_seed(0)
+13: teacher = TinyLM(ModelConfig(width=16, experts=3, top_k=2)).eval().requires_grad_(False)
+14: student = TinyLM(ModelConfig(width=8))
+15: ids = torch.tensor([[1, 2]])
+16: with torch.no_grad():
+17:     t = teacher(ids)["logits"]
+18: s = student(ids)["logits"]
+19: labels = torch.tensor([[1, 2]])
+20: loss = distillation_kl(s, t, labels, temperature=1.0)
+21: loss.backward()
+22: print("教師/學生分數形狀", tuple(t.shape), tuple(s.shape))
+23: print("總參數", teacher.description()["parameters"], student.description()["parameters"])
+24: print("學生輸出權重有梯度", student.output.weight.grad.abs().sum().item() > 0)
+25: ```
+26:
+27: 輸入是同一段ID，兩模型詞表沿用相同預設配置。teacher內部用MoE，student用Dense；`distillation_kl`只接分數與有效位置標記，不讀內部expert索引。這個人工標籤把兩格都設有效，只檢驗資料介面與梯度，不模擬完整對話遮罩。應輸出相同 `(1,2,264)`，總參數18048與6104，學生輸出權重有梯度True。
+28:
+29: 兩模型都隨機初始化，此例證明能構成學習路徑，沒有證明教師有數學或語言能力，更沒有完成真正蒸餾。正式實驗需載入已驗證教師，保留同學生架構的未蒸餾基準，再比較任務品質與成本。教師的MoE總參數、每token啟動expert數與實際計算時間也應分別記錄，不能因每次只選兩位就把第三位權重儲存算成零。
+30:
+31: 真正對照載入[15.13預先指定的top-2、auxiliary 0.01教師](15.md#15.13)，寬64、兩層、每層四位expert、共340,608個參數；`model.pt`在MoE實驗開始就指定複製這支，不由測試分數挑選。寬32一層Dense學生33,632個參數，CE與CE+KL同初始化、同抽樣計畫，各更新300次、讀559,651個真實故事目標。受本輪預算限制，學生只讀原409篇訓練故事的前32篇；教師原先讀完整409篇。因此教師與學生的差距還包含資料預算，能隔離教師訊號的是兩個同樣只讀32篇的學生。
+32:
+33: 最後52篇原始故事全部計NLL，分成352個序列片段，共41,914個目標：41,862個文字byte目標，加上52個代表每篇故事結束的EOS目標。EOS是在每篇故事末尾加一次，再切成片段，中途切片處不另外加EOS。驗證51篇則分成334個片段，共39,256個目標，包含39,205個文字byte目標與51個故事EOS目標。測試平均NLL依教師／CE學生／KL學生為2.3017／2.4601／2.3890，KL比同架構CE低約0.0712，但仍高於教師。每篇另從前24個byte生成最多24個新token，三者與原文下一段的精確匹配均0/52，也都沒有EOS；這是固定原文續段匹配，不能等同開放創作的通用評分。提示`Once upon a time, there `後，教師寫`tthe the the the the the`，CE寫`the a t the the the the `，KL寫`the t the the the the th`，仍是重複片語。原始ID、每篇生成與完整留出代價都保留在[蒸餾實報的MoE任務](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/course-experiments/results/distillation.json)，不能只拿平均代價改善就說已保住故事能力。
+34:
+35: 學生更小會限制能學到的細節。即使候選分布對齊，Dense學生仍可能無法在所有輸入近似教師，尤其是教師不同expert形成多種複雜規則時；這需要獨立評估，不能由shape相同推論能力等同。反過來，學生沒有router，也不代表它一定更快，實際耗時仍受硬體與輸入條件影響。
+36:
+37: 練習只將學生vocab_size設成265。先預測學生分數最後一軸變265、教師仍264，KL輔助函式`distillation_kl`會拒絕形狀不一致，再執行觀察錯誤。把它改回264之後路徑恢復；候選欄位先對上，內部結構才有自由。
+38:

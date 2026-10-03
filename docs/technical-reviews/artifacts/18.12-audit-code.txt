@@ -1,0 +1,162 @@
+import hashlib
+import json
+import platform
+from pathlib import Path
+
+import torch
+
+from scripts.course_experiments.common import text_examples
+from tiny_perceptron.alignment import distillation_kl
+from tiny_perceptron.data import ByteTokenizer
+from tiny_perceptron.model import ModelConfig, TinyLM, generate
+from tiny_perceptron.training import load_checkpoint
+
+
+def sha(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+root = Path.cwd()
+out = {
+    "environment": {
+        "python": platform.python_version(),
+        "torch": str(torch.__version__),
+        "torch_git_version": str(torch.version.git_version),
+        "device": "cpu",
+        "threads": str(torch.get_num_threads()),
+        "OMP_NUM_THREADS": "1",
+        "MKL_NUM_THREADS": "1",
+    }
+}
+torch.manual_seed(0)
+teacher = TinyLM(ModelConfig(width=16, experts=3, top_k=2)).eval().requires_grad_(False)
+student = TinyLM(ModelConfig(width=8))
+ids = torch.tensor([[1, 2]])
+with torch.no_grad():
+    t = teacher(ids)["logits"]
+s = student(ids)["logits"]
+labels = torch.tensor([[1, 2]])
+loss = distillation_kl(s, t, labels, temperature=1.0)
+alternate_labels_loss = distillation_kl(s, t, torch.tensor([[260, 263]]), temperature=1.0)
+loss.backward()
+bad = TinyLM(ModelConfig(width=8, vocab_size=265))(ids)["logits"]
+try:
+    distillation_kl(bad, t, labels, temperature=1.0)
+except ValueError as error:
+    shape_error = str(error)
+else:
+    raise AssertionError("265-axis exercise was not rejected")
+out["interface"] = {
+    "teacher_shape": list(t.shape),
+    "student_shape": list(s.shape),
+    "teacher_hidden_width": teacher.config.width,
+    "student_hidden_width": student.config.width,
+    "teacher_experts": len(teacher.blocks[0].ffn.experts),
+    "teacher_top_k": teacher.blocks[0].ffn.top_k,
+    "student_ffn_class": type(student.blocks[0].ffn).__name__,
+    "loss": float(loss.detach()),
+    "changing_only_valid_label_ids_preserves_KL": bool(torch.equal(loss, alternate_labels_loss)),
+    "student_output_gradient_sum": float(student.output.weight.grad.abs().sum()),
+    "teacher_has_any_gradient": any(p.grad is not None for p in teacher.parameters()),
+    "student_265_shape": list(bad.shape),
+    "exercise_exception": shape_error,
+}
+tok = ByteTokenizer()
+chunks = text_examples([{"text": "a" * 300}], max_length=128)
+out["chunk_EOS_probe"] = {
+    "synthetic_document_bytes": 300,
+    "document_count": 1,
+    "chunk_count": len(chunks),
+    "chunk_lengths": [len(y) for x, y in chunks],
+    "chunk_last_target_ids": [int(y[-1]) for x, y in chunks],
+    "EOS_target_count": sum(int((y == tok.eos_id).sum()) for x, y in chunks),
+    "total_target_count": sum(len(y) for x, y in chunks),
+}
+assert out["chunk_EOS_probe"]["EOS_target_count"] == 1
+assert out["chunk_EOS_probe"]["total_target_count"] == 301
+
+p = Path("docs/course-experiments/results/distillation.json")
+j = json.loads(p.read_bytes())
+m = j["results"]["tasks"]["moe_to_dense"]
+out["formal_source"] = {
+    "path": str(p),
+    "sha256": sha(p),
+    "run_environment": {k: j[k] for k in ("revision", "device", "seed", "torch_version", "python_version", "gpu", "step_scale", "status")},
+    "teacher_provenance": m["teacher_provenance"],
+    "data": m["data"],
+    "teacher_frozen_and_unchanged": m["teacher_frozen_and_unchanged"],
+    "code_sha256": {k: j["code_sha256"][k] for k in ("tiny_perceptron/model.py", "tiny_perceptron/alignment.py", "tiny_perceptron/modern.py", "tiny_perceptron/data.py", "scripts/course_experiments/common.py", "scripts/course_experiments/compression.py", "scripts/course_experiments/run.py")},
+    "models": {},
+}
+for name, r in [
+    ("teacher", {"test": m["teacher_test"], "validation": m["teacher_validation"], "storage": m["teacher_storage"]}),
+    ("ce", m["runs"]["w32_ce"]),
+    ("ce_kl", m["runs"]["w32_ce_kl"]),
+]:
+    model = {"parameter_count": r["storage"]["parameter_count"]}
+    if "training" in r:
+        model["training"] = r["training"]
+    for split in ("validation", "test"):
+        e = r[split]
+        small = {k: v for k, v in e.items() if k != "generated_samples"}
+        small["computed_average_nll"] = e["nll_sum"] / e["supervised_tokens"]
+        small["target_minus_raw_bytes"] = e["supervised_tokens"] - e["answer_bytes"]
+        samples = e["generated_samples"]
+        assert len(samples) == e["examples"]
+        assert sum(row["exact"] for row in samples) == e["correct"]
+        assert sum(row["ended_with_eos"] for row in samples) == e["eos_count"]
+        for row in samples:
+            raw = row["generated_ids"]
+            assert len(raw) <= 24
+            assert (tok.eos_id in raw) == row["ended_with_eos"]
+            assert tok.decode(raw[:raw.index(tok.eos_id)] if tok.eos_id in raw else raw) == row["generated"]
+        small["first_generated_sample"] = samples[0]
+        small["every_generated_record"] = [
+            {k: row[k] for k in ("family", "generated_ids", "exact", "ended_with_eos")}
+            for row in samples
+        ]
+        model[split] = small
+    out["formal_source"]["models"][name] = model
+ce = m["runs"]["w32_ce"]["training"]
+kl = m["runs"]["w32_ce_kl"]["training"]
+assert ce["initialization_sha256"] == kl["initialization_sha256"]
+assert ce["batch_plan_sha256"] == kl["batch_plan_sha256"]
+assert ce["effective_supervised_tokens"] == kl["effective_supervised_tokens"] == 559651
+out["formal_difference"] = m["runs"]["w32_ce"]["test"]["answer_nll"] - m["runs"]["w32_ce_kl"]["test"]["answer_nll"]
+
+public = json.loads(Path("docs/course-experiments/public-releases/distillation.json").read_bytes())["release"]
+entries = {r["output"]: r for r in public["public_manifest"]["files"]}
+out["public_CPU_inference"] = []
+prompt_text = "Once upon a time, there "
+assert len(prompt_text.encode()) == 24
+prompt = torch.tensor([[tok.bos_id] + tok.encode(prompt_text)])
+for filename in ("moe-teacher.pt", "moe-w32-ce.pt", "moe-w32-ce_kl.pt"):
+    path = Path("checkpoints/course/distillation") / filename
+    entry = entries[filename]
+    assert sha(path) == entry["sha256"]
+    model, payload = load_checkpoint(path, "cpu")
+    model.eval().requires_grad_(False)
+    with torch.no_grad():
+        sample_logits = model(prompt)["logits"]
+        generated = generate(model, prompt, max_new_tokens=24, temperature=0, use_cache=False)[0, prompt.shape[1]:].tolist()
+    row = {
+        "file": filename,
+        "url": f"https://huggingface.co/{public['repo']}/resolve/{public['weights_revision']}/{entry['path']}",
+        "revision": public["weights_revision"],
+        "original_sha256": sha(path),
+        "config": payload["config"],
+        "tokenizer": payload["tokenizer"],
+        "format_version": payload["format_version"],
+        "parameters": model.description()["parameters"],
+        "state_tensor_count": len(payload["model"]),
+        "embedding_shape": list(payload["model"]["embedding.weight"].shape),
+        "output_shape": list(payload["model"]["output.weight"].shape),
+        "forward_shape": list(sample_logits.shape),
+        "finite": bool(torch.isfinite(sample_logits).all()),
+        "prompt": prompt_text,
+        "generated_ids": generated,
+        "generated": tok.decode(generated),
+        "scope": "固定公開權重、24-byte 同前文、CPU greedy 24 步；不重訓、不重跑完整留出集，不能外推一般能力或 GPU 速度。",
+    }
+    out["public_CPU_inference"].append(row)
+print(json.dumps(out, ensure_ascii=False, indent=2))

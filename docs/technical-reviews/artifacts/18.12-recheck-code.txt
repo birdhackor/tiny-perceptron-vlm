@@ -1,0 +1,107 @@
+import hashlib
+import json
+import platform
+import re
+from pathlib import Path
+
+import torch
+
+from scripts.course_experiments.common import text_examples
+from tiny_perceptron.data import ByteTokenizer
+
+
+def sha(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+a = Path("docs/technical-reviews/artifacts")
+original_review = json.loads((a / "18.12-original-review-def0139.json").read_bytes())
+old = (a / "18.12-source.txt").read_bytes()
+new = (a / "18.12-current-source-d5054a69.txt").read_bytes()
+book = Path("course/chapters/18.md").read_bytes()
+heading = re.search(rb"^## 18\.12 .*$", book, re.M)
+next_heading = re.search(rb"^## ", book[heading.end():], re.M)
+end = heading.end() + next_heading.start() if next_heading else len(book)
+assert book[heading.start():end] == new
+assert old.splitlines(keepends=True)[:32] == new.splitlines(keepends=True)[:32]
+assert old.splitlines(keepends=True)[33:] == new.splitlines(keepends=True)[33:]
+assert re.findall(rb"```python\n(.*?)```", old, re.S) == re.findall(rb"```python\n(.*?)```", new, re.S)
+
+out = {
+    "environment": {
+        "python": platform.python_version(),
+        "torch": str(torch.__version__),
+        "torch_git_version": str(torch.version.git_version),
+        "device": "cpu",
+        "threads": str(torch.get_num_threads()),
+        "OMP_NUM_THREADS": "1",
+        "MKL_NUM_THREADS": "1",
+    },
+    "old_source_sha256": sha(a / "18.12-source.txt"),
+    "new_source_sha256": sha(a / "18.12-current-source-d5054a69.txt"),
+    "original_report_sha256": sha(a / "18.12-original-review-def0139.json"),
+    "changed_section_lines": [33],
+    "Python_fences_and_exercise_unchanged": True,
+    "repository_sources_still_identical": {},
+    "figures_still_identical": {},
+}
+for source in original_review["sources"]:
+    if source["kind"] == "repository_code":
+        current = sha(source["path"])
+        assert current == source["sha256"], source["path"]
+        out["repository_sources_still_identical"][source["path"]] = current
+for path, expected in original_review["figure_sha256"].items():
+    current = sha(path)
+    assert current == expected, path
+    out["figures_still_identical"][path] = current
+
+result_path = Path("docs/course-experiments/results/distillation.json")
+formal = json.loads(result_path.read_bytes())["results"]["tasks"]["moe_to_dense"]
+out["formal_data_source"] = {"path": str(result_path), "sha256": sha(result_path)}
+out["formal_denominator_recheck"] = {}
+for name, model in (
+    ("teacher", {"validation": formal["teacher_validation"], "test": formal["teacher_test"]}),
+    ("CE", formal["runs"]["w32_ce"]),
+    ("CE_KL", formal["runs"]["w32_ce_kl"]),
+):
+    splits = {}
+    for split, expected in (
+        ("test", {"documents": 52, "chunks": 352, "bytes": 41862, "EOS": 52, "targets": 41914}),
+        ("validation", {"documents": 51, "chunks": 334, "bytes": 39205, "EOS": 51, "targets": 39256}),
+    ):
+        row = model[split]
+        observed = {
+            "documents": row["examples"],
+            "chunks": row["nll_sequence_chunks"],
+            "bytes": row["answer_bytes"],
+            "EOS": row["supervised_tokens"] - row["answer_bytes"],
+            "targets": row["supervised_tokens"],
+        }
+        assert observed == expected
+        assert observed["bytes"] + observed["documents"] == observed["targets"]
+        splits[split] = observed
+    out["formal_denominator_recheck"][name] = splits
+
+tok = ByteTokenizer()
+records = [{"text": "a" * 300}, {"text": "貓"}]
+chunks = text_examples(records, max_length=128)
+flattened_labels = [int(label) for x, y in chunks for label in y]
+expected_labels = []
+for record in records:
+    expected_labels.extend(tok.encode(record["text"]) + [tok.eos_id])
+assert flattened_labels == expected_labels
+out["short_CPU_document_EOS_probe"] = {
+    "documents": len(records),
+    "text_UTF8_bytes": sum(len(row["text"].encode("utf-8")) for row in records),
+    "chunks": len(chunks),
+    "chunk_target_lengths": [len(y) for x, y in chunks],
+    "chunk_last_target_IDs": [int(y[-1]) for x, y in chunks],
+    "EOS_targets": flattened_labels.count(tok.eos_id),
+    "total_targets": len(flattened_labels),
+    "concatenated_labels_equal_document_bytes_then_single_EOS": True,
+    "middle_chunk_last_targets_are_text_IDs": [int(chunks[i][1][-1]) >= 8 for i in (0, 1)],
+}
+assert out["short_CPU_document_EOS_probe"]["EOS_targets"] == 2
+assert out["short_CPU_document_EOS_probe"]["total_targets"] == 305
+out["scope"] = "只重新核新增文件EOS/分母說明及不變來源hash；未重跑原例、練習、公開weights或正式訓練。原300-byte單篇3切片反例與原CPU證據完整保留。"
+print(json.dumps(out, ensure_ascii=False, indent=2))
