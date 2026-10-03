@@ -1,0 +1,59 @@
+from pathlib import Path
+import hashlib
+import json
+import os
+import re
+import subprocess
+import sys
+import torch
+
+root = Path(__file__).resolve().parents[3]
+out = root / "docs/technical-reviews/artifacts"
+raw = subprocess.run(
+    [str(root / ".venv/bin/python"), "/tmp/course-reader-extract.py", "course/chapters/13.md", "13.8"],
+    cwd=root, check=True, capture_output=True,
+).stdout
+assert hashlib.sha256(raw).hexdigest() == "92967f7e8813feaa9fb4160a9a80ab185cf447d2619f9662992898a57eeb0ef2"
+(out / "13.8-source.txt").write_bytes(raw)
+original = re.search(rb"```python\n(.*?)```", raw, re.S)[1]
+exercise = original.decode().replace(
+    '"chosen": "2+2等於4；把兩組各2個物件合起來，就是4個。",',
+    '"chosen": "笨蛋，當然是4",',
+).replace(
+    '"reason": "溫和修正錯誤，並提供可核對解釋",',
+    '"reason": "算術正確但侮辱語氣不合格；與附和錯誤相比仍須記錄取捨，更佳候選是原先溫和修正",',
+).encode()
+offline = {
+    "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1", "CUDA_VISIBLE_DEVICES": "",
+    "HF_HUB_OFFLINE": "1", "HF_DATASETS_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1",
+    "PYTHONDONTWRITEBYTECODE": "1",
+}
+environment = {
+    "python": sys.version, "torch": str(torch.__version__),
+    "torch_git_version": str(torch.version.git_version), "device": "cpu",
+    "cuda_build": str(torch.version.cuda), "cuda_available": str(torch.cuda.is_available()),
+    **offline,
+}
+assert torch.version.cuda is None and not torch.cuda.is_available()
+for name, code in [("original", original), ("exercise", exercise)]:
+    code_path = out / f"13.8-{name}-code.txt"
+    code_path.write_bytes(code)
+    relative = code_path.relative_to(root).as_posix()
+    command = "OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 CUDA_VISIBLE_DEVICES='' HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1 TRANSFORMERS_OFFLINE=1 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python " + relative
+    proc = subprocess.run(
+        [str(root / ".venv/bin/python"), relative], cwd=root, env={**os.environ, **offline},
+        capture_output=True, text=True, timeout=10,
+    )
+    result = {
+        "reviewer_task": "/root/technical_round_coordinator/technical_13_8_fresh",
+        "accessed_on": "2026-10-03", "command": command, "cwd": str(root),
+        "environment": environment, "timeout_seconds": 10, "returncode": proc.returncode,
+        "stdout": proc.stdout, "stderr": proc.stderr,
+        "code_path": relative, "code_sha256": hashlib.sha256(code).hexdigest(),
+        "source_sha256": hashlib.sha256(raw).hexdigest(),
+        "scope": "獨立程序離線 CPU 列印；無模型、訓練、評分或資料下載。練習另換 chosen 與人工 reason。",
+    }
+    (out / f"13.8-{name}-execution.json").write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n")
+    print(name, json.dumps(result, ensure_ascii=False))
+    assert proc.returncode == 0 and not proc.stderr
+    assert proc.stdout.startswith("真值 4\n")
