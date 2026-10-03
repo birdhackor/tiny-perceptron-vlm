@@ -1,0 +1,121 @@
+from pathlib import Path
+from datetime import datetime, timezone
+import difflib
+import hashlib
+import json
+import platform
+import re
+
+prefix = Path("docs/technical-reviews/artifacts/7.11-training-")
+artifact_path = lambda suffix: Path(str(prefix) + suffix)
+sha = lambda value: hashlib.sha256(value).hexdigest()
+write_json = lambda path, value: path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n")
+old_path = Path("/tmp/root-full-course-source-history/training-5d3004318da50801aff9b4d85a49be8e439d16ff4fc68e7fdc052365a55c39fe.md")
+new_path = Path("course/training.md")
+old = old_path.read_bytes()
+new = new_path.read_bytes()
+report_path = Path("docs/technical-reviews/7.11.json")
+report_raw = report_path.read_bytes()
+report = json.loads(report_raw)
+recipe = next(source for source in report["sources"] if source["id"] == "s_recipe")
+assert sha(old) == recipe["sha256"] == "5d3004318da50801aff9b4d85a49be8e439d16ff4fc68e7fdc052365a55c39fe"
+assert sha(new) == "fec3aca1b4f9ce1fe3de129fe1a6445a29d795c2a0f832f6575fcd293caff4f0"
+assert len(old) == 114485 and report["verdict"] == "pass"
+artifact_path("prior-report.json").write_bytes(report_raw)
+old_lines, new_lines = old.decode("utf-8").splitlines(keepends=True), new.decode("utf-8").splitlines(keepends=True)
+diff = "".join(difflib.unified_diff(old_lines, new_lines,
+    fromfile="course/training.md@sha256:" + sha(old), tofile="course/training.md@sha256:" + sha(new), n=12))
+raw_diff = diff.encode("utf-8")
+artifact_path("full-diff.txt").write_bytes(raw_diff)
+def section_for(lines, index):
+    result = "導言"
+    for line in lines[:index + 1]:
+        if line.startswith("## "):
+            result = line.rstrip("\r\n")
+    return result
+changes = []
+for tag, a, b, c, d in difflib.SequenceMatcher(None, old_lines, new_lines, autojunk=False).get_opcodes():
+    if tag != "equal":
+        changes.append({"operation": tag, "old_line_start": a + 1, "old_line_count": b - a,
+            "new_line_start": c + 1, "new_line_count": d - c,
+            "old_section": section_for(old_lines, a), "new_section": section_for(new_lines, c),
+            "old_raw_utf8": "".join(old_lines[a:b]), "new_raw_utf8": "".join(new_lines[c:d])})
+diff_record = {"reviewer_task": report["reviewer_task"], "read_at_utc": datetime.now(timezone.utc).isoformat(),
+    "old_input_path": str(old_path), "old_full_bytes": len(old), "old_full_sha256": sha(old),
+    "old_git_revision_supplied_by_coordinator": "8c46b46b0de8a2ff6fa862dbea4d16df65180c57",
+    "old_git_scope": "本人讀取原始bytes並核對SHA；未執行Git，revision來源為協調者提供的純原文定位。",
+    "new_input_path": str(new_path), "new_full_bytes": len(new), "new_full_sha256": sha(new),
+    "prior_report_sha256": sha(report_raw), "prior_verdict": report["verdict"], "prior_s_recipe": recipe,
+    "raw_diff_path": str(artifact_path("full-diff.txt")), "raw_diff_bytes": len(raw_diff), "raw_diff_sha256": sha(raw_diff),
+    "complete_unified_diff": diff, "all_change_operations": changes,
+    "coverage": "完整舊新全檔byte身份與完整差異；差異篩查不表示重審training.md全書技術內容。"}
+write_json(artifact_path("full-diff.json"), diff_record)
+scope = []
+for label, old_range, new_range, note, ids in [
+    ("T.4資料版本變動與鄰近起點配方", (229, 287), (231, 289),
+     "原先實讀支持為256–287行；本次因完整差異另讀241行及相鄰資料表。SHA版本核對由絕對相同表述收窄為實務指紋核對，不改45／5／10題或初始checkpoint配方。", ["c20", "c23", "c32", "c41"]),
+    ("T.4對話配方及正式路線", (338, 368), (340, 370),
+     "原先已實讀的SFT命令、45／5／10題、900／250步、寬64兩層、batch16、lr0.003、36／69目標、固定greedy生成與CPU／正式配方區分，舊新bytes完全相同。", ["c23", "c25", "c31", "c32", "c33", "c34", "c35", "c36", "c37", "c38", "c39", "c40", "c41", "c42"]),
+    ("T.4接續狀態變動與鄰近評估提醒", (409, 423), (411, 425),
+     "421→423行將目前限文字與SFT改為本節示範文字與SFT；本人原c22只記同排程恢復optimizer／步數／RNG與新階段可建新optimizer，沒有把CLI全域任務支援限為兩種。其餘步數與排程契約、固定評估提醒不變。", ["c20", "c22", "c25", "c26", "c27"])]:
+    a, b = old_range
+    c, d = new_range
+    old_scope = "".join(old_lines[a - 1:b]).encode("utf-8")
+    new_scope = "".join(new_lines[c - 1:d]).encode("utf-8")
+    scope.append({"label": label, "old_lines": list(old_range), "new_lines": list(new_range),
+       "old_raw_utf8": old_scope.decode(), "new_raw_utf8": new_scope.decode(),
+       "old_scope_sha256": sha(old_scope), "new_scope_sha256": sha(new_scope),
+       "raw_scope_equal": old_scope == new_scope, "personally_read": True,
+       "claim_ids": ids, "independent_inspection": note, "effect_on_own_claims": "維持verified，無新增issue。"})
+triage = [
+    {"sections": ["T.2"], "inspection": "完整diff及12行鄰接原文已親讀。dry-run從一次前向反向改為一個batch，補充vision逐筆前向與effective_tokens=null。7.11是已實跑的純文字TinyLM batch，c16–c18與c30的loss／梯度／不更新參數沒有引用vision數值；c17的17組梯度非零只限該原例。", "effect": "不影響本節；沒有新審查vision主張。"},
+    {"sections": ["T.4"], "inspection": "上述三組舊新原文與自身相關claim／scope均已親讀；相同原文、精確改句及支持範圍分開記錄。", "effect": "不影響原pass；s_recipe只更新當前整檔身份與窄讀定位，保留舊身份及真實原pass。"},
+    {"sections": ["T.5"], "inspection": "完整diff中PKU資料包授權與新衍生資料釋出說明已讀；7.11沒有使用PKU來源或安全結果。", "effect": "差異篩查後列範圍外，不替其授權或安全主張作新技術判定。"},
+    {"sections": ["T.6"], "inspection": "完整diff中凍結只允許更新／輸入無梯度不更新及影片擴充說明已讀；本節未涉及多模態freeze或影片，且c18只限已驗證原例的backward不更新參數。", "effect": "不影響本節，不新增多模態或影片審查。"},
+    {"sections": ["T.7"], "inspection": "完整diff中PPO與REINFORCE用途／後續擴充改句已讀；本節沒有PPO、獎勵模型或REINFORCE主張。", "effect": "範圍外，不重審該方法。"},
+    {"sections": ["T.10"], "inspection": "完整diff中MoE故事計分目標拆成byte與每篇EOS，及GSM8K限定八支屬性學生的改句已讀；本節正式證據只用SFT三路線，未使用這兩組蒸餾／域外診斷。", "effect": "範圍外，不重審蒸餾或GSM8K結果。"}]
+inspection = {"reviewer_task": report["reviewer_task"], "review_stage": "technical", "recheck_kind": "whole_file_identity_and_prior_support_scope",
+    "original_support_scope": recipe["inspection_note"], "actual_read_scope": scope, "complete_diff_triage": triage,
+    "whole_training_guide_technical_re_review": False, "new_paper_inspections": False,
+    "conclusion": "與7.11相關支持未產生矛盾或未核實；保留47項主張與pass，無新增issue。"}
+write_json(artifact_path("scope-inspection.json"), inspection)
+def extract(path, lesson):
+    data = Path(path).read_bytes()
+    start = re.search(rb"^## " + re.escape(lesson.encode()) + rb"\s", data, re.M).start()
+    after = re.search(rb"^## ", data[start + 1:], re.M)
+    end = len(data) if after is None else start + 1 + after.start()
+    return data[start:end]
+primary = sha(extract("course/chapters/07.md", "7.11"))
+assert primary == report["source_sha256"]
+code_identity = []
+for source in report["sources"]:
+    if source["kind"] == "repository_code" and source["id"] != "s_recipe":
+        observed = sha(Path(source["path"]).read_bytes())
+        assert observed == source["sha256"]
+        code_identity.append({"id": source["id"], "path": source["path"], "prior_sha256": source["sha256"], "current_sha256": observed, "unchanged": True})
+figures = []
+for path, expected in report["figure_sha256"].items():
+    observed = sha(Path(path).read_bytes())
+    assert observed == expected
+    figures.append({"path": path, "sha256": observed, "unchanged": True})
+prereqs = json.loads(Path("docs/technical-reviews/artifacts/7.11-prerequisites.json").read_text())
+prerequisite_identity = []
+for item in prereqs:
+    path, lesson = item["source"].split("#")
+    observed = sha(extract(path, lesson))
+    assert observed == item["sha256"]
+    prerequisite_identity.append({"source": item["source"], "sha256": observed, "unchanged": True})
+previous_artifacts = []
+for item in report["artifacts"]:
+    observed = sha(Path(item["path"]).read_bytes())
+    assert observed == item["sha256"]
+    previous_artifacts.append({"id": item["id"], "path": item["path"], "sha256": observed, "unchanged": True})
+print(json.dumps({"environment": {"python": platform.python_version(), "device": "CPU，僅bytes與diff；未執行模型", "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"},
+    "actual_tool": "tools.exec_command，pwd與本次Python程序皆成功",
+    "old_full_sha256": sha(old), "new_full_sha256": sha(new), "prior_report_sha256": sha(report_raw),
+    "raw_diff_sha256": sha(raw_diff), "changed_operations": len(changes),
+    "primary_sha256": primary, "primary_unchanged": True, "necessary_code_identity": code_identity,
+    "prerequisite_identity": prerequisite_identity, "figure_identity": figures,
+    "previous_artifact_identity": previous_artifacts, "model_execution_repeated": False, "figure_render_repeated": False,
+    "new_training_updates": 0, "whole_guide_technical_re_review": False,
+    "result": "完整差異與原支持窄範圍本人已親讀，相關主張不受變動影響，維持pass。"}, ensure_ascii=False, indent=2))

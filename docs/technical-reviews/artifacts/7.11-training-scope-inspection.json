@@ -1,0 +1,141 @@
+{
+  "reviewer_task": "/root/technical_round_coordinator/technical_7_11_fresh",
+  "review_stage": "technical",
+  "recheck_kind": "whole_file_identity_and_prior_support_scope",
+  "original_support_scope": "僅親讀T.4相關256–287、338–368、421行；checkpoint新階段與resume、固定前後題與生成設定、正式900/250路線；未把其他配方當本節主張。",
+  "actual_read_scope": [
+    {
+      "label": "T.4資料版本變動與鄰近起點配方",
+      "old_lines": [
+        229,
+        287
+      ],
+      "new_lines": [
+        231,
+        289
+      ],
+      "old_raw_utf8": "{\"text\":\"color=red;shape=circle;side=left.\",\"family\":\"color=red;shape=circle;side=left.\"}\n{\"messages\":[{\"role\":\"user\",\"content\":\"color=red;shape=circle;pitch=low;shape?\"},{\"role\":\"assistant\",\"content\":\"circle\"}],\"family\":\"red:circle:low\"}\n```\n\n第一行來自 `toy-text`，教的是文字接續；第二行來自 `attributes-sft`，問題是列出屬性後問形狀，理想答案就是 `circle`。同一組 `red:circle:low` 的 `describe`、`shape?`、`color?`、`pitch?`、`joint?` 都屬同一家族，答案依序是 `circle`、`circle`、`red`、`low`、`circle,low`。它們一起放在同一側，避免模型已見過同組屬性後，只換問法就算新題。\n\n| 檔案（位於 `data/generated/資料種類/`） | 角色 | toy-text 筆數／家族數 | attributes-sft 筆數／家族數 |\n| --- | --- | --- | --- |\n| `train.jsonl` | 練習，允許更新模型 | 9／9 | 45／9 |\n| `validation.jsonl` | 留出（held-out）的新家族，用來比較、調整設定 | 1／1 | 5／1 |\n| `test.jsonl` | 最後檢查；選完設定再用 | 2／2 | 10／2 |\n\n數量來自預設 12 個家族的整組切分；每個 SFT 家族有五種問題。下面程式可在根目錄執行，列印三份筆數、家族數、檔案指紋和一筆原文，核對產物；指紋相同表示檔案內容相同，前後比較要保留這份資料：\n\n```python\nimport json\nfrom pathlib import Path\n\nfor kind in (\"toy-text\", \"attributes-sft\"):\n    directory = Path(\"data/generated\") / kind\n    manifest = json.loads((directory / \"manifest.json\").read_text())\n    print(kind, \"seed\", manifest[\"seed\"], \"切分單位\", manifest[\"split_unit\"])\n    for split, stats in manifest[\"splits\"].items():\n        print(split, \"筆數\", stats[\"records\"], \"家族\", stats[\"families\"], \"sha256\", stats[\"sha256\"])\n        print((directory / f\"{split}.jsonl\").read_text().splitlines()[0])\n```\n\n接著只選文字或屬性問答一條路。先預測：訓練會增加教學答案的機率，但未教過家族的平均代價與生成答案不一定改善。為了取得真正的開始回答，先保存零次更新的模型；移除 `--train` 的 dry-run 不會存檔，`--steps 0` 也不是可用入口。先執行 `mkdir -p outputs checkpoints`，將下面程式存為 `outputs/save_start.py`，再執行 `.venv/bin/python outputs/save_start.py`：\n\n```python\nfrom tiny_perceptron.model import ModelConfig, TinyLM\nfrom tiny_perceptron.training import save_checkpoint, seed_everything\n\nseed_everything(42)\nmodel = TinyLM(ModelConfig(width=32, layers=1, heads=1, max_length=128))\nsave_checkpoint(\n    \"checkpoints/start.pt\",\n    model,\n    step=0,\n    metadata={\"seed\": 42, \"note\": \"untrained baseline\"},\n)\nprint(\"已保存起始模型；沒有求導或更新\")\n```\n\n`ModelConfig` 記錄模型設定，`TinyLM` 依設定建立 CPU 模型，`save_checkpoint` 保存它的數字。`width=32`（CLI 寫作 `--width 32`）表示每個位置的特徵向量有 32 個數字，`layers=1`／`heads=1` 是一層、一個注意力頭，`max_length=128` 是一次最多 128 個編碼位置；零件背景見[4.5](chapters/04.md#4.5)。這個 checkpoint 沒有更新工具狀態，用來開始新階段，不用 `--resume`。\n\n文字路線先評估起點，再正式更新，最後用完全相同的留出檔與生成上限評估結束：\n\n```bash\n.venv/bin/python scripts/evaluate.py checkpoints/start.pt --data data/generated/toy-text/validation.jsonl --mode text --tokens 32 --device cpu --output outputs/text-before.json\n.venv/bin/python scripts/infer.py checkpoints/start.pt --prompt \"color=\" --tokens 32 --temperature 0 --cache --device cpu > outputs/text-prompt-before.txt\n.venv/bin/python scripts/train.py --task text --data data/generated/toy-text/train.jsonl --checkpoint checkpoints/start.pt --seed 42 --device cpu --train --steps 200 --output checkpoints/text.pt\n.venv/bin/python scripts/evaluate.py checkpoints/text.pt --data data/generated/toy-text/validation.jsonl --mode text --tokens 32 --device cpu --output outputs/text-after.json\n.venv/bin/python scripts/infer.py checkpoints/text.pt --prompt \"color=\" --tokens 32 --temperature 0 --cache --device cpu > outputs/text-prompt-after.txt\n```\n\n上面的200步是用小型CPU模型練流程的起點。我們已另用相同種類、種子42切出的9／1／2篇短文，完成一次更寬的兩層模型訓練：每位置64個特徵、一個注意力頭、最多128個位置，手寫注意力，共141,568個參數。這次在NVIDIA L4上更新600次，每批抽16篇，學習率固定0.003。下表才是這份完整實跑的成績，不能拿來當上面width32、一層、200步命令的預期數字。\n\n| 資料側：短文篇數／計分目標數 | 訓練前平均代價 | 600次更新後平均代價 |\n",
+      "new_raw_utf8": "{\"text\":\"color=red;shape=circle;side=left.\",\"family\":\"color=red;shape=circle;side=left.\"}\n{\"messages\":[{\"role\":\"user\",\"content\":\"color=red;shape=circle;pitch=low;shape?\"},{\"role\":\"assistant\",\"content\":\"circle\"}],\"family\":\"red:circle:low\"}\n```\n\n第一行來自 `toy-text`，教的是文字接續；第二行來自 `attributes-sft`，問題是列出屬性後問形狀，理想答案就是 `circle`。同一組 `red:circle:low` 的 `describe`、`shape?`、`color?`、`pitch?`、`joint?` 都屬同一家族，答案依序是 `circle`、`circle`、`red`、`low`、`circle,low`。它們一起放在同一側，避免模型已見過同組屬性後，只換問法就算新題。\n\n| 檔案（位於 `data/generated/資料種類/`） | 角色 | toy-text 筆數／家族數 | attributes-sft 筆數／家族數 |\n| --- | --- | --- | --- |\n| `train.jsonl` | 練習，允許更新模型 | 9／9 | 45／9 |\n| `validation.jsonl` | 留出（held-out）的新家族，用來比較、調整設定 | 1／1 | 5／1 |\n| `test.jsonl` | 最後檢查；選完設定再用 | 2／2 | 10／2 |\n\n數量來自預設 12 個家族的整組切分；每個 SFT 家族有五種問題。下面程式可在根目錄執行，列印三份筆數、家族數、檔案指紋和一筆原文，核對產物。這裡用 SHA-256 指紋作資料版本的實務核對，前後比較要保留這份資料：\n\n```python\nimport json\nfrom pathlib import Path\n\nfor kind in (\"toy-text\", \"attributes-sft\"):\n    directory = Path(\"data/generated\") / kind\n    manifest = json.loads((directory / \"manifest.json\").read_text())\n    print(kind, \"seed\", manifest[\"seed\"], \"切分單位\", manifest[\"split_unit\"])\n    for split, stats in manifest[\"splits\"].items():\n        print(split, \"筆數\", stats[\"records\"], \"家族\", stats[\"families\"], \"sha256\", stats[\"sha256\"])\n        print((directory / f\"{split}.jsonl\").read_text().splitlines()[0])\n```\n\n接著只選文字或屬性問答一條路。先預測：訓練會增加教學答案的機率，但未教過家族的平均代價與生成答案不一定改善。為了取得真正的開始回答，先保存零次更新的模型；移除 `--train` 的 dry-run 不會存檔，`--steps 0` 也不是可用入口。先執行 `mkdir -p outputs checkpoints`，將下面程式存為 `outputs/save_start.py`，再執行 `.venv/bin/python outputs/save_start.py`：\n\n```python\nfrom tiny_perceptron.model import ModelConfig, TinyLM\nfrom tiny_perceptron.training import save_checkpoint, seed_everything\n\nseed_everything(42)\nmodel = TinyLM(ModelConfig(width=32, layers=1, heads=1, max_length=128))\nsave_checkpoint(\n    \"checkpoints/start.pt\",\n    model,\n    step=0,\n    metadata={\"seed\": 42, \"note\": \"untrained baseline\"},\n)\nprint(\"已保存起始模型；沒有求導或更新\")\n```\n\n`ModelConfig` 記錄模型設定，`TinyLM` 依設定建立 CPU 模型，`save_checkpoint` 保存它的數字。`width=32`（CLI 寫作 `--width 32`）表示每個位置的特徵向量有 32 個數字，`layers=1`／`heads=1` 是一層、一個注意力頭，`max_length=128` 是一次最多 128 個編碼位置；零件背景見[4.5](chapters/04.md#4.5)。這個 checkpoint 沒有更新工具狀態，用來開始新階段，不用 `--resume`。\n\n文字路線先評估起點，再正式更新，最後用完全相同的留出檔與生成上限評估結束：\n\n```bash\n.venv/bin/python scripts/evaluate.py checkpoints/start.pt --data data/generated/toy-text/validation.jsonl --mode text --tokens 32 --device cpu --output outputs/text-before.json\n.venv/bin/python scripts/infer.py checkpoints/start.pt --prompt \"color=\" --tokens 32 --temperature 0 --cache --device cpu > outputs/text-prompt-before.txt\n.venv/bin/python scripts/train.py --task text --data data/generated/toy-text/train.jsonl --checkpoint checkpoints/start.pt --seed 42 --device cpu --train --steps 200 --output checkpoints/text.pt\n.venv/bin/python scripts/evaluate.py checkpoints/text.pt --data data/generated/toy-text/validation.jsonl --mode text --tokens 32 --device cpu --output outputs/text-after.json\n.venv/bin/python scripts/infer.py checkpoints/text.pt --prompt \"color=\" --tokens 32 --temperature 0 --cache --device cpu > outputs/text-prompt-after.txt\n```\n\n上面的200步是用小型CPU模型練流程的起點。我們已另用相同種類、種子42切出的9／1／2篇短文，完成一次更寬的兩層模型訓練：每位置64個特徵、一個注意力頭、最多128個位置，手寫注意力，共141,568個參數。這次在NVIDIA L4上更新600次，每批抽16篇，學習率固定0.003。下表才是這份完整實跑的成績，不能拿來當上面width32、一層、200步命令的預期數字。\n\n| 資料側：短文篇數／計分目標數 | 訓練前平均代價 | 600次更新後平均代價 |\n",
+      "old_scope_sha256": "98e4204e86d7acc0d5d0a5fb32adba6c13b2d0a175bbdd2ba274f9e50bae870c",
+      "new_scope_sha256": "d438459e53dac12b078098cae2469df5799e6ee9376b92c7268e77014521d46d",
+      "raw_scope_equal": false,
+      "personally_read": true,
+      "claim_ids": [
+        "c20",
+        "c23",
+        "c32",
+        "c41"
+      ],
+      "independent_inspection": "原先實讀支持為256–287行；本次因完整差異另讀241行及相鄰資料表。SHA版本核對由絕對相同表述收窄為實務指紋核對，不改45／5／10題或初始checkpoint配方。",
+      "effect_on_own_claims": "維持verified，無新增issue。"
+    },
+    {
+      "label": "T.4對話配方及正式路線",
+      "old_lines": [
+        338,
+        368
+      ],
+      "new_lines": [
+        340,
+        370
+      ],
+      "old_raw_utf8": "\n```bash\n.venv/bin/python scripts/evaluate.py checkpoints/start.pt --data data/generated/attributes-sft/validation.jsonl --mode sft --tokens 24 --device cpu --output outputs/attributes-before.json\n.venv/bin/python scripts/infer.py checkpoints/start.pt --chat --prompt \"color=red;shape=square;pitch=low;shape?\" --tokens 24 --temperature 0 --cache --device cpu > outputs/attributes-prompt-before.txt\n.venv/bin/python scripts/train.py --task sft --data data/generated/attributes-sft/train.jsonl --checkpoint checkpoints/start.pt --seed 42 --device cpu --train --steps 500 --output checkpoints/attributes.pt\n.venv/bin/python scripts/evaluate.py checkpoints/attributes.pt --data data/generated/attributes-sft/validation.jsonl --mode sft --tokens 24 --device cpu --output outputs/attributes-after.json\n.venv/bin/python scripts/infer.py checkpoints/attributes.pt --chat --prompt \"color=red;shape=square;pitch=low;shape?\" --tokens 24 --temperature 0 --cache --device cpu > outputs/attributes-prompt-after.txt\n```\n\n我們已另完成一組正式GPU屬性實驗，保持12個屬性家族整組切分：45題訓練、5題驗證、10題最後檢查。模型改用寬度64、兩層、141,568個參數，從零更新900次，每批16題，學習率0.003、種子42。驗證與最後檢查的有效回答目標是36與69個，含EOS；生成最多32個新byte／結構單位，每次取最高分候選，答案匹配直接核對原始ID，不讓解碼藏起控制標記。[7.12](chapters/07.md#7.12)列出全部留出成績與失敗示例，不把它當上面CPU、width32、500步命令的預期數字。\n\n這組也另做「先250次文字、再900次對話」支線，以及一個很小的UltraChat首輪片段測試；後者只用80次更新確認自然資料能經過同一通路，不能當成完整聊天能力，截取範圍見[7.10](chapters/07.md#7.10)。要完整重跑，先取這一包資料：\n\n```bash\n.venv/bin/python scripts/fetch_training_assets.py --asset ultrachat-sft\n.venv/bin/python -m scripts.course_experiments.run --experiment sft --device cuda\n```\n\n`outputs/course-experiments/course-v1/sft/model.pt`是900次直接對話訓練的基準，`pretrain.pt`與`pretrain-sft.pt`分別保存另一支線的文字階段與微調後模型；`start.pt`保存零更新起點。`dataset.json`與`data/manifest.json`保留三側完整題目、家族與指紋，`result.json`保存生成和代價。[公開完整報告](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/course-experiments/results/sft.json)中的`matches/records`是完整答案ID匹配的分子／分母，`eos_rate`另記是否主動結束，`nll`則按有效目標平均。這些欄名屬於完整課程實驗入口，下面單一`evaluate.py`命令的報告欄名則另列解釋。\n\n接著可以讓同一份屬性模型學新加法，或刻意改錯少量答案，觀察[7.14到7.16](chapters/07.md#7.14)的資料效應。先完成上面的完整`sft`實驗，讓預設依賴目錄中確實有它的`model.pt`，再執行：\n\n```bash\n.venv/bin/python -m scripts.course_experiments.run --experiment sft_ablation --device cuda\n```\n\n這組每支都重新載入同一份屬性基模：`b-only.pt`與`replay.pt`各更新500次，`clean.pt`與`noisy.pt`各更新300次，並保存各自完整留出生成。`outputs/course-experiments/course-v1/sft_ablation/result.json`與[公開報告](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/course-experiments/results/sft_ablation.json)可核對實測；`corruptions.json`明列四筆被改錯的答案。這組加法是從64道題按交換加數的家族切成49／8／7，沒有用完整相同的算式或交換版本跨側做新題。回放只匹配更新次數與batch筆數，錯標比較則另保持問題與有效目標數相同，兩種比較要按各自的預算理解。\n\n`--data` 指資料檔，`--task`／`--mode` 選訓練／評估任務；`--checkpoint` 載入剛保存的同一起點，`--train` 才更新，`--steps` 指總更新步數，`--output` 指保存位置。這些 200／500 步是待檢查的配方，本文沒有宣稱它們會收斂。`--chat` 為提示加上對話角色邊界；固定提示的理想回答是 `square`。這一題用來觀察變化，是否屬留出家族仍要核對資料，整體新題成績看 validation 報告。\n\n`--tokens` 是最多新生成的編碼單位數。此入口的文字單位是 UTF-8 byte，另有開始、結束與角色等特殊 ID，並不是人眼字數；見[6.7](chapters/06.md#6.7)。`--temperature 0` 每次選最高分候選，固定前後生成方式。`--cache` 重用前文的 Key／Value 計算，後續仍讀前文，概念見[16.2](chapters/16.md#16.2)；它不改變學習目標。評估入口使用相同的最高分生成方式，預設只取前20筆（`--limit`）；本節的1／5筆validation都會納入，較大資料則加`--limit all`，才會選取整份檔案。BPE模型也要加訓練時配對的`--tokenizer`，沿用上面的JSON指紋核對。\n",
+      "new_raw_utf8": "\n```bash\n.venv/bin/python scripts/evaluate.py checkpoints/start.pt --data data/generated/attributes-sft/validation.jsonl --mode sft --tokens 24 --device cpu --output outputs/attributes-before.json\n.venv/bin/python scripts/infer.py checkpoints/start.pt --chat --prompt \"color=red;shape=square;pitch=low;shape?\" --tokens 24 --temperature 0 --cache --device cpu > outputs/attributes-prompt-before.txt\n.venv/bin/python scripts/train.py --task sft --data data/generated/attributes-sft/train.jsonl --checkpoint checkpoints/start.pt --seed 42 --device cpu --train --steps 500 --output checkpoints/attributes.pt\n.venv/bin/python scripts/evaluate.py checkpoints/attributes.pt --data data/generated/attributes-sft/validation.jsonl --mode sft --tokens 24 --device cpu --output outputs/attributes-after.json\n.venv/bin/python scripts/infer.py checkpoints/attributes.pt --chat --prompt \"color=red;shape=square;pitch=low;shape?\" --tokens 24 --temperature 0 --cache --device cpu > outputs/attributes-prompt-after.txt\n```\n\n我們已另完成一組正式GPU屬性實驗，保持12個屬性家族整組切分：45題訓練、5題驗證、10題最後檢查。模型改用寬度64、兩層、141,568個參數，從零更新900次，每批16題，學習率0.003、種子42。驗證與最後檢查的有效回答目標是36與69個，含EOS；生成最多32個新byte／結構單位，每次取最高分候選，答案匹配直接核對原始ID，不讓解碼藏起控制標記。[7.12](chapters/07.md#7.12)列出全部留出成績與失敗示例，不把它當上面CPU、width32、500步命令的預期數字。\n\n這組也另做「先250次文字、再900次對話」支線，以及一個很小的UltraChat首輪片段測試；後者只用80次更新確認自然資料能經過同一通路，不能當成完整聊天能力，截取範圍見[7.10](chapters/07.md#7.10)。要完整重跑，先取這一包資料：\n\n```bash\n.venv/bin/python scripts/fetch_training_assets.py --asset ultrachat-sft\n.venv/bin/python -m scripts.course_experiments.run --experiment sft --device cuda\n```\n\n`outputs/course-experiments/course-v1/sft/model.pt`是900次直接對話訓練的基準，`pretrain.pt`與`pretrain-sft.pt`分別保存另一支線的文字階段與微調後模型；`start.pt`保存零更新起點。`dataset.json`與`data/manifest.json`保留三側完整題目、家族與指紋，`result.json`保存生成和代價。[公開完整報告](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/course-experiments/results/sft.json)中的`matches/records`是完整答案ID匹配的分子／分母，`eos_rate`另記是否主動結束，`nll`則按有效目標平均。這些欄名屬於完整課程實驗入口，下面單一`evaluate.py`命令的報告欄名則另列解釋。\n\n接著可以讓同一份屬性模型學新加法，或刻意改錯少量答案，觀察[7.14到7.16](chapters/07.md#7.14)的資料效應。先完成上面的完整`sft`實驗，讓預設依賴目錄中確實有它的`model.pt`，再執行：\n\n```bash\n.venv/bin/python -m scripts.course_experiments.run --experiment sft_ablation --device cuda\n```\n\n這組每支都重新載入同一份屬性基模：`b-only.pt`與`replay.pt`各更新500次，`clean.pt`與`noisy.pt`各更新300次，並保存各自完整留出生成。`outputs/course-experiments/course-v1/sft_ablation/result.json`與[公開報告](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/course-experiments/results/sft_ablation.json)可核對實測；`corruptions.json`明列四筆被改錯的答案。這組加法是從64道題按交換加數的家族切成49／8／7，沒有用完整相同的算式或交換版本跨側做新題。回放只匹配更新次數與batch筆數，錯標比較則另保持問題與有效目標數相同，兩種比較要按各自的預算理解。\n\n`--data` 指資料檔，`--task`／`--mode` 選訓練／評估任務；`--checkpoint` 載入剛保存的同一起點，`--train` 才更新，`--steps` 指總更新步數，`--output` 指保存位置。這些 200／500 步是待檢查的配方，本文沒有宣稱它們會收斂。`--chat` 為提示加上對話角色邊界；固定提示的理想回答是 `square`。這一題用來觀察變化，是否屬留出家族仍要核對資料，整體新題成績看 validation 報告。\n\n`--tokens` 是最多新生成的編碼單位數。此入口的文字單位是 UTF-8 byte，另有開始、結束與角色等特殊 ID，並不是人眼字數；見[6.7](chapters/06.md#6.7)。`--temperature 0` 每次選最高分候選，固定前後生成方式。`--cache` 重用前文的 Key／Value 計算，後續仍讀前文，概念見[16.2](chapters/16.md#16.2)；它不改變學習目標。評估入口使用相同的最高分生成方式，預設只取前20筆（`--limit`）；本節的1／5筆validation都會納入，較大資料則加`--limit all`，才會選取整份檔案。BPE模型也要加訓練時配對的`--tokenizer`，沿用上面的JSON指紋核對。\n",
+      "old_scope_sha256": "a3100065dc2bfd46c60dd4088ce4fc2cef3f6d871b9d96c40ff31cb8fe8d03cf",
+      "new_scope_sha256": "a3100065dc2bfd46c60dd4088ce4fc2cef3f6d871b9d96c40ff31cb8fe8d03cf",
+      "raw_scope_equal": true,
+      "personally_read": true,
+      "claim_ids": [
+        "c23",
+        "c25",
+        "c31",
+        "c32",
+        "c33",
+        "c34",
+        "c35",
+        "c36",
+        "c37",
+        "c38",
+        "c39",
+        "c40",
+        "c41",
+        "c42"
+      ],
+      "independent_inspection": "原先已實讀的SFT命令、45／5／10題、900／250步、寬64兩層、batch16、lr0.003、36／69目標、固定greedy生成與CPU／正式配方區分，舊新bytes完全相同。",
+      "effect_on_own_claims": "維持verified，無新增issue。"
+    },
+    {
+      "label": "T.4接續狀態變動與鄰近評估提醒",
+      "old_lines": [
+        409,
+        423
+      ],
+      "new_lines": [
+        411,
+        425
+      ],
+      "old_raw_utf8": "    comparison[stage] = {\n        key: report[key] for key in (\"mean_token_nll\", \"effective_tokens\", \"exact_match\", \"samples\", \"skipped\")\n    }\ntext = json.dumps(comparison, ensure_ascii=False, indent=2)\nPath(f\"outputs/{kind}-comparison.json\").write_text(text + \"\\n\")\nprint(text)\nprint(\"固定提示開始：\", Path(f\"outputs/{kind}-prompt-before.txt\").read_text())\nprint(\"固定提示結束：\", Path(f\"outputs/{kind}-prompt-after.txt\").read_text())\n```\n\n練習要求說出同一組新題的平均代價如何變、SFT 完全匹配率如何變，再指出 `samples` 中有哪些答案真的改變。生成不好但代價下降也要記錄；兩項量測不是同一件事，不能只挑一個變好的回答。跳過表非空時先依原因處理，再重新比較，不能悄悄丟掉難題。\n\n訓練中斷可用 `--resume --checkpoint` 恢復模型、optimizer（優化器／更新工具）、步數與隨機狀態，目前限文字與 SFT。optimizer 保存管理參數更新所需的歷史，例如最近梯度方向與大小，見[5.4](chapters/05.md#5.4)。`--steps` 是整段訓練的總步數，不是多加幾步；已完成 200 步後要求接續到 200 步會被拒絕。若要驗證中斷後仍走同一條更新路線，還必須保留原來的學習率與總步數計畫，不能把增加`--steps`當成不改排程。單用 `--checkpoint` 則只載入模型，建立新的更新工具與排程，正是本節從零更新起點開始的方式。\n\n## T.5 把風格、指令遵循與安全拆成不同目標\n",
+      "new_raw_utf8": "    comparison[stage] = {\n        key: report[key] for key in (\"mean_token_nll\", \"effective_tokens\", \"exact_match\", \"samples\", \"skipped\")\n    }\ntext = json.dumps(comparison, ensure_ascii=False, indent=2)\nPath(f\"outputs/{kind}-comparison.json\").write_text(text + \"\\n\")\nprint(text)\nprint(\"固定提示開始：\", Path(f\"outputs/{kind}-prompt-before.txt\").read_text())\nprint(\"固定提示結束：\", Path(f\"outputs/{kind}-prompt-after.txt\").read_text())\n```\n\n練習要求說出同一組新題的平均代價如何變、SFT 完全匹配率如何變，再指出 `samples` 中有哪些答案真的改變。生成不好但代價下降也要記錄；兩項量測不是同一件事，不能只挑一個變好的回答。跳過表非空時先依原因處理，再重新比較，不能悄悄丟掉難題。\n\n訓練中斷可用 `--resume --checkpoint` 恢復模型、optimizer（優化器／更新工具）、步數與隨機狀態；本節示範文字與 SFT 的接續。optimizer 保存管理參數更新所需的歷史，例如最近梯度方向與大小，見[5.4](chapters/05.md#5.4)。`--steps` 是整段訓練的總步數，不是多加幾步；已完成 200 步後要求接續到 200 步會被拒絕。若要驗證中斷後仍走同一條更新路線，還必須保留原來的學習率與總步數計畫，不能把增加`--steps`當成不改排程。單用 `--checkpoint` 則只載入模型，建立新的更新工具與排程，正是本節從零更新起點開始的方式。\n\n## T.5 把風格、指令遵循與安全拆成不同目標\n",
+      "old_scope_sha256": "270911f1918ec84e0b044c0585d5da788cff94daee60752cc2f06f1322b2a569",
+      "new_scope_sha256": "72db0a4052dd3a0d13cebc9941c7176982e64c55d1dc563285262f130cbaa3b8",
+      "raw_scope_equal": false,
+      "personally_read": true,
+      "claim_ids": [
+        "c20",
+        "c22",
+        "c25",
+        "c26",
+        "c27"
+      ],
+      "independent_inspection": "421→423行將目前限文字與SFT改為本節示範文字與SFT；本人原c22只記同排程恢復optimizer／步數／RNG與新階段可建新optimizer，沒有把CLI全域任務支援限為兩種。其餘步數與排程契約、固定評估提醒不變。",
+      "effect_on_own_claims": "維持verified，無新增issue。"
+    }
+  ],
+  "complete_diff_triage": [
+    {
+      "sections": [
+        "T.2"
+      ],
+      "inspection": "完整diff及12行鄰接原文已親讀。dry-run從一次前向反向改為一個batch，補充vision逐筆前向與effective_tokens=null。7.11是已實跑的純文字TinyLM batch，c16–c18與c30的loss／梯度／不更新參數沒有引用vision數值；c17的17組梯度非零只限該原例。",
+      "effect": "不影響本節；沒有新審查vision主張。"
+    },
+    {
+      "sections": [
+        "T.4"
+      ],
+      "inspection": "上述三組舊新原文與自身相關claim／scope均已親讀；相同原文、精確改句及支持範圍分開記錄。",
+      "effect": "不影響原pass；s_recipe只更新當前整檔身份與窄讀定位，保留舊身份及真實原pass。"
+    },
+    {
+      "sections": [
+        "T.5"
+      ],
+      "inspection": "完整diff中PKU資料包授權與新衍生資料釋出說明已讀；7.11沒有使用PKU來源或安全結果。",
+      "effect": "差異篩查後列範圍外，不替其授權或安全主張作新技術判定。"
+    },
+    {
+      "sections": [
+        "T.6"
+      ],
+      "inspection": "完整diff中凍結只允許更新／輸入無梯度不更新及影片擴充說明已讀；本節未涉及多模態freeze或影片，且c18只限已驗證原例的backward不更新參數。",
+      "effect": "不影響本節，不新增多模態或影片審查。"
+    },
+    {
+      "sections": [
+        "T.7"
+      ],
+      "inspection": "完整diff中PPO與REINFORCE用途／後續擴充改句已讀；本節沒有PPO、獎勵模型或REINFORCE主張。",
+      "effect": "範圍外，不重審該方法。"
+    },
+    {
+      "sections": [
+        "T.10"
+      ],
+      "inspection": "完整diff中MoE故事計分目標拆成byte與每篇EOS，及GSM8K限定八支屬性學生的改句已讀；本節正式證據只用SFT三路線，未使用這兩組蒸餾／域外診斷。",
+      "effect": "範圍外，不重審蒸餾或GSM8K結果。"
+    }
+  ],
+  "whole_training_guide_technical_re_review": false,
+  "new_paper_inspections": false,
+  "conclusion": "與7.11相關支持未產生矛盾或未核實；保留47項主張與pass，無新增issue。"
+}

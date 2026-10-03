@@ -1,0 +1,109 @@
+from datetime import datetime, timezone
+from pathlib import Path
+import hashlib
+import json
+import platform
+import re
+
+base = Path("docs/technical-reviews/artifacts")
+sha = lambda data: hashlib.sha256(data).hexdigest()
+save = lambda path, value: path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n")
+report_path = Path("docs/technical-reviews/7.11.json")
+report_bytes = report_path.read_bytes()
+report = json.loads(report_bytes)
+assert report["verdict"] == "pass" and not report["issues"]
+diff_path = base / "7.11-training-full-diff.txt"
+raw = diff_path.read_bytes()
+prior_record_path = base / "7.11-training-full-diff.json"
+prior_record_bytes = prior_record_path.read_bytes()
+prior_record = json.loads(prior_record_bytes)
+assert len(raw) == prior_record["raw_diff_bytes"] == 33619
+assert sha(raw) == prior_record["raw_diff_sha256"] == "9e222d7715c79bd577485290e1128e3305e86c6507a208b1a8daf0daf4bd3945"
+assert prior_record["complete_unified_diff"].encode("utf-8") == raw
+old_sha = prior_record["old_full_sha256"]
+new_sha = prior_record["new_full_sha256"]
+assert old_sha == "5d3004318da50801aff9b4d85a49be8e439d16ff4fc68e7fdc052365a55c39fe"
+assert new_sha == "fec3aca1b4f9ce1fe3de129fe1a6445a29d795c2a0f832f6575fcd293caff4f0"
+assert sha(Path("course/training.md").read_bytes()) == new_sha
+raw_text = raw.decode("utf-8", errors="strict")
+container_path = base / "7.11-training-full-diff-lossless.json"
+container = {
+    "schema_version": 1,
+    "reviewer_task": report["reviewer_task"],
+    "content_type": "完整unified diff原始UTF-8 bytes之無損JSON封裝",
+    "raw_bytes": len(raw),
+    "raw_sha256": sha(raw),
+    "raw_encoding": "UTF-8",
+    "raw_utf8": raw_text,
+    "old_source": {"path": "course/training.md", "full_bytes": prior_record["old_full_bytes"], "full_sha256": old_sha,
+        "git_revision_supplied_by_coordinator": prior_record["old_git_revision_supplied_by_coordinator"]},
+    "new_source": {"path": "course/training.md", "full_bytes": prior_record["new_full_bytes"], "full_sha256": new_sha},
+    "serialization_note": "未strip、rstrip、刪context prefix或正規化原內容；JSON只編碼字串。原raw diff SHA與容器SHA是兩個不同的bytes身份。",
+    "recovery": "json.loads(container_bytes)['raw_utf8'].encode('utf-8')",
+}
+save(container_path, container)
+container_bytes = container_path.read_bytes()
+decoded = json.loads(container_bytes)["raw_utf8"].encode("utf-8")
+assert decoded == raw and len(decoded) == len(raw) and sha(decoded) == sha(raw)
+assert not any(line.endswith((b" ", b"\t")) for line in container_bytes.splitlines())
+history_path = base / "7.11-diff-container-fix-history.json"
+history = {
+    "reviewer_task": report["reviewer_task"], "captured_at_utc": datetime.now(timezone.utc).isoformat(),
+    "prior_verdict": report["verdict"], "prior_issues": report["issues"],
+    "prior_report": {"path": str(report_path), "raw_bytes": len(report_bytes), "raw_sha256": sha(report_bytes), "raw_utf8": report_bytes.decode("utf-8")},
+    "prior_diff_record": {"path": str(prior_record_path), "raw_bytes": len(prior_record_bytes), "raw_sha256": sha(prior_record_bytes), "raw_utf8": prior_record_bytes.decode("utf-8")},
+    "historical_raw_diff": {"local_only_path": str(diff_path), "raw_bytes": len(raw), "raw_sha256": sha(raw),
+        "publication_status": "原txt留本機歷史；不列入本輪current artifacts，不發布或stage此不安全文字檔。"},
+    "repair_scope": "僅原始diff的證據封裝與報告引用修正；原pass、47項主張、來源身份與原始內容不改。",
+}
+save(history_path, history)
+recovered_history = json.loads(history_path.read_bytes())
+assert recovered_history["prior_report"]["raw_utf8"].encode("utf-8") == report_bytes
+assert recovered_history["prior_diff_record"]["raw_utf8"].encode("utf-8") == prior_record_bytes
+current_record_path = base / "7.11-training-full-diff-current-record.json"
+current_record = dict(prior_record)
+historical_path = current_record.pop("raw_diff_path")
+current_record["historical_raw_diff_input"] = {"local_only_path": historical_path, "raw_bytes": len(raw), "raw_sha256": sha(raw),
+    "not_a_current_public_artifact": True}
+current_record["raw_diff_container"] = {"path": str(container_path), "container_sha256": sha(container_bytes),
+    "raw_field": "raw_utf8", "decoded_raw_bytes": len(decoded), "decoded_raw_sha256": sha(decoded)}
+current_record["format_fix"] = "按共同additional rule9封裝；完整unified diff原bytes及old/newfullsource關係不變。"
+save(current_record_path, current_record)
+assert json.loads(current_record_path.read_bytes())["complete_unified_diff"].encode("utf-8") == raw
+source_checks = []
+for source in report["sources"]:
+    if source["kind"] == "repository_code":
+        current = sha(Path(source["path"]).read_bytes())
+        assert current == source["sha256"]
+        source_checks.append({"id": source["id"], "path": source["path"], "sha256": current, "unchanged": True})
+body = Path("course/chapters/07.md").read_bytes()
+start = re.search(rb"^## 7\.11\s", body, re.M).start()
+next_section = re.search(rb"^## ", body[start + 1:], re.M)
+end = len(body) if next_section is None else start + 1 + next_section.start()
+primary_sha = sha(body[start:end])
+assert primary_sha == report["source_sha256"]
+figure_checks = []
+for path, expected in report["figure_sha256"].items():
+    current = sha(Path(path).read_bytes())
+    assert current == expected
+    figure_checks.append({"path": path, "sha256": current, "unchanged": True})
+artifact_checks = []
+for artifact in report["artifacts"]:
+    current = sha(Path(artifact["path"]).read_bytes())
+    assert current == artifact["sha256"]
+    artifact_checks.append({"id": artifact["id"], "path": artifact["path"], "sha256": current, "unchanged": True})
+safe_json_paths = [container_path, history_path, current_record_path]
+assert all(not any(line.endswith((b" ", b"\t")) for line in path.read_bytes().splitlines()) for path in safe_json_paths)
+print(json.dumps({"environment": {"python": platform.python_version(), "device": "CPU，僅bytes與JSON編解碼；未執行模型", "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"},
+    "repair_scope": "artifact-only，無事實主張或教材修改",
+    "prior_report_sha256": sha(report_bytes), "prior_verdict": report["verdict"], "prior_claim_count": len(report["claims"]),
+    "original_raw_diff_bytes": len(raw), "original_raw_diff_sha256": sha(raw),
+    "container_path": str(container_path), "container_bytes": len(container_bytes), "container_sha256": sha(container_bytes),
+    "decoded_raw_bytes": len(decoded), "decoded_raw_sha256": sha(decoded), "decoded_raw_equals_original_byte_for_byte": decoded == raw,
+    "original_context_prefixes_and_trailing_spaces_preserved_inside_json": True,
+    "old_full_source_sha256": old_sha, "new_full_source_sha256": new_sha,
+    "new_json_containers_have_no_literal_trailing_whitespace": True,
+    "primary_sha256": primary_sha, "primary_unchanged": True, "source_identity": source_checks,
+    "figure_identity": figure_checks, "previous_artifact_identity": artifact_checks,
+    "facts_re_reviewed": False, "cpu_examples_repeated": False, "figure_render_repeated": False,
+    "model_training_updates": 0, "verdict_unchanged": "pass"}, ensure_ascii=False, indent=2))
