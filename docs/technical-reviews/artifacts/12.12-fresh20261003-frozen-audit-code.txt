@@ -1,0 +1,60 @@
+import json,hashlib,random,platform
+from pathlib import Path
+from collections import Counter
+ROOT=Path.cwd()
+def digest(p): return hashlib.sha256(p.read_bytes()).hexdigest()
+def load(p): return json.loads(p.read_text())
+joint_path=ROOT/"docs/course-experiments/results/joint.json"
+d=load(joint_path);r=d["results"];train=r["data"]["splits"]["train"]["records"];test=r["data"]["splits"]["test"]["records"]
+out={"mode":"唯讀固定結果、重算分母與逐題計數，未執行模型、未訓練、未使用 GPU", "environment":{"python":platform.python_version(),"device":"cpu; stdlib only","torch":"not imported"},"joint_source_sha256":digest(joint_path),"run":{"revision":d["revision"],"seed":d["seed"],"device":d["device"],"torch_version":d["torch_version"],"gpu":d["gpu"],"evidence_status":d["evidence_status"]},"training":{k:v for k,v in r["training"].items() if k not in ["history"]},"splits":{},"evaluations":{},"paired":{},"source_code_hash_matches":{}}
+for p,h in d["code_sha256"].items():
+ if p in ["tiny_perceptron/multimodal.py","tiny_perceptron/model.py","tiny_perceptron/data.py","scripts/course_experiments/modalities.py","scripts/course_experiments/common.py","scripts/course_experiments/text.py"]:
+  actual=digest(ROOT/p);out["source_code_hash_matches"][p]={"reported":h,"actual":actual,"match":actual==h};assert actual==h
+for name,s in r["data"]["splits"].items():
+ records=s["records"];out["splits"][name]={"reported_count":s["count"],"count":len(records),"offsets":sorted(set(x["offset"] for x in records)),"frequencies":sorted(set(x["frequency"] for x in records)),"combinations":dict(Counter(x["answer"] for x in records)),"records":records};assert len(records)==s["count"]
+probe_rng=random.Random(d["seed"]-1)
+probe_rows=[probe_rng.choice(train) for _ in range(4)]
+out["loss_probe_denominator"]={"rng_seed":d["seed"]-1,"records":probe_rows,"effective_answer_targets":sum(len(x["answer"].encode())+1 for x in probe_rows)}
+counts=[]
+for step in range(400):
+ rng=random.Random(d["seed"]+step);counts.append(sum(len(rng.choice(train)["answer"].encode("utf8"))+1 for _ in range(4)))
+assert counts==[x["effective_targets"] for x in r["training"]["history"]]
+assert sum(counts)==18422==r["training"]["effective_targets"]
+out["training_target_audit"]={"steps":len(counts),"batch":4,"draws":len(counts)*4,"effective_targets":sum(counts),"per_step_targets":counts,"formula":"sum over four independently sampled answers: UTF-8 bytes + one EOS; 400 steps"}
+for name,g in [("validation",r["validation"])]+list(r["evaluations"].items()):
+ samples=g["samples"];joint=shape=pitch=0
+ for s in samples:
+  ids=s["generated_ids"];raw=ids[:ids.index(2)] if 2 in ids else ids
+  exact=raw==[b+8 for b in s["target"].encode()];assert exact==s["exact_match"]
+  assert bytes(x-8 for x in raw if x>=8).decode()==s["generated"]
+  joint+=exact;parts=s["generated"].split(",");target=s["target"].split(",")
+  shape+=len(parts)==2 and parts[0]==target[0];pitch+=len(parts)==2 and parts[1]==target[1]
+ n=len(samples);assert (joint,shape,pitch,n)==(g["correct"],g["shape_correct"],g["pitch_correct"],g["examples"])
+ out["evaluations"][name]={"count":n,"joint_correct":joint,"shape_correct":shape,"pitch_correct":pitch,"eos_count":sum(s["eos"] for s in samples),"per_item":samples}
+base=r["evaluations"]["none"]["samples"]
+for name in ["swap_image","swap_audio"]:
+ changed=r["evaluations"][name]["samples"];pairs=[]
+ for i,(a,b) in enumerate(zip(base,changed,strict=True)):
+  at=a["target"].split(",");bt=b["target"].split(",");ap=a["generated"].split(",");bp=b["generated"].split(",")
+  which=0 if name=="swap_image" else 1
+  assert at[which]!=bt[which] and at[1-which]==bt[1-which]
+  assert ap[which]!=bp[which] and ap[1-which]==bp[1-which]
+  row=dict(test[i]);row["shape"]=("square" if row["shape"]=="circle" else "circle") if name=="swap_image" else row["shape"]
+  row["frequency"]=(340 if row["frequency"]<=300 else 260) if name=="swap_audio" else row["frequency"]
+  donor=next(j for j,t in enumerate(test) if all(row[k]==t[k] for k in ["color","shape","offset","frequency","question"]))
+  pairs.append({"row":i,"test_set_donor_index":donor,"both_correct":a["exact_match"] and b["exact_match"],"original":a["generated"],"changed":b["generated"]})
+ out["paired"][name]={"count":len(pairs),"both_correct":sum(x["both_correct"] for x in pairs),"pairs":pairs}
+for name in ["blank_image","blank_audio","blank"]:
+ samples=r["evaluations"][name]["samples"]
+ assert [s["target"] for s in samples]==[s["target"] for s in base]
+ if name=="blank_image":assert all(s["generated"].split(",")[0]=="circle" for s in samples)
+ if name=="blank_audio":assert all(s["generated"].split(",")[1]=="high" for s in samples)
+ if name=="blank":assert all(s["generated"]=="circle,high" for s in samples)
+encoder_path=ROOT/"docs/course-experiments/results/encoders.json";enc=load(encoder_path);audio=enc["results"]["audio"]["data"]["splits"]["train"]["records"]
+out["prior_audio_exposure"]={"source_sha256":digest(encoder_path),"revision":enc["revision"],"train_records":audio,"train_frequencies":sorted(set(x["frequency"] for x in audio)),"joint_test_frequencies_seen":sorted(set(x["frequency"] for x in audio)&{260,340})};assert out["prior_audio_exposure"]["joint_test_frequencies_seen"]==[260,340]
+vision_path=ROOT/"docs/course-experiments/results/vision_ablation.json";v=load(vision_path);iv=v["results"]["interventions"];a=[s for s in iv["none"]["samples"] if s["question"]=="shape?"];b=[s for s in iv["shape_swap_relabelled"]["samples"] if s["question"]=="shape?"]
+assert len(a)==len(b)==6
+assert all(s["generated"]=="circle" for s in a+b)
+out["prerequisite_figure_shape_pairs"]={"source_sha256":digest(vision_path),"original_correct":sum(s["exact_match"] for s in a),"swap_correct":sum(s["exact_match"] for s in b),"both_correct":sum(x["exact_match"] and y["exact_match"] for x,y in zip(a,b,strict=True)),"original_samples":a,"swap_samples":b}
+print(json.dumps({"training_targets":out["training_target_audit"]["effective_targets"],"evaluation_counts":{k:[g["joint_correct"],g["shape_correct"],g["pitch_correct"],g["count"]] for k,g in out["evaluations"].items()},"paired_counts":{k:[v["both_correct"],v["count"]] for k,v in out["paired"].items()},"prior_audio_exposure":out["prior_audio_exposure"]["joint_test_frequencies_seen"],"figure_pair_counts":[out["prerequisite_figure_shape_pairs"][k] for k in ["original_correct","swap_correct","both_correct"]]},ensure_ascii=False))
+(ROOT/"docs/technical-reviews/artifacts/12.12-fresh20261003-frozen-audit-result.json").write_text(json.dumps(out,ensure_ascii=False,indent=2)+"\n")

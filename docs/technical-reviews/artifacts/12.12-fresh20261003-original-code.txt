@@ -1,0 +1,16 @@
+import torch
+from tiny_perceptron.data import ByteTokenizer
+from tiny_perceptron.model import TinyLM, ModelConfig, masked_loss
+from tiny_perceptron.multimodal import MultiModalLM, scene, tone
+
+torch.manual_seed(0)
+tok = ByteTokenizer()
+model = MultiModalLM(TinyLM(ModelConfig(width=8)))
+prefix = [tok.bos_id, tok.user_id, tok.image_id, tok.audio_id, tok.eos_id, tok.assistant_id]
+answer = tok.encode("circle,high") + [tok.eos_id]
+ids = torch.tensor(prefix + answer)
+labels = torch.tensor([-100] * len(prefix) + answer)
+out = model(ids, labels, image=scene("red", "circle"), waveform=tone(440))
+masked_loss(out["logits"], out["labels"]).backward()
+print("圖路徑梯度", model.image_projector.weight.grad.norm().item() > 0)
+print("音路徑梯度", model.audio_projector.weight.grad.norm().item() > 0)
