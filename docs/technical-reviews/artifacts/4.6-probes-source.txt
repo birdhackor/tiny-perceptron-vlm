@@ -1,0 +1,127 @@
+import json
+import sys
+import torch
+from torch.nn import functional as F
+from tiny_perceptron.model import TinyLM, ModelConfig, generate
+from tiny_perceptron.attention import attention_mask
+
+torch.manual_seed(42)
+model = TinyLM(ModelConfig(vocab_size=20, width=8))
+ids = torch.tensor([[1, 2, 3]])
+flow = {}
+handles = []
+def hook(name):
+    def capture(module, args, output):
+        tensor = output[0] if isinstance(output, tuple) else output
+        flow[name] = {"input": list(args[0].shape), "output": list(tensor.shape)}
+    return capture
+for name, module in [("embedding", model.embedding), ("position", model.position),
+                     ("attention", model.blocks[0].attention), ("ffn", model.blocks[0].ffn),
+                     ("block", model.blocks[0]), ("final_norm", model.final_norm),
+                     ("output", model.output)]:
+    handles.append(module.register_forward_hook(hook(name)))
+logits = model(ids)["logits"]
+for handle in handles:
+    handle.remove()
+scores = logits.reshape(-1, logits.shape[-1])
+target = torch.tensor([[2, 3, 4]])
+answers = target.reshape(-1)
+per_row = F.cross_entropy(scores, answers, reduction="none")
+manual = scores.double().logsumexp(-1) - scores.double()[torch.arange(3), answers]
+assert torch.allclose(per_row.double(), manual, atol=1e-6, rtol=0)
+assert abs(per_row.mean().item() - 3.336) < 0.0005
+assert torch.equal(scores, logits[0])
+assert answers.tolist() == [2, 3, 4]
+probabilities = logits.softmax(-1)
+assert torch.allclose(probabilities.sum(-1), torch.ones(1, 3), atol=1e-6)
+
+try:
+    F.cross_entropy(logits, target)
+except RuntimeError as exc:
+    wrong_layout_error = str(exc)
+else:
+    raise AssertionError("未整理的 [B,T,V] 不應匹配 [B,T] 的 class-index target")
+
+hidden = {}
+handle = model.final_norm.register_forward_hook(lambda module, args, out: hidden.update(x=out.detach()))
+current = model(ids)["logits"]
+handle.remove()
+manual_logits = hidden["x"] @ model.output.weight.T
+assert torch.allclose(current, manual_logits, atol=1e-6, rtol=0)
+assert model.output.bias is None
+
+changed = model(torch.tensor([[1, 2, 4]]))["logits"]
+future_change_difference = (current[:, :2] - changed[:, :2]).abs().max().item()
+assert future_change_difference == 0.0
+prefix_differences = []
+for length in [1, 2, 3]:
+    prefix = model(ids[:, :length])["logits"]
+    difference = (prefix[:, -1] - current[:, length - 1]).abs().max().item()
+    prefix_differences.append(difference)
+    assert difference <= 1e-6
+mask = attention_mask(torch.arange(3), torch.arange(3))[0, 0]
+assert mask.tolist() == [[True, False, False], [True, True, False], [True, True, True]]
+
+with torch.no_grad():
+    sequence = ids.clone()
+    step_ids = []
+    for _ in range(2):
+        next_id = model(sequence)["logits"][:, -1].argmax(-1, keepdim=True)
+        step_ids.append(next_id.item())
+        sequence = torch.cat((sequence, next_id), 1)
+    library_sequence = generate(model, ids, max_new_tokens=2, eos_id=-1, use_cache=False)
+assert torch.equal(sequence, library_sequence)
+assert sequence[:, 3].item() == logits[:, -1].argmax(-1).item()
+
+last_legal_shape = list(model(torch.tensor([[19]]))["logits"].shape)
+try:
+    model(torch.tensor([[20]]))
+except IndexError as exc:
+    illegal_id_error = str(exc)
+else:
+    raise AssertionError("ID20 應超過20列 embedding")
+untied_identity = model.embedding.weight is model.output.weight
+untied_storage = model.embedding.weight.data_ptr() == model.output.weight.data_ptr()
+torch.manual_seed(42)
+tied = TinyLM(ModelConfig(vocab_size=20, width=8, tied=True))
+tied_identity = tied.embedding.weight is tied.output.weight
+assert not untied_identity and not untied_storage and tied_identity
+assert model.description()["parameters"] - tied.description()["parameters"] == 20 * 8
+
+# 分開讀的前置：位置內FFN不讀其他位置，LN最後軸各自整理。
+x = torch.randn(1, 3, 8)
+ffn_before = model.blocks[0].ffn(x)
+x_changed = x.clone()
+x_changed[0, 2, 0] += 1
+ffn_after = model.blocks[0].ffn(x_changed)
+assert torch.equal(ffn_before[:, :2], ffn_after[:, :2])
+print(json.dumps({
+    "environment": {"python": sys.version, "torch": torch.__version__, "torch_commit": torch.version.git_version, "device": str(logits.device)},
+    "input_ids": ids.tolist(), "input_dtype": str(ids.dtype),
+    "flow": flow, "logits_shape": list(logits.shape), "logits_dtype": str(logits.dtype),
+    "scores_shape": list(scores.shape), "answers_shape": list(answers.shape),
+    "reshape_preserves_rows_exactly": torch.equal(scores, logits[0]),
+    "answers_order": answers.tolist(), "question_count": scores.shape[0],
+    "argmax": logits.argmax(-1).tolist(), "argmax_shape": list(logits.argmax(-1).shape),
+    "first_five_scores": logits[0, 0, :5].tolist(),
+    "logits_min": logits.min().item(), "logits_max": logits.max().item(),
+    "logits_row_sums": logits.sum(-1).tolist(),
+    "probability_row_sums": probabilities.sum(-1).tolist(),
+    "loss_per_row": per_row.tolist(), "manual_loss_float64": manual.tolist(),
+    "mean_loss": per_row.mean().item(),
+    "loss_from_probabilities_incorrect": F.cross_entropy(probabilities.reshape(3, 20), answers).item(),
+    "unreshaped_cross_entropy_error": wrong_layout_error,
+    "output_weight_shape": list(model.output.weight.shape), "output_bias": None,
+    "manual_head_max_abs_difference": (current - manual_logits).abs().max().item(),
+    "causal_allowed": mask.tolist(), "future_change_earlier_scores_max_abs_difference": future_change_difference,
+    "prefix_last_score_max_abs_differences": prefix_differences,
+    "generation_step_ids": step_ids, "generation_sequence": sequence.tolist(),
+    "generate_matches_manual_steps": torch.equal(sequence, library_sequence),
+    "last_legal_id19_shape": last_legal_shape, "illegal_id20_error": illegal_id_error,
+    "embedding_weight_shape": list(model.embedding.weight.shape),
+    "untied_parameter_identity": untied_identity, "untied_storage_identity": untied_storage,
+    "tied_parameter_identity": tied_identity,
+    "parameters_untied": model.description()["parameters"], "parameters_tied": tied.description()["parameters"],
+    "ffn_change_last_position_earlier_positions_unchanged": torch.equal(ffn_before[:, :2], ffn_after[:, :2]),
+    "updates": 0, "tokens": 3, "seed": 42,
+}, ensure_ascii=False, indent=2))

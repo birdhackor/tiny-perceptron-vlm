@@ -1,0 +1,90 @@
+# 有界離線 CPU 審查；不執行任何正式訓練或參數更新。
+import ast
+import hashlib
+import json
+import random
+import sys
+from pathlib import Path
+import torch
+from torch.nn import functional as F
+from tiny_perceptron.data import ByteTokenizer, IGNORE, pad_batch, shifted
+from tiny_perceptron.model import TinyLM, ModelConfig, masked_loss, loss_sum
+
+root = Path.cwd()
+cache = root / 'outputs/technical-sources/4.7-fresh'
+out = {'environment': {'python': sys.version, 'torch': str(torch.__version__), 'torch_git_version': str(torch.version.git_version), 'device': 'cpu', 'OMP_NUM_THREADS': '1', 'MKL_NUM_THREADS': '1'}, 'command': 'OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 .venv/bin/python -c "import runpy; runpy.run_path(\'docs/technical-reviews/artifacts/4.7-checks.txt\', run_name=\'__main__\')"'}
+assert torch.version.cuda is None
+
+torch.manual_seed(42)
+x,y = shifted([1,2,3,4])
+model = TinyLM(ModelConfig(vocab_size=5,width=8))
+logits = model(x[None])['logits']
+loss = masked_loss(logits,y[None])
+per_token = F.cross_entropy(logits.reshape(-1,5),y,reduction='none')
+manual = -logits.log_softmax(-1).gather(-1,y[None,:,None]).squeeze(-1).mean()
+assert list(zip(x.tolist(),y.tolist())) == [(1,2),(2,3),(3,4)]
+assert x.dtype == y.dtype == torch.int64
+assert list(logits.shape) == [1,3,5]
+assert torch.allclose(loss,per_token.mean()) and torch.allclose(loss,manual)
+before = {n:p.detach().clone() for n,p in model.named_parameters()}
+loss.backward()
+assert all(p.grad is not None and torch.isfinite(p.grad).all() for p in model.parameters())
+assert all(torch.equal(before[n],p) for n,p in model.named_parameters())
+labels = y.clone(); labels[1]=IGNORE
+masked = masked_loss(logits,labels[None])
+assert torch.allclose(masked, per_token[[0,2]].mean())
+out['original_instrumented']={'pairs':list(zip(x.tolist(),y.tolist())), 'dtype':str(x.dtype), 'input_shape':list(x[None].shape),'target_shape':list(y[None].shape),'logits_shape':list(logits.shape),'per_position_nll':per_token.tolist(),'mean_nll':float(loss.detach()), 'manual_nll':float(manual.detach()), 'ignored_middle_nll':float(masked.detach()), 'effective_targets':int((y!=IGNORE).sum()), 'parameter_tensors':len(before),'all_parameter_tensors_require_grad':all(p.requires_grad for p in model.parameters()),'all_grads_present_finite':True,'parameters_unchanged_after_backward':True}
+
+# 親跑正文兩項練習；錯誤答案版本只計算代價與梯度，不更新或重訓。
+torch.manual_seed(42)
+x4,y4=shifted([1,2,3,4,0])
+exercise_model=TinyLM(ModelConfig(vocab_size=5,width=8))
+scores=exercise_model(x4[None])['logits']
+correct=masked_loss(scores,y4[None]); copied=x4.clone()
+copy_loss=masked_loss(scores,copied[None]); copy_loss.backward()
+assert list(scores.shape)==[1,4,5]
+assert list(zip(x4.tolist(),y4.tolist()))==[(1,2),(2,3),(3,4),(4,0)]
+assert list(zip(x4.tolist(),copied.tolist()))==[(1,1),(2,2),(3,3),(4,4)]
+out['exercise']={'correct_pairs':list(zip(x4.tolist(),y4.tolist())),'logits_shape':list(scores.shape),'correct_mean_nll':float(correct.detach()),'copy_pairs':list(zip(x4.tolist(),copied.tolist())),'copy_mean_nll':float(copy_loss.detach()),'copy_backward_success':True,'copy_tensor_independent_storage':copied.data_ptr()!=x4.data_ptr()}
+
+# 錯誤地把已對齊答案再切一次：範例見得到 1 卻配 3，長度由 3 變 2。
+out['double_shift']={'input':x.tolist(),'twice_shifted_target':y[1:].tolist(),'pairs_if_truncated':list(zip(x.tolist(),y[1:].tolist())),'input_length':len(x),'target_length':len(y[1:])}
+# 同一模型全序列平行與逐前綴預測；只驗證 CPU 實作，不冒稱正式 GPU 重測。
+prefix_max=max(float((model(x[:i+1][None])['logits'][0,-1]-logits[0,i]).abs().max().detach()) for i in range(len(x)))
+changed=x.clone(); changed[-1]=0
+causal_max=float((model(changed[None])['logits'][:,:-1]-logits[:,:-1]).abs().max().detach())
+assert prefix_max<1e-6 and causal_max==0.0
+out['cpu_causal_check']={'prefix_parallel_max_difference':prefix_max,'last_input_change':{'before':x.tolist(),'after':changed.tolist()},'past_logits_max_difference':causal_max}
+
+# 只載入固定修訂版中安全的資料純函式；不 import 或 call 任何訓練入口。
+namespace={'torch':torch,'json':json,'hashlib':hashlib,'random':random,'ByteTokenizer':ByteTokenizer,'shifted':shifted}
+def add_functions(filename,names):
+    tree=ast.parse((cache/filename).read_text())
+    selected=[node for node in tree.body if isinstance(node,ast.FunctionDef) and node.name in names]
+    assert {node.name for node in selected}==set(names)
+    exec(compile(ast.Module(body=selected,type_ignores=[]),filename,'exec'),namespace)
+add_functions('formal-prepare.py',['generate_records'])
+add_functions('formal-common.py',['split_records','text_examples'])
+records=namespace['generate_records']('toy-text')
+parts=namespace['split_records'](records,seed=42)
+report=json.loads((root/'docs/course-experiments/results/text_foundation.json').read_text())
+formal=report['results']
+data={}
+for side,rows in parts.items():
+    raw=''.join(json.dumps(row,ensure_ascii=False)+'\n' for row in rows).encode()
+    digest=hashlib.sha256(raw).hexdigest()
+    recorded=formal['data'][side]
+    assert len(rows)==recorded['records'] and digest==recorded['sha256']
+    examples=namespace['text_examples'](rows,mode='text',max_length=128)
+    total=sum(len(y) for x,y in examples)
+    assert all(len(x)==len(y) for x,y in examples)
+    data[side]={'records':len(rows),'families':len({r['family'] for r in rows}),'raw_utf8_bytes':sum(len(r['text'].encode()) for r in rows),'next_token_targets_including_eos':total,'serialized_sha256':digest,'first_record':rows[0],'first_example':{'x_first_6':examples[0][0][:6].tolist(),'y_first_6':examples[0][1][:6].tolist()}}
+assert len(records)==12 and [data[s]['records'] for s in ('train','validation','test')]==[9,1,2]
+assert formal['causal_max_difference']==0.0
+source_matches={}
+for filename,path in [('formal-text.py','scripts/course_experiments/text.py'),('formal-common.py','scripts/course_experiments/common.py')]:
+    digest=hashlib.sha256((cache/filename).read_bytes()).hexdigest()
+    assert digest==report['code_sha256'][path]
+    source_matches[path]=digest
+out['frozen_formal_result_inspection']={'result_file_sha256':hashlib.sha256((root/'docs/course-experiments/results/text_foundation.json').read_bytes()).hexdigest(),'revision':report['revision'],'recorded_device':report['device'],'recorded_gpu':report['gpu'],'recorded_python':report['python_version'],'recorded_torch':report['torch_version'],'seed':report['seed'],'step_scale':report['step_scale'],'status':report['status'],'data':data,'training':formal['training'],'causal_probe':{'input':[[1,10,11,12,13]],'modified':[[1,10,11,12,14]],'comparison_positions':4,'candidates_per_position':264,'compared_logits':1056,'recorded_causal_max_difference':formal['causal_max_difference'],'construction_source':'formal-text.py run_text_foundation lines 263-280','not_rerun':True},'recorded_code_sha_matches':source_matches,'scope':'凍結正式 GPU 結果與原版程式核對；CPU 只重建 12 筆內建資料與分母，沒有訓練、載入模型權重或重跑正式量測。'}
+print(json.dumps(out,ensure_ascii=False,indent=2,allow_nan=False))

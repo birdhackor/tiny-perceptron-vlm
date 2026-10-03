@@ -1,0 +1,143 @@
+原正式修訂版：b52935d99f58b694cd932ac158c10c4d8d92d4c2
+閱讀日：2026-10-03
+程式取自版本化 raw GitHub URL，text/common SHA與正式報告code_sha256完全一致。
+目前text/common全檔已異於正式版本，未拿目前變動代替原配置。
+
+URL: https://raw.githubusercontent.com/birdhackor/tiny-perceptron-vlm/b52935d99f58b694cd932ac158c10c4d8d92d4c2/scripts/prepare_data.py
+Full file SHA256: d5cfe23d628e81a31d7d2030a4f6349dcff7bc95ad2c4c4b627fb417e961a429
+Lines 22-30:
+22: def generate_records(kind):
+23:     records = []
+24:     if kind == "toy-text":
+25:         for color in ("red", "green", "blue"):
+26:             for shape in ("circle", "square"):
+27:                 for side in ("left", "right"):
+28:                     text = f"color={color};shape={shape};side={side}."
+29:                     records.append({"text": text, "family": text, "source": "course-generated", "license": "MIT"})
+30:     elif kind == "attributes-sft":
+
+URL: https://raw.githubusercontent.com/birdhackor/tiny-perceptron-vlm/b52935d99f58b694cd932ac158c10c4d8d92d4c2/scripts/course_experiments/common.py
+Full file SHA256: e79d98e82b60fd1bc738bf40f4eef1407cc6e3097f245ef82151ad429b063cb5
+Lines 45-95:
+45: def new_lm(ctx, width=64, layers=2, max_length=128, **kwargs):
+46:     seed(ctx.seed)
+47:     return TinyLM(ModelConfig(width=width, layers=layers, max_length=max_length, **kwargs)).to(ctx.device)
+48:
+49:
+50: def split_records(records, seed=42, family="family"):
+51:     """Keep all descendants of a family in one split; never split individual answers."""
+52:     groups = {}
+53:     seen = set()
+54:     for record in records:
+55:         encoded = json.dumps(record, ensure_ascii=False, sort_keys=True)
+56:         if encoded in seen:
+57:             continue
+58:         seen.add(encoded)
+59:         key = str(record.get(family, hashlib.sha256(encoded.encode()).hexdigest()))
+60:         groups.setdefault(key, []).append(record)
+61:     keys = sorted(groups)
+62:     if len(keys) < 3:
+63:         raise ValueError("At least three distinct families are required for train/validation/test")
+64:     random.Random(seed).shuffle(keys)
+65:     a = min(max(1, int(len(keys) * 0.8)), len(keys) - 2)
+66:     b = min(max(a + 1, int(len(keys) * 0.9)), len(keys) - 1)
+67:     return {
+68:         name: [record for key in selected for record in groups[key]]
+69:         for name, selected in (("train", keys[:a]), ("validation", keys[a:b]), ("test", keys[b:]))
+70:     }
+71:
+72:
+73: def records_sha256(records):
+74:     return hashlib.sha256(json.dumps(records, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+75:
+76:
+77: def text_examples(records, mode="text", max_length=128, tokenizer=None):
+78:     tok = tokenizer or ByteTokenizer()
+79:     examples = []
+80:     for record in records:
+81:         if mode == "sft":
+82:             messages = record["messages"] if isinstance(record, dict) else record
+83:             x, y = render_chat(messages, tok)
+84:             if len(x) > max_length:
+85:                 raise ValueError(f"SFT record has {len(x)} tokens, exceeding {max_length}; crop explicitly upstream")
+86:             examples.append((x, y))
+87:         elif mode == "text":
+88:             text = record["text"] if isinstance(record, dict) else record
+89:             ids = [tok.bos_id] + tok.encode(text) + [tok.eos_id]
+90:             # Every next-token label appears once; chunk boundaries share only the preceding input token.
+91:             for start in range(0, len(ids) - 1, max_length):
+92:                 examples.append(shifted(ids[start : start + max_length + 1]))
+93:         else:
+94:             raise ValueError("mode must be text or sft")
+95:     if not examples:
+Lines 122-146:
+122: def fit_lm(
+123:     model, records, ctx, mode="text", steps=600, batch_size=16, lr=0.003, auxiliary=0.01, name="model", tokenizer=None
+124: ):
+125:     examples = text_examples(records, mode, model.config.max_length, tokenizer)
+126:     initial = _nll(model, examples)
+127:     optimizer = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=lr)
+128:     sampler = random.Random(ctx.seed)
+129:     history, effective_tokens = [], 0
+130:     model.train()
+131:     _sync(ctx.device)
+132:     started = time.perf_counter()
+133:     for step in range(steps):
+134:         batch = sampler.choices(examples, k=batch_size)
+135:         x, y, valid = (t.to(ctx.device) for t in pad_batch(batch))
+136:         optimizer.zero_grad(set_to_none=True)
+137:         result = model(x, valid=valid)
+138:         loss = masked_loss(result["logits"], y) + auxiliary * result["auxiliary"]
+139:         if not torch.isfinite(loss):
+140:             raise FloatingPointError(f"Nonfinite training loss at step {step + 1}")
+141:         loss.backward()
+142:         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0, error_if_nonfinite=True)
+143:         optimizer.step()
+144:         effective_tokens += int((y != IGNORE).sum())
+145:         if step == 0 or (step + 1) % max(1, steps // 10) == 0:
+146:             history.append({"step": step + 1, "batch_loss_before_update": float(loss.detach())})
+
+URL: https://raw.githubusercontent.com/birdhackor/tiny-perceptron-vlm/b52935d99f58b694cd932ac158c10c4d8d92d4c2/scripts/course_experiments/text.py
+Full file SHA256: c3c98e1b2ff5dce288308afe105ed0307aabe473458cabfc0d66d99bef5a0c3c
+Lines 263-280:
+263:     records = generate_records("toy-text")
+264:     parts = split_records(records, seed=ctx.seed)
+265:     manifest = _save_splits(ctx, parts)
+266:     seed(ctx.seed)
+267:     model = new_lm(ctx, width=64, layers=2)
+268:     save_checkpoint(ctx.output / "start.pt", model, step=0, metadata={"seed": ctx.seed, "data": manifest})
+269:     before = _evaluations(model, parts, mode="text")
+270:     training = fit_lm(model, parts["train"], ctx, mode="text", steps=_steps(ctx, 600))
+271:     after = _evaluations(model, parts, mode="text")
+272:     probe = torch.tensor([[1, 10, 11, 12, 13]], device=ctx.device)
+273:     changed = probe.clone()
+274:     changed[0, -1] = 14
+275:     with torch.no_grad():
+276:         causal_difference = float((model(probe)["logits"][:, :-1] - model(changed)["logits"][:, :-1]).abs().max())
+277:     if causal_difference > 1e-6:
+278:         raise ValueError("future token affected past logits")
+279:     factorial = {}
+280:     pool = [
+
+原repo授權（已親讀）：
+MIT License
+
+Copyright (c) 2026 birdhackor
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

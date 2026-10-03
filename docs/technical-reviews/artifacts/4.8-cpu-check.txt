@@ -1,0 +1,109 @@
+import hashlib
+import json
+import platform
+from pathlib import Path
+
+import torch
+
+from tiny_perceptron.data import ByteTokenizer
+from tiny_perceptron.model import ModelConfig, TinyLM, generate
+
+
+def digest(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+torch.set_num_threads(1)
+result = {
+    "environment": {
+        "python": platform.python_version(),
+        "torch": torch.__version__,
+        "torch_source_commit": torch.version.git_version,
+        "device": "cpu",
+        "threads": str(torch.get_num_threads()),
+    },
+    "exercise_width16": [],
+    "parameter_breakdowns": [],
+    "stack_observation": {},
+}
+
+# Execute the exercise exactly by changing only width=8 to width=16.
+for depth in [1, 2, 3]:
+    model = TinyLM(ModelConfig(vocab_size=20, width=16, layers=depth))
+    count = model.description()["parameters"]
+    logits = model(torch.tensor([[1, 2]]))["logits"]
+    assert logits.shape == (1, 2, 20)
+    assert count == 2720 + depth * 3216
+    result["exercise_width16"].append(
+        {"depth": depth, "parameters": count, "logits_shape": list(logits.shape)}
+    )
+
+for width, vocab, depth in [(8, 20, 3), (16, 20, 3), (64, 264, 2)]:
+    model = TinyLM(ModelConfig(vocab_size=vocab, width=width, layers=depth))
+    parameters = {name: {"shape": list(p.shape), "numel": p.numel()} for name, p in model.named_parameters()}
+    fixed = sum(v["numel"] for k, v in parameters.items() if not k.startswith("blocks."))
+    blocks = [sum(v["numel"] for k, v in parameters.items() if k.startswith(f"blocks.{i}.")) for i in range(depth)]
+    assert fixed == 2 * vocab * width + 128 * width + 2 * width
+    assert blocks == [12 * width * width + 9 * width] * depth
+    assert model.output.bias is None
+    assert model.output.weight is not model.embedding.weight
+    assert len({p.data_ptr() for p in model.parameters()}) == len(list(model.parameters()))
+    result["parameter_breakdowns"].append(
+        {"width": width, "vocab": vocab, "depth": depth, "fixed": fixed, "per_block": blocks,
+         "total": model.description()["parameters"], "parameters": parameters}
+    )
+
+torch.manual_seed(42)
+model = TinyLM(ModelConfig(vocab_size=20, width=8, layers=2))
+observed = {}
+handles = [
+    model.blocks[0].register_forward_hook(lambda m, a, o: observed.update(first_output=o[0].detach().clone())),
+    model.blocks[1].register_forward_pre_hook(lambda m, a: observed.update(second_input=a[0].detach().clone())),
+]
+ids = torch.tensor([[1, 2]])
+raw = model.embedding(ids) + model.position(torch.arange(2))
+logits = model(ids)["logits"]
+for handle in handles:
+    handle.remove()
+assert torch.equal(observed["first_output"], observed["second_input"])
+assert not torch.equal(raw, observed["second_input"])
+result["stack_observation"] = {
+    "first_output_equals_second_input": True,
+    "second_input_equals_original_embeddings": False,
+    "raw_to_second_max_difference": float((raw - observed["second_input"]).abs().max().detach()),
+    "logits_shape": list(logits.shape),
+    "logits_last_axis_sums": logits.sum(-1).detach().tolist(),
+}
+
+# Read the pinned existing model; never retrain or dispatch GPU work.
+checkpoint_path = Path("checkpoints/course/text_foundation/model.pt")
+start_path = Path("checkpoints/course/text_foundation/start.pt")
+payload = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+start = torch.load(start_path, map_location="cpu", weights_only=True)
+expected_digest = "98bfedd6cf596a3bb90a21f4acd67fd9c4c2caf67435b2a381b6cfc11ed80834"
+assert digest(checkpoint_path) == expected_digest
+model = TinyLM(ModelConfig(**payload["config"]))
+model.load_state_dict(payload["model"])
+assert model.description()["parameters"] == 141568
+tok = ByteTokenizer()
+prompt = "color=blue;shape=circle;"
+prompt_ids = [tok.bos_id] + tok.encode(prompt)
+with torch.no_grad():
+    sequence = generate(model, torch.tensor([prompt_ids]), 32, temperature=0, eos_id=tok.eos_id)
+generated = sequence[0, len(prompt_ids):].tolist()
+assert generated == [123, 113, 108, 109, 69, 122, 113, 111, 112, 124, 54, 2]
+weight_difference = max(float((payload["model"][key] - start["model"][key]).abs().max()) for key in payload["model"])
+assert weight_difference > 0
+result["frozen_checkpoint_inspection"] = {
+    "checkpoint_path": str(checkpoint_path), "checkpoint_sha256": digest(checkpoint_path),
+    "start_path": str(start_path), "start_sha256": digest(start_path),
+    "config": payload["config"], "architecture": payload["architecture"],
+    "metadata": payload["metadata"], "parameters": model.description()["parameters"],
+    "start_to_trained_max_weight_difference": weight_difference,
+    "prompt": prompt, "generation_limit": 32, "temperature": 0,
+    "generated_ids": generated, "generated_text": tok.decode(generated),
+    "eos": generated[-1] == tok.eos_id,
+    "scope": "One pinned checkpoint and prompt; no training, quality comparison, or speed measurement.",
+}
+
+print(json.dumps(result, ensure_ascii=False, indent=2))
