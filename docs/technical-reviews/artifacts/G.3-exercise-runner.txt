@@ -1,0 +1,77 @@
+"""G.3 必要前置練習的有界 CPU 重播；不訓練、不取網路、不改教材。"""
+import contextlib
+import hashlib
+import io
+import json
+import os
+import re
+import sys
+from datetime import UTC, datetime
+from pathlib import Path
+
+ROOT = Path.cwd()
+sys.path.insert(0, str(ROOT))
+import torch
+
+torch.set_num_threads(1)
+torch.set_default_device("cpu")
+assert torch.version.cuda is None
+assert os.environ["OMP_NUM_THREADS"] == os.environ["MKL_NUM_THREADS"] == "1"
+
+def section(chapter, lesson):
+    raw = (ROOT / f"course/chapters/{chapter}.md").read_bytes()
+    headings = list(re.finditer(rb"(?m)^## [^\r\n]+", raw))
+    index = next(i for i, h in enumerate(headings) if h[0].startswith(f"## {lesson} ".encode()))
+    end = headings[index + 1].start() if index + 1 < len(headings) else len(raw)
+    body = raw[headings[index].start():end]
+    codes = re.findall(rb"(?ms)^```python\n(.*?)^```", body)
+    return body, [code.decode() for code in codes]
+
+cases = []
+
+def add(chapter, lesson, label, edits=(), expected_error=False, append="", fence_count=1):
+    body, fences = section(chapter, lesson)
+    code = "\n".join(fences[:fence_count])
+    for old, new in edits:
+        assert old in code, (lesson, old)
+        code = code.replace(old, new)
+    code += append
+    cases.append({"source": f"course/chapters/{chapter}.md#{lesson}", "source_sha256": hashlib.sha256(body).hexdigest(), "label": label, "code": code, "expected_assertion_error": expected_error})
+
+add("03", "3.3", "K 增加 [2,0]", [("k = torch.tensor([[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]])", "k = torch.tensor([[1.0, 0.0], [0.0, 1.0], [1.0, 1.0], [2.0, 0.0]])"), ("scores.shape == (2, 3)", "scores.shape == (2, 4)")], append="\nassert torch.equal(scores[:, -1], torch.tensor([2.0, 0.0]))\n")
+add("03", "3.4", "只改第一份 V", [("v = torch.tensor([[10.0, 20.0, 30.0]", "v = torch.tensor([[20.0, 40.0, 60.0]")], append="\nassert torch.allclose(output, torch.tensor([[14.35223015, 28.70446030, 43.05669046]]), atol=1e-5)\n")
+add("03", "3.6", "移除 tril，原先防未來檢查預期失敗", [(".tril()[None, None]", "[None, None]")], expected_error=True)
+add("07", "7.6", "第一個補齊 label 從 -100 改 0，原一致檢查預期失敗", [("[[1, 2, -100, -100, -100]]", "[[1, 2, 0, -100, -100]]")], expected_error=True)
+for content, count in [("答案", 7), ("OK", 3)]:
+    add("07", "7.3", f"assistant {content} 的有效目標數", [("\"content\": \"答\"", f"\"content\": \"{content}\"")], append=f"\nassert (y != -100).sum().item() == {count}\n")
+add("07", "7.5", "Q 改成 Z，忽略 logits 梯度仍為 0，輸入列仍有梯度", [("\"content\": \"Q\"", "\"content\": \"Z\"")], append="\nassert logits.grad[0, 0].norm().item() == 0.0\nassert model.embedding.weight.grad[x[2]].norm().item() > 0.0\n")
+add("04", "4.2", "修正改成 0*x", [("correction = 2 * x", "correction = 0 * x"), ("torch.tensor([3.0, 3.0])", "torch.tensor([1.0, 1.0])")], append="\nassert torch.equal(y.detach(), torch.tensor([1.0, 2.0]))\n")
+add("04", "4.3", "整個第二位置平移 100，兩位置均一致", fence_count=2, append="\nassert torch.allclose(first[0, 0], shifted[0, 0])\nassert torch.allclose(first[0, 1], shifted[0, 1])\n")
+add("04", "4.3", "只改第二位置第一特徵，第一位置一致、第二位置不同", [("x[0, 1] += 100", "x[0, 1, 0] += 100")], fence_count=2, append="\nassert torch.allclose(first[0, 0], shifted[0, 0])\nassert not torch.allclose(first[0, 1], shifted[0, 1])\n")
+add("10", "10.2", "patch 邊長 8", [("patchify(image, 4)", "patchify(image, 8)"), ("3, 16, 16, 4)", "3, 16, 16, 8)")], append="\nassert patches.shape == (1, 4, 192)\nassert torch.equal(image, restored)\n")
+add("10", "10.6", "projector 輸出寬度 10", [("nn.Linear(8, 12)", "nn.Linear(8, 10)")], append="\nassert language_features.shape == (1, 16, 10)\nassert projector.weight.shape == (10, 8)\n")
+add("12", "12.5", "單音改 880Hz", [("tone(440.0", "tone(880.0")], append="\nassert power.shape == (201, 21)\nassert peak == 22\n")
+add("12", "12.6", "mel 區段數改 32", [("bands=16", "bands=32")], append="\nassert bank.shape == (32, 201)\nassert mel_power.shape == (32, 3)\n")
+
+results = []
+for case in cases:
+    stdout = io.StringIO()
+    error = None
+    with contextlib.redirect_stdout(stdout):
+        try:
+            exec(compile(case["code"], case["source"] + ":exercise", "exec"), {"__name__": "__main__"})
+        except AssertionError:
+            error = "AssertionError"
+    matched = (error == "AssertionError") == case["expected_assertion_error"]
+    assert matched, case["label"]
+    results.append({**case, "stdout": stdout.getvalue(), "observed_error": error, "expectation_matched": matched})
+
+# 主節唯一數字 440Hz 的透明週期核對：不將峰格當作無限精度量測。
+period = 1.0 / 440.0
+numeric = {"frequency_hz": 440.0, "period_seconds": period, "cycles_in_one_second": 1.0 / period, "formula": "f=1/T；sin(2*pi*f*(t+T))=sin(2*pi*f*t)"}
+assert numeric["cycles_in_one_second"] == 440.0
+
+record = {"reviewer_task": "/root/technical_round_coordinator/technical_g_3_fresh", "finished_utc": datetime.now(UTC).isoformat(), "command": "OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1 TRANSFORMERS_OFFLINE=1 CUDA_VISIBLE_DEVICES='' .venv/bin/python docs/technical-reviews/artifacts/G.3-exercise-runner.txt", "environment": {"python": sys.version, "torch": str(torch.__version__), "torch_git_version": str(torch.version.git_version), "device": "cpu", "OMP_NUM_THREADS": os.environ["OMP_NUM_THREADS"], "MKL_NUM_THREADS": os.environ["MKL_NUM_THREADS"]}, "primary_has_python_fences": False, "primary_exercise": "主節只有口頭練習：看得到由 attention 許可決定；需作答由目標 label 是否計入 loss 決定。提示可被讀取而沒有自己的直接 loss。", "cases": results, "primary_numeric_derivation": numeric}
+target = ROOT / "docs/technical-reviews/artifacts/G.3-exercises.json"
+target.write_text(json.dumps(record, ensure_ascii=False, indent=2, allow_nan=False) + "\n")
+print(json.dumps({"cases": len(results), "matched": sum(r["expectation_matched"] for r in results), "expected_assertion_errors": sum(bool(r["observed_error"]) for r in results), "numeric": numeric}, ensure_ascii=False))
