@@ -1,0 +1,181 @@
+"""12.2 獨立離線 CPU 核查；只讀既有資料，沒有训练或網路。"""
+import contextlib
+import hashlib
+import io
+import json
+import os
+import platform
+import shlex
+import struct
+import subprocess
+from datetime import datetime, timezone
+from pathlib import Path
+
+import numpy as np
+import soundfile as sf
+import torch
+from scripts.course_experiments.modalities import _resample_8_to_16
+from tiny_perceptron.multimodal import log_mel, tone
+
+ROOT = Path.cwd()
+ART = ROOT / 'docs/technical-reviews/artifacts'
+torch.set_num_threads(1)
+assert torch.version.cuda is None
+ENV = {'python': platform.python_version(), 'torch': str(torch.__version__),
+       'torch_git_version': str(torch.version.git_version), 'numpy': np.__version__,
+       'soundfile': sf.__version__, 'libsndfile': str(sf.__libsndfile_version__),
+       'device': 'cpu', 'OMP_NUM_THREADS': os.environ['OMP_NUM_THREADS'],
+       'MKL_NUM_THREADS': os.environ['MKL_NUM_THREADS']}
+COMMAND = 'timeout 60s env OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 CUDA_VISIBLE_DEVICES= .venv/bin/python docs/technical-reviews/artifacts/12.2-cpu-verification-code.txt'
+
+def sha(value):
+    return hashlib.sha256(value).hexdigest()
+
+def save(name, value):
+    (ART / name).write_text(json.dumps(value, ensure_ascii=False, indent=2) + '\n')
+
+def chunks(value):
+    assert value[:4] == b'RIFF' and value[8:12] == b'WAVE'
+    offset = 12
+    result = {}
+    while offset + 8 <= len(value):
+        size = struct.unpack_from('<I', value, offset + 4)[0]
+        result[value[offset:offset+4].decode()] = (offset + 8, size)
+        offset += 8 + size + size % 2
+    return result
+
+# 分別執行原例與唯一練習，記錄實際子程序指令。
+for label in ['original', 'exercise']:
+    relative = f'docs/technical-reviews/artifacts/12.2-{label}-code.txt'
+    program = f"from pathlib import Path; exec(compile(Path({relative!r}).read_text(), {relative!r}, 'exec'), {{}})"
+    args = ['timeout', '30s', 'env', 'OMP_NUM_THREADS=1', 'MKL_NUM_THREADS=1',
+            'CUDA_VISIBLE_DEVICES=', '.venv/bin/python', '-c', program]
+    run = subprocess.run(args, capture_output=True, text=True, check=False)
+    assert run.returncode == 0, run.stderr
+    save(f'12.2-{label}-execution.json', {'command': shlex.join(args), 'exit_code': run.returncode,
+         'stdout': run.stdout, 'stderr': run.stderr, 'environment': ENV})
+    print(label, run.stdout.strip())
+
+formal_path = ROOT / 'docs/course-experiments/results/real_modal.json'
+proof_path = ROOT / 'docs/course-experiments/student-checks/fsdd-format-and-resampling.json'
+formal = json.loads(formal_path.read_bytes())
+proof = json.loads(proof_path.read_bytes())
+code_path = ROOT / 'scripts/course_experiments/modalities.py'
+code_sha = sha(code_path.read_bytes())
+assert code_sha == formal['code_sha256']['scripts/course_experiments/modalities.py']
+assert code_sha == proof['resampling_code_sha256']
+assert sha(formal_path.read_bytes()) == proof['formal_report_sha256']
+conversions = formal['results']['fsdd']['resampling']
+proof_by_name = {row['source']: row for row in proof['records']}
+assert len(conversions) == len(proof_by_name) == 60
+start = int(datetime.fromisoformat(proof['original_run_metadata']['run_started_at'].replace('Z', '+00:00')).timestamp())
+end = int(datetime.fromisoformat(proof['original_run_metadata']['updated_at'].replace('Z', '+00:00')).timestamp())
+rows = []
+for row in conversions:
+    record = proof_by_name[row['source']]
+    path = ROOT / 'outputs/course-student/real-modal/fsdd-initial/recordings' / row['source']
+    source_bytes = path.read_bytes()
+    assert sha(source_bytes) == row['source_sha256'] == record['source_sha256']
+    source_chunks = chunks(source_bytes)
+    fmt_start, _ = source_chunks['fmt ']
+    header = struct.unpack_from('<HHIIHH', source_bytes, fmt_start)
+    assert header[0] == 1 and header[1] == 1 and header[2] == 8000 and header[5] == 16
+    payload_start, payload_size = source_chunks['data']
+    pcm = np.frombuffer(source_bytes[payload_start:payload_start+payload_size], dtype='<i2')
+    decoded, rate = sf.read(io.BytesIO(source_bytes), dtype='float32')
+    assert rate == 8000 and decoded.ndim == 1
+    assert np.array_equal(decoded, pcm.astype('float32') / 32768)
+    assert sf.info(io.BytesIO(source_bytes)).subtype == 'PCM_16'
+    derived = _resample_8_to_16(decoded)
+    assert len(pcm) == row['samples_before'] and len(derived) == row['samples_after'] == 2 * len(pcm)
+    assert row['source_rate'] == 8000 and row['target_rate'] == 16000
+    buffer = io.BytesIO()
+    sf.write(buffer, derived, 16000, format='WAV', subtype='FLOAT')
+    fresh = buffer.getvalue()
+    rebuilt = bytearray(fresh)
+    rebuilt_chunks = chunks(rebuilt)
+    peak_start, peak_size = rebuilt_chunks['PEAK']
+    assert peak_size >= 8 and struct.unpack_from('<I', rebuilt, peak_start)[0] == 1
+    stamp = record['historical_write_timestamp']
+    assert start <= stamp <= end
+    struct.pack_into('<I', rebuilt, peak_start + 4, stamp)
+    assert sha(rebuilt) == row['derived_sha256'] == record['formal_derived_sha256']
+    data_start, data_size = rebuilt_chunks['data']
+    audio_payload_sha = sha(rebuilt[data_start:data_start+data_size])
+    assert audio_payload_sha == record['audio_payload_sha256']
+    info = sf.info(io.BytesIO(rebuilt))
+    recovered, recovered_rate = sf.read(io.BytesIO(rebuilt), dtype='float32')
+    assert info.subtype == 'FLOAT' and info.channels == 1 and recovered_rate == 16000
+    assert np.array_equal(recovered, derived)
+    index = record['actual_sample']['index_zero_based']
+    actual = {'index_zero_based': index, 'pcm16_value': int(pcm[index]), 'floating_value': float(decoded[index])}
+    assert actual == record['actual_sample']
+    assert len(pcm) / 8000 == len(derived) / 16000 == record['duration_seconds']
+    assert [float(decoded.min()), float(decoded.max()), float(derived.min()), float(derived.max())] == [record['decoded_min'], record['decoded_max'], record['derived_min'], record['derived_max']]
+    rows.append({'source': row['source'],
+        'immutable_public_source': 'https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/' + row['source'],
+        'source_sha256': sha(source_bytes), 'reconstructed_formal_derived_sha256': sha(rebuilt),
+        'audio_payload_sha256': audio_payload_sha, 'source_subtype': 'PCM_16', 'derived_subtype': info.subtype,
+        'channels': info.channels, 'source_rate': rate, 'target_rate': recovered_rate,
+        'samples_before': len(pcm), 'samples_after': len(derived), 'duration_seconds': len(pcm) / rate,
+        'all_pcm_samples_divide_32768_exact': True, 'derived_samples_exactly_match_float_wav': True,
+        'actual_sample': actual, 'decoded_min': float(decoded.min()), 'decoded_max': float(decoded.max()),
+        'derived_min': float(derived.min()), 'derived_max': float(derived.max()),
+        'historical_PEAK_write_timestamp': stamp, 'only_replaced_bytes': 'RIFF PEAK timestamp uint32, 4 bytes'})
+
+# FLOAT 檔另用 >1 的測試值核查不會自行削波；它不是正式資料或品質實驗。
+sentinel = np.array([-2.0, -0.125, 0.5, 2.0], dtype='float32')
+buffer = io.BytesIO()
+sf.write(buffer, sentinel, 16000, format='WAV', subtype='FLOAT')
+readback, _ = sf.read(io.BytesIO(buffer.getvalue()), dtype='float32')
+assert np.array_equal(readback, sentinel)
+splits = formal['results']['fsdd']['data']['splits']
+assert {name: item['count'] for name, item in splits.items()} == {'train':20, 'validation':20, 'test':20}
+assert {r['family'] for item in splits.values() for r in item['records']} == {r['source'] for r in conversions}
+save('12.2-fsdd-execution.json', {'command': COMMAND, 'exit_code': 0, 'environment': ENV,
+    'formal_path': str(formal_path.relative_to(ROOT)), 'formal_sha256': sha(formal_path.read_bytes()),
+    'student_check_path': str(proof_path.relative_to(ROOT)), 'student_check_sha256': sha(proof_path.read_bytes()),
+    'formal_revision': formal['revision'], 'matching_resampling_code_sha256': code_sha,
+    'data_revision': '26eb9aaf76e81b692f806f9140c2d2777410d7a1',
+    'denominators': {'recordings':60, 'original_samples':sum(r['samples_before'] for r in rows),
+        'derived_samples':sum(r['samples_after'] for r in rows), 'train':20, 'validation':20, 'test':20,
+        'formal_seed':formal['seed'], 'cpu_training_updates':0},
+    'result': '60/60 原檔 SHA、PCM16 解碼、FLOAT 重建全檔 SHA 與 payload SHA 全部成立。僅用補充記錄的歷史寫入時間替換新 WAV 的四個 PEAK timestamp bytes。',
+    'amplitude_scope': '核查讀檔至重採樣至 FLOAT 寫檔；kernel.sum 正規化插值權重，不是每段峰值或能量正規化。沒有再次調整振幅或 clamp 波形；不推論原錄音前處理、聲學分貝或模型品質。',
+    'float_no_clipping_sentinel_input': sentinel.tolist(), 'float_no_clipping_sentinel_readback': readback.tolist(),
+    'records': rows})
+print('FSDD',len(rows),'原樣本',sum(r['samples_before'] for r in rows),'全部 SHA 與尺度成立')
+
+n = torch.arange(1600, dtype=torch.float64)
+boundary = torch.sin(2 * torch.pi * 8000 * n / 16000)
+assert float(boundary.abs().max()) < 2e-12
+high = torch.sin(2 * torch.pi * 9000 * n / 16000)
+low = -torch.sin(2 * torch.pi * 7000 * n / 16000)
+assert torch.allclose(high, low, atol=2e-12, rtol=0)
+
+def peak(w):
+    power = torch.stft(w, 400, 160, window=torch.hann_window(400), return_complex=True).abs().square()
+    return power, int(power.mean(-1).argmax())
+
+wave16 = tone(440.0, seconds=0.2)
+power16, bin16 = peak(wave16)
+assert bin16 == 11 and list(power16.shape) == [201,21]
+wave8 = tone(440.0, seconds=0.2, sample_rate=8000)
+power8, bin8 = peak(wave8)
+assert bin8 == 22 and list(power8.shape) == [201,11]
+mel_true = log_mel(wave8, sample_rate=8000)
+mel_wrong = log_mel(wave8, sample_rate=16000)
+assert mel_true.shape == mel_wrong.shape and not torch.equal(mel_true, mel_wrong)
+assert float(torch.fft.rfftfreq(400,d=1/16000)[11]) == 440.0
+wave0 = tone(440.0)
+cycle = [0.5 * np.sin(2 * np.pi * x) for x in [0,.25,.5,.75,1]]
+save('12.2-mechanisms-execution.json', {'command': COMMAND, 'exit_code':0, 'environment': ENV,
+    'result': '邊界正弦在浮點容差內為零，9kHz 混疊為相反相位 7kHz；16kHz 440Hz 第11格，8kHz 440Hz 第22格；錯誤 Hz 換算與 log-mel 設定未觸發形狀錯誤。',
+    'boundary_max_abs':float(boundary.abs().max()), 'aliasing_max_error':float((high-low).abs().max()),
+    'stft_16k':{'samples':len(wave16),'shape':list(power16.shape),'bin':bin16,'correct_Hz':bin16*16000/400,'mislabelled_8k_Hz':bin16*8000/400},
+    'stft_8k':{'samples':len(wave8),'shape':list(power8.shape),'bin':bin8,'correct_Hz':bin8*8000/400,'mislabelled_16k_Hz':bin8*16000/400},
+    'mel_correct_shape':list(mel_true.shape),'mel_wrong_shape':list(mel_wrong.shape),'mel_max_difference':float((mel_true-mel_wrong).abs().max()),
+    '12.1_prerequisite':{'shape':list(wave0.shape),'first_three':[round(x,3) for x in wave0[:3].tolist()],
+                       'cycle_phase':[0,.25,.5,.75,1],'ideal_amplitude':[float(x) for x in cycle]},
+    'scope':'確定合成音與格式機制，只核本節主張與必要前置。沒有實際播放、訓練、正式 GPU 排程或下載。'})
+print('機制',bin16,bin8,'邊界最大殘差',float(boundary.abs().max()))
