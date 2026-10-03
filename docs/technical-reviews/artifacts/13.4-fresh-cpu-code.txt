@@ -1,0 +1,83 @@
+import contextlib,copy,hashlib,io,json,platform,re
+from pathlib import Path
+import torch
+from tiny_perceptron.model import ModelConfig,TinyLM
+from tiny_perceptron.training import load_checkpoint
+from tiny_perceptron.alignment import sequence_log_probability,dpo_loss
+from tiny_perceptron.data import render_chat
+from scripts.course_experiments.common import evaluate_lm
+
+torch.set_num_threads(1)
+root=Path('.')
+art=root/'docs/technical-reviews/artifacts'
+source=(art/'13.4-fresh-raw.txt').read_text()
+fence=re.findall(r'```python\n(.*?)```',source,re.S)[0]
+report={'environment':{'python':platform.python_version(),'torch':torch.__version__,'torch_commit':torch.version.git_version,'device':'cpu','threads':str(torch.get_num_threads()),'OMP_NUM_THREADS':'1','MKL_NUM_THREADS':'1'},'runs':[]}
+for name,text in [('original',fence),('omit_freeze',fence.replace('.eval().requires_grad_(False)','.eval()')),('exercise_alias',fence.replace('copy.deepcopy(policy)','policy'))]:
+ torch.manual_seed(134)
+ ns={}; stream=io.StringIO()
+ with contextlib.redirect_stdout(stream):exec(compile(text,f'13.4-{name}','exec'),ns)
+ policy,reference,before,scores=(ns[k] for k in ('policy','reference','before','scores'))
+ result={'case':name,'source_code':text,'stdout':stream.getvalue(),'policy_is_reference':policy is reference,'grad_enabled_at_scoring':torch.is_grad_enabled(),'policy_all_parameters_trainable':all(p.requires_grad for p in policy.parameters()),'reference_all_parameters_frozen':all(not p.requires_grad for p in reference.parameters()),'all_corresponding_parameters_distinct_storage':all(p.data_ptr()!=q.data_ptr() for p,q in zip(policy.parameters(),reference.parameters())),'snapshot_distinct_storage':before.data_ptr()!=reference.embedding.weight.data_ptr(),'logits_shape':list(scores.shape),'logits_requires_grad':scores.requires_grad,'input_dtype':'torch.int64','reference_training':reference.training}
+ report['runs'].append(result)
+ expected=['參考未跟著改 True\n參考不記梯度 False\n','參考未跟著改 True\n參考不記梯度 True\n','參考未跟著改 False\n參考不記梯度 False\n'][len(report['runs'])-1]
+ assert result['stdout']==expected,result
+
+# 概念輔助：相同起點及重複複製後的相對差距、凍結參考與優化器名單。
+torch.manual_seed(134)
+policy=TinyLM(ModelConfig(width=8)); reference=copy.deepcopy(policy).eval().requires_grad_(False)
+opt=torch.optim.AdamW(policy.parameters(),lr=0.001)
+opt_ids={id(p) for g in opt.param_groups for p in g['params']}
+report['optimizer_reference_parameters_included']=any(id(p) in opt_ids for p in reference.parameters())
+report['toy_arithmetic']={'reference_margin':-4-(-3),'policy_margin':-3-(-3),'relative_margin':(-3-(-3))-(-4-(-3))}
+inputs,labels=render_chat([{'role':'user','content':'3+5=?'},{'role':'assistant','content':'8'}])
+with torch.no_grad():
+ left=sequence_log_probability(policy(inputs[None])['logits'],labels[None]); right=sequence_log_probability(reference(inputs[None])['logits'],labels[None])
+report['initial_same_candidate_logp_difference']=float(left-right)
+# 固定 margin，記錄 beta 在 loss 內而不是優化器學習率中。
+report['beta_loss_at_margin_one']={str(b):float(dpo_loss(torch.tensor([-3.]),torch.tensor([-3.]),torch.tensor([-4.]),torch.tensor([-3.]),beta=b)) for b in (0.1,1.0)}
+
+formal=json.loads((root/'docs/course-experiments/results/dpo.json').read_text()); style=json.loads((root/'docs/course-experiments/results/style.json').read_text()); d=formal['results']; s=style['results']
+row=next(r for r in d['runs']['model']['preference']['validation']['samples'] if r['prompt']=='3+5=?')
+assert abs((row['policy_chosen_logp']-row['policy_rejected_logp'])-row['policy_margin'])<1e-12
+assert abs((row['policy_margin']-row['reference_margin'])-row['relative_margin'])<1e-12
+report['formal_gpu_row']=row
+report['formal_configuration']={k:formal[k] for k in ('revision','device','seed','torch_version','python_version','step_scale','evidence_status')}
+report['formal_configuration']['data']=d['data']
+report['formal_configuration']['runs']={name:{'beta':v['beta'],'training':v['training']} for name,v in d['runs'].items()}
+report['formal_reference']={'state_sha256':d['reference_sha256'],'unchanged':d['reference_unchanged'],'initial_zero_all_validation_test':all(r['relative_margin']==0 for split in ('validation','test') for r in d['before'][split]['samples'])}
+report['formal_base_test']={k:s['content_evaluation']['test'][k] for k in ('records','matches','effective_tokens','samples')}
+
+def digest(state):
+ h=hashlib.sha256()
+ for name,value in sorted(state.items()):
+  h.update(name.encode()); h.update(str(tuple(value.shape)).encode()); h.update(value.detach().cpu().contiguous().numpy().tobytes())
+ return h.hexdigest()
+base,payload=load_checkpoint(root/'checkpoints/course/style/content.pt','cpu'); base.eval()
+pol,polpayload=load_checkpoint(root/'checkpoints/course/dpo/model.pt','cpu'); pol.eval()
+report['existing_weights']={}
+for exp,name,model,checkpoint in [('style','content.pt',base,payload),('dpo','model.pt',pol,polpayload)]:
+ p=root/f'checkpoints/course/{exp}/{name}'
+ report['existing_weights'][f'{exp}/{name}']={'sha256':hashlib.sha256(p.read_bytes()).hexdigest(),'bytes':p.stat().st_size,'config':checkpoint['config'],'parameters':sum(p.numel() for p in model.parameters()),'tensor_count':len(model.state_dict()),'state_sha256':digest(model.state_dict()),'metadata':checkpoint.get('metadata',{}),'step':checkpoint.get('step')}
+assert digest(base.state_dict())==d['reference_sha256']
+with torch.no_grad():
+ scores={}
+ for answer in ('8','9'):
+  x,y=render_chat([{'role':'user','content':'3+5=?'},{'role':'assistant','content':answer}])
+  scores[answer]={'answer_tokens':int((y!=-100).sum()),'base':float(sequence_log_probability(base(x[None])['logits'],y[None])),'policy':float(sequence_log_probability(pol(x[None])['logits'],y[None]))}
+report['cpu_replay_row']={'scores':scores,'reference_margin':scores['8']['base']-scores['9']['base'],'policy_margin':scores['8']['policy']-scores['9']['policy']}
+report['cpu_replay_row']['relative_margin']=report['cpu_replay_row']['policy_margin']-report['cpu_replay_row']['reference_margin']
+records=[{'messages':r['messages']+[{'role':'assistant','content':r['expected']}]} for r in s['content_evaluation']['test']['samples']]
+e=evaluate_lm(base,records,mode='sft',tokens=32)
+report['cpu_base_test']={k:e[k] for k in ('records','matches','exact_match','effective_tokens','samples')}
+assert e['matches']==0 and e['records']==7
+# 七題只作既有公開底座離線推論；正式訓練與GPU排程均未執行。
+(art/'13.4-fresh-cpu.json').write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n')
+print(json.dumps({'cases':[{k:r[k] for k in ('case','stdout','logits_shape','policy_is_reference','all_corresponding_parameters_distinct_storage')} for r in report['runs']],'formal_gpu_row':report['formal_gpu_row'],'cpu_replay_row':report['cpu_replay_row'],'cpu_base_test_matches':e['matches'],'reference_digest':digest(base.state_dict()),'environment':report['environment']},ensure_ascii=False,indent=2))
+
+binding={'environment':report['environment'],'scope':'本人親讀已存在的ignored公開權重；未下載/重訓。保存小份配置、逐tensor shape/dtype/hash/前三個數，並連到immutable公開來源。','weights':{}}
+for key,model in [('style/content.pt',base),('dpo/model.pt',pol)]:
+ exp,filename=key.split('/')
+ revision={'style':'34dedc2292c6fbf0ebe9ff8b217dbef8bb1ca438','dpo':'4b75f786852d6ae706691cd4ed1f15cff9bd905b'}[exp]
+ binding['weights'][key]={**report['existing_weights'][key],'original_url':f'https://huggingface.co/birdhackor/tiny-perceptron-course-models/resolve/{revision}/course/course-v1/{exp}/{filename}','immutable_revision':revision,'tensor_evidence':[{'name':name,'shape':list(t.shape),'dtype':str(t.dtype),'sha256':hashlib.sha256(t.detach().cpu().contiguous().numpy().tobytes()).hexdigest(),'first_three':t.detach().cpu().reshape(-1)[:3].tolist()} for name,t in sorted(model.state_dict().items())]}
+(art/'13.4-fresh-weights-binding.json').write_text(json.dumps(binding,ensure_ascii=False,indent=2)+'\n')
