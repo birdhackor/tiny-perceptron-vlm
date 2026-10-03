@@ -1,0 +1,49 @@
+import json
+import math
+import platform
+
+import torch
+
+from tiny_perceptron.multimodal import tone
+
+torch.set_num_threads(1)
+assert torch.version.cuda is None
+wave = tone()
+frame = wave[:400]
+periodic = torch.hann_window(400)
+symmetric = torch.hann_window(400, periodic=False)
+long_symmetric = torch.hann_window(401, periodic=False)
+rectangle = torch.ones(400)
+frames = wave.unfold(0, 400, 160)
+weighted_frames = frames * periodic
+expected_tail = (1 - math.cos(2 * math.pi * 399 / 400)) / 2
+assert tuple(frame.shape) == (400,)
+assert tuple(frames.shape) == tuple(weighted_frames.shape) == (8, 400)
+assert torch.equal(periodic, long_symmetric[:-1])
+assert symmetric[0].item() == symmetric[-1].item() == 0
+assert torch.equal(frame * rectangle, frame)
+assert abs(periodic[-1].item() - expected_tail) < 5e-8
+assert abs(frame.square().sum().item() - 50) < 1e-4
+assert abs((frame * periodic).square().sum().item() - 18.75) < 1e-4
+float64_n = torch.arange(400, dtype=torch.float64)
+ideal_frame = 0.5 * torch.sin(2 * math.pi * 11 * float64_n / 400)
+ideal_window = (1 - torch.cos(2 * math.pi * float64_n / 400)) / 2
+record = {
+    'environment': {
+        'python': platform.python_version(),
+        'torch': torch.__version__,
+        'torch_git_version': torch.version.git_version,
+        'device': str(frame.device),
+        'dtype': str(frame.dtype),
+        'torch_threads': str(torch.get_num_threads()),
+    },
+    'tone': {'wave_length': wave.numel(), 'frame_length': frame.numel(), 'sample_rate': 16000, 'frequency': 440, 'amplitude': 0.5, 'cycles_in_frame': 11},
+    'periodic': {'start': periodic[0].item(), 'middle': periodic[200].item(), 'last': periodic[-1].item(), 'float64_formula_last': expected_tail, 'equals_symmetric_401_truncated': torch.equal(periodic, long_symmetric[:-1])},
+    'symmetric': {'start': symmetric[0].item(), 'last': symmetric[-1].item()},
+    'energy': {'original_float32': frame.square().sum().item(), 'hann_float32': (frame * periodic).square().sum().item(), 'rectangle_float32': (frame * rectangle).square().sum().item(), 'original_float64_formula': ideal_frame.square().sum().item(), 'hann_float64_formula': (ideal_frame * ideal_window).square().sum().item()},
+    'shape': {'original_frames': list(frames.shape), 'weighted_frames': list(weighted_frames.shape)},
+    'seam_hypothesis': {'unweighted_absolute_jump': abs(0.4 - (-0.3)), 'periodic_weighted_absolute_jump': abs(0.4 * periodic[-1].item() - (-0.3) * periodic[0].item())},
+    'overlap_global_index_399': {'frame0_local_index': 399, 'frame1_local_index': 239, 'frame0_weight': periodic[399].item(), 'frame1_weight': periodic[239].item(), 'same_input_sample': frames[0, 399].item() == frames[1, 239].item()},
+    'scope': '短程離線 CPU 確定性核對，無模型、訓練、資料或 GPU 速度主張。',
+}
+print(json.dumps(record, ensure_ascii=False, indent=2))

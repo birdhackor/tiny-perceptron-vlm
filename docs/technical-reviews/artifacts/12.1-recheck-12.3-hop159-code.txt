@@ -1,0 +1,47 @@
+import hashlib
+import json
+import os
+import platform
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path.cwd()))
+import torch
+from tiny_perceptron.multimodal import tone
+
+torch.set_num_threads(1)
+
+def deny_network(event, args):
+    if event in {'socket.connect', 'socket.connect_ex', 'socket.getaddrinfo', 'subprocess.Popen'}:
+        raise RuntimeError('offline recheck: ' + event)
+
+sys.addaudithook(deny_network)
+wave = tone()
+hop = 159
+size = 400
+frames = wave.unfold(0, size, hop)
+formula_count = (len(wave) - size) // hop + 1
+shared_count = size - hop
+overlap_equal = torch.equal(frames[0, hop:], frames[1, :shared_count])
+assert tuple(frames.shape) == (8, 400)
+assert formula_count == 8 and shared_count == 241 and overlap_equal
+assert (len(wave) - size) // 160 + 1 == 8
+record = {
+    'environment': {'python': platform.python_version(), 'torch': str(torch.__version__),
+                    'torch_git_version': str(torch.version.git_version), 'device': 'cpu',
+                    'OMP_NUM_THREADS': os.environ['OMP_NUM_THREADS'],
+                    'MKL_NUM_THREADS': os.environ['MKL_NUM_THREADS'],
+                    'threads': str(torch.get_num_threads())},
+    'configuration': {'N': len(wave), 'frame_size': size, 'hop': hop, 'sample_rate': 16000},
+    'observed': {'frame_shape': list(frames.shape), 'formula_count': formula_count,
+                 'adjacent_shared_samples': shared_count, 'overlap_values_equal': overlap_equal,
+                 'last_frame_start': (formula_count - 1) * hop,
+                 'last_frame_end_inclusive': (formula_count - 1) * hop + size - 1},
+    'derivation': '完整框起點k*h必須不大於N-size，故k=0至floor((N-size)/h)，框數floor((N-size)/h)+1。N=1600、size=400、h=159時1200//159=7，框數8；共用400-159=241點。固定N>=size、正整數hop，減小hop使實數商增加，但floor可能不變。',
+    'scope': '僅新增12.3 hop159例子作為本人12.1導言所指短框流程的必要支持核對；不重跑未改原例，不給12.3獨立技術判定。',
+    'code_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+    'exit_code': 0,
+}
+path = Path('docs/technical-reviews/artifacts/12.1-recheck-12.3-hop159-execution.json')
+path.write_text(json.dumps(record, ensure_ascii=False, indent=2) + '\n')
+print(json.dumps(record['observed'], ensure_ascii=False))

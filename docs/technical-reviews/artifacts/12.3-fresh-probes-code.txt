@@ -1,0 +1,81 @@
+import json
+import os
+import platform
+from pathlib import Path
+
+import torch
+from torch.nn import functional as F
+
+from tiny_perceptron.multimodal import tone
+
+torch.set_num_threads(1)
+assert torch.version.cuda is None
+assert not torch.cuda.is_available()
+wave = tone()
+frames = wave.unfold(0, 400, 160)
+indices = torch.arange(1600).unfold(0, 400, 160)
+hop_cases = []
+for hop in [400, 160, 159, 150, 80]:
+    indexed = torch.arange(1600).unfold(0, 400, hop)
+    hop_cases.append({"hop": hop, "overlap": max(0, 400 - hop), "shape": list(indexed.shape),
+                      "formula_frames": (1600 - 400) // hop + 1,
+                      "last_start": int(indexed[-1, 0]), "last_end": int(indexed[-1, -1])})
+alias_wave = wave.clone()
+alias_frames = alias_wave.unfold(0, 400, 160)
+before = float(alias_wave[160])
+alias_frames[0, 160] = 3.25
+shared_writes = {"before": before, "original_after": float(alias_wave[160]),
+                 "adjacent_after": float(alias_frames[1, 0]),
+                 "same_storage": alias_frames.untyped_storage().data_ptr() == alias_wave.untyped_storage().data_ptr(),
+                 "frame_stride": list(alias_frames.stride()),
+                 "frame_numel": alias_frames.numel(), "original_numel": alias_wave.numel(),
+                 "storage_nbytes": alias_frames.untyped_storage().nbytes()}
+centered = torch.stft(wave, 400, 160, window=torch.hann_window(400), return_complex=True)
+uncentered = torch.stft(wave, 400, 160, window=torch.hann_window(400), return_complex=True, center=False)
+long_wave = tone(440.0, seconds=0.2)
+long_spec = torch.stft(long_wave, 400, 160, window=torch.hann_window(400), return_complex=True)
+long_power = long_spec.abs().square()
+short_tail_start = int(indices[-1, 0]) + 160
+tail_policy = {"discard_complete_frames": int(indices.shape[0]), "discard_tail_samples": 1600 - int(indices[-1, -1]) - 1,
+               "short_last_start": short_tail_start, "short_last_length": wave[short_tail_start:].numel(),
+               "right_padding": 80, "padded_shape": list(F.pad(wave, (0, 80)).unfold(0, 400, 160).shape)}
+forward = torch.tensor([0.0, 0.0, 1.0, 1.0])
+reverse = forward.flip(0)
+aggregate_order = {"forward": forward.tolist(), "reverse": reverse.tolist(),
+                   "mean_equal": float(forward.mean()) == float(reverse.mean()),
+                   "energy_equal": float(forward.square().sum()) == float(reverse.square().sum()),
+                   "short_frame_means_forward": forward.unfold(0, 2, 2).mean(-1).tolist(),
+                   "short_frame_means_reverse": reverse.unfold(0, 2, 2).mean(-1).tolist()}
+result = {
+    "scope": "有界 CPU 機制核對；無訓練、資料下載或品質／速度外推。",
+    "original_index_ranges": [[int(row[0]), int(row[-1])] for row in indices],
+    "first_second_overlap": sorted(set(indices[0].tolist()) & set(indices[1].tolist())),
+    "overlap_exact_equal": torch.equal(frames[0, 160:], frames[1, :240]),
+    "hop_cases": hop_cases,
+    "counterexample": {"original_hop": 160, "new_hop": 159, "old_overlap": 240, "new_overlap": 241,
+                       "old_frames": len(frames), "new_frames": len(wave.unfold(0, 400, 159))},
+    "shared_writes": shared_writes,
+    "stft": {"samples": wave.numel(), "centered_shape": list(centered.shape), "uncentered_shape": list(uncentered.shape),
+             "centers_samples": [i * 160 for i in range(centered.shape[-1])],
+             "long_samples": long_wave.numel(), "long_shape": list(long_spec.shape),
+             "long_peak_bin": int(long_power.mean(-1).argmax()), "long_peak_hz": int(long_power.mean(-1).argmax()) * 16000 / 400},
+    "tail_policy": tail_policy,
+    "aggregate_order": aggregate_order,
+    "environment": {"python": platform.python_version(), "torch": str(torch.__version__),
+                    "torch_source_commit": str(torch.version.git_version), "device": str(wave.device),
+                    "dtype": str(wave.dtype), "OMP_NUM_THREADS": os.environ["OMP_NUM_THREADS"],
+                    "MKL_NUM_THREADS": os.environ["MKL_NUM_THREADS"]},
+}
+assert result["counterexample"]["old_frames"] == result["counterexample"]["new_frames"] == 8
+assert result["counterexample"]["new_overlap"] > result["counterexample"]["old_overlap"]
+assert shared_writes["same_storage"]
+assert shared_writes["original_after"] == shared_writes["adjacent_after"] == 3.25
+assert result["stft"]["centered_shape"] == [201, 11]
+assert result["stft"]["uncentered_shape"] == [201, 8]
+assert result["stft"]["long_shape"] == [201, 21]
+assert result["stft"]["long_peak_bin"] == 11
+Path("docs/technical-reviews/artifacts/12.3-fresh-probes-result.json").write_text(
+    json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+)
+print(json.dumps({"counterexample": result["counterexample"], "shared_writes": shared_writes,
+                  "stft": result["stft"], "tail_policy": tail_policy}, ensure_ascii=False))
