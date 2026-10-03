@@ -1,0 +1,95 @@
+import contextlib
+import io
+import json
+import platform
+import re
+from pathlib import Path
+
+import torch
+from torch import nn
+
+torch.set_num_threads(1)
+section = Path('docs/technical-reviews/artifacts/4.3-section.md').read_bytes()
+fences = re.findall(rb'```python\n(.*?)```', section, re.S)
+namespace = {}
+original_stdout = io.StringIO()
+with contextlib.redirect_stdout(original_stdout):
+    exec(compile(fences[0], '4.3-original-example', 'exec'), namespace)
+original_x = namespace['x'].clone()
+original_y = namespace['y'].detach().clone()
+row_shift_stdout = io.StringIO()
+with contextlib.redirect_stdout(row_shift_stdout):
+    exec(compile(fences[1], '4.3-original-exercise-row', 'exec'), namespace)
+row_shift_y = namespace['shifted'].detach().clone()
+
+namespace['x'] = original_x.clone()
+single_shift_stdout = io.StringIO()
+with contextlib.redirect_stdout(single_shift_stdout):
+    single_exercise = fences[1].replace(b'x[0, 1] += 100', b'x[0, 1, 0] += 100')
+    exec(compile(single_exercise, '4.3-exercise-single-feature', 'exec'), namespace)
+single_shift_y = namespace['shifted'].detach().clone()
+assert row_shift_stdout.getvalue() == 'True\nTrue\n'
+assert single_shift_stdout.getvalue() == 'True\nFalse\n'
+
+layer = nn.LayerNorm(3)
+mean = original_x.mean(dim=-1, keepdim=True)
+variance = original_x.var(dim=-1, unbiased=False, keepdim=True)
+formula_y = (original_x - mean) / torch.sqrt(variance + layer.eps)
+assert torch.allclose(original_y, formula_y, atol=2e-6)
+assert torch.equal(original_x[0, 1], torch.tensor([10., 20., 30.]))
+assert original_x[0, 1, 0].item() == 10
+assert torch.equal(original_y.mean(dim=-1), original_y.mean(dim=2))
+assert torch.equal(original_y.var(dim=-1, unbiased=False), original_y.var(dim=-1, correction=0))
+assert torch.equal(layer.weight, torch.ones(3))
+assert torch.equal(layer.bias, torch.zeros(3))
+constant = layer(torch.ones(1, 2, 3) * 7).detach()
+assert torch.equal(constant, torch.zeros_like(constant))
+
+affine = nn.LayerNorm(3)
+with torch.no_grad():
+    affine.weight.fill_(2)
+    affine.bias.fill_(1)
+affine_y = affine(original_x).detach()
+assert torch.allclose(affine_y, 2 * original_y + 1, atol=2e-6)
+
+other_sentence = torch.tensor([[[1000., -10., 7.], [200., 7., 9.]]])
+batched_y = layer(torch.cat((original_x, other_sentence), dim=0)).detach()
+assert torch.equal(batched_y[:1], original_y)
+future = original_x.clone()
+future[0, 1, 0] += 100
+per_position = layer(future).detach()
+across_positions = nn.LayerNorm((2, 3))
+cross_before = across_positions(original_x).detach()
+cross_after = across_positions(future).detach()
+assert torch.equal(per_position[0, 0], original_y[0, 0])
+assert not torch.allclose(cross_before[0, 0], cross_after[0, 0])
+loss = layer(original_x).square().sum()
+loss.backward()
+assert layer.weight.requires_grad and layer.bias.requires_grad
+assert layer.weight.grad is not None and layer.bias.grad is not None
+
+def values(tensor):
+    return tensor.detach().tolist()
+
+result = {
+    'environment': {'python': platform.python_version(), 'torch': str(torch.__version__), 'torch_commit': str(torch.version.git_version), 'device': str(original_x.device), 'dtype': str(original_x.dtype), 'threads': str(torch.get_num_threads())},
+    'original_example_stdout': original_stdout.getvalue(),
+    'original_row_shift_exercise_stdout': row_shift_stdout.getvalue(),
+    'single_feature_shift_exercise_stdout': single_shift_stdout.getvalue(),
+    'x_shape': list(original_x.shape), 'row_index': values(original_x[0, 1]), 'scalar_index': original_x[0, 1, 0].item(),
+    'input_means': values(mean), 'input_biased_variances': values(variance), 'input_standard_deviations': values(variance.sqrt()),
+    'eps': layer.eps, 'default_weights': values(layer.weight), 'default_biases': values(layer.bias),
+    'normalized_y': values(original_y), 'output_means': values(original_y.mean(-1)), 'output_biased_variances': values(original_y.var(-1, unbiased=False)),
+    'formula_max_absolute_error': (original_y-formula_y).abs().max().item(),
+    'row_shift_max_absolute_difference': (original_y-row_shift_y).abs().max().item(),
+    'single_shift_y': values(single_shift_y),
+    'constant_input_y': values(constant),
+    'affine_y': values(affine_y), 'affine_means': values(affine_y.mean(-1)), 'affine_biased_variances': values(affine_y.var(-1, unbiased=False)),
+    'extra_sentence_changes_original': not torch.equal(batched_y[:1], original_y),
+    'future_change_alters_position0_per_position': not torch.equal(per_position[0, 0], original_y[0, 0]),
+    'future_change_alters_position0_across_positions': not torch.allclose(cross_before[0, 0], cross_after[0, 0]),
+    'cross_before_position0': values(cross_before[0, 0]), 'cross_after_position0': values(cross_after[0, 0]),
+    'gamma_beta_require_grad': [layer.weight.requires_grad, layer.bias.requires_grad], 'gamma_gradient': values(layer.weight.grad), 'beta_gradient': values(layer.bias.grad),
+    'parameter_updates': 0, 'all_assertions_passed': True
+}
+print(json.dumps(result, ensure_ascii=False, indent=2))

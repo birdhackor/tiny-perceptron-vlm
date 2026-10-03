@@ -1,0 +1,124 @@
+from pathlib import Path
+import contextlib
+import hashlib
+import io
+import json
+import os
+import re
+import sys
+import torch
+
+ROOT = Path(__file__).resolve().parents[3]
+assert os.environ.get('OMP_NUM_THREADS') == '1'
+assert os.environ.get('MKL_NUM_THREADS') == '1'
+assert not torch.cuda.is_available()
+torch.set_num_threads(1)
+
+def guard(event, arguments):
+    if event in {'socket.connect', 'socket.getaddrinfo', 'socket.bind', 'socket.sendto',
+                 'subprocess.Popen', 'os.system', 'os.exec', 'os.posix_spawn'}:
+        raise PermissionError('Offline bounded CPU check forbids network and child processes')
+
+sys.addaudithook(guard)
+
+def read_section(path, lesson):
+    raw = (ROOT / path).read_bytes()
+    headings = list(re.finditer(rb'(?m)^## [^\r\n]+', raw))
+    i = next(i for i, h in enumerate(headings) if h[0].startswith(('## ' + lesson + ' ').encode()))
+    end = headings[i+1].start() if i+1 < len(headings) else len(raw)
+    return raw[headings[i].start():end]
+
+def run(label, code):
+    namespace = {}
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        exec(compile(code, label, 'exec'), namespace)
+    result = {'label': label, 'stdout': output.getvalue(), 'code_sha256': hashlib.sha256(code.encode()).hexdigest()}
+    if 'x' in namespace and 'y' in namespace:
+        result.update(x=namespace['x'].detach().tolist(), y=namespace['y'].detach().tolist(),
+                      gradient=namespace['x'].grad.tolist(), y_sum=namespace['y'].sum().item())
+    return namespace, result
+
+body = (ROOT / 'docs/technical-reviews/artifacts/4.2-section-raw.txt').read_bytes()
+assert body == read_section('course/chapters/04.md', '4.2')
+original = re.search(rb'```python\n(.*?)```', body, re.S)[1].decode()
+exercise = original.replace('correction = 2 * x', 'correction = 0 * x').replace(
+    'torch.tensor([3.0, 3.0])', 'torch.tensor([1.0, 1.0])')
+assert exercise != original
+results = []
+ns, result = run('4.2-zero-correction-exercise', exercise)
+assert torch.equal(ns['y'].detach(), torch.tensor([1., 2.]))
+assert torch.equal(ns['x'].grad, torch.tensor([1., 1.]))
+results.append(result)
+
+x = torch.tensor([1., 2.], requires_grad=True)
+y = x + 2*x
+detached = y.detach()
+assert torch.equal(detached, y)
+assert detached.requires_grad is False and detached.grad_fn is None
+assert y.requires_grad is True and y.grad_fn is not None
+assert y.sum().shape == torch.Size([]) and y.sum().item() == 9.
+y.sum().backward()
+assert torch.equal(x.grad, torch.tensor([3., 3.]))
+assert repr(detached) == 'tensor([3., 6.])'
+equal_results = {
+    'same_shape_same_values': torch.equal(torch.tensor([3., 3.]), x.grad),
+    'different_shape': torch.equal(torch.tensor([[3., 3.]]), x.grad),
+    'different_values': torch.equal(torch.tensor([3., 2.]), x.grad),
+    'different_dtype_same_values': torch.equal(torch.tensor([3, 3]), x.grad),
+    'nan': torch.equal(torch.tensor([float('nan')]), torch.tensor([float('nan')]))
+}
+assert equal_results == {'same_shape_same_values': True, 'different_shape': False,
+                         'different_values': False, 'different_dtype_same_values': True, 'nan': False}
+try:
+    assert False
+except AssertionError:
+    assert_failure = 'AssertionError'
+else:
+    raise RuntimeError('Expected assertion failure was not observed')
+results.append({'label': '4.2-api-conditions', 'x_shape': list(x.shape), 'dtype': str(x.dtype),
+                'scalar_sum': y.sum().item(), 'detached_value': detached.tolist(),
+                'detached_requires_grad': detached.requires_grad, 'detached_grad_fn': str(detached.grad_fn),
+                'original_requires_grad': y.requires_grad, 'repr': repr(detached),
+                'equal_cases': equal_results, 'assert_failure': assert_failure, '__debug__': __debug__})
+
+x = torch.tensor([1., 2.], requires_grad=True)
+y = x + (-x)
+y.sum().backward()
+assert torch.equal(y.detach(), torch.zeros(2)) and torch.equal(x.grad, torch.zeros(2))
+results.append({'label': '4.2-limitation-counterexample', 'branch': 'f(x)=-x',
+                'y': y.detach().tolist(), 'gradient': x.grad.tolist(),
+                'supports': 'identity項仍在代數式中，但分支可抵銷它；殘差不保證非零總梯度或可逆。'})
+
+for path, lesson in [('course/chapters/04.md', '4.1'), ('course/chapters/01.md', '1.10'),
+                     ('course/chapters/03.md', '3.4')]:
+    section = read_section(path, lesson)
+    code = re.search(rb'```python\n(.*?)```', section, re.S)[1].decode()
+    ns, result = run(lesson+'-prerequisite-original', code)
+    result['source_sha256'] = hashlib.sha256(section).hexdigest()
+    if lesson == '4.1':
+        assert torch.allclose(ns['x'].detach(), torch.tensor([[1.,0.,0.],[.1,1.2,.3],[1.2,.4,.6]]))
+        changed = code.replace('ids = torch.tensor([1, 2, 1])', '    p.weight.zero_()\nids = torch.tensor([1, 2, 1])').replace(
+            'assert not torch.equal(x[0], x[2])', 'assert torch.equal(x[0], x[2])')
+    elif lesson == '1.10':
+        assert ns['w'].grad.item() == 24 and ns['loss'].item() == 36
+        changed = code.replace('u = 2 * w', 'u = 3 * w').replace('2 * u.detach().item(), 2', '2 * u.detach().item(), 3').replace(
+            'assert w.grad.item() == 24', 'assert w.grad.item() == 54')
+    else:
+        assert torch.allclose(ns['weights'], torch.tensor([[.7310586, .2689414]]), atol=1e-7)
+        assert torch.allclose(ns['output'], torch.tensor([[7.041645,14.08329,21.124937]]), atol=3e-6)
+        changed = code.replace('[10.0, 20.0, 30.0]', '[20.0, 40.0, 60.0]')
+    results.append(result)
+    ns, result = run(lesson+'-prerequisite-exercise', changed)
+    if lesson == '4.1': assert torch.equal(ns['x'][0], ns['x'][2])
+    elif lesson == '1.10': assert ns['w'].grad.item() == 54 and ns['loss'].item() == 81
+    else:
+        assert torch.allclose(ns['weights'], torch.tensor([[.7310586,.2689414]]), atol=1e-7)
+        assert torch.allclose(ns['output'], torch.tensor([[14.35223,28.70446,43.05669]]), atol=5e-6)
+    results.append(result)
+
+print(json.dumps({'environment': {'python': sys.version, 'torch': torch.__version__,
+                                  'torch_git_version': torch.version.git_version,
+                                  'device': 'cpu', 'OMP_NUM_THREADS': os.environ['OMP_NUM_THREADS'],
+                                  'MKL_NUM_THREADS': os.environ['MKL_NUM_THREADS'], 'network': 'audit guard offline'},
+                  'results': results, 'result': 'all assertions passed'}, ensure_ascii=False, indent=2))
