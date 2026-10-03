@@ -1,0 +1,133 @@
+from pathlib import Path
+import contextlib
+import hashlib
+import io
+import json
+import re
+import sys
+import torch
+
+ROOT = Path(__file__).resolve().parents[3]
+OUT = ROOT / "docs/technical-reviews/artifacts/G.1-replay-output.json"
+CASE_INPUTS = [
+    ("1.1", "course/chapters/01.md"),
+    ("2.1", "course/chapters/02.md"),
+    ("6.1", "course/chapters/06.md"),
+    ("6.7", "course/chapters/06.md"),
+    ("W.3", "course/first-steps.md"),
+    ("2.3", "course/chapters/02.md"),
+    ("2.4", "course/chapters/02.md"),
+]
+
+def section(path, lesson):
+    raw = (ROOT / path).read_bytes()
+    headings = list(re.finditer(rb"(?m)^## ([A-Z\d]+\.\d+) [^\r\n]+", raw))
+    pos = next(i for i, h in enumerate(headings) if h[1].decode() == lesson)
+    end = headings[pos + 1].start() if pos + 1 < len(headings) else len(raw)
+    return raw[headings[pos].start():end]
+
+cases = []
+def run(name, code, check, description):
+    torch.manual_seed(0)
+    ns = {"__name__": "__review_bounded_cpu__"}
+    stdout = io.StringIO()
+    with contextlib.redirect_stdout(stdout):
+        exec(compile(code, name, "exec"), ns)
+    observed = check(ns)
+    cases.append({"name": name, "description": description,
+                  "code_sha256": hashlib.sha256(code.encode()).hexdigest(),
+                  "executed_code": code, "stdout": stdout.getvalue(),
+                  "assertions": "passed", "observed": observed})
+
+sections = []
+codes = {}
+for lesson, path in CASE_INPUTS:
+    raw = section(path, lesson)
+    fences = re.findall(r"```python\n(.*?)```", raw.decode(), re.S)
+    assert len(fences) == 1, (lesson, len(fences))
+    sections.append({"lesson_id": lesson, "source": path + "#" + lesson,
+                     "raw_sha256": hashlib.sha256(raw).hexdigest(),
+                     "raw_utf8": raw.decode(), "python_fence_count": len(fences)})
+    codes[lesson] = fences[0]
+
+def ids_check(ns):
+    assert ns["restored"] == ns["text"]
+    return {"chars": ns["chars"], "ids": ns["ids"], "restored": ns["restored"]}
+run("1.1-original", codes["1.1"], ids_check, "前置原例；字元編號可還原")
+run("1.1-exercise-reverse", codes["1.1"].replace("sorted(set(text))", "sorted(set(text), reverse=True)"), ids_check, "前置練習；編號改變但還原相同")
+
+def embedding_check(ns):
+    x = ns["x"]
+    assert list(x.shape) == [1, 3, 3]
+    return {"shape": list(x.shape), "vectors": x.detach().tolist(),
+            "weight_requires_grad": ns["embedding"].weight.requires_grad}
+run("2.1-original", codes["2.1"], embedding_check, "前置原例；同 ID 查相同列")
+run("2.1-exercise-all-id1", codes["2.1"].replace("[[1, 2, 1]]", "[[1, 1, 1]]"), embedding_check, "前置練習；三格均查 ID1")
+
+def bytes_check(ns):
+    return [{"text": t, "codepoints": len(t), "utf8_bytes": len(t.encode("utf-8"))} for t in ns["texts"]]
+run("6.1-original", codes["6.1"], bytes_check, "前置原例；不同拆法計數不同")
+run("6.1-exercise-cat-emoji", codes["6.1"].replace('["小小貓", "cat", "🙂"]', '["小小貓", "cat", "🙂", "cat🙂"]'), bytes_check, "前置練習第一步；cat🙂 是 4 碼點、7 bytes")
+run("6.1-exercise-cat-chinese", codes["6.1"].replace('["小小貓", "cat", "🙂"]', '["小小貓", "cat", "🙂", "貓🙂"]'), bytes_check, "前置練習第二步；貓🙂 是 2 碼點、7 bytes")
+
+def decode_check(ns):
+    assert list(ns["raw"]) == [232, 178, 147, 240, 159, 153, 130]
+    return {"raw_bytes": list(ns["raw"]), "complete": ns["raw"].decode("utf-8")}
+run("6.7-original", codes["6.7"], decode_check, "前置原例；單 byte 不一定是完整字")
+run("6.7-exercise-3bytes", codes["6.7"].replace("raw[:1]", "raw[:3]"), decode_check, "前置練習第一步；前三 bytes 還原貓")
+run("6.7-exercise-4bytes", codes["6.7"].replace("raw[:1]", "raw[:4]"), decode_check, "前置練習第二步；第四 byte 只開啟 emoji")
+
+def shape_check(ns):
+    scores = ns["scores"]
+    assert list(scores.shape) == [2, 3]
+    return {"shape": list(scores.shape), "per_student": scores.mean(dim=1).tolist(), "per_test": scores.mean(dim=0).tolist()}
+run("W.3-original", codes["W.3"], shape_check, "前置原例；兩列三欄與方向")
+run("W.3-exercise-grade110", codes["W.3"].replace("[60.0, 70.0, 80.0]", "[60.0, 70.0, 110.0]"), shape_check, "前置練習；每人 [80,90]、每考 [70,80,105]")
+
+def linear_check(ns):
+    assert torch.allclose(ns["y"], ns["manual"])
+    return {"weight_shape": list(ns["layer"].weight.shape), "output": ns["y"].detach().tolist()}
+run("2.3-original", codes["2.3"], linear_check, "前置原例；兩套加權配方")
+run("2.3-exercise-weight3", codes["2.3"].replace("[1.0, 0.0, 2.0]", "[1.0, 0.0, 3.0]"), linear_check, "前置練習；第一個輸出增加 4")
+
+def relu_check(ns):
+    assert torch.allclose(ns["linear"], ns["combined"])
+    return {"input": ns["x"].tolist(), "hidden": ns["hidden"].detach().tolist(), "linear": ns["linear"].detach().tolist(), "curved": ns["curved"].detach().tolist()}
+run("2.4-original", codes["2.4"], relu_check, "前置原例；非線性讓輸出成 V")
+run("2.4-exercise-input3", codes["2.4"].replace("[2.0]])", "[3.0]])"), relu_check, "前置練習第一步；最後 ReLU 輸出 3")
+run("2.4-exercise-no-relu", codes["2.4"].replace("[2.0]])", "[3.0]])").replace("b(F.relu(hidden))", "b(hidden)"), relu_check, "前置練習第二步；移除 ReLU 退回全零")
+
+primary = section("course/glossary.md", "G.1")
+assert not re.findall(r"```", primary.decode()), "G.1 沒有自己的程式 fence"
+primary_example = '''from torch import nn
+import torch
+chars = ["狗", "看", "貓"]
+to_id = {char: i for i, char in enumerate(chars)}
+ids = [to_id[char] for char in "貓看狗"]
+embedding = nn.Embedding(3, 2, dtype=torch.float64)
+with torch.no_grad():
+    embedding.weight.copy_(torch.tensor([[0.0, 0.0], [0.0, 0.0], [0.2, -0.1]], dtype=torch.float64))
+vector = embedding(torch.tensor(2))
+restored = "".join(chars[i] for i in ids)
+print(ids, vector.tolist(), restored)
+'''
+def primary_check(ns):
+    assert ns["ids"] == [2, 1, 0]
+    assert ns["vector"].tolist() == [0.2, -0.1]
+    assert ns["restored"] == "貓看狗"
+    return {"ids": ns["ids"], "embedding_id2": ns["vector"].tolist(), "restored": ns["restored"]}
+run("G.1-own-numeric-check", primary_example, primary_check, "審閱者將正文指定約定轉為有界 CPU 核對；不是原文 fence")
+run("G.1-textual-exercise", 'identifier = 2\nvector = [0.2, -0.1]\nassert isinstance(identifier, int)\nassert len(vector) == 2\nprint("ID:", identifier, "向量:", vector)\n', lambda ns: {"id": ns["identifier"], "vector": ns["vector"]}, "本節文字練習：2 是 ID，[0.2,-0.1] 是查回向量；不測學習效果")
+
+output = {"reviewer_task": "/root/technical_round_coordinator/technical_g_1_fresh",
+          "environment": {"python": sys.version, "torch": torch.__version__, "torch_git_version": torch.version.git_version,
+                          "device": "cpu", "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1", "torch_threads": str(torch.get_num_threads())},
+          "primary_source_sha256": hashlib.sha256(primary).hexdigest(),
+          "primary_python_fence_count": 0,
+          "primary_exercise_kind": "文字問題；無可直接執行的原文 fence",
+          "navigation_targets": [{"target": s["source"], "exists": True} for s in sections],
+          "prerequisite_sections": sections,
+          "cases": cases,
+          "result": "19 個互不共用 namespace 的有界 CPU 原例／練習核對完成；所有 assert 通過；未量測真人學習效果"}
+OUT.write_text(json.dumps(output, ensure_ascii=False, indent=2) + "\n")
+print(json.dumps({"cases": len(cases), "result": output["result"], "primary_source_sha256": output["primary_source_sha256"]}, ensure_ascii=False))
