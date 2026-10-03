@@ -1,0 +1,59 @@
+import contextlib
+import io
+import json
+import platform
+import re
+from pathlib import Path
+
+import torch
+from torch.nn import functional as F
+
+base = Path('docs/technical-reviews/artifacts')
+
+def block(name):
+    raw = (base / name).read_bytes().decode('utf-8')
+    return re.search(r'```python\n(.*?)```', raw, re.S).group(1)
+
+def run(code, expect_assertion=False):
+    namespace = {}
+    output = io.StringIO()
+    failed = False
+    with contextlib.redirect_stdout(output):
+        try:
+            exec(compile(code, '<literal-course-block>', 'exec'), namespace)
+        except AssertionError:
+            failed = True
+    assert failed == expect_assertion
+    return namespace, {'stdout': output.getvalue(), 'assertion_failed': failed}
+
+record = {'environment': {'python': platform.python_version(), 'torch': str(torch.__version__), 'torch_commit': str(torch.version.git_version), 'device': 'cpu', 'OMP_NUM_THREADS': '1', 'MKL_NUM_THREADS': '1'}}
+code = block('3.6-source-raw.txt')
+n, record['original_repeat'] = run(code)
+expected_weights = torch.tensor([[1., 0., 0., 0.], [.5, .5, 0., 0.], [1/3, 1/3, 1/3, 0.], [.25, .25, .25, .25]])
+expected_out = torch.tensor([[1., 10.], [1.5, 15.], [2., 20.], [2.5, 25.]])
+assert torch.allclose(n['weights'][0,0], expected_weights)
+assert torch.allclose(n['out'][0,0], expected_out)
+assert torch.equal(n['v'], torch.tensor([[[[1.,10.],[2.,20.],[3.,30.],[4.,40.]]]]))
+assert n['v'].data_ptr() != n['changed'].data_ptr()
+record['original_details'] = {'q_shape': list(n['q'].shape), 'q_dtype': str(n['q'].dtype), 'allowed_shape': list(n['allowed'].shape), 'allowed_dtype': str(n['allowed'].dtype), 'allowed': n['allowed'][0,0].tolist(), 'weights': n['weights'][0,0].tolist(), 'out': n['out'][0,0].tolist(), 'changed_out': n['other'][0,0].tolist(), 'output_delta': (n['other']-n['out'])[0,0].tolist(), 'clone_preserved_original': True, 'allclose_front_three': bool(torch.allclose(n['out'][:,:,:3], n['other'][:,:,:3]))}
+assert code.count('.tril()') == 1
+e, record['exercise'] = run(code.replace('.tril()', ''), expect_assertion=True)
+assert torch.equal(e['weights'], torch.full((1,1,4,4), .25))
+assert torch.equal(e['other']-e['out'], torch.full((1,1,4,2),25.))
+record['exercise_details'] = {'only_edit': 'remove .tril()', 'allowed': e['allowed'][0,0].tolist(), 'weights': e['weights'][0,0].tolist(), 'out': e['out'][0,0].tolist(), 'changed_out': e['other'][0,0].tolist(), 'output_delta': (e['other']-e['out'])[0,0].tolist(), 'expected_assertion_error': True}
+record['softmax_special_values'] = {'exp_negative_infinity': torch.tensor(float('-inf')).exp().item(), 'mixed_row': torch.tensor([0., float('-inf')]).softmax(dim=-1).tolist(), 'all_negative_infinity_nan': torch.isnan(torch.full((2,),float('-inf')).softmax(dim=-1)).tolist()}
+assert record['softmax_special_values']['exp_negative_infinity'] == 0.
+assert record['softmax_special_values']['mixed_row'] == [1.,0.]
+record['prerequisites'] = {}
+for lesson in ['1.3','1.7','3.4']:
+    p, result = run(block('3.6-prerequisite-'+lesson+'-raw.txt'))
+    record['prerequisites'][lesson] = result
+p13,_=run(block('3.6-prerequisite-1.3-raw.txt').replace('貓看狗。','鳥飛。').replace('== 3','== 2'))
+assert list(zip(p13['x'],p13['y'])) == [('鳥','飛'),('飛','。')]
+p17,_=run(block('3.6-prerequisite-1.7-raw.txt').replace('[1.0, 2.0, -1.0]','[3.0, 2.0, -1.0]'))
+assert torch.allclose(p17['p'],torch.tensor([.7214,.2654,.0132]),atol=5e-5,rtol=0.)
+p34,_=run(block('3.6-prerequisite-3.4-raw.txt').replace('[10.0, 20.0, 30.0]','[20.0, 40.0, 60.0]'))
+record['prerequisite_exercises']={'1.3_pairs':list(zip(p13['x'],p13['y'])),'1.7_probabilities':p17['p'].tolist(),'3.4_output':p34['output'].tolist()}
+record['loss_illustration'] = {'one_fixed_target_class': 1, 'logits': [0.,20.,0.], 'cross_entropy': F.cross_entropy(torch.tensor([[0.,20.,0.]],dtype=torch.float64),torch.tensor([1])).item(), 'scope': '固定 logits 的代價算例；沒有模型訓練、品質測量或生成實測'}
+record['result'] = '全部原例數值、clone、不受未來 V 影響的檢查成功；練習只移除 tril，原 assertion 如預期失敗；其餘查核 assertion 全部成功。'
+print(json.dumps(record,ensure_ascii=False,indent=2))

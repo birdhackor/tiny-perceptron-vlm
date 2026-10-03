@@ -1,0 +1,82 @@
+import json
+import platform
+import torch
+from tiny_perceptron.attention import CausalAttention, attention_mask, manual_attention
+
+torch.set_num_threads(1)
+report = {"environment": {"python": platform.python_version(), "torch": torch.__version__, "torch_commit": torch.version.git_version, "device": "cpu", "dtype": "torch.float32", "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"}}
+
+def fresh(heads):
+    torch.manual_seed(42)
+    layer = CausalAttention(width=8, heads=heads)
+    x = torch.randn(1, 4, 8)
+    out, cache = layer(x)
+    return layer, x, out, cache
+
+layer, x, out, cache = fresh(2)
+other_layer, other_x, other_out, other_cache = fresh(2)
+report["seed"] = {"weights_equal": all(torch.equal(a, b) for a, b in zip(layer.parameters(), other_layer.parameters())), "inputs_equal": torch.equal(x, other_x), "outputs_equal": torch.equal(out, other_out)}
+assert all(report["seed"].values())
+
+q = layer.q(x).view(1, 4, 2, 4).transpose(1, 2)
+k = layer.k(x).view(1, 4, 2, 4).transpose(1, 2)
+v = layer.v(x).view(1, 4, 2, 4).transpose(1, 2)
+allowed = attention_mask(torch.arange(4), torch.arange(4))
+per_head, weights = manual_attention(q, k, v, allowed)
+merged = per_head.transpose(1, 2).contiguous().view(1, 4, 8)
+manual_out = layer.out(merged)
+report["two_heads"] = {"qkv_shapes": [list(a.shape) for a in (q, k, v)], "weights_shape": list(weights.shape), "weights": weights.detach().tolist(), "head_output_shape": list(per_head.shape), "merged_shape": list(merged.shape), "output_shape": list(out.shape), "cache_k_matches_projected_k": torch.equal(cache[0], k), "cache_v_matches_projected_v": torch.equal(cache[1], v), "all_projections_trainable": all(p.requires_grad for p in layer.parameters()), "projection_shapes": {name: list(getattr(layer, name).weight.shape) for name in ("q", "k", "v", "out")}, "biases_none": all(getattr(layer, name).bias is None for name in ("q", "k", "v", "out")), "reconstruction_max_abs": (manual_out-out).abs().max().item(), "causal_forbidden_max_abs": weights.masked_select(~allowed).abs().max().item(), "row_sum_max_abs": (weights.sum(-1)-1).abs().max().item()}
+assert torch.equal(manual_out, out)
+assert torch.equal(cache[0], k) and torch.equal(cache[1], v)
+assert weights.shape == (1, 2, 4, 4)
+assert report["two_heads"]["causal_forbidden_max_abs"] == 0
+assert torch.allclose(weights.sum(-1), torch.ones(1, 2, 4))
+
+changed = x.clone()
+changed[:, 3] += 100
+changed_out, _ = layer(changed)
+report["causal_input_counterexample"] = {"prefix_max_abs_change": (changed_out[:, :3]-out[:, :3]).abs().max().item(), "last_position_max_abs_change": (changed_out[:, 3]-out[:, 3]).abs().max().item()}
+assert torch.equal(changed_out[:, :3], out[:, :3])
+assert report["causal_input_counterexample"]["last_position_max_abs_change"] > 0
+
+prefix_out, prefix_cache = layer(x[:, :3])
+last_out, grown_cache = layer(x[:, 3:], cache=prefix_cache)
+report["cache_reuse"] = {"prefix_k_shape": list(prefix_cache[0].shape), "grown_k_shape": list(grown_cache[0].shape), "last_output_max_abs_difference": (last_out-out[:, 3:]).abs().max().item(), "k_max_abs_difference": (grown_cache[0]-cache[0]).abs().max().item(), "v_max_abs_difference": (grown_cache[1]-cache[1]).abs().max().item()}
+assert torch.allclose(last_out, out[:, 3:], atol=1e-6, rtol=1e-5)
+assert torch.allclose(grown_cache[0], cache[0], atol=1e-6, rtol=1e-5)
+assert torch.allclose(grown_cache[1], cache[1], atol=1e-6, rtol=1e-5)
+
+sequence = torch.arange(1, 33).view(1, 4, 8)
+grouped = sequence.view(1, 4, 2, 4)
+split = grouped.transpose(1, 2)
+restored = split.transpose(1, 2).contiguous().view(1, 4, 8)
+report["axis_example"] = {"original_shape": list(sequence.shape), "grouped_shape": list(grouped.shape), "split_shape": list(split.shape), "head0": split[0, 0].tolist(), "head1": split[0, 1].tolist(), "restored_equal": torch.equal(restored, sequence), "concatenation_equal": torch.equal(torch.cat((split[:, 0], split[:, 1]), dim=-1), sequence)}
+assert report["axis_example"]["head0"][0] == [1, 2, 3, 4]
+assert report["axis_example"]["head1"][0] == [5, 6, 7, 8]
+assert report["axis_example"]["restored_equal"] and report["axis_example"]["concatenation_equal"]
+
+four, four_x, four_out, four_cache = fresh(4)
+report["four_heads"] = {"head_dim": four.head_dim, "output_shape": list(four_out.shape), "k_shape": list(four_cache[0].shape), "initial_weights_equal_to_two_heads": all(torch.equal(a,b) for a,b in zip(layer.parameters(),four.parameters())), "input_equal_to_two_heads": torch.equal(x,four_x), "output_max_abs_difference": (out-four_out).abs().max().item()}
+assert four.head_dim == 2
+assert tuple(four_out.shape) == (1,4,8) and tuple(four_cache[0].shape) == (1,4,4,2)
+try:
+    CausalAttention(width=8, heads=3)
+except ValueError as error:
+    report["nondivisible"] = {"exception": type(error).__name__, "message": str(error)}
+else:
+    raise AssertionError("Expected rejection of width=8, heads=3")
+
+# 必要前置圖中的算例，只驗證本節依賴的匹配、混合與因果比例。
+pq = torch.tensor([[1.0,0.0]])
+pk = torch.tensor([[1.0,0.0],[0.0,1.0]])
+pv = torch.tensor([[10.0,20.0,30.0],[-1.0,-2.0,-3.0]])
+pw = (pq @ pk.T).softmax(-1)
+po = pw @ pv
+report["prerequisite_3_4_figure"] = {"weights": pw.tolist(), "output": po.tolist()}
+assert torch.allclose(po, torch.tensor([[7.042,14.083,21.125]]), atol=0.0005, rtol=0)
+cq = torch.zeros(1,1,4,2)
+cv = torch.tensor([[[[1.0,10.0],[2.0,20.0],[3.0,30.0],[4.0,40.0]]]])
+co,cw = manual_attention(cq,cq,cv,allowed)
+report["prerequisite_3_6_figure"] = {"weights": cw[0,0].tolist(), "output": co[0,0].tolist()}
+assert torch.allclose(co[0,0], torch.tensor([[1,10],[1.5,15],[2,20],[2.5,25]]))
+print(json.dumps(report,ensure_ascii=False,indent=2))

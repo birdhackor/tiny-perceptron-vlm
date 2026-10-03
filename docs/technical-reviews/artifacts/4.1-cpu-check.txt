@@ -1,0 +1,110 @@
+from pathlib import Path
+import contextlib
+import hashlib
+import io
+import json
+import re
+import sys
+import torch
+from tiny_perceptron.model import ModelConfig, TinyLM
+
+ROOT = Path.cwd()
+OUT = ROOT / "docs/technical-reviews/artifacts"
+
+def section(path, lesson):
+    raw = (ROOT / path).read_bytes()
+    heads = list(re.finditer(rb"(?m)^## ([A-Z\d]+\.\d+) [^\r\n]+", raw))
+    i = next(i for i, h in enumerate(heads) if h[1].decode() == lesson)
+    end = heads[i + 1].start() if i + 1 < len(heads) else len(raw)
+    return raw[:heads[0].start()], raw[heads[i].start():end]
+
+def code_of(raw):
+    return re.search(rb"```python\n(.*?)```", raw, re.S)[1].decode()
+
+def run(name, code, expected_error=None):
+    ns = {}
+    buf = io.StringIO()
+    error = None
+    with contextlib.redirect_stdout(buf):
+        try:
+            exec(compile(code, name, "exec"), ns)
+        except Exception as exc:
+            error = {"type": type(exc).__name__, "message": str(exc)}
+    if expected_error is None:
+        assert error is None, error
+    else:
+        assert error and error["type"] == expected_error, error
+    return ns, {"name": name, "stdout": buf.getvalue(), "error": error}
+
+intro, raw = section("course/chapters/04.md", "4.1")
+(OUT / "4.1-section.txt").write_bytes(raw)
+(OUT / "4.1-intro.txt").write_bytes(intro)
+code = code_of(raw)
+exercise = code.replace("ids = torch.tensor", "    p.weight.zero_()\nids = torch.tensor", 1)
+exercise = exercise.replace("assert not torch.equal", "assert torch.equal", 1)
+(OUT / "4.1-original-code.txt").write_text(code)
+(OUT / "4.1-exercise-code.txt").write_text(exercise)
+records = []
+ns, record = run("4.1 original", code)
+assert ns["positions"].tolist() == [0, 1, 2]
+assert ns["positions"].dtype == torch.int64
+expected = torch.tensor([[1., 0., 0.], [.1, 1.2, .3], [1.2, .4, .6]])
+assert torch.allclose(ns["x"], expected, rtol=0, atol=1e-7)
+record["before_backward"] = {"e_grad": str(ns["e"].weight.grad), "p_grad": str(ns["p"].weight.grad)}
+record["shape"] = list(ns["x"].shape)
+record["dtype"] = str(ns["x"].dtype)
+record["grad_fn"] = type(ns["x"].grad_fn).__name__
+record["values"] = ns["x"].detach().tolist()
+assert ns["e"].weight.grad is None and ns["p"].weight.grad is None
+ns["x"].sum().backward()
+record["additional_sum_backward"] = {"e_grad": ns["e"].weight.grad.tolist(), "p_grad": ns["p"].weight.grad.tolist()}
+assert torch.equal(ns["e"].weight.grad[1], torch.tensor([2., 2., 2.]))
+assert torch.equal(ns["p"].weight.grad[:3], torch.ones(3, 3))
+records.append(record)
+ex, record = run("4.1 exercise", exercise)
+assert torch.equal(ex["x"], ex["e"](ex["ids"]))
+assert torch.equal(ex["e"].weight, ns["e"].weight)
+assert torch.count_nonzero(ex["p"].weight).item() == 0
+record["values"] = ex["x"].detach().tolist()
+record["word_table_unchanged"] = True
+records.append(record)
+_, record = run("position 5 out of range", "import torch\nfrom torch import nn\np=nn.Embedding(5,3)\np(torch.tensor([5]))", "IndexError")
+records.append(record)
+_, record = run("incompatible width 3 versus 2", "import torch\nfrom torch import nn\ne=nn.Embedding(4,3)\np=nn.Embedding(5,2)\ne(torch.tensor([1,2,1]))+p(torch.arange(3))", "RuntimeError")
+records.append(record)
+_, record = run("zero_ without no_grad", "from torch import nn\np=nn.Embedding(5,3)\np.weight.zero_()", "RuntimeError")
+records.append(record)
+for lesson, path in [("2.1", "course/chapters/02.md"), ("3.6", "course/chapters/03.md"), ("2.3", "course/chapters/02.md"), ("1.12", "course/chapters/01.md")]:
+    _, prerequisite = section(path, lesson)
+    (OUT / f"4.1-prerequisite-{lesson}.txt").write_bytes(prerequisite)
+    pcode = code_of(prerequisite)
+    _, record = run(f"prerequisite {lesson} original", pcode)
+    records.append(record)
+    if lesson == "2.1":
+        modified = pcode.replace("[[1, 2, 1]]", "[[1, 1, 1]]")
+    elif lesson == "3.6":
+        modified = pcode.replace(".tril()", "")
+    elif lesson == "2.3":
+        modified = pcode.replace("[1.0, 0.0, 2.0]", "[1.0, 0.0, 3.0]")
+    else:
+        modified = pcode.replace("0.1 * w.grad", "0.6 * w.grad")
+    _, record = run(f"prerequisite {lesson} exercise", modified, "AssertionError" if lesson == "3.6" else None)
+    records.append(record)
+    if lesson == "1.12":
+        _, record = run("prerequisite 1.12 step 2 counterexample", pcode.replace("0.1 * w.grad", "2 * w.grad"), "AssertionError")
+        records.append(record)
+torch.manual_seed(4101)
+model = TinyLM(ModelConfig(vocab_size=4, width=4, layers=2, max_length=5))
+ids = torch.tensor([[1, 2, 1]])
+logits = model(ids)["logits"]
+loss = torch.nn.functional.cross_entropy(logits.reshape(-1, 4), torch.tensor([2, 1, 3]))
+loss.backward()
+assert torch.isfinite(logits).all()
+assert model.position.weight.grad is not None and model.embedding.weight.grad is not None
+assert torch.count_nonzero(model.position.weight.grad[:3]).item() > 0
+records.append({"name": "intro bounded TinyLM forward/backward; no updates", "config": model.description(), "ids": ids.tolist(), "labels": [2, 1, 3], "logits_shape": list(logits.shape), "loss": loss.item(), "finite_logits": True, "position_gradient_nonzero": True, "embedding_gradient_nonzero": bool(torch.count_nonzero(model.embedding.weight.grad).item()), "optimizer_updates": 0})
+_, record = run("TinyLM length guard", "import torch\nfrom tiny_perceptron.model import TinyLM, ModelConfig\nm=TinyLM(ModelConfig(vocab_size=4,width=4,max_length=5))\nm(torch.ones(1,6,dtype=torch.long))", "ValueError")
+records.append(record)
+result = {"reviewer_task": "/root/technical_round_coordinator/technical_4_1_fresh", "source_sha256": hashlib.sha256(raw).hexdigest(), "intro_sha256": hashlib.sha256(intro).hexdigest(), "command": "OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1 TRANSFORMERS_OFFLINE=1 CUDA_VISIBLE_DEVICES='' .venv/bin/python docs/technical-reviews/artifacts/4.1-cpu-check.txt", "result": "所有預期成功及預期失敗檢查均成立；無訓練排程，無下載資料，無參數更新（1.12 的原例與練習各一次純量更新除外）。", "environment": {"python": sys.version, "torch": torch.__version__, "torch_git_version": torch.version.git_version, "device": "cpu", "dtype": "torch.float32", "threads": str(torch.get_num_threads()), "cuda_available": str(torch.cuda.is_available())}, "records": records}
+(OUT / "4.1-cpu-results.json").write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n")
+print(json.dumps(result, ensure_ascii=False, indent=2))

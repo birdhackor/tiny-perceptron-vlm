@@ -1,0 +1,45 @@
+import contextlib, hashlib, io, json, math, os, re, sys
+from pathlib import Path
+import torch
+
+torch.set_num_threads(1)
+out=Path("docs/technical-reviews/artifacts")
+results=[]
+for section in ["3.1","3.5"]:
+    raw=(out/f"3.2-recheck-prerequisite-{section}-raw.txt").read_bytes()
+    fences=re.findall(rb"```python\n(.*?)```",raw,re.S)
+    namespace={}
+    captured=io.StringIO()
+    with contextlib.redirect_stdout(captured):
+        for fence in fences:exec(compile(fence.decode(),f"current-prerequisite-{section}","exec"),namespace)
+    item={"section":section,"raw_sha256":hashlib.sha256(raw).hexdigest(),"original_stdout":captured.getvalue(),"python_fences_executed":len(fences)}
+    if section=="3.1":
+        values=namespace["values"]
+        swapped=torch.tensor([0.1,0.9]) @ values
+        assert torch.allclose(swapped,torch.tensor([0.2,3.6]))
+        new_contributions=torch.tensor([0.9,0.1],dtype=torch.float64)*torch.tensor([1.0,100.0],dtype=torch.float64)
+        assert torch.allclose(new_contributions,torch.tensor([0.9,10.0],dtype=torch.float64),atol=1e-12,rtol=0.0)
+        assert new_contributions[1] > new_contributions[0]
+        item.update({"exercise_swapped_weights_output":swapped.tolist(),"new_numeric_example":{"weights":[0.9,0.1],"single_column_values":[1.0,100.0],"weighted_values":new_contributions.tolist(),"lower_weight_larger_weighted_value":True}})
+    else:
+        torch.manual_seed(42)
+        exercise=[]
+        for d in [4,64]:
+            q=torch.randn(1000,d)
+            k=torch.randn(1000,d)
+            base=(q*k).sum(-1)
+            multiplied=((q*2)*(k*2)).sum(-1)
+            assert torch.allclose(multiplied,base*4)
+            scaled=base/math.sqrt(d)
+            multiplied_scaled=multiplied/math.sqrt(d)
+            assert math.isclose(multiplied.std().item(),base.std().item()*4,rel_tol=1e-7)
+            assert math.isclose(multiplied_scaled.std().item(),scaled.std().item()*4,rel_tol=1e-7)
+            exercise.append({"d":d,"pairs":1000,"seed":42,"base_std":base.std().item(),"scaled_std":scaled.std().item(),"both_q_k_times_2_std":multiplied.std().item(),"both_q_k_times_2_scaled_std":multiplied_scaled.std().item()})
+        tied_scores=torch.tensor([0.0,5.0,5.0,5.0],dtype=torch.float64)
+        tied_weights=tied_scores.softmax(0)
+        assert tied_weights[1]==tied_weights[2]==tied_weights[3]
+        assert tied_weights[1]>tied_weights[0]
+        assert torch.allclose(tied_weights,(tied_scores+100).softmax(0),atol=1e-12,rtol=0)
+        item.update({"scale_exercise":exercise,"new_tie_boundary_example":{"scores":tied_scores.tolist(),"weights":tied_weights.tolist(),"highest_count":3,"three_highest_share_equal_weight":True,"common_shift_keeps_weights":True}})
+    results.append(item)
+print(json.dumps({"reviewer_task":"/root/technical_round_coordinator/technical_3_2_fresh","environment":{"python":sys.version,"torch":torch.__version__,"torch_git_version":torch.version.git_version,"device":"cpu","OMP_NUM_THREADS":os.environ.get("OMP_NUM_THREADS"),"MKL_NUM_THREADS":os.environ.get("MKL_NUM_THREADS"),"num_threads":str(torch.get_num_threads())},"results":results,"all_assertions":"passed","scope":"只核對本次更新前置的原例、短練習、新增數值與並列邊界，無訓練、無GPU或雲端；不把權重當作value數值貢獻，也不將尺度例外推到已訓練模型。"},ensure_ascii=False,indent=2))

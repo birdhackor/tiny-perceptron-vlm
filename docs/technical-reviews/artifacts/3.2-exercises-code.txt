@@ -1,0 +1,53 @@
+import json, math, os, sys
+import torch
+
+torch.set_num_threads(1)
+base_keys = torch.tensor([[1.0,0.0],[0.0,1.0],[-1.0,0.0]])
+q = torch.tensor([0.0,1.0])
+
+def record(label, q, keys):
+    scores = q @ keys.T
+    weights = scores.softmax(dim=0)
+    expected = torch.tensor([math.exp(float(x)) for x in scores.tolist()], dtype=torch.float64)
+    expected /= expected.sum()
+    assert torch.allclose(weights.double(), expected, atol=1e-7, rtol=0.0)
+    assert torch.all(weights > 0)
+    assert abs(weights.sum().item() - 1.0) < 1e-6
+    return {"case":label,"q":q.tolist(),"keys":keys.tolist(),"q_shape":list(q.shape),"keys_T_shape":list(keys.T.shape),"scores_shape":list(scores.shape),"scores":scores.tolist(),"weights":weights.tolist(),"weights_sum":weights.sum().item(),"float64_formula_weights":expected.tolist(),"device":str(scores.device),"dtype":str(scores.dtype)}
+
+exercise1=record("exercise_1_q_changed",q,base_keys)
+assert exercise1["scores"] == [0.0,1.0,0.0]
+assert exercise1["weights"][1] > exercise1["weights"][0] == exercise1["weights"][2]
+changed_keys = base_keys.clone()
+changed_keys[-1] = torch.tensor([-1.0,1.0])
+exercise2=record("exercise_2_last_key_changed",q,changed_keys)
+assert exercise2["scores"] == [0.0,1.0,1.0]
+assert exercise2["weights"][1] == exercise2["weights"][2]
+assert abs(exercise2["weights"][1] - 0.4223187982515182) < 1e-7
+
+length_keys=base_keys.clone()
+length_keys[0] = torch.tensor([2.0,0.0])
+length=record("body_length_example",torch.tensor([1.0,0.0]),length_keys)
+assert length["scores"] == [2.0,0.0,-1.0]
+
+base_scores=torch.tensor([1.0,0.0,-1.0])
+concentration={"base":base_scores.softmax(0).tolist(),"large_gap":(base_scores*10).softmax(0).tolist(),"common_shift":(base_scores+100).softmax(0).tolist()}
+assert torch.allclose(base_scores.softmax(0),(base_scores+100).softmax(0))
+assert concentration["large_gap"][0] > concentration["base"][0]
+
+from tiny_perceptron.attention import manual_attention
+qq=torch.zeros(1,1,4,2)
+kk=torch.zeros_like(qq)
+vv=torch.tensor([[[[1.0,10.0],[2.0,20.0],[3.0,30.0],[4.0,40.0]]]])
+allowed=torch.ones(4,4,dtype=torch.bool).tril()[None,None]
+out,attention_weights=manual_attention(qq,kk,vv,allowed)
+changed=vv.clone();changed[:,:,3]+=100
+other,_=manual_attention(qq,kk,changed,allowed)
+assert torch.allclose(out[:,:,:3],other[:,:,:3])
+all_allowed=torch.ones_like(allowed)
+unmasked,_=manual_attention(qq,kk,vv,all_allowed)
+unmasked_changed,_=manual_attention(qq,kk,changed,all_allowed)
+assert not torch.allclose(unmasked[:,:,:3],unmasked_changed[:,:,:3])
+
+result={"environment":{"python":sys.version,"torch":torch.__version__,"torch_git_version":torch.version.git_version,"device":"cpu","dtype":"torch.float32","OMP_NUM_THREADS":os.environ.get("OMP_NUM_THREADS"),"MKL_NUM_THREADS":os.environ.get("MKL_NUM_THREADS"),"num_threads":str(torch.get_num_threads())},"exercises":[exercise1,exercise2],"length_example":length,"scale_boundary":concentration,"prerequisite_causal_check":{"weights":attention_weights[0,0].tolist(),"out":out[0,0].tolist(),"future_change_keeps_first_three":True,"removing_mask_changes_first_three":True},"all_assertions":"passed","scope":"本節兩步練習、長度反例與必要前置遮罩的短CPU機制核對；不支持訓練品質、GPU速度或正式實測。"}
+print(json.dumps(result,ensure_ascii=False,indent=2))

@@ -1,0 +1,41 @@
+獨立技術核對筆記；實際讀取日 2026-10-03。
+審閱者 /root/technical_round_coordinator/technical_3_6_fresh。
+
+原始論文
+Attention Is All You Need，arXiv:1706.03762v7，修訂日 2023-08-02。
+PDF https://arxiv.org/pdf/1706.03762v7
+下載原始 PDF SHA-256 bdfaa68d8984f0dc02beaca527b76f207d99b666d31d1da728ee0728182df697。
+親讀下載 PDF 轉出的 text，核對 PDF 印刷頁2–5：§3 的逐步生成設定；§3.1（頁3）的輸出嵌入位移一格與遮罩；§3.2（頁3–4）的 query/key/value 定義；§3.2.1（頁4）式(1)；§3.2.3（頁5）的 decoder causal connections。
+我的核對：每個 decoder 輸入位置能用目前及較早位置，禁止較晚位置。由於 decoder 輸入與欲預測符號相差一格，允许讀自己的輸入不等於讀該位置的答案。論文描述非法連結的 softmax 輸入設為負無限，之後以權重混合 V。式(1) 有 1/sqrt(dk) 縮放；本節 q=k=0，是否縮放不影響分數0或平均值。3.4 的直接前置刻意用未縮放的 dot-product，論文同節也區分未縮放 dot-product。
+成立範圍：decoder 自回歸資料流；不是說 encoder 都該使用這種遮罩。若訓練使用了讀未來答案的捷徑，生成前綴無法提供該訊息；這是任務條件不一致的原因，不是本次測量出來的生成品質，也不是所有無遮罩模型必定失敗的定理。
+公開檔只保存本人的轉述與公式定位；原 PDF 與全文 text 留在 ignored outputs/technical-sources/3.6-fresh。
+
+PyTorch 原始官方來源
+實際環境 torch 2.14.1+cpu；torch.version.git_version = 5c4886908584029761b579af026dcfb627c84070。
+來源 URL 前綴 https://raw.githubusercontent.com/pytorch/pytorch/5c4886908584029761b579af026dcfb627c84070/
+torch/nn/functional.py SHA-256 95ff403085bb179477a01df63acfddf59dfac0fb58829e99a9c8b5c2fe98899b。
+親讀行2175–2220：softmax 按 dim 對 exp 比例化；行6367–6436：SDPA 參考實作以 bool tril(0) 遮罩禁止位置並加 -inf，True 參與注意力；行3478–3569：cross_entropy 的輸入是 logits，target 是正確類別/分布。
+torch/_torch_docs.py SHA-256 f3962a2a4973e7d4917a3b3f265903d4a534085343bbe40d003728385d1949e5。
+親讀行834–865：allclose 預設 atol=1e-8、rtol=1e-5，逐元素比較 |input-other| <= atol + rtol*|other|；行2909–2929：clone 是複本，可保留 autograd 關係，不是 detach；行4309–4331：exp；行8836–8865：ones 的 size/dtype；行12066–12124：tril 預設保留主對角線及以下；行12475–12501：unsqueeze 插入長度1的軸；行12618–12678：zeros、zeros_like 的形狀與零值。
+torch/_tensor_docs.py SHA-256 9c3d4d0bcef8041352cc87cff68980c39ddd8c506d4e8db6410af306bd46f189。
+親讀行3146–3162：masked_fill_ 的 BoolTensor 以 True 為填入位置；行6546–6552：masked_fill 是其非就地版本。教材 module 對 ~allowed 填 -inf，因此 False 才被排除。
+aten/src/ATen/TensorIndexing.h SHA-256 871a8af3e49d0787c84c2b9390acb0ebacbd1777c830b6f3fbe94f7530b59861。
+親讀行89–110、492–498：Python None 對應此索引，該分支 unsqueeze 並前進一個 dim，連用 [None,None] 因而增加兩個前置軸。
+docs/source/tensor_view.md SHA-256 31b513a59b47f594e2500d3d2e0b18c98f56bc53433270f7815cf6d81a6f2640。
+親讀 Tensor Views 全文：基本切片為 view、索引賦值為就地；本例 clone 後更動 changed 的第四個位置不會更動原 v。初次取 .rst 得404後，改取此版本的 .md 成功，不把404當作教材錯誤。
+本公開筆記採本人轉述與必要公式，沒有重製原始文件的長段落。
+
+本專案原始實作
+tiny_perceptron/attention.py 全檔 SHA-256 edb29d24392f1b7aedf04890b106add669bc0e31bfde7fde7f80ad190b007c15。
+親讀全檔，重點 manual_attention 行21–29：QK^T/sqrt(dk)，對 ~allowed 填 -inf，沿最後軸 softmax，weights @ V。全不可讀列另外改 scores=0 再 weights=0，避免全 -inf softmax 的 NaN。本文 tril 每列都有對角線，所以這個防護分支不影響算例。
+
+數學推導
+Aij = 1 當且僅當 j<=i，i,j=0,1,2,3。q=k=0，因此所有未遮罩分數 Sij=0。
+每列有 i+1 個可讀分數：exp(0)=1，exp(-inf)=0，分母 i+1>0。
+所以 Wij = 1/(i+1) (j<=i)，否則0；四列分別為[1,0,0,0]、[1/2,1/2,0,0]、[1/3,1/3,1/3,0]、[1/4,1/4,1/4,1/4]。
+Vi=[i+1,10*(i+1)]，Oi 是前 i+1 個 V 的平均，依次[1,10]、[1.5,15]、[2,20]、[2.5,25]。
+只令 V3 增加[100,100]，delta Oi = Wi3*[100,100]：前三列0，最後[25,25]。
+移除 tril，Wij=1/4 對所有 i,j，因此所有 Oi=[2.5,25]、所有 delta Oi=[25,25]，前三列 allclose 必定 False。
+這個不變性測試固定 q,k，只更動 v；它核對這次注意力讀取路線，不能單獨證明所有多層模型沒有其他未來訊息通路。
+負無限特殊值：有有限可讀分數才能做上述比例；若一列全 -inf，softmax 在本環境產生 NaN，不能聲稱任何遮罩都自動給全0。
+loss 的說明是 -log p(correct)。三類固定 logits [0,20,0]，正確類別1，p(correct)=1/(1+2exp(-20))，loss=log(1+2exp(-20))，約4.1223e-9。這只顯示把答案偏好給得很高可有很小代價，未執行模型訓練。

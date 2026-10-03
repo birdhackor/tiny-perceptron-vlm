@@ -1,0 +1,85 @@
+import itertools
+import json
+import math
+import platform
+
+import torch
+
+torch.set_default_device("cpu")
+torch.set_num_threads(1)
+assert torch.version.cuda is None
+
+def samples():
+    torch.manual_seed(42)
+    result = []
+    for d in [4, 64]:
+        q = torch.randn(1000, d)
+        k = torch.randn(1000, d)
+        scores = (q * k).sum(dim=-1)
+        scaled = scores / math.sqrt(d)
+        doubled_scores = ((q * 2) * (k * 2)).sum(dim=-1)
+        doubled_scaled = doubled_scores / math.sqrt(d)
+        result.append({
+            "d": d,
+            "q_shape": list(q.shape),
+            "k_shape": list(k.shape),
+            "scores_shape": list(scores.shape),
+            "dtype": str(scores.dtype),
+            "q_mean": q.mean().item(),
+            "q_std": q.std().item(),
+            "k_mean": k.mean().item(),
+            "k_std": k.std().item(),
+            "scores_std": scores.std().item(),
+            "scaled_std": scaled.std().item(),
+            "std_manual_n_minus_1": ((scores - scores.mean()).square().sum() / 999).sqrt().item(),
+            "doubled_scores_std": doubled_scores.std().item(),
+            "doubled_scaled_std": doubled_scaled.std().item(),
+            "scores_std_ratio": (doubled_scores.std() / scores.std()).item(),
+            "scaled_std_ratio": (doubled_scaled.std() / scaled.std()).item(),
+            "max_abs_scores_minus_4x": (doubled_scores - 4 * scores).abs().max().item(),
+            "max_abs_scaled_minus_4x": (doubled_scaled - 4 * scaled).abs().max().item(),
+        })
+    return result
+
+first = samples()
+repeat = samples()
+assert first == repeat
+for row in first:
+    assert row["scores_std_ratio"] == 4.0
+    assert row["scaled_std_ratio"] == 4.0
+    assert row["max_abs_scores_minus_4x"] == 0.0
+    assert row["max_abs_scaled_minus_4x"] == 0.0
+
+toy = []
+for d in [1, 2, 4]:
+    sums = [sum(values) for values in itertools.product([-1, 1], repeat=d)]
+    mean = sum(sums) / len(sums)
+    variance = sum((value - mean) ** 2 for value in sums) / len(sums)
+    toy.append({"d": d, "outcomes": sums, "mean": mean, "population_variance": variance, "population_std": math.sqrt(variance)})
+
+z = torch.tensor([3.0, 1.0, 0.0], dtype=torch.float64)
+temperature = [{"T": t, "weights": (z / t).softmax(dim=0).tolist()} for t in [0.5, 1.0, 2.0]]
+counterexample = torch.tensor([100.0, 100.0, 100.0, 0.0], dtype=torch.float64)
+weights = counterexample.softmax(dim=0)
+assert torch.allclose(weights[:3], torch.full((3,), 1 / 3, dtype=torch.float64), atol=1e-15, rtol=0)
+assert (weights > 0.1).sum().item() == 3
+small_weight_logits = torch.tensor([0.0, -20.0], dtype=torch.float64)
+small_weights = small_weight_logits.softmax(dim=0)
+large_values = torch.tensor([0.0, 1.0e12], dtype=torch.float64)
+large_contribution = (small_weights * large_values).sum().item()
+assert small_weights[1].item() < 1.0e-8
+assert large_contribution > 2000.0
+
+print(json.dumps({
+    "environment": {"python": platform.python_version(), "torch": str(torch.__version__), "torch_git_version": str(torch.version.git_version), "device": "cpu", "cuda_build": str(torch.version.cuda), "torch_threads": str(torch.get_num_threads())},
+    "seed": 42,
+    "samples_per_dimension": 1000,
+    "std_correction": 1,
+    "original_and_exercise": first,
+    "same_environment_seed_replay_equal": first == repeat,
+    "toy_exact_enumeration": toy,
+    "temperature_fixed_logits": {"logits": z.tolist(), "rows": temperature},
+    "softmax_many_maxima_counterexample": {"scores": counterexample.tolist(), "max_minus_min": (counterexample.max() - counterexample.min()).item(), "weights": weights.tolist(), "candidates_over_0_1": (weights > 0.1).sum().item()},
+    "small_weight_large_value_counterexample": {"scores": small_weight_logits.tolist(), "weights": small_weights.tolist(), "values": large_values.tolist(), "weighted_sum": large_contribution},
+    "exit_checks": "所有上述斷言通過；只使用 CPU，無網路、訓練或參數更新。",
+}, ensure_ascii=False, indent=2))
