@@ -1,0 +1,24 @@
+# Same-owner necessary-context recheck, round 2
+
+Reviewer: /root/v4_review_coordinator/factual_v4_11_15.
+
+The complete current raw 11.14, including its blank lines through the 11.15 boundary, was personally read. Its SHA-256 is 8d338be14a26e0b7a4a48b01e85741e687e37b8f6be05e25fa5bd8c2110cd6be. This is a bounded assessment of its effect on my previously completed 11.15 factual review, not a new full technical audit of 11.14 or the book. No peer reader or technical judgment was read as authority.
+
+The actual current 11.14 explains that object identities alone do not determine visible actions and relations, and that unpictured events may remain unknown. Its red/blue example is confined to exchanging positions within one average region. It explicitly says the example loads no model and does not establish that preserving a pixel sequence produces natural-photo understanding. Its training paragraph describes scene/relation demonstration answers as one training arrangement, while allowing for abilities already learned by the model and other learning tasks. It says extra color labels do not guarantee relation learning.
+
+I personally reread the relevant original bytes from my own first-round research: PyTorch v2.14.1 functional.py area branch lines 5234–5237; ViT arXiv 2010.11929v2 §3.1 positional embeddings/Eq. (1) and §3.2 higher-resolution sequence length; Qwen3-VL arXiv 2511.21631v1 §3.1 S0/S1 upstream multimodal training and §4.1/§4.2.1 supervised training, text-only distillation, RL and multimodal examples. These are original authorities, not the context section or a peer report used as proof. Their first-round retrieval receipts and hashes remain the source record.
+
+Effect on my own claims:
+
+- c1: The context's order-loss example is another many-to-one averaging mechanism, consistent with my independent 11.15 column-8/column-15 collision proof. It does not imply every stroke signal vanishes, that unseen events are recoverable with certainty, or that larger downstream models uniquely invert lost pixels.
+- c4 and c5: Retaining spatial information or suitable resolution prevents this particular evidence destruction. Neither current section promises that retained pixels alone yield scene understanding, OCR success or free computation. The resource claim remains a qualified architectural/count claim, not a new benchmark.
+- c6 and c8: The current context explicitly allows upstream ability and alternative learning tasks. Accordingly, the 11.15 exercise's correct Chinese image/text examples are interpreted as a possible supervised route to glyph/answer correspondence, not the sole necessary way to obtain Chinese-reading ability. The pretrained base may already have such ability. The toy digit-only experiment still cannot establish it; course LoRA still must be distinguished from inherited base ability and the selected base-only configuration.
+- c2, c3 and c7: The helper's construction, its exact arithmetic and the paired processor's role are unaffected. Their first-round executed evidence and original source inspection are retained.
+
+The current practical_order.svg was read, independently rendered with installed Inkscape and personally viewed via view_image. It displays red-left/blue-right and blue-left/red-right inside the same dashed average-region box, a shared-summary arrow, and an explicit enlarged-local illustration label with the same 32×32 / 8×8 scope. It supports the context's positional-information distinction without claiming model understanding. Its SHA-256 is 6d4a0e684aedb9196b1c61bc2fd5a78fb3ce11663d2875e5d3b04532030ed523. Inkscape completed with exit 0; actual Pango/Gtk warnings are retained.
+
+Actual byte/hash comparisons confirm that the full 11.15 source remains identical to my saved first raw source (SHA-256 684ae754c6288f778e2081a2944670e8e0f7acd83e5a15d4d5d343d93af9d9fe), all previously registered repository implementation/configuration sources and both registered figures are unchanged, and the prior CPU results, code, stdout, stderr and execution receipt match the genuine first report. Those CPU runs are reused as prior executed evidence; no new full-main reread, helper run, model loading, training, OCR experiment or benchmark is claimed in this round.
+
+My genuine first PASS report (cc38747c92033387de6193dd521920e33298ccf0b9aeba4d428e56b3e8503039), first raw main section, first FINAL closure, real original native checker exit 0 and independence disclosure were copied before canonical update. The existing failed probes, render attempts and retrieval failures remain preserved. The prior accidental navigation exposure disclosure is unchanged.
+
+Own round-2 conclusion: pass; no substantive correction or unresolved issue for 11.15. This context recheck clarifies my interpretation and recorded necessary context; it does not convert a pixel-preservation argument into a trained-model performance claim.
