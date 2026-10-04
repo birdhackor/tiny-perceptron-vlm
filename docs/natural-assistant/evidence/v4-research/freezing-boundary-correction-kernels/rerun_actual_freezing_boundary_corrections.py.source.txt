@@ -1,0 +1,30 @@
+from pathlib import Path
+import hashlib, json, subprocess, shutil, datetime
+from scripts.export_course import checked_notebook
+from scripts.check_technical_reviews import sections
+root=Path.cwd(); base=root/'outputs/natural-v4/wholebook-kernel'; outbase=base/'freezing-boundary-rechecks'
+assert not outbase.exists(); outbase.mkdir()
+receipts=[]
+for lesson, chapter in [('10.8','10'),('11.2','11')]:
+ source=root/f'notebooks/{chapter}/{lesson}.ipynb'
+ out=outbase/lesson; out.mkdir()
+ command=['.venv/bin/python','scripts/check_notebooks.py','--mode','kernel','--workers','1','--lesson',lesson,'--output',str(out.relative_to(root))]
+ with (out/'stdout.txt').open('wb') as stdout, (out/'stderr.txt').open('wb') as stderr:
+  run=subprocess.run(command,cwd=root,stdout=stdout,stderr=stderr)
+ native=json.loads((out/'validation-kernel.json').read_text()); assert run.returncode==0 and native['total']==native['passed']==1 and native['failed']==0
+ relative=source.relative_to(root/'notebooks'); executed=out/relative
+ checked_notebook(json.loads(source.read_text()),executed)
+ shutil.copyfile(executed,root/'outputs/notebooks'/relative)
+ receipt={'lesson':lesson,'command':command,'exit_code':run.returncode,'native_validation':native,'source_sha256':hashlib.sha256(source.read_bytes()).hexdigest(),'executed_path':str(executed.relative_to(root)),'executed_sha256':hashlib.sha256(executed.read_bytes()).hexdigest()}
+ (out/'receipt.json').write_text(json.dumps(receipt,indent=2)+'\n'); receipts.append(receipt)
+ print('Actual fresh kernel passed',lesson,native['seconds'],flush=True)
+index=[]
+for source in sorted((root/'notebooks').rglob('*.ipynb')):
+ executed=root/'outputs/notebooks'/source.relative_to(root/'notebooks')
+ checked_notebook(json.loads(source.read_text()),executed)
+ index.append({'source':str(source.relative_to(root)),'source_sha256':hashlib.sha256(source.read_bytes()).hexdigest(),'executed':str(executed.relative_to(root)),'executed_sha256':hashlib.sha256(executed.read_bytes()).hexdigest()})
+assert len(index)==266
+prev=base/'current-kernel-closure-reward-syntax.json'
+result={'record_kind':'actual_current_notebook_execution_closure_not_review','created_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),'scope':'Original 266 native kernels plus 7 earlier corrections, 2 SFT terminology corrections, 1 reward-syntax correction, and 2 new numerical-equality/freezing-boundary corrections. No second complete 266 execution.','status':'passed','notebooks_checked':266,'previous_closure_path':str(prev.relative_to(root)),'previous_closure_sha256':hashlib.sha256(prev.read_bytes()).hexdigest(),'new_actual_corrections':receipts,'files':index}
+(base/'current-kernel-closure-freezing-boundary.json').write_text(json.dumps(result,indent=2)+'\n')
+print('All 266 exact executed cells match current sources',flush=True)
