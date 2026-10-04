@@ -1,37 +1,38 @@
-# Natural-input v4 preparation checkpoint
+# Natural-input v4 execution handoff
 
-This is an engineering handoff, not a published lesson or a claim of finished training.
+This file records engineering state, not a student lesson or a completed release.
 
-## Completed
+## Frozen and verified
 
-- Legal-source research: Google DOCCI CC BY 4.0, NVIDIA multilingual OCR CC BY 4.0, individually licensed Commons photos (CC BY / CC0 / public domain), OpenAssistant Apache 2.0, FLEURS CC BY 4.0 and AISHELL-1 Apache 2.0. Excluded NC/SA or unclear-rights image collections are not training inputs.
-- Real photograph training: 439 photos, 878 Traditional-Chinese scene/fact QA. Every author viewed the actual photos and read full descriptions. All 39 added human-activity photos received a separate actual-visual peer review; 11 answers were corrected before inference.
-- OCR: 710 single-line and 117 multi-line NVIDIA crops, 62 approved Commons crops, whole-image region questions and balanced Chinese-presence examples. Ambiguous or clipped crops were removed. Fresh local-source reconstruction verified all 978 declared OCR artifacts byte-for-byte; the receipt explicitly records zero fresh HTTP requests.
-- Six additional natural multi-line heldout tasks passed a second whole-image/detail visual review. Their score measures ordered transcription, not isolated reading-order ability.
-- Chat: 144 records (122 train / 9 validation / 13 test), independently read in full; source tree grouping, source replay, peer corrections and question-specific heldout rubrics preserved.
-- Speech: 30 fresh FLEURS transcription recordings and eight AISHELL human read questions (four validation / four test). These are evaluation inputs; no ASR fine-tuning occurred.
-- Real CPU ASR validation: same 16 recordings, small normalized CER 117/510 (22.94%), turbo 50/510 (9.80%). Raw CER also improved. Turbo was selected before test; final base/adapter comparisons must use the same ASR. See `asr-selection.json` and its immutable evidence hashes.
-- CPU processor audit: 2,341 text/image rows plus 38 audio files passed; longest full sequence 630 tokens, 39,436 current-assistant supervised train tokens. This is stable provisional data, not the final freeze.
-- Runtime supports bounded fresh LoRA training, two immutable update checkpoints, validation of base plus two adapters, selected-checkpoint release and separate transcription/chat evaluation.
-- Download helper accepts complete fixed v3 or v4 archive sets, verifies the correct remote manifest path and all file hashes. Actual provisional archives were extracted and verified locally. Anonymous network download is not yet verified.
-- Three provisional LFS archives are reproducible locally, total 145,577,586 compressed bytes. They are under `outputs/natural-v4/provisional-assets`, not uploaded or committed final snapshots.
-- Chapter 20 was rewritten as 13 coherent draft sections, with four new SVGs and rewritten STUDENT/DATA/TRAINING drafts. Ten CPU teaching examples were actually run. Drafts are under `drafts/`; they do not replace the formal book yet.
+- Data manifest: `docs/natural-assistant/v4/manifest.json`, SHA-256 `0c660490eb78bd82a8e092c2658646a6bae59c70058b6f5c2c944d138f732f60`. Three data archives total 146,543,309 compressed bytes; 1,513 declared files total 160,683,823 unpacked bytes.
+- 2,371 text/image records: 2,077 train, 124 validation, 170 test. There are also 38 heldout audio recordings: 16 validation and 22 test. The CPU encoding audit passed all rows, longest full sequence 630 tokens, 39,436 supervised training tokens. Current source-status binding is preserved as an append, rather than changing earlier audit bytes.
+- Legal-source data: Google DOCCI CC BY 4.0; NVIDIA OCR CC BY 4.0; individually approved Commons CC BY/CC0/public-domain photos; OpenAssistant Apache 2.0; FLEURS CC BY 4.0; AISHELL-1 Apache 2.0. Excluded NC/SA preview collections are absent from the snapshots.
+- Accepted DOCCI photographs: 439 train, 28 validation and 42 test. All added activity and heldout photographs received actual visual author and independent AI peer review. One rejected activity candidate remains excluded from training.
+- OCR: 710 single-line plus 117 multiline NVIDIA crops, 62 approved Commons crops, whole-image region questions and balanced text-presence training. A genuinely fresh public-source reconstruction in this cloud workspace verified all 978 OCR artifacts from 89 photos and 153 selected NVIDIA pages; NVIDIA range transfer was 69,982,238 bytes, below 128 MiB, with no HTTP429. This is distinct from the GitHub runner replay that was interrupted by Wikimedia HTTP429.
+- ASR was selected on the same 16 validation recordings before test: small normalized CER 117/510, turbo 50/510; raw CER also improved. Both LM candidates must use the same turbo transcripts. No ASR training or new test inference occurred.
+- Validation protocol is committed before LM outputs. It compares base and archives at updates 1,039 and 2,077, with blinded semantic grades, exact row normalization, raw EOS completion guards, integer macro scoring and explicit nonregression gates. The scorer has export/score commands and generates an immutable pre-test selection.
+- Actual prepare/train/validation execution source is `9a61ecf524c9518f33f1501c28aa72997d4a82d0`; the feature branch also contains subsequent independent final-test scorer fixes. Its three archive paths contain exact 133-byte Git LFS pointer blobs matching the frozen manifest. Native Actions upload and independent LFS download verified all three objects; the exact receipt is preserved in [data-publication evidence](../evidence/v4-research/data-publication/lfs-transfer-receipt.json).
+- Canonical chapter 20 has 13 coherent sections, four additional SVGs, three v4 operation guides and migrated links. Ten CPU examples and static links passed. Real model results and release pins remain author comments; formal fresh review/reading times have not started.
+- Optional research-proof base and supplement are packaged and verified twice; small indices/notices are committed. Raw proof is outside ordinary Git. Publication has not been verified.
 
-## Transport blocker
+## Current execution state
 
-Public GCS/HF downloads, GitHub API/git and Modal API return HTTP 503 with Envoy `cloudflare_https_tunnel` / `Invalid argument`. Chromium reproduced the same result. Direct connection reported network unreachable. No network policy, TLS checks or proxy configuration were changed. This observation does not establish the infrastructure root cause.
+Data publication completed in [Actions run 37212727035](https://github.com/birdhackor/tiny-perceptron-vlm/actions/runs/37212727035). The native uploader registered the three frozen objects, and independent LFS downloads matched their sizes and SHA-256 hashes: 146,543,309 bytes in total. The temporary `natural-v4-lfs-byte-transfer` ref is absent remotely and locally. The ordinary feature tree contains none of the temporary transfer paths. Exact-copy, committed-blob and read-only ref checks are recorded in [publication-closure.json](../evidence/v4-research/data-publication/publication-closure.json).
 
-Latest anonymous probes are in `../evidence/v4-research/environment-network/` (relative to the parent natural-assistant directory). No v4 Modal/GPU job has started, no v4 weights were produced, no v4 LFS upload succeeded and no formal v4 book was published.
+The two CPU source-bootstrap attempts, `37211774915` and `37212355816`, failed and retained US$0.62 each. Their final cumulative reservation was US$26.05 before the subsequent model/data prepare attempt. These are conservative ledger reservations, not an invoice or measured billing total. The shared authorization remains US$40; no ledger reset occurred.
 
-## Continue in order
+The [CPU model/data prepare run 37212856741](https://github.com/birdhackor/tiny-perceptron-vlm/actions/runs/37212856741) completed and its actual 23 pinned model files were audited. A separate fresh, unauthenticated student data download verified every archive and all 1,513 declared unpacked files. Both receipts remain separate from model inference and capability grading.
 
-1. Restore the environment's network. Retrieve the ten already-selected new activity heldout photos: four validation and six test, in the existing heldout similarity clusters. Actually view each, author the labels, then obtain independent visual review before any inference. The unused 40th activity training candidate stays excluded; 39 good training photos are sufficient.
-2. Finish the source/gold freeze, delta processor audit and exact validation-selection rule. `experiment-plan.json` holds the intended fresh learning rate 1e-4, rank 8, q/v targets, accumulation 2 and seed 42. Current train count is 2,077: archive updates 1,039 and 2,077 correspond to 2,078 (approximately one pass) and 4,154 (two passes) visits. Confirm final counts before dispatch.
-3. Build the final three archives and `manifest.json`. Commit them as native LFS pointers on the `natural-assistant-v4` branch. `.github/workflows/natural-data-v4.yml` reconstructs exact pinned sources and uploads matching LFS objects without a GPU. Verify a fresh anonymous student data download afterward.
-4. Use the existing `natural-assistant.yml` workflow serially: prepare, train with both checkpoints, then one validation of base plus both adapters. Keep the cumulative durable budget: US$40 cap, last verified reservation US$24.81, US$15.19 remaining. Reservations are not invoices; never reset the ledger.
-5. Grade predeclared semantic rubrics independently, select on validation and commit exact selection/weight hashes before the new paired final test. Preserve all actual completion/timeout counts. Test outputs must not be used to choose training settings or rewrite gold.
-6. Release the exact selected checkpoint, verify student model download/UI, then integrate actual results into the coherent draft. Do not copy old v3 performance into v4 or attribute ASR replacement gains to LM fine-tuning.
-7. Apply semantic crosslinks from `drafts/crosslink-migration.json`, generate notebooks and figures, then complete three ordered fresh review rounds: readability, factual/source accuracy, continuity. Recheck changed runtime-dependent sections 11.15 / 12.14 / 19.12 / R.2 / R.4 as well as all new Chapter 20 sections.
-8. Add actual fresh reading-time estimates for changed pages, validate all source/figure fingerprints, run appropriate builds/CI, commit/push main, verify Pages and the real student route. Remove learning-irrelevant failure history from student prose; keep genuine technical evidence separately.
+The [training run 37213067566](https://github.com/birdhackor/tiny-perceptron-vlm/actions/runs/37213067566) completed 2,077 optimizer updates, 4,154 row visits and 78,872 supervised target tokens. Every one of the 2,077 training rows was visited twice. Both archived adapters and their private HF receipt were audited; the two hashes remain in [training evidence](../evidence/v4-runtime/train-37213067566/training-audit-summary.json). Loss on different training batches is not heldout accuracy.
 
-Do not blanket-add old untracked files. Some historical research previews were excluded from the permitted dataset. Preserve the current raw review evidence; large image data and image evidence need the LFS/release strategy before final publication.
+The [validation run 37215395335](https://github.com/birdhackor/tiny-perceptron-vlm/actions/runs/37215395335) completed 396 LM generations and one shared pass over 16 actual ASR recordings. The original frozen source files, source/weight hashes, raw outputs and exact counts were audited. Decoder completion was 126/132 for base and 129/132 for each adapter. Actual truncated answers remain failures under the original protocol. Four fresh independent reviewers are now grading the 303 blinded semantic cases against actual source images and the frozen rubrics. No chosen version, final test, or public release is recorded here yet.
+
+The latest durable cumulative reservation is US$30.25/40.00 after validation. It is a conservative reservation ledger, not the invoice. No reset occurred.
+
+## Continue
+
+1. Complete the four actual independent blind grading packets without disclosing candidate mapping; preserve every judgment, source-image inspection and owner identity.
+2. Apply the unchanged protocol, preserve its original selection evidence, and commit the selected exact weights before opening the new test. Any further training experiment would require a separate pre-run plan and budget reservation; neither frozen gold nor the existing protocol may be rewritten to accommodate outputs.
+3. Run the selected-only new test, obtain fresh semantic grades, publish the selected configuration and actually verify anonymous student download and browser use.
+4. Fill the canonical book with only current measured results. Keep useful explanations, remove incidental failure histories from student prose.
+5. Run fresh readability, then factual correctness, then continuity review; fix and recheck each finding. Update reading times only afterward, rebuild the whole course, commit/push and verify Pages.
