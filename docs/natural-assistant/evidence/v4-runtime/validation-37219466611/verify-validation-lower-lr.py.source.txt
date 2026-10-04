@@ -1,0 +1,199 @@
+"""Audit genuine v4 validation provenance/counts without semantic grading."""
+
+import collections
+import hashlib
+import importlib.util
+import json
+import pathlib
+import subprocess
+import sys
+from datetime import datetime, timezone
+
+ROOT = pathlib.Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(ROOT))
+spec = importlib.util.spec_from_file_location("frozen_validation_scorer", ROOT / "scripts/score_natural_v4_validation.py")
+scorer = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(scorer)
+
+
+def read(path):
+    return json.loads(path.read_bytes())
+
+
+def sha(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def audit():
+    revision = "a008cec6fd447ca977503dbfd1130cd59a7c7a49"
+    run_root = ROOT / "outputs/natural-v4/modal-runs/validation-37219466611"
+    artifact = run_root / "natural-natural-v4-validation-37219466611-1"
+    review = artifact / "review"
+    blind_root = ROOT / "outputs/natural-v4/validation-review/gha-37219466611-1"
+    wrapper = read(artifact / "result.json")
+    report = read(review / "result.json")
+    frozen_sources = {}
+    for name in (
+        "scripts/score_natural_v4_validation.py",
+        "docs/natural-assistant/v4/validation-protocol-lower-lr.json",
+        "docs/natural-assistant/v4/manifest.json",
+        "tiny_perceptron/natural_assistant.py",
+        "scripts/modal_natural.py",
+    ):
+        source = ROOT / name
+        assert source.read_bytes() == subprocess.check_output(["git", "show", revision + ":" + name], cwd=ROOT), name
+        frozen_sources[name] = {"bytes": source.stat().st_size, "sha256": sha(source)}
+    assert wrapper["stage"] == "validation" and wrapper["status"] == "completed"
+    assert wrapper["revision"] == revision == report["execution"]["revision"]
+    assert wrapper["run_id"] == "gha-37219466611-1" == report["execution"]["run_id"]
+    manifest, protocol, cases, records, binding, data_root = scorer.load_artifacts(
+        ROOT / "docs/natural-assistant/v4/manifest.json",
+        ROOT / "docs/natural-assistant/v4/validation-protocol-lower-lr.json",
+        review,
+        ROOT / "outputs/natural-v4/data",
+    )
+    assert report["selected_only"] is False
+    execution = report["execution"]
+    expected_options = {
+        "steps": 2077,
+        "seed": 42,
+        "max_seconds": 3300,
+        "max_pixels": 524288,
+        "learning_rate": 0.00003,
+        "asr_variant": "turbo",
+        "asr_model": "openai/whisper-large-v3-turbo",
+        "asr_revision": "41f01f3fe87f28c78e2fbf8b568835947dd65ed9",
+        "checkpoint_steps": [],
+        "adapter_checkpoint": "",
+        "adapter_checkpoints": ["step-001039", "step-002077"],
+    }
+    assert execution["runtime_options"] == expected_options
+    assert not execution["volume_commit_errors"]
+    train_root = ROOT / "outputs/natural-v4/modal-runs/train-37217452291/natural-natural-v4-train-37217452291-1/review"
+    for descriptor in execution["adapters"]:
+        assert descriptor["adapter_run_id"] == "gha-37217452291-1"
+        expected_weights = train_root / "checkpoints" / descriptor["checkpoint"] / "adapter_model.safetensors"
+        assert descriptor["adapter_sha256"] == sha(expected_weights)
+    combined = read(review / "generations.json")
+    combined_index = {(record["variant"], scorer.case_id(record["id"], record["task"])): record for record in combined}
+    assert len(combined_index) == len(combined) == 396
+    generation_summary = {}
+    for variant, indexed in records.items():
+        assert len(indexed) == 132
+        for key, record in indexed.items():
+            assert combined_index[(variant, key)] == record
+        generation_summary[variant] = {
+            "actual_records": len(indexed),
+            "task_counts": dict(collections.Counter(record["task"] for record in indexed.values())),
+            "confirmed_raw_eos_records": sum(scorer.eos_complete(record, 384) for record in indexed.values()),
+            "reported_truncated_records": sum(record["truncated"] is True for record in indexed.values()),
+            "reported_completion_unknown_records": sum(record["completion_unknown"] is True for record in indexed.values()),
+            "generated_token_count_sum": sum(record["generated_tokens"] for record in indexed.values()),
+            "generation_seconds_sum": sum(record["generation_seconds"] for record in indexed.values()),
+        }
+    transcripts = read(review / "transcripts.json")
+    total = collections.Counter()
+    by_task = collections.defaultdict(collections.Counter)
+    by_source = collections.defaultdict(collections.Counter)
+    for record in transcripts:
+        recomputed = scorer.core.asr_cer_metrics(record["reference_transcript"], record["transcript"])
+        for field, value in recomputed.items():
+            assert record[field] == value, (record["id"], field)
+        assert record["raw_token_count"] == len(record["raw_token_ids"])
+        assert record["generated_token_count"] == len(record["generated_token_ids"])
+        assert record["decoder_prompt_matches"] is True
+        assert record["raw_token_ids"] == record["expected_decoder_prompt_ids"] + record["generated_token_ids"]
+        assert record["generated_token_ids"][-1] in record["eos_token_ids"]
+        assert record["ended_with_eos"] is True and record["stop_reason"] == "eos"
+        assert record["truncated"] is False and record["completion_unknown"] is False
+        for group in (total, by_task[record["task"]], by_source[record["source"]]):
+            group["count"] += 1
+            for key in ("errors", "reference_characters", "raw_errors", "raw_reference_characters"):
+                group[key] += recomputed[key]
+    for key, value in total.items():
+        assert report["asr"][key] == value
+    for field, groups in (("by_task", by_task), ("by_source", by_source)):
+        assert set(report["asr"][field]) == set(groups)
+        for name, counts in groups.items():
+            for key, value in counts.items():
+                assert report["asr"][field][name][key] == value
+    receipt = wrapper["hf"]
+    assert receipt["private"] is True and receipt["verified_weight_files"] == []
+    assert receipt["prefix"] == "natural-v3/natural-v4/validation/gha-37219466611-1"
+    for item in receipt["files"]:
+        path = review / item["path"]
+        assert path.stat().st_size == item["bytes"] and sha(path) == item["sha256"]
+    assert len(receipt["files"]) == 9
+    packet = read(blind_root / "blind-packet.json")
+    template = read(blind_root / "grades-template.json")
+    assert len(packet["cases"]) == len(template["grades"]) == 303
+    assert template["blind_packet_sha256"] == sha(blind_root / "blind-packet.json")
+    assert all(row["passed"] is None and row["reason"] == "" for row in template["grades"])
+    # Do not read, parse, hash, or disclose the private alias mapping.
+    assert (blind_root / "private-map.json").is_file()
+    return {
+        "schema_version": 1,
+        "verified_at_utc": datetime.now(timezone.utc).isoformat(),
+        "verification_passed": True,
+        "scope": "Actual completed validation provenance/count/ASR audit and original frozen blind export; no semantic grades, model selection, final test, release, or new inference.",
+        "run_id": wrapper["run_id"],
+        "source_git_revision": revision,
+        "frozen_source_files": frozen_sources,
+        "artifact_binding": binding,
+        "counts": {
+            "visual_text_rows": 124,
+            "audio_recordings": 16,
+            "asr_only_recordings": 12,
+            "speech_chat_recordings": 4,
+            "lm_generations_per_candidate": 132,
+            "lm_generations_total": 396,
+            "manual_blind_cases_total": 303,
+        },
+        "generation_summary": generation_summary,
+        "same_genuine_asr_stream_across_candidates_verified": True,
+        "asr_metrics_recomputed_from_genuine_reference_and_hypothesis": dict(total),
+        "asr_report": report["asr"],
+        "runtime_options": expected_options,
+        "model": report["model"],
+        "model_revision": report["model_revision"],
+        "resources": {
+            "device": report["device"],
+            "gpu_name": report["gpu_name"],
+            "dtype": report["dtype"],
+            "asr_device": report["asr"]["device"],
+            "evaluation_elapsed_seconds": report["elapsed_seconds"],
+            "evaluation_elapsed_scope": "Core evaluation timer starts before load_manifest asset verification and includes LM/ASR load, shared ASR, all three candidates' LM generations, and review-file writes; excludes later HF backup and workflow setup.",
+            "runner_subprocess_seconds": execution["seconds"],
+            "runner_elapsed_scope": "Python runner subprocess includes imports and stage execution; excludes later private HF backup and workflow setup.",
+        },
+        "private_hf_backup": {
+            "repo": receipt["repo"],
+            "immutable_commit": receipt["revision"],
+            "prefix": receipt["prefix"],
+            "file_count": len(receipt["files"]),
+            "local_files_match_uploaded_receipt_bytes_and_sha256": True,
+            "remote_readback_scope": "Authenticated HfApi.upload_folder returned the immutable commit; local review files match the upload receipt. Validation has no weight files, so backup_remote's weight-only remote readback loop verified zero files. This auditor does not independently download these private remote JSON files.",
+        },
+        "budget": {
+            "cumulative_reserved_usd": wrapper["budget"]["reserved_total_usd"],
+            "budget_usd": wrapper["budget"]["budget_usd"],
+            "this_validation_reserved_usd": wrapper["budget"]["entry"]["reserved_usd"],
+            "scope": "Preserved shared conservative reservation ledger, not an invoice.",
+        },
+        "blind_export": {
+            "packet": str((blind_root / "blind-packet.json").relative_to(ROOT)),
+            "packet_sha256": sha(blind_root / "blind-packet.json"),
+            "template": str((blind_root / "grades-template.json").relative_to(ROOT)),
+            "template_sha256": sha(blind_root / "grades-template.json"),
+            "actual_images_root": str(data_root),
+            "manual_cases": 303,
+            "private_alias_mapping_read_or_disclosed_by_auditor": False,
+            "semantic_grade_status": "Not graded by this auditor; original template contains null grades.",
+        },
+        "original_raw_report_sha256": sha(review / "result.json"),
+        "original_wrapper_receipt_sha256": sha(artifact / "result.json"),
+    }
+
+
+if __name__ == "__main__":
+    print(json.dumps(audit(), indent=2, ensure_ascii=False))
