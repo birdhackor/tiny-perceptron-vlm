@@ -589,7 +589,7 @@ def execute_stage(stage, batch_id, run_id, revision, manifest_sha, options):
     if stage != "prepare":
         args.append("--local-files-only")
     if stage in ("baseline", "validation", "evaluate"):
-        args.extend(["--split", "test" if stage == "evaluate" else "validation"])
+        args.extend(["--split", "test" if stage == "evaluate" else "validation", "--max-new-tokens", "384"])
     if stage == "train":
         args.extend(["--steps", str(options["steps"]), "--checkpoint-every", "25"])
     if stage == "external_ocr":

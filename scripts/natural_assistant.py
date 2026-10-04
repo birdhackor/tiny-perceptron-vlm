@@ -29,7 +29,7 @@ def parser():
     result.add_argument("--min-pixels", type=int, default=65536)
     result.add_argument("--max-pixels", type=int, default=524288)
     result.add_argument("--max-tokens", type=int, default=2048)
-    result.add_argument("--max-new-tokens", type=int, default=96)
+    result.add_argument("--max-new-tokens", type=int, default=384)
     result.add_argument("--max-seconds", type=int, default=3300)
     result.add_argument("--seed", type=int, default=42)
     result.add_argument("--adapter", type=Path)
