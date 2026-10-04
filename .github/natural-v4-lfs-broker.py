@@ -6,7 +6,7 @@ import re
 import urllib.error
 import urllib.request
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlsplit
 
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
@@ -119,18 +119,35 @@ def validate_upload(action, expected):
     headers = action.get("header", {})
     if not isinstance(headers, dict):
         raise RuntimeError("Malformed upload headers")
+    exported = json.dumps(action)
+    if token in exported or auth in exported or base64.b64encode(("x-access-token:" + token).encode()).decode() in exported:
+        raise RuntimeError("Refusing to export the GitHub token in an upload action")
     for name, value in headers.items():
         if not isinstance(name, str) or not re.fullmatch(r"[!#$%&'()*+.^_`|~0-9A-Za-z-]+", name) or not isinstance(value, str) or "\r" in value or "\n" in value:
             raise RuntimeError("Malformed upload header")
-        if name.lower() in {"authorization", "proxy-authorization", "cookie", "set-cookie"}:
-            raise RuntimeError("Refusing to export an authentication header")
+        if name.lower() in {"proxy-authorization", "cookie", "set-cookie"}:
+            raise RuntimeError("Refusing to export a proxy or cookie authentication header")
+        if name.lower() == "authorization":
+            # AWS documents both forms as request signatures bound to the method
+            # and S3 object resource. Neither contains the AWS secret signing key.
+            v4 = re.fullmatch(
+                r"AWS4-HMAC-SHA256 +Credential=[A-Za-z0-9]+/[0-9]{8}/[a-z0-9-]+/s3/aws4_request, *"
+                r"SignedHeaders=([a-z0-9-]+(?:;[a-z0-9-]+)*), *Signature=[0-9a-fA-F]{64}", value
+            )
+            v2 = re.fullmatch(r"AWS +[A-Za-z0-9]+:[A-Za-z0-9+/]{27}=", value)
+            if not (v4 and "host" in v4.group(1).split(";") or v2):
+                scheme = value.split(" ", 1)[0]
+                diagnostic = {
+                    "upload_hostname": host,
+                    "auth_scheme": scheme if scheme in {"AWS4-HMAC-SHA256", "AWS", "Basic", "Bearer"} else "unrecognized",
+                    "header_names": sorted(headers),
+                    "query_keys": sorted({key for key, _ in parse_qsl(parsed.query, keep_blank_values=True) if token not in key and auth.removeprefix("Basic ") not in key}),
+                }
+                raise RuntimeError("Refusing a non-S3 request-signature authentication header; safe_shape=" + json.dumps(diagnostic))
         if name.lower() == "content-length" and value != str(expected["size"]):
             raise RuntimeError("Upload header disagrees with frozen byte length")
         if name.lower() == "host" and value != host:
             raise RuntimeError("Upload Host header disagrees with the S3 destination")
-    exported = json.dumps(action)
-    if token in exported or auth in exported or base64.b64encode(("x-access-token:" + token).encode()).decode() in exported:
-        raise RuntimeError("Refusing to export the GitHub token in an upload action")
     return action
 
 
