@@ -13,12 +13,12 @@ import hashlib
 import http.client
 import io
 import json
-from pathlib import Path
 import tempfile
 import time
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import PIL
 from PIL import Image

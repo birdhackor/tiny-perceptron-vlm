@@ -1,4 +1,4 @@
-name: Publish fixed natural teaching data to LFS
+name: Bootstrap verified v4 LFS objects
 
 on:
   workflow_dispatch:
@@ -6,10 +6,14 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: tiny-perceptron-natural-v4-data
+  cancel-in-progress: false
+
 jobs:
-  publish:
+  publish-data:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v7
         with:
@@ -17,44 +21,87 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: '3.13'
-      - name: Install only data preparation dependencies
-        run: python -m pip install pillow==12.3.0 soundfile==0.14.0
-      - name: Reconstruct exact committed snapshots from fixed public sources
+      - name: Install fixed image and source decoding dependencies
+        run: python -m pip install pillow==12.3.0 h5py==3.16.0 numpy==2.5.3 soundfile==0.14.0
+      - name: Reconstruct the frozen public source subset and verify every byte
         run: |
-          mkdir -p outputs/natural-data
-          python scripts/build_natural_assets.py --prepare \
-            --manifest outputs/natural-data/reconstructed-manifest.json \
-            --verify-manifest docs/natural-assistant/manifest.json
-      - name: Upload only the three verified LFS objects
+          python scripts/build_natural_v4_assets.py \
+            --reconstruct \
+            --data-root outputs/natural-v4/rebuilt-data \
+            --manifest outputs/natural-v4/data-publish/reconstructed-manifest.json \
+            --verify-manifest docs/natural-assistant/v4/manifest.json
+      - name: Verify committed LFS pointers and upload the three existing objects
         shell: bash
         run: |
           set -euo pipefail
           git lfs install --local
           python - <<'PY'
+          import hashlib
           import json
+          import os
           import subprocess
           from pathlib import Path
-          manifest = json.loads(Path('docs/natural-assistant/manifest.json').read_text())
-          ids = []
+
+          expected_paths = {
+              'assets/training/natural-vision-v4.tar.gz',
+              'assets/training/natural-ocr-v4.tar.gz',
+              'assets/training/natural-voice-v4.tar.gz',
+          }
+          manifest_path = Path('docs/natural-assistant/v4/manifest.json')
+          manifest = json.loads(manifest_path.read_bytes())
+          if len(manifest['archives']) != 3 or {item['path'] for item in manifest['archives']} != expected_paths:
+              raise RuntimeError('Only the reviewed three v4 training archives may be uploaded')
+          uploaded = []
           for archive in manifest['archives']:
-              expected = f"version https://git-lfs.github.com/spec/v1\noid sha256:{archive['sha256']}\nsize {archive['bytes']}\n"
-              prior = subprocess.run(['git', 'show', f"HEAD:{archive['path']}"], capture_output=True, text=True)
-              if prior.returncode == 0 and prior.stdout != expected:
-                  raise RuntimeError('Committed LFS pointer differs from reconstructed archive')
-              subprocess.run(['git', 'add', '--', archive['path']], check=True)
-              pointer = subprocess.check_output(['git', 'show', f":{archive['path']}"], text=True)
-              if pointer != expected:
-                  raise RuntimeError('Reconstructed index pointer differs from frozen manifest')
-              ids.append(archive['sha256'])
-          subprocess.run(['git', 'lfs', 'push', '--object-id', 'origin', *ids], check=True)
-          changed = set(subprocess.check_output(['git','diff','--cached','--name-only'],text=True).splitlines())
-          if not changed.issubset({item['path'] for item in manifest['archives']}):
-              raise RuntimeError('Reconstruction changed files outside the three expected archives')
-          Path('outputs/natural-data/receipt.json').write_text(json.dumps({'revision': subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(), 'archive_sha256': ids, 'reconstructed_and_uploaded': True},indent=2)+'\n')
+              path = archive['path']
+              actual = Path(path)
+              digest = hashlib.sha256(actual.read_bytes()).hexdigest()
+              if actual.stat().st_size != archive['bytes'] or digest != archive['sha256']:
+                  raise RuntimeError('Rebuilt archive differs from the frozen manifest')
+              pointer = (
+                  'version https://git-lfs.github.com/spec/v1\n'
+                  f'oid sha256:{digest}\n'
+                  f'size {archive["bytes"]}\n'
+              ).encode()
+              prior = subprocess.run(['git', 'show', f'HEAD:{path}'], capture_output=True)
+              if prior.returncode == 0 and prior.stdout != pointer:
+                  raise RuntimeError('Existing committed LFS pointer differs from the frozen snapshot')
+              # GitHub rejects a first pointer push until the object exists.
+              # The bootstrap commit freezes the full manifest; native index
+              # and actual reconstructed bytes must still match every pin.
+              subprocess.run(['git', 'add', '--', path], check=True)
+              staged = subprocess.check_output(['git', 'show', f':{path}'])
+              if staged != pointer:
+                  raise RuntimeError('Native git-lfs did not stage the exact frozen pointer')
+              uploaded.append({'path': path, 'bytes': archive['bytes'], 'sha256': digest})
+          changed = subprocess.check_output(['git', 'diff', '--cached', '--name-only']).decode().splitlines()
+          if any(path not in expected_paths for path in changed):
+              raise RuntimeError('The rebuild staged an unrelated path')
+          subprocess.run(
+              ['git', 'lfs', 'push', '--object-id', 'origin', *[item['sha256'] for item in uploaded]],
+              check=True,
+          )
+          receipt = {
+              'git_revision': os.environ['GITHUB_SHA'],
+              'manifest_sha256': hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
+              'objects': uploaded,
+              'source_reconstruction': 'Pinned public sources, verified against the committed manifest',
+              'lfs_upload_completed': True,
+              'pointer_phase': 'bootstrap before final pointer commit push',
+              'gpu_started': False,
+              'modal_or_hf_credentials_used': False,
+          }
+          output = Path('outputs/natural-v4/data-publish/upload-receipt.json')
+          output.write_text(json.dumps(receipt, indent=2) + '\n')
+          print(json.dumps(receipt))
           PY
-      - uses: actions/upload-artifact@v6
+      - name: Save reconstruction and upload receipts
         if: always()
+        uses: actions/upload-artifact@v7
         with:
-          name: natural-data-${{ github.run_id }}-${{ github.run_attempt }}
-          path: outputs/natural-data/
-          if-no-files-found: ignore
+          name: natural-v4-data-rebuild-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            outputs/natural-v4/data-publish/*.json
+            outputs/natural-v4/rebuilt-data/voice/replay-receipt.json
+          if-no-files-found: warn
+          retention-days: 30
