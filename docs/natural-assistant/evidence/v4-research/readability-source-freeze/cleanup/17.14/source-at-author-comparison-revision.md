@@ -1,0 +1,62 @@
+## 17.14 模型能預先適應量化誤差嗎？
+
+訓練好的模型直接量化，可能對粗刻度很敏感。可以在訓練期間就讓它看見量化後的特徵與權重，學習避開容易受傷的表示嗎？這叫Quantization-Aware Training（QAT，量化感知訓練）。但我們在[梯度暖身](../first-steps.md#W.6)知道，學習需要微小變動如何影響誤差；round取整在格子內幾乎不變，直接對它求梯度常得到零，難以教上游權重。
+
+先回顧[刻度捨入](17.md#17.2)。輸入 `[0.1,0.4,0.9]`，本工具的四位元對稱量化使用-7至7的整數碼，最大正碼是7，所以把最大絕對值0.9除以7得到scale，還原約 `[0.1286,0.3857,0.9]`。QAT常用fake quantization（模擬量化）：向前確實使用這些還原數字，向後卻用一個近似規則，例如把取整視為「輸入原樣通過」來傳梯度。這叫straight-through estimator（STE，直通估計），不是取整函數真正的導數。
+
+圖的第一格保存可小幅更新的FP32主權重，第二格用剛才的scale得到整數`[1,3,7]`，再還原成前向數值。回到第一格的箭頭表示每次誤差沿STE近似路徑更新主權重；下一次前向會重新模擬，而不是只量化一次就永遠不動。訓練完成後，第三格才把整數、scale與形狀存成真正packed4檔，部署仍用本工具的FP32反量化參考計算。這三步把「學習時體驗誤差」與「最後怎麼保存」接了起來。
+
+![QAT保留FP32主權重，前向模擬量化並以STE更新，訓練後另存packed4](../figures/qat_training_deployment.svg)
+
+```python
+import torch
+from tiny_perceptron.quantization import fake_quantize
+
+x = torch.tensor([0.1, 0.4, 0.9], requires_grad=True)
+y = fake_quantize(x, bits=4)
+y.sum().backward()
+print("向前", y.detach().round(decimals=4).tolist())
+print("STE梯度", x.grad.tolist())
+hard = x.detach().clone().requires_grad_()
+scale = 0.9 / 7
+plain = (hard / scale).round() * scale
+plain.sum().backward()
+print("直接round梯度", hard.grad.tolist())
+```
+
+`fake_quantize`用 `x + (還原值-x).detach()`實作這個示範。向前數值中x相消，剩下還原值；`detach`阻止括號裡的修正項回傳梯度，向後只剩外面直接的x路徑。誤差先取y總和，對各y的導數是1，因此x.grad得到 `[1,1,1]`。建立hard時，`x.detach()`先切斷與原x的求導關係，`.clone()`複製數值到獨立資料，`.requires_grad_()`再把這份副本設為接下來可求導的輸入；它不會接回原x的關係。因此hard可保存自己的梯度，普通round路徑得到 `[0,0,0]`。兩條路的向前捨入規則相同，向後規則刻意不同。
+
+第一行約 `[0.1286,0.3857,0.9]`，比原始輸入有小偏移；第二行並不是說這些偏移的精確導數為1，而是我們選擇了可用於學習的近似。這讓訓練有機會調整權重，減少換成低位元時的任務損失。近似是否有效仍需實驗，不能從「有非零梯度」推論模型一定改善。
+
+模擬量化一般仍保留浮點權重，向前計算（forward）臨時體驗格子誤差，所以這個例子沒有生成較小權重檔，也沒有使用專為低位元資料安排讀取與乘加的底層運算（kernel）。完整QAT流程需要加入適當模擬位置、訓練、轉換成實際打包格式，然後使用轉換版重新檢查任務品質與成本。若模擬規則和最後儲存格式不同，訓練時適應的誤差也可能對不上。
+
+[Jacob等人的模擬量化原文第3節](https://arxiv.org/abs/1712.05877v1)也分開浮點訓練圖與低位元推論圖；我們只採其中「先體驗捨入誤差」的思路，沒有複製其整數推論引擎。[STE原文第4節](https://arxiv.org/abs/1308.3432v1)把直接傳梯度稱為有偏的估計，正好提醒我們：有梯度是能更新的條件，品質改善另靠結果證明。
+
+正式流程從[T.4的直接SFT底座](../training.md#T.4)各複製一份，以相同初始化、相同抽題索引、seed42、batch16與學習率0.003，分別做350次普通FP32微調與350次weight-only QAT。兩支都實際完成350次optimizer更新、各讀39,348個回答與EOS目標。QAT針對每個輸出列以最大絕對值除7求scale，捨入至-7至7、反量化後前向，反向則採上述STE；和最後`QuantizedLinear`的規則相同。這與上方單向量、共用一把刻度的CPU例子不同，正式模型使用逐列刻度。
+
+表中的PTQ是post-training quantization（訓練後量化）：先完成普通浮點訓練或微調，再把固定權重轉成低位元表示；PTQ4表示四位元版本。QAT則在訓練時就模擬量化誤差。[17.9](17.md#17.9)示範了PTQ的轉換流程。NLL是把標準答案與EOS各位置的負對數代價取平均，計算方法可回看[5.1](05.md#5.1)；越小表示這批目標的平均預測代價越低，還不是模型自己生成時的答對率。
+
+| 共同底座的支線 | 額外更新 | 測試答對／10題 | 測試回答NLL／69目標 |
+| --- | ---: | ---: | ---: |
+| 原FP32 | 0 | 5 | 0.5058 |
+| 原版直接PTQ4 | 0 | 4 | 0.5262 |
+| 普通FP32微調 | 350 | 6 | 0.4896 |
+| 普通微調後PTQ4 | 350 | 6 | 0.4066 |
+| QAT浮點主權重 | 350 | 4 | 0.5398 |
+| QAT後正式packed4 | 350 | 4 | 0.5979 |
+
+公平的QAT對照是兩支都有350次更新的packed版，而不是只和零次更新的直接PTQ比。驗證五題上，QAT後packed4與普通微調後PTQ4各答對2/5；按相同36個回答與EOS目標計算，前者NLL是0.5273，後者是1.1811。最後十題的排序卻反過來：QAT後packed4的NLL是0.5979，普通微調後PTQ4是0.4066，QAT還少答對兩題。驗證卷上較低的代價，沒有在這份最後考卷維持同樣優勢。因此不能用「預先適應」保證成功，也不能看過最後題再改設定把失敗藏掉。六版測試都EOS10/10且無非法控制ID，停止正常仍不等於答案正確。
+
+在一筆完整帶標準答案前文的測試輸入上，QAT模擬forward與重新載入的packed4最大logit差為0；這檢查部署規則對上，沒有證明模型答對。還要分清「保存數字」與「保存計算方式」：`qat_float.pt`只保留浮點主權重，普通FP32載入不會自動啟用fake quant；真正打包後的部署檔是`model.pt`。完整條件與產物可查[QAT實報](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/course-experiments/results/qat.json)。
+
+已有[T.4直接SFT實驗](../training.md#T.4)的`model.pt`與`dataset.json`時，下列指令從同一底座重做普通微調、QAT與打包比較，再試用QAT部署檔。這是重做全流程的入口；正式L4數字不等於你CPU重跑的時間：
+
+```bash
+.venv/bin/python -m scripts.course_experiments.run --experiment qat --device cpu
+.venv/bin/python scripts/infer.py outputs/course-experiments/course-v1/qat/model.pt --chat --prompt "color=red;shape=square;pitch=high;describe" --tokens 24 --json
+```
+
+這題標準答案是`square`，正式QAT部署版卻答`circle`，普通微調後PTQ答`square`。同樣的四位元儲存仍可能保存不同決策；兩支的tensor bytes相同，檔案bytes的差還包含metadata，不能當成QAT減少參數的證據。
+
+練習只把第一個誤差 `y.sum()` 改成 `y.square().sum()`。先預測STE梯度變成兩倍量化後的y，約 `[0.2571,0.7714,1.8]`，再重跑核對。直接round那條路維持原來的總和誤差，仍是零；這能區分誤差函數提供的學習訊號與模擬量化採用的近似傳遞規則。
+
