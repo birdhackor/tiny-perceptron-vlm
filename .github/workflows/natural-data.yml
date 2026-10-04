@@ -1,44 +1,66 @@
-name: Transfer and verify the three frozen LFS objects
+name: Bootstrap the fixed v4 source objects from Modal CPU
 on:
   workflow_dispatch:
 permissions:
   contents: write
+concurrency:
+  group: tiny-perceptron-course-gpu
+  cancel-in-progress: false
 jobs:
-  transfer:
+  source-bootstrap:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 45
+    env:
+      MODAL_TOKEN_ID: ${{ vars.MODAL_TOKEN_ID || secrets.MODAL_TOKEN_ID }}
+      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+      MODAL_ENVIRONMENT: ${{ vars.MODAL_ENVIRONMENT || 'main' }}
+      NATURAL_MODAL_PHASE: control
+      NATURAL_MANIFEST: docs/natural-assistant/v4/manifest.json
+      NATURAL_BOOTSTRAP_RUN_ID: gha-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@v7
         with:
           lfs: false
       - uses: actions/setup-python@v6
         with:
-          python-version: '3.12'
-      - run: python -m pip install cryptography==46.0.5
-      - name: Issue only encrypted object-scoped upload actions
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          BROKER_PHASE: issue
-        run: python .github/natural-v4-lfs-broker.py
-      - name: Deliver encrypted upload capabilities while this runner retains verification
-        uses: actions/upload-artifact@v7
-        with:
-          name: natural-v4-lfs-capability-${{ github.run_id }}
-          path: outputs/natural-v4/lfs-broker/encrypted-transfer.json
-          retention-days: 1
-          if-no-files-found: error
-      - name: Await local upload and perform standard LFS verification in this runner
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          BROKER_PHASE: await
+          python-version: '3.13'
+      - name: Install the existing Modal client
+        run: python -m pip install modal==1.6.0
+      - name: Reserve the fixed CPU prepare allowance in the existing shared ledger
+        id: reserve
         run: |
-          python -c 'import time; time.sleep(30)'
-          python .github/natural-v4-lfs-broker.py
-      - name: Save only actual completed upload and byte verification receipt
-        uses: actions/upload-artifact@v7
+          modal run scripts/modal_natural.py \
+            --stage reserve --requested-stage prepare \
+            --run-id "$NATURAL_BOOTSTRAP_RUN_ID" --batch-id natural-v4 \
+            --revision "$GITHUB_SHA" --manifest "$NATURAL_MANIFEST" \
+            --steps 100 --seed 42 --max-seconds 1620 --max-pixels 524288 \
+            --learning-rate 0.0001 --asr-variant turbo
+      - name: Fresh source reconstruction and scoped LFS upload from Modal CPU
+        id: bootstrap
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python .github/natural-v4-modal-source.py
+      - name: Finish the existing reservation without resetting its retained amount
+        if: always() && steps.reserve.outcome == 'success'
+        env:
+          BOOTSTRAP_OUTCOME: ${{ steps.bootstrap.outcome }}
+        run: |
+          status=failed-or-cancelled
+          if [ "$BOOTSTRAP_OUTCOME" = success ]; then status=completed; fi
+          modal run scripts/modal_natural.py \
+            --stage finish --finish-status "$status" \
+            --run-id "$NATURAL_BOOTSTRAP_RUN_ID" --batch-id natural-v4 \
+            --revision "$GITHUB_SHA" --manifest "$NATURAL_MANIFEST"
+      - name: Save public source bootstrap and ledger receipts only
         if: always()
+        uses: actions/upload-artifact@v7
         with:
-          name: natural-v4-lfs-receipt-${{ github.run_id }}
-          path: outputs/natural-v4/lfs-broker/upload-receipt.json
+          name: natural-v4-modal-source-${{ github.run_id }}
+          path: |
+            outputs/natural-v4/modal-source/source-lock.json
+            outputs/natural-v4/modal-source/modal-source-receipt.json
+            outputs/natural-v4/modal-source/upload-receipt.json
+            outputs/natural-assistant/reservation.json
+            outputs/natural-assistant/budget-final.json
           retention-days: 30
           if-no-files-found: warn
