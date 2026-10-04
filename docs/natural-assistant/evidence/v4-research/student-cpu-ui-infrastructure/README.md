@@ -1,0 +1,13 @@
+# Actual CPU UI infrastructure receipt
+
+`receipt.json` is a small ordinary-Git engineering receipt for the explicitly authorized official-base + turbo offline CPU trial on 2026-10-04. Source checkout: `9a61ecf524c9518f33f1501c28aa72997d4a82d0`. The actual product entry point was `scripts/natural_assistant.py serve`; the source files remained unchanged. Observation wrappers called the original model/ASR functions once, without replacement outputs.
+
+Typed greeting → one **train** DOCCI photo → one pre-existing **validation** AISHELL recording → edited speech question → historical follow-up → new dialogue all completed. No test rows, expected answers or rubrics were evaluated; generation records have no references/scores. This is infrastructure evidence, not model selection, accuracy, selected-public-release verification, or publication. Browser interaction was not executed in this trial.
+
+One Qwen core load and one turbo ASR load; four serial actual chat calls. Both official components were loaded from the already verified local v4 cache, not freshly downloaded. Torch threads 5, inter-op 1, CPU float32. All chat/ASR decoders stopped at EOS, with the scope limited to decoder stopping. The photo remained in later history/processor grids. Reset cleared history/assets/transcriptions; old asset GETs returned 400; normal SIGINT shutdown deleted uploaded temporary files.
+
+Ready 10.05 seconds; total 152.81 seconds; peak RSS 13,533,200 KiB (12.91 GiB); CPU user/system 368.00/96.35 seconds. This is one actual Intel Xeon Platinum 8573C cloud setup, not a minimum RAM requirement or a measurement for the pending selected adapter. The source/data/API timing/hash details and 12 post-run infrastructure checks are in the receipt.
+
+Raw requests, original generation/ASR records, saved actual page, stderr and exact executed harness/source bytes are listed by size/SHA under `raw_file_index`. Those `archive_only_path` entries are local `outputs/` artifacts and are **not files in a normal checkout**. They require a later independently verified external proof archive if published; no such publication is claimed here. The receipt itself is readable without that archive.
+
+The earlier `core-ui-run-001` stopped before model launch because the engineering harness assumed an absent `/usr/bin/time`. It was corrected to Python's Linux resource measurements. The successful raw run is `core-ui-run-002`. Later prepared Chromium/browser and anonymous-public-fetch helpers have only compile/help/Ruff checks so far. The final selected public manifest must still undergo actual fresh anonymous fetch plus actual browser interactions; this trial cannot substitute for that evidence.

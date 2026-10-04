@@ -1,0 +1,144 @@
+"""Recheck existing validation-only ASR evidence; no model weights or inference.
+
+Uses a full-matrix edit-distance implementation independent of the runner.
+Whisper tokenizers only decode preserved token IDs; no new audio is transcribed.
+"""
+
+import hashlib
+import json
+import os
+import sys
+import time
+import unicodedata
+from datetime import UTC, datetime
+from pathlib import Path
+
+os.environ["HF_HUB_OFFLINE"] = "1"
+os.environ["TRANSFORMERS_OFFLINE"] = "1"
+ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(ROOT))
+from transformers import WhisperProcessor
+import soundfile as sf
+from tiny_perceptron import natural_assistant as core
+
+EVIDENCE = ROOT / "docs/natural-assistant/evidence/v4-research/asr-cpu-validation"
+OUT = ROOT / "outputs/natural-v4/asr-cpu-validation"
+
+
+def normalized(text):
+    return "".join(unicodedata.normalize("NFKC", text).split())
+
+
+def matrix_edit_distance(left, right):
+    cells = [[0] * (len(right) + 1) for _ in range(len(left) + 1)]
+    for i in range(len(left) + 1):
+        cells[i][0] = i
+    for j in range(len(right) + 1):
+        cells[0][j] = j
+    for i, x in enumerate(left, 1):
+        for j, y in enumerate(right, 1):
+            cells[i][j] = min(cells[i - 1][j] + 1, cells[i][j - 1] + 1, cells[i - 1][j - 1] + int(x != y))
+    return cells[-1][-1]
+
+
+def json_read(path):
+    return json.loads(Path(path).read_text(encoding="utf-8"))
+
+
+def require(condition, description):
+    if not condition:
+        raise ValueError(description)
+
+
+def main():
+    started = time.monotonic()
+    protocol = json_read(EVIDENCE / "protocol.json")
+    comparison = json_read(EVIDENCE / "comparison.json")
+    require(protocol["threads"] == 5 and protocol["interop_threads"] == 1 and protocol["dtype"] == "float32" and protocol["device"] == "cpu", "Original protocol device/dtype/thread settings changed")
+    require(protocol["core_source_sha256"] == core.sha256(ROOT / "tiny_perceptron/natural_assistant.py"), "ASR runner source changed since actual recorded calls")
+    copy_checks = []
+    for item in comparison["copy_index"]:
+        path = ROOT / item["path"]
+        require(path.stat().st_size == item["bytes"] and core.sha256(path) == item["sha256"], "Original preserved evidence changed: " + item["path"])
+        copy_checks.append({"path": item["path"], "sha256": item["sha256"], "verified": True})
+    refs = {}
+    for source in protocol["sources"]:
+        path = ROOT / source["path"]
+        require(core.sha256(path) == source["sha256"], "Original source metadata changed: " + source["path"])
+        # Only validation rows reach reference fields/audio checks. No new test
+        # transcript or recording is decoded or generated in this verifier.
+        selected = [row for row in json_read(path)["audio_rows"] if row["split"] == "validation"]
+        require(len(selected) == source["validation_rows"], "Original validation split count changed")
+        for row in selected:
+            require(row["id"] not in refs, "Duplicate validation source ID")
+            refs[row["id"]] = row
+    require(len(refs) == 16 and set(refs) == set(protocol["ordered_ids"]), "Original 16 ordered validation source rows changed")
+    verified_rows = []
+    observed_parameters = {}
+    for variant in ("small", "turbo"):
+        repo, pin = core.ASR_VARIANTS[variant]
+        cache = ROOT / ("outputs/natural-extension/student-base-cache/hf" if variant == "small" else "outputs/natural-v4/student-base-cache/hf")
+        snapshot = cache / ("models--" + repo.replace("/", "--")) / "snapshots" / pin
+        processor = WhisperProcessor.from_pretrained(str(snapshot), local_files_only=True)
+        expected_prompt = [processor.tokenizer.convert_tokens_to_ids("<|startoftranscript|>")] + [token for _, token in processor.get_decoder_prompt_ids(language="chinese", task="transcribe", no_timestamps=True)]
+        records = json_read(EVIDENCE / (variant + "-records.json"))
+        summary = json_read(EVIDENCE / (variant + "-summary.json"))
+        require([row["id"] for row in records] == protocol["ordered_ids"], "Variants must preserve identical reference/audio order")
+        require(summary["model"] == repo and summary["revision"] == pin and summary["status"] == "completed", "Observed summary model pin/completion changed")
+        require(summary["environment"]["threads"] == 5 and summary["environment"]["interop_threads"] == 1, "Original observed CPU thread settings differ between variants")
+        require(summary["records_sha256"] == core.sha256(EVIDENCE / (variant + "-records.json")) and summary["protocol_sha256"] == core.sha256(EVIDENCE / "protocol.json"), "Observed summary source SHA mismatch")
+        first_stdout = json.loads((EVIDENCE / (variant + ".stdout.jsonl")).read_text().splitlines()[0])
+        require(first_stdout["parameters"] == summary["parameters"] and first_stdout["variant"] == variant, "Actual model-loaded stdout parameter count disagrees with summary")
+        observed_parameters[variant] = {"repository": repo, "revision": pin, "parameters": summary["parameters"], "evidence": "Original actual loaded-model numel stdout and summary agree; no model weights loaded by this verifier", "tokenizer_files": [{"name": path.name, "sha256": core.sha256(path), "bytes": path.stat().st_size} for path in sorted(snapshot.iterdir()) if path.name in {"tokenizer.json", "tokenizer_config.json", "vocab.json", "merges.txt", "added_tokens.json", "special_tokens_map.json", "normalizer.json", "preprocessor_config.json"}]}
+        raw_errors = errors = raw_chars = chars = 0
+        per_source = {}
+        for recorded in records:
+            reference = refs[recorded["id"]]
+            audio = ROOT / "outputs/natural-v4/data/voice" / reference["audio"]
+            digest = core.sha256(audio)
+            require(digest == reference["sha256"] == recorded["source_audio_sha256"] == recorded["audio_sha256"], "Original recording SHA mismatch")
+            require(audio.stat().st_size == reference["bytes"], "Original recording bytes mismatch")
+            info = sf.info(audio)
+            require(info.samplerate == reference["sample_rate"] == recorded["original_sample_rate"] and info.channels == reference["channels"] and info.frames/info.samplerate == reference["duration_seconds"] == recorded["source_duration_seconds"] == recorded["audio_seconds"], "Original audio header/sample rate/channel/duration differs from recorded source")
+            require(reference["source_member"] == recorded["source_member"] and reference["source"] == recorded["source"], "Source-member/dataset association mismatch")
+            require(recorded["split"] == "validation" and recorded["reference_transcript"] == reference["user"], "Original reference transcript/split changed")
+            reference_digest = hashlib.sha256(reference["user"].encode()).hexdigest()
+            require(reference_digest == recorded["source_reference_sha256"], "Original reference transcript SHA mismatch")
+            require(recorded["asr_repo"] == repo and recorded["asr_revision"] == pin and recorded["variant"] == variant, "Preserved per-row model pin mismatch")
+            raw = recorded["raw_token_ids"]
+            prompt = recorded["expected_decoder_prompt_ids"]
+            require(prompt == expected_prompt, "Fixed processor Chinese/transcribe/no-timestamps decoder prompt differs from recorded calls")
+            generated = recorded["generated_token_ids"]
+            decoded = processor.tokenizer.decode(raw, skip_special_tokens=True)
+            require(decoded == recorded["transcript"], "Actual preserved raw tokens do not decode to saved transcript")
+            require(raw[:len(prompt)] == prompt and raw[len(prompt):] == generated, "Original decoder prompt/raw/generated token sequence mismatch")
+            require(len(raw) == recorded["raw_token_count"] and len(generated) == recorded["generated_token_count"], "Original token counts mismatch")
+            require(recorded["decoder_prompt_matches"] and recorded["ended_with_eos"] and raw[-1] in recorded["eos_token_ids"] and recorded["stop_reason"] == "eos" and not recorded["truncated"] and not recorded["completion_unknown"] and not recorded["reached_token_limit"] and recorded["max_new_tokens"] == 128, "Original actual stopping metadata changed/incomplete")
+            original_ref = reference["user"]
+            original_output = recorded["transcript"]
+            nr, no = normalized(original_ref), normalized(original_output)
+            re, ne = matrix_edit_distance(original_ref, original_output), matrix_edit_distance(nr, no)
+            require(re == recorded["raw_errors"] and ne == recorded["errors"], "Independent edit-distance numerator mismatch")
+            require(len(original_ref) == recorded["raw_reference_characters"] and len(nr) == recorded["reference_characters"], "Original character denominators changed")
+            require(nr == recorded["normalized_reference"] and no == recorded["normalized_prediction"], "Recorded normalization changed punctuation/script/reference")
+            raw_errors += re; errors += ne; raw_chars += len(original_ref); chars += len(nr)
+            group = per_source.setdefault(reference["source"], {"raw_errors": 0, "errors": 0, "raw_reference_characters": 0, "reference_characters": 0, "count": 0})
+            for key, value in {"raw_errors": re, "errors": ne, "raw_reference_characters": len(original_ref), "reference_characters": len(nr), "count": 1}.items():
+                group[key] += value
+            verified_rows.append({"id": recorded["id"], "variant": variant, "source": reference["source"], "split": "validation", "reference_sha256": reference_digest, "audio_sha256": digest, "raw_token_sha256": hashlib.sha256(json.dumps(raw, separators=(",", ":")).encode()).hexdigest(), "raw_tokens_decode_to_preserved_transcript": True, "raw_errors": re, "raw_reference_characters": len(original_ref), "normalized_errors": ne, "normalized_reference_characters": len(nr), "stop_reason": "eos"})
+        for target in (summary["metrics"], comparison["variants"][variant]["metrics"]):
+            for key, value in {"raw_errors": raw_errors, "errors": errors, "raw_reference_characters": raw_chars, "reference_characters": chars, "count": 16}.items():
+                require(target[key] == value, "Original summary/comparison aggregate mismatch")
+            require(target["raw_micro_cer"] == raw_errors/raw_chars and target["normalized_micro_cer"] == errors/chars, "Original CER ratio mismatch")
+        require(sum(record["seconds"] for record in records) == summary["generation_seconds"] == comparison["variants"][variant]["generation_seconds"], "Observed generation-time aggregate mismatch")
+        require(sum(record["audio_seconds"] for record in records) == summary["audio_seconds"] == comparison["variants"][variant]["audio_seconds"], "Observed audio-duration aggregate mismatch")
+        for source, actual in per_source.items():
+            for key, value in actual.items():
+                require(summary["by_source"][source][key] == value and comparison["variants"][variant]["by_source"][source][key] == value, "Original per-source aggregate mismatch")
+    result = {"schema_version": 1, "verified_at": datetime.now(UTC).isoformat(), "status": "verified", "scope": "Recheck original 16 paired validation ASR outputs only; no test inference/reference selection, no weight/model loads or new transcript generation; not a new generalization experiment", "elapsed_seconds": time.monotonic()-started, "ordered_ids": protocol["ordered_ids"], "same_order_audio_reference_protocol_and_pins": True, "original_source_metadata": protocol["sources"], "original_parameters_from_observed_stdout": observed_parameters, "preserved_files_verified": copy_checks, "row_checks": verified_rows, "comparison_sha256": core.sha256(EVIDENCE / "comparison.json"), "verifier_script_sha256": core.sha256(Path(__file__)), "conclusion": "The existing validation-only small/turbo comparison is internally source-bound and CER-correct. Parent selected turbo before new test. No spontaneous dialogue, arbitrary speaker or language-model chat accuracy is measured."}
+    core.write_json(OUT / "source-bound-verification.json", result)
+    print(json.dumps({"status": result["status"], "paired_validation_rows": 16, "existing_outputs_checked": len(verified_rows), "elapsed_seconds": result["elapsed_seconds"]}), flush=True)
+
+
+if __name__ == "__main__":
+    main()
