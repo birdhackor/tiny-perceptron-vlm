@@ -1,0 +1,3 @@
+# Completed readability at the source freeze
+
+These files preserve actual coordinator dispatches, returned owner results and raw native checker output without changing their bytes. The closure records 57 genuinely new independent numbered readers and 235 unchanged current baseline reports; it does not claim 292 fresh new reads. Six additional independent owners read eight full canonical guides/entry files and actually revisited the corrected executed web preview. Original genuine revisions and accepted nonblocking notes remain explicit. The factual phase starts afterward and is not approved by this archive. `preservation-index.json` maps original runtime paths to the byte-exact copies. Python helper copies use inert `.source.txt` names.

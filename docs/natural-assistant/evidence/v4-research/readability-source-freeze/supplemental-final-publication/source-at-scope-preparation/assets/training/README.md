@@ -1,0 +1,78 @@
+# 首批訓練資料：Git LFS 快照
+
+此處發布8個分來源資料包，共29.4 MiB、1,447筆整理好的 training 紀錄；內容是已收集的教學 pilot，沒有模型訓練成果。程式與教材用普通 Git，`.tar.gz` 實體資料用 Git LFS，解包後放回被忽略的 `data/training/`。
+
+下方另外列出實用成品 v3 的3個資料包。首批8包與新版3包使用不同清單和下載入口；本頁原本的 `--asset all` 指首批8包。
+
+發布狀態（2026-10-02）：8個LFS物件已上傳，並以新的快取、不提供額外認證重新下載；逐包及解包後每個檔案的SHA-256均符合manifest。資料包由GitHub runner從固定公開來源重建，全部壓縮包與原本機快照的SHA-256完全相同；[上傳紀錄](https://github.com/birdhackor/tiny-perceptron-vlm/actions/runs/36946663981)。
+
+| ID | Training 紀錄 | 資料授權 |
+| --- | ---: | --- |
+| `tinystories` | 512個完整英文故事 | CDLA-Sharing-1.0 |
+| `chinese-poetry` | 365首古典中文詩 | MIT |
+| `ultrachat-sft` | 100筆多輪對話 | MIT |
+| `ultrafeedback-dpo` | 100組偏好對 | MIT |
+| `pku-safe-rlhf` | 100組安全／有用性比較 | CC-BY-NC-4.0，非商用 |
+| `fashion-mnist` | 50張圖與分類模板 | MIT |
+| `gsm8k` | 200題人寫解答 | MIT |
+| `fsdd` | 20段training語音 | CC-BY-SA-4.0 |
+
+FSDD另保留各20段validation／test，原錄音是8 kHz，使用16 kHz入口前須明確重採樣。Fashion-MNIST包內另保留完整60,000筆來源training parquet；50筆是已配對的pilot，不是自然圖片caption／VQA。GSM8K解答不是教師模型生成的蒸餾資料。
+
+各包保留來源、固定revision、原始授權證據與修改／選樣說明。`manifest.json`記錄壓縮包與每個檔案的大小、SHA-256；`sources/`保存來源metadata，這兩者用普通Git。資料依各自授權，不能統一當成此repo的MIT內容；非商用資料獨立成包，按需求選取。
+
+## 取得資料
+
+要在clone時先只取程式與LFS pointer：
+
+```bash
+GIT_LFS_SKIP_SMUDGE=1 git clone https://github.com/birdhackor/tiny-perceptron-vlm.git
+```
+
+Windows PowerShell先設定 `$env:GIT_LFS_SKIP_SMUDGE="1"` 再clone。需安裝 [Git LFS](https://git-lfs.com/)，clone後在repo根目錄執行 `git lfs install --local`，並依主README安裝Python環境。啟用`.venv`後：
+
+```bash
+python scripts/fetch_training_assets.py --list
+python scripts/fetch_training_assets.py --asset tinystories --asset chinese-poetry
+python scripts/fetch_training_assets.py --asset all
+```
+
+只指定需要的ID即可。入口先取得對應LFS物件，核對包與逐檔雜湊，再解到`data/training/`。已有相同內容會跳過；已有不同內容會停止，可用`--output`另選目錄。它不會更新權重或執行訓練。
+
+## 使用方式與範圍
+
+TinyStories／唐詩的`text` JSONL可用文字入口；UltraChat的`messages`、UltraFeedback的`chosen/rejected`與GSM8K的`question/answer`可對應SFT／偏好資料讀法。原始包保留上游格式，不替不同任務偷偷重寫標註；Fashion-MNIST、FSDD與安全比較資料須依對應章節明確轉換。
+
+自己開新實驗時，仍需按完整故事、詩、題目、圖片及近重複家族建立不洩漏的holdout。課程30組正式實驗已由配對入口建立各自的切分、轉換與指紋，詳見[實驗紀錄](../../docs/course-experiments/README.md)；包中的上游training身份與課程自訂留出側是兩件事。較偏好／較安全的回答不自動等於安全SFT正例。教材主線的離線小實驗仍用規則生成器，下載本資料不是執行各節Notebook的必要條件。
+
+若要重建同一快照，先解包全部資料，再執行`python scripts/build_training_assets.py --source data/training --output outputs/rebuilt-training-assets`；壓縮包不包含時間戳差異，可比對manifest SHA-256。每次實質改動發布新版本，不覆蓋v1。
+
+## 第20章資料：照片、中文文件與真人語音
+
+目前成品的來源、授權、固定下載與逐檔核對見[新版資料說明](../../docs/natural-assistant/v4/DATA.md)，重新訓練見[訓練指引](../../docs/natural-assistant/v4/TRAINING.md)。只想開啟模型時，直接用[學生操作指引](../../docs/natural-assistant/v4/STUDENT.md)，不用先取得全部訓練資料。
+
+### 舊資料快照v3（供回查）
+
+這3包提供實用成品使用的自然照片、合成中文圖片與真人中文錄音。壓縮包共70,648,031 bytes（約67.4 MiB），解包後345個檔案共94,905,207 bytes（約90.5 MiB）。它們是資料，不包含模型權重；下載資料本身也不會開始訓練。
+
+| 資料包 | 用來觀察什麼 | 來源與授權 |
+| --- | --- | --- |
+| `natural-vision-v3` | 自然照片中的物件、動作與關係，以及圖片描述 | DOCCI，CC BY 4.0；逐張來源與修改說明保留在包內 |
+| `natural-ocr-v3` | 繁體中文逐字轉錄、有無文字與閱讀順序 | 課程自製短句、背景與標註，MIT；使用 Noto 字體並保留 OFL 授權說明，包內沒有字體二進位檔 |
+| `natural-speech-v3` | 真人中文讀稿的逐字稿，以及把辨識文字送進聊天模型 | FLEURS 普通話，CC BY 4.0；保留原本簡體中文逐字稿與來源，不是自然聊天錄音集 |
+
+固定的整合清單是 [docs/natural-assistant/manifest.json](../../docs/natural-assistant/manifest.json)。`rows` 有390筆文字／圖片紀錄，分成272筆訓練、52筆驗證、66筆測試；`audio_rows` 另外索引42段真人錄音，分成24／6／12段。請依各自的切分使用：390是三側的總數，訓練側是272。課程沒有用這42段錄音重新訓練 Whisper，語音入口沿用已訓練的辨識模型。
+
+在專案根目錄執行下面的入口。它只使用 Python 標準函式庫，不需要 Modal、GPU、Hugging Face 登入或先安裝 Git LFS：
+
+```bash
+python scripts/fetch_natural_data.py --list
+python scripts/fetch_natural_data.py
+python scripts/fetch_natural_data.py --verify
+```
+
+第二行會解到被忽略的 `data/natural/`，第三行只核對已有資料，不下載。若同一份資料已完整存在，程式核對成功後會跳過；若有不同檔案、缺檔或多出自己的內容，就保留原資料並停止。可以用 `--output` 選一個新目錄。
+
+下載入口固定使用已公開的 Git commit `21a24124353487e08881302bbd71614766a489ac`，並核對本機與該版本的整合清單指紋。每個壓縮包與解包後的每個檔案也都要符合清單，三包全部核對成功，才建立完整的新資料夾。[匿名下載核對紀錄](../../docs/natural-assistant/evidence/data/lfs-anonymous-check.json)保存各包的精確大小與 SHA-256。這個入口直接讀 Git LFS 的公開實體檔，沒有把三包改成普通 Git 檔案。
+
+如果你想觀察選圖、製作中文字圖片、挑選中文錄音的過程，請依實用成品章節使用 `prepare_natural_vision.py`、`prepare_natural_ocr.py`、`prepare_natural_speech.py` 等來源準備程式。那是從來源重新準備資料的另一條路線；這裡的下載入口只還原已經固定的快照。各來源的授權繼續分別適用，不能把整個資料目錄統一視為專案的 MIT 授權。
