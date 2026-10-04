@@ -26,6 +26,10 @@ MODEL_ID = "Qwen/Qwen3-VL-2B-Instruct"
 MODEL_REVISION = "89644892e4d85e24eaac8bacfd4f463576704203"
 ASR_ID = "openai/whisper-small"
 ASR_REVISION = "973afd24965f72e36ca33b3055d56a652f456b4d"
+ASR_VARIANTS = {
+    "small": (ASR_ID, ASR_REVISION),
+    "turbo": ("openai/whisper-large-v3-turbo", "41f01f3fe87f28c78e2fbf8b568835947dd65ed9"),
+}
 LORA_TARGETS = r".*language_model\.layers\.\d+\.self_attn\.(q_proj|v_proj)"
 
 
@@ -70,6 +74,9 @@ def load_manifest(path, data_root=None):
     if not rows and "splits" in manifest:
         rows = [dict(row, split=split) for split, group in manifest["splits"].items() for row in group]
     audio_rows = manifest.get("audio_rows", [])
+    for row in audio_rows:
+        if row.get("task", "asr") not in {"asr", "speech_chat", "speech_transcription"}:
+            raise ValueError("Audio task must be legacy asr, speech_chat or speech_transcription")
     identifiers, families = set(), {}
     root = Path(data_root or path.parent).resolve()
     for row in rows + audio_rows:
@@ -460,6 +467,56 @@ def save_checkpoint(model, optimizer, output, record):
         shutil.rmtree(previous)
 
 
+def checkpoint_schedule(value, requested_steps):
+    """At most two explicit, increasing update boundaries; never infer an epoch."""
+    if isinstance(value, str):
+        if not value:
+            return ()
+        fields = value.split(",")
+        if any(not re.fullmatch(r"[0-9]+", field.strip()) for field in fields):
+            raise ValueError("Checkpoint steps must be comma-separated positive integers")
+        steps = tuple(int(field) for field in fields)
+    else:
+        steps = tuple(value)
+    if (
+        len(steps) > 2
+        or any(type(step) is not int or not 1 <= step <= requested_steps for step in steps)
+        or tuple(sorted(set(steps))) != steps
+    ):
+        raise ValueError("Checkpoint steps must contain at most two increasing unique completed updates")
+    return steps
+
+
+def archive_checkpoint(model, optimizer, output, record):
+    """Save the current real tensors/state, independently of the rotating latest copy."""
+    step = record["completed_steps"]
+    destination = Path(output) / "checkpoints" / f"step-{step:06d}"
+    if destination.exists():
+        raise ValueError("An archived checkpoint is immutable; refusing to overwrite it")
+    temporary = destination.with_name(destination.name + ".tmp")
+    if temporary.exists():
+        shutil.rmtree(temporary)
+    save_checkpoint(model, optimizer, temporary, record)
+    payload = temporary / "adapter"
+    files = [
+        {"path": file.name, "bytes": file.stat().st_size, "sha256": sha256(file)}
+        for file in sorted(payload.iterdir())
+        if file.is_file()
+    ]
+    write_json(
+        payload / "checkpoint.json",
+        {"completed_steps": step, "manifest_sha256": record["manifest_sha256"], "files": files},
+    )
+    payload.rename(destination)
+    shutil.rmtree(temporary)
+    return {
+        "completed_steps": step,
+        "path": destination.relative_to(output).as_posix(),
+        "files": files,
+        "checkpoint_metadata_sha256": sha256(destination / "checkpoint.json"),
+    }
+
+
 def training_row_at(rows, step, seed):
     indices = list(range(len(rows)))
     random.Random(seed + step // len(rows)).shuffle(indices)
@@ -471,6 +528,7 @@ def run_train(options):
     rows = [row for row in manifest["rows"] if row["split"] == "train"]
     if not rows:
         raise ValueError("No training rows")
+    checkpoints = checkpoint_schedule(getattr(options, "checkpoint_steps", ()), options.steps)
     torch.manual_seed(options.seed)
     started = time.monotonic()
     model, processor = load_core(options, adapter=options.adapter, train=True)
@@ -494,6 +552,8 @@ def run_train(options):
         optimizer_parameter_names=names,
         trainable_parameter_names=names,
         optimizer_only_lora=True,
+        checkpoint_steps=list(checkpoints),
+        archived_checkpoints=[],
     )
     if options.adapter:
         prior = json.loads((Path(options.adapter) / "training.json").read_text())
@@ -513,6 +573,11 @@ def run_train(options):
         record["history"] = prior["history"]
         record["completed_steps"] = prior["completed_steps"]
         record["trained_rows"] = prior["trained_rows"]
+        # Prior archives remain in the earlier immutable run; never relabel them
+        # as newly saved versions in this output directory.
+        record["prior_archived_checkpoints"] = prior.get("archived_checkpoints", [])
+        if any(step <= prior["completed_steps"] for step in checkpoints):
+            raise ValueError("Resumed archival steps must follow the resumed completed update")
         record["resume_from"] = {
             "adapter_training_sha256": sha256(Path(options.adapter) / "training.json"),
             "completed_steps": prior["completed_steps"],
@@ -570,6 +635,8 @@ def run_train(options):
                 "elapsed_seconds": time.monotonic() - started,
             }
         )
+        if step + 1 in checkpoints:
+            record["archived_checkpoints"].append(archive_checkpoint(model, optimizer, options.output, record))
         if (step + 1) % options.checkpoint_every == 0 or time.monotonic() - checkpoint_time >= 60:
             save_checkpoint(model, optimizer, options.output, record)
             checkpoint_time = time.monotonic()
@@ -715,26 +782,67 @@ def evaluate_rows(model, processor, rows, data_root, options, variant, deadline=
     return records
 
 
+def transcription_summary(records):
+    result = {
+        "count": len(records),
+        "raw_errors": sum(row["raw_errors"] for row in records),
+        "raw_reference_characters": sum(row["raw_reference_characters"] for row in records),
+        "errors": sum(row["errors"] for row in records),
+        "reference_characters": sum(row["reference_characters"] for row in records),
+        "truncated_count": sum(bool(row.get("truncated")) for row in records),
+        "completion_unknown_count": sum(bool(row.get("completion_unknown")) for row in records),
+    }
+    result["raw_micro_cer"] = (
+        result["raw_errors"] / result["raw_reference_characters"] if result["raw_reference_characters"] else None
+    )
+    result["normalized_micro_cer"] = (
+        result["errors"] / result["reference_characters"] if result["reference_characters"] else None
+    )
+    return result
+
+
+@contextlib.contextmanager
+def evaluation_adapter(model, name):
+    previous = model.active_adapter
+    model.set_adapter(name)
+    try:
+        yield
+    finally:
+        model.set_adapter(previous)
+
+
 def run_evaluate(options, *, baseline=False):
     started = time.monotonic()
     deadline = started + options.max_seconds
     manifest, data_root = load_manifest(options.manifest, options.data_root)
     rows = [row for row in manifest["rows"] if row["split"] == options.split]
     audio_rows = [row for row in manifest["audio_rows"] if row["split"] == options.split]
+    audio_chat_rows = [row for row in audio_rows if row.get("task", "asr") != "speech_transcription"]
     if not rows and not audio_rows:
         raise ValueError("No evaluation rows in requested split")
     model, processor = load_core(options, adapter=None if baseline else options.adapter)
+    comparisons = getattr(options, "comparison_adapters", [])
+    if comparisons and (baseline or not options.adapter or Path(comparisons[0][1]) != Path(options.adapter)):
+        raise ValueError("Comparison adapters need an adapter evaluation with the first exact loaded path")
     variants = [
         ("base", model.disable_adapter()) if options.adapter and not baseline else ("base", contextlib.nullcontext())
     ]
     if options.adapter and not baseline:
-        variants.append(("adapter", contextlib.nullcontext()))
+        if comparisons:
+            variants.append((comparisons[0][0], evaluation_adapter(model, "default")))
+            for label, path in comparisons[1:]:
+                model.load_adapter(path, adapter_name=label, is_trainable=False)
+                variants.append((label, evaluation_adapter(model, label)))
+            model.eval()
+        else:
+            variants.append((getattr(options, "adapter_label", "adapter"), contextlib.nullcontext()))
     result = dict(
         provenance(options, manifest),
         **parameter_counts(model),
         split=options.split,
         requested_visual_text_rows=len(rows),
         requested_audio_rows=len(audio_rows),
+        requested_audio_chat_rows=len(audio_chat_rows),
         status="in_progress",
         variants={},
     )
@@ -750,6 +858,8 @@ def run_evaluate(options, *, baseline=False):
             observation = transcribe(asr_model, asr_processor, asset_path(row["audio"], data_root))
             observation.update(
                 id=row["id"],
+                task=row.get("task", "asr"),
+                source=row.get("source"),
                 reference_transcript=row["user"],
                 **asr_cer_metrics(row["user"], observation["transcript"]),
                 speaker=row.get("speaker"),
@@ -775,11 +885,30 @@ def run_evaluate(options, *, baseline=False):
         result["asr"]["micro_cer_scope"] = "normalized_micro_cer; raw_micro_cer is reported separately"
         raw_count = result["asr"]["raw_reference_characters"]
         result["asr"]["raw_micro_cer"] = result["asr"]["raw_errors"] / raw_count if raw_count else None
+        result["asr"]["completed"] = len(transcripts) == len(audio_rows)
+        result["asr"]["by_task"] = {
+            task: transcription_summary([record for record in transcripts if record["task"] == task])
+            for task in sorted({record["task"] for record in transcripts})
+        }
+        groups = {}
+        for record in transcripts:
+            source = record.get("source")
+            if isinstance(source, dict):
+                source = (
+                    source.get("id")
+                    or source.get("dataset")
+                    or source.get("repo")
+                    or json.dumps(source, sort_keys=True)
+                )
+            groups.setdefault(str(source) if source is not None else "unspecified", []).append(record)
+        result["asr"]["by_source"] = {source: transcription_summary(group) for source, group in groups.items()}
         write_json(Path(options.output) / "transcripts.json", transcripts)
     for variant, context in variants:
         with context:
             records = evaluate_rows(model, processor, rows, data_root, options, variant, deadline)
             for row, observation in zip(audio_rows[: len(transcripts)], transcripts, strict=True):
+                if row.get("task", "asr") == "speech_transcription":
+                    continue
                 if time.monotonic() >= deadline:
                     break
                 actual = dict(row, user=observation["transcript"], task="speech_chat")
@@ -801,14 +930,17 @@ def run_evaluate(options, *, baseline=False):
             result["variants"][variant] = {
                 "tasks": summarize(records),
                 "generation_count": len(records),
-                "completed": len(records) == len(rows) + 2 * len(audio_rows),
+                "completed": len(records) == len(rows) + 2 * len(audio_chat_rows),
             }
             write_json(Path(options.output) / f"generations-{variant}.json", records)
             write_json(Path(options.output) / "result.json", result)
     write_json(Path(options.output) / "generations.json", raw)
     write_json(Path(options.output) / "provenance.json", provenance(options, manifest))
     result["status"] = (
-        "completed" if all(value["completed"] for value in result["variants"].values()) else "time_limit_partial"
+        "completed"
+        if all(value["completed"] for value in result["variants"].values())
+        and result.get("asr", {}).get("completed", True)
+        else "time_limit_partial"
     )
     result["elapsed_seconds"] = time.monotonic() - started
     write_json(Path(options.output) / "result.json", result)

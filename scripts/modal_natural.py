@@ -52,6 +52,10 @@ BUILD_AND_RETAINED_STORAGE_ALLOWANCE_USD = Decimal("0.20")
 MAX_EGRESS_GIB = Decimal("8")
 MAX_PRIVATE_BACKUP_BYTES = 256 * 1024 * 1024
 MAX_REVIEW_DOWNLOAD_BYTES = 64 * 1024 * 1024
+ASR_VARIANTS = {
+    "small": ("openai/whisper-small", "973afd24965f72e36ca33b3055d56a652f456b4d"),
+    "turbo": ("openai/whisper-large-v3-turbo", "41f01f3fe87f28c78e2fbf8b568835947dd65ed9"),
+}
 
 PHASE = os.environ.get("NATURAL_MODAL_PHASE", "control")
 MANIFEST_RELATIVE = os.environ.get("NATURAL_MANIFEST", "docs/natural-assistant/manifest.json")
@@ -89,6 +93,131 @@ def write_json(path, value):
     temporary = path.with_name(path.name + ".tmp")
     temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8")
     temporary.replace(path)
+
+
+def checkpoint_names(value):
+    if not value:
+        return []
+    names = value.split(",")
+    if (
+        len(names) > 2
+        or len(set(names)) != len(names)
+        or any(not re.fullmatch(r"step-[0-9]{6}", name) or not 1 <= int(name[5:]) <= 3000 for name in names)
+    ):
+        raise ValueError("Need at most two unique step-NNNNNN checkpoint names")
+    return names
+
+
+def runtime_options(
+    stage, steps, seed, max_seconds, max_pixels, learning_rate, asr_variant, checkpoints, checkpoint, compare
+):
+    if (
+        type(steps) is not int
+        or not 1 <= steps <= 3000
+        or type(max_pixels) is not int
+        or not 1 <= max_pixels <= 1048576
+    ):
+        raise ValueError("Requested steps or visual budget exceed the bounded runner")
+    limit = min(3300, SPEC[stage]["seconds"] - 180)
+    if type(max_seconds) is not int or not 1 <= max_seconds <= limit:
+        raise ValueError("Runner timeout must leave at least 180 seconds for checkpoint/cleanup")
+    if Decimal(str(learning_rate)) not in (Decimal("0.0001"), Decimal("0.00003")):
+        raise ValueError("Learning rate must be exactly 1e-4 or 3e-5")
+    if asr_variant not in ASR_VARIANTS:
+        raise ValueError("ASR must use the fixed small or turbo model pin")
+    saved = []
+    if checkpoints:
+        fields = checkpoints.split(",")
+        if any(not re.fullmatch(r"[0-9]+", field) for field in fields):
+            raise ValueError("Checkpoint updates must be comma-separated integers")
+        saved = [int(field) for field in fields]
+        if stage != "train" or len(saved) > 2 or saved != sorted(set(saved)) or any(not 1 <= n <= steps for n in saved):
+            raise ValueError("At most two increasing checkpoint updates within this train run are allowed")
+    selected = checkpoint_names(checkpoint)
+    if len(selected) > 1:
+        raise ValueError("Final inference must identify only one adapter checkpoint")
+    compared = checkpoint_names(compare)
+    if compared and (stage != "validation" or selected):
+        raise ValueError("Checkpoint comparison is validation-only and cannot also select one checkpoint")
+    return {
+        "steps": steps,
+        "seed": seed,
+        "max_seconds": max_seconds,
+        "max_pixels": max_pixels,
+        "learning_rate": float(learning_rate),
+        "asr_variant": asr_variant,
+        "asr_model": ASR_VARIANTS[asr_variant][0],
+        "asr_revision": ASR_VARIANTS[asr_variant][1],
+        "checkpoint_steps": saved,
+        "adapter_checkpoint": checkpoint,
+        "adapter_checkpoints": compared,
+    }
+
+
+def runtime_contract(options):
+    return json.dumps(options, sort_keys=True, separators=(",", ":"))
+
+
+def verify_runtime_contract(stage, options):
+    settings = runtime_options(
+        stage,
+        options["steps"],
+        options["seed"],
+        options["max_seconds"],
+        options["max_pixels"],
+        options["learning_rate"],
+        options["asr_variant"],
+        ",".join(map(str, options["checkpoint_steps"])),
+        options["adapter_checkpoint"],
+        ",".join(options["adapter_checkpoints"]),
+    )
+    digest = hashlib.sha256(runtime_contract(settings).encode()).hexdigest()
+    if (
+        settings != options["runtime_options"]
+        or any(options.get(key) != value for key, value in settings.items())
+        or digest != options["runtime_options_sha256"]
+    ):
+        raise ValueError("Actual runtime arguments differ from their canonical reserved configuration")
+    return digest
+
+
+def adapter_descriptor(batch_id, run_id, checkpoint="", manifest_sha=None):
+    safe_name(run_id)
+    names = checkpoint_names(checkpoint)
+    if len(names) > 1:
+        raise ValueError("One descriptor identifies exactly one checkpoint")
+    directory = NATURAL_ROOT / batch_id / "train" / run_id
+    directory = directory / "checkpoints" / checkpoint if checkpoint else directory / "adapter"
+    weight = directory / "adapter_model.safetensors"
+    if not weight.is_file():
+        raise ValueError("Requested adapter is absent in the same explicit batch")
+    if checkpoint:
+        metadata = json.loads((directory / "checkpoint.json").read_text())
+        training = json.loads((directory / "training.json").read_text())
+        completed = int(checkpoint[5:])
+        if metadata.get("completed_steps") != completed or training.get("completed_steps") != completed:
+            raise ValueError("Checkpoint name and actual saved training update differ")
+        if manifest_sha and any(item.get("manifest_sha256") != manifest_sha for item in (metadata, training)):
+            raise ValueError("Archived checkpoint belongs to a different manifest")
+        files = metadata.get("files", [])
+        if not {"adapter_model.safetensors", "adapter_config.json", "training.json", "training_state.pt"} <= {
+            item.get("path") for item in files
+        }:
+            raise ValueError("Archived checkpoint must contain complete adapter, metadata and resume state")
+        for item in files:
+            relative = safe_relative(item["path"])
+            if len(relative.parts) != 1:
+                raise ValueError("Checkpoint metadata may only name files in its own directory")
+            file = directory / relative
+            if not file.is_file() or file.stat().st_size != item["bytes"] or sha256(file) != item["sha256"]:
+                raise ValueError("Archived checkpoint differs from the exact saved update bytes")
+    return {
+        "variant": f"adapter-{checkpoint}" if checkpoint else "adapter",
+        "checkpoint": checkpoint,
+        "path": str(directory),
+        "adapter_sha256": sha256(weight),
+        "adapter_run_id": run_id,
+    }
 
 
 def snapshot():
@@ -180,7 +309,7 @@ def reservation(ledger, run_id, batch_id, stage, revision, manifest_sha, live):
     return item
 
 
-def validate_selection(selection, manifest_sha, adapter_run_id):
+def validate_selection(selection, manifest_sha, adapter_run_id, adapter_checkpoint=""):
     if not isinstance(selection, dict) or selection.get("dataset_manifest_sha256") != manifest_sha:
         raise ValueError("Selected final model must bind the exact frozen dataset manifest SHA-256")
     safe_name(selection.get("validation_run_id", ""))
@@ -190,20 +319,31 @@ def validate_selection(selection, manifest_sha, adapter_run_id):
         if not isinstance(selection.get(field), str) or not selection[field].strip():
             raise ValueError("Final selection must explain its pre-test criterion and decision")
     variant = selection.get("selected_variant")
-    if variant == "adapter":
+    if variant == "adapter" or re.fullmatch(r"adapter-step-[0-9]{6}", str(variant)):
         selected_run = safe_name(selection.get("adapter_run_id", ""))
         if adapter_run_id != selected_run or not re.fullmatch(r"[a-f0-9]{64}", selection.get("adapter_sha256", "")):
             raise ValueError("Test adapter argument and immutable weight SHA must match the committed selection")
+        checkpoint_names(adapter_checkpoint)
+        if selection.get("adapter_checkpoint", "") != adapter_checkpoint or variant != (
+            f"adapter-{adapter_checkpoint}" if adapter_checkpoint else "adapter"
+        ):
+            raise ValueError("Selection must bind the exact archived checkpoint and variant")
     elif variant == "base":
-        if adapter_run_id or selection.get("adapter_run_id") or selection.get("adapter_sha256"):
+        if (
+            adapter_run_id
+            or adapter_checkpoint
+            or selection.get("adapter_checkpoint")
+            or selection.get("adapter_run_id")
+            or selection.get("adapter_sha256")
+        ):
             raise ValueError("A selected base model must not load an adapter")
     else:
         raise ValueError("Selected variant must be base or adapter")
     return selection
 
 
-def selection_gate(selection, manifest_sha, adapter_run_id, batch_id):
-    validate_selection(selection, manifest_sha, adapter_run_id)
+def selection_gate(selection, manifest_sha, adapter_run_id, batch_id, adapter_checkpoint=""):
+    validate_selection(selection, manifest_sha, adapter_run_id, adapter_checkpoint)
     report_path = NATURAL_ROOT / batch_id / "validation" / selection["validation_run_id"] / "result.json"
     if not report_path.is_file() or sha256(report_path) != selection["validation_result_sha256"]:
         raise ValueError("Committed selection does not match actual Volume validation/result.json bytes")
@@ -221,21 +361,25 @@ def selection_gate(selection, manifest_sha, adapter_run_id, batch_id):
     variant = selection["selected_variant"]
     if report.get("variants", {}).get(variant, {}).get("completed") is not True:
         raise ValueError("Selected model did not finish the referenced validation evaluation")
-    if variant == "adapter":
-        adapter = NATURAL_ROOT / batch_id / "train" / adapter_run_id / "adapter" / "adapter_model.safetensors"
-        if (
-            execution.get("adapter_run_id") != adapter_run_id
-            or execution.get("adapter_sha256") != selection["adapter_sha256"]
-            or not adapter.is_file()
-            or sha256(adapter) != selection["adapter_sha256"]
-        ):
+    if variant != "base":
+        actual = adapter_descriptor(batch_id, adapter_run_id, adapter_checkpoint, manifest_sha)
+        evaluated = next((item for item in execution.get("adapters", []) if item.get("variant") == variant), None)
+        if evaluated is None and variant == "adapter":
+            evaluated = {
+                "adapter_run_id": execution.get("adapter_run_id"),
+                "adapter_sha256": execution.get("adapter_sha256"),
+            }
+        if not evaluated or any(evaluated.get(key) != actual[key] for key in ("adapter_run_id", "adapter_sha256")):
             raise ValueError("Selected adapter differs from the weights actually used for validation")
+        if actual["adapter_sha256"] != selection["adapter_sha256"]:
+            raise ValueError("Selected checkpoint differs from committed inference weights")
     return {
         "validation_run_id": selection["validation_run_id"],
         "validation_result_sha256": selection["validation_result_sha256"],
         "selected_variant": variant,
         "adapter_run_id": selection.get("adapter_run_id"),
         "adapter_sha256": selection.get("adapter_sha256"),
+        "adapter_checkpoint": adapter_checkpoint,
         "criterion": selection["criterion"],
         "decision": selection["decision"],
     }
@@ -315,6 +459,7 @@ def reserve_remote(
     selection_text="",
     adapter_run_id="",
     external_metadata_sha="",
+    runtime_options_text="",
 ):
     volume.reload()
     if not LEDGER_PATH.is_file():
@@ -322,10 +467,18 @@ def reserve_remote(
     ledger = json.loads(LEDGER_PATH.read_text())
     selection_proof = None
     if stage in SELECTION_STAGES:
-        selection_proof = selection_gate(json.loads(selection_text), manifest_sha, adapter_run_id, batch_id)
+        settings = json.loads(runtime_options_text) if runtime_options_text else {}
+        selection_proof = selection_gate(
+            json.loads(selection_text), manifest_sha, adapter_run_id, batch_id, settings.get("adapter_checkpoint", "")
+        )
     if stage == "external_ocr":
         external_cache_guard(external_metadata_sha)
     item = reservation(ledger, run_id, batch_id, stage, revision, manifest_sha, live)
+    if runtime_options_text:
+        item.update(
+            runtime_options=json.loads(runtime_options_text),
+            runtime_options_sha256=hashlib.sha256(runtime_options_text.encode()).hexdigest(),
+        )
     if selection_proof:
         item.update(
             selection_sha256=hashlib.sha256(selection_text.encode()).hexdigest(),
@@ -338,7 +491,9 @@ def reserve_remote(
     return {"budget_usd": ledger["budget_usd"], "reserved_total_usd": ledger["reserved_total_usd"], "entry": item}
 
 
-def require_reservation(run_id, batch_id, stage, revision, manifest_sha, selection_sha="", external_metadata_sha=""):
+def require_reservation(
+    run_id, batch_id, stage, revision, manifest_sha, selection_sha="", external_metadata_sha="", runtime_sha=""
+):
     ledger = json.loads(LEDGER_PATH.read_text())
     item = next((item for item in ledger["reservations"] if item.get("run_id") == run_id), None)
     if item is None or any(
@@ -356,6 +511,8 @@ def require_reservation(run_id, batch_id, stage, revision, manifest_sha, selecti
         raise ValueError("Test selection contract differs from the one committed before reserving this attempt")
     if stage in EXTERNAL_STAGES and item.get("external_metadata_sha256") != external_metadata_sha:
         raise ValueError("External OCR metadata differs from the one committed before reserving this attempt")
+    if runtime_sha and item.get("runtime_options_sha256") != runtime_sha:
+        raise ValueError("Runtime settings differ from the exact configuration reserved before this attempt")
     item["status"] = "running"
     write_json(LEDGER_PATH, ledger)
     volume.commit()
@@ -530,6 +687,7 @@ if modal.is_local() and PHASE == "execute":
 
 def execute_stage(stage, batch_id, run_id, revision, manifest_sha, options):
     volume.reload()
+    runtime_sha = verify_runtime_contract(stage, options)
     require_reservation(
         run_id,
         batch_id,
@@ -538,10 +696,13 @@ def execute_stage(stage, batch_id, run_id, revision, manifest_sha, options):
         manifest_sha,
         options.get("selection_sha256", ""),
         options.get("external_metadata_sha256", ""),
+        runtime_sha,
     )
     selection_proof = None
     if stage in SELECTION_STAGES:
-        selection_proof = selection_gate(options["selection"], manifest_sha, options["adapter_run_id"], batch_id)
+        selection_proof = selection_gate(
+            options["selection"], manifest_sha, options["adapter_run_id"], batch_id, options["adapter_checkpoint"]
+        )
     manifest_file = Path("/app") / manifest_path
     if sha256(manifest_file) != manifest_sha:
         raise ValueError("Container dataset manifest differs from reserved Git version")
@@ -585,13 +746,28 @@ def execute_stage(stage, batch_id, run_id, revision, manifest_sha, options):
         str(options["max_pixels"]),
         "--seed",
         str(options["seed"]),
+        "--asr-model",
+        options["asr_model"],
+        "--asr-revision",
+        options["asr_revision"],
     ]
     if stage != "prepare":
         args.append("--local-files-only")
     if stage in ("baseline", "validation", "evaluate"):
         args.extend(["--split", "test" if stage == "evaluate" else "validation", "--max-new-tokens", "384"])
     if stage == "train":
-        args.extend(["--steps", str(options["steps"]), "--checkpoint-every", "25", "--learning-rate", "0.00003"])
+        args.extend(
+            [
+                "--steps",
+                str(options["steps"]),
+                "--checkpoint-every",
+                "25",
+                "--learning-rate",
+                str(options["learning_rate"]),
+            ]
+        )
+        if options["checkpoint_steps"]:
+            args.extend(["--checkpoint-steps", ",".join(map(str, options["checkpoint_steps"]))])
     if stage == "external_ocr":
         args.extend(["--split", "test", "--max-new-tokens", "384"])
     if stage == "external_prepare":
@@ -606,13 +782,18 @@ def execute_stage(stage, batch_id, run_id, revision, manifest_sha, options):
             str(NATURAL_ROOT / "cache" / "external-ocr"),
         ]
     adapter_sha = None
+    adapters = []
     if options.get("adapter_run_id") and stage != "external_prepare":
         adapter_run_id = safe_name(options["adapter_run_id"])
-        adapter = NATURAL_ROOT / batch_id / "train" / adapter_run_id / "adapter"
-        if not (adapter / "adapter_model.safetensors").is_file():
-            raise ValueError("Requested adapter is absent in the same explicit batch")
-        adapter_sha = sha256(adapter / "adapter_model.safetensors")
-        args.extend(["--adapter", str(adapter)])
+        checkpoints = options["adapter_checkpoints"] or [options["adapter_checkpoint"]]
+        adapters = [
+            adapter_descriptor(batch_id, adapter_run_id, checkpoint, manifest_sha) for checkpoint in checkpoints
+        ]
+        adapter_sha = adapters[0]["adapter_sha256"]
+        args.extend(["--adapter", adapters[0]["path"], "--adapter-label", adapters[0]["variant"]])
+        if options["adapter_checkpoints"]:
+            for item in adapters:
+                args.extend(["--comparison-adapter", f"{item['variant']}={item['path']}"])
     write_json(
         directory / "execution.json",
         {
@@ -626,6 +807,10 @@ def execute_stage(stage, batch_id, run_id, revision, manifest_sha, options):
             "secret_injected_into_gpu": False,
             "adapter_run_id": options.get("adapter_run_id") or None,
             "adapter_sha256": adapter_sha,
+            "adapter_checkpoint": options["adapter_checkpoint"],
+            "adapters": adapters,
+            "runtime_options_sha256": options["runtime_options_sha256"],
+            "runtime_options": options["runtime_options"],
             "selection_sha256": options.get("selection_sha256"),
             "pretest_selection": selection_proof,
             "external_metadata_sha256": external_metadata_sha,
@@ -667,6 +852,10 @@ def execute_stage(stage, batch_id, run_id, revision, manifest_sha, options):
             "volume_commit_errors": commits,
             "adapter_run_id": options.get("adapter_run_id") or None,
             "adapter_sha256": adapter_sha,
+            "adapter_checkpoint": options["adapter_checkpoint"],
+            "adapters": adapters,
+            "runtime_options_sha256": options["runtime_options_sha256"],
+            "runtime_options": options["runtime_options"],
             "selection_sha256": options.get("selection_sha256"),
             "pretest_selection": selection_proof,
             "external_metadata_sha256": external_metadata_sha,
@@ -859,6 +1048,20 @@ def validate_release(approval):
             for word in ("optimizer", "scheduler", "rng", "checkpoint", "training")
         ):
             raise ValueError("Only reviewed inference adapter/config/metadata files may be public")
+        if "source_path" in item:
+            private_path = safe_relative(item["source_path"])
+            if private_path.name != path.name or private_path.name not in (
+                "adapter_model.safetensors",
+                "adapter_config.json",
+            ):
+                raise ValueError("Checkpoint mapping may export only the same inference adapter/config basename")
+            if not (
+                private_path.parts == ("adapter", private_path.name)
+                or len(private_path.parts) == 3
+                and private_path.parts[0] == "checkpoints"
+                and len(checkpoint_names(private_path.parts[1])) == 1
+            ):
+                raise ValueError("Checkpoint mapping must identify latest or one explicit archived adapter")
         if not re.fullmatch(r"[a-f0-9]{64}", item.get("sha256", "")):
             raise ValueError("Every released file needs an exact SHA-256")
         if item.get("redistribution_approved") is not True or not item.get("license"):
@@ -912,7 +1115,7 @@ def release_remote(release_repo, approval_text, approval_sha, run_id, batch_id, 
         for item in approval["files"]:
             file = hf_hub_download(
                 repo_id=source["repo"],
-                filename=f"{source['prefix']}/{item['path']}",
+                filename=f"{source['prefix']}/{item.get('source_path', item['path'])}",
                 revision=source["revision"],
                 token=os.environ["HF_TOKEN"],
                 local_dir=Path(temporary) / "private",
@@ -991,9 +1194,17 @@ def download_review(batch_id, stage, run_id, output, receipt):
     total = 0
     for item in receipt["files"]:
         relative = safe_relative(item["path"])
-        if relative.as_posix() not in allowed and not (
-            relative.parts[0] == "adapter" and relative.suffix in (".json", ".safetensors")
-        ):
+        adapter_file = relative.parts[0] == "adapter" and relative.suffix in (".json", ".safetensors")
+        archived_file = (
+            len(relative.parts) == 3
+            and relative.parts[0] == "checkpoints"
+            and bool(checkpoint_names(relative.parts[1]))
+            and relative.suffix in (".json", ".safetensors")
+        )
+        candidate_output = len(relative.parts) == 1 and re.fullmatch(
+            r"generations-adapter-step-[0-9]{6}\.json", relative.name
+        )
+        if relative.as_posix() not in allowed and not (adapter_file or archived_file or candidate_output):
             continue
         total += item["bytes"]
         if total > MAX_REVIEW_DOWNLOAD_BYTES:
@@ -1024,6 +1235,11 @@ def main(
     seed: int = 42,
     max_seconds: int = 3300,
     max_pixels: int = 524288,
+    learning_rate: float = 0.00003,
+    asr_variant: str = "small",
+    checkpoint_steps: str = "",
+    adapter_checkpoint: str = "",
+    adapter_checkpoints: str = "",
     finish_status: str = "failed-or-cancelled",
 ):
     for value in (run_id, batch_id):
@@ -1044,12 +1260,27 @@ def main(
         result = finish_remote.remote(run_id, finish_status, snapshot())
         write_json(output / "budget-final.json", result)
         return
+    settings = runtime_options(
+        selected,
+        steps,
+        seed,
+        max_seconds,
+        max_pixels,
+        learning_rate,
+        asr_variant,
+        checkpoint_steps,
+        adapter_checkpoint,
+        adapter_checkpoints,
+    )
+    if (adapter_checkpoint or adapter_checkpoints) and not adapter_run_id:
+        raise ValueError("Archived checkpoint selection needs its exact train adapter_run_id")
+    settings_text = runtime_contract(settings)
     manifest_text = committed_text(manifest, revision, ("docs", "natural-assistant"))
     manifest_sha = hashlib.sha256(manifest_text.encode()).hexdigest()
     selection_text = ""
     if selected in SELECTION_STAGES:
         selection_text = committed_text(selection_file, revision, ("docs", "natural-assistant"))
-        validate_selection(json.loads(selection_text), manifest_sha, adapter_run_id)
+        validate_selection(json.loads(selection_text), manifest_sha, adapter_run_id, adapter_checkpoint)
     external_metadata_sha = ""
     if selected in EXTERNAL_STAGES:
         external_text = committed_text(EXTERNAL_METADATA_RELATIVE, revision, ("docs", "natural-assistant"))
@@ -1073,6 +1304,7 @@ def main(
             selection_text,
             adapter_run_id,
             external_metadata_sha,
+            settings_text,
         )
         write_json(output / "reservation.json", result)
         print(
@@ -1085,17 +1317,12 @@ def main(
             )
         )
         return
-    if not 1 <= steps <= 5000 or not 1 <= max_pixels <= 1048576:
-        raise ValueError("Requested training steps or visual budget exceed the bounded runner")
-    if not 1 <= max_seconds <= SPEC[stage]["seconds"] - 180:
-        raise ValueError("Runner timeout must leave at least 180 seconds for checkpoint/cleanup")
     if stage != "release" and PHASE != "execute":
         raise RuntimeError("Heavy stages require NATURAL_MODAL_PHASE=execute after a separate reservation")
     options = {
-        "steps": steps,
-        "seed": seed,
-        "max_seconds": max_seconds,
-        "max_pixels": max_pixels,
+        **settings,
+        "runtime_options": settings,
+        "runtime_options_sha256": hashlib.sha256(settings_text.encode()).hexdigest(),
         "adapter_run_id": adapter_run_id,
         "selection": json.loads(selection_text) if selection_text else None,
         "selection_sha256": hashlib.sha256(selection_text.encode()).hexdigest() if selection_text else None,

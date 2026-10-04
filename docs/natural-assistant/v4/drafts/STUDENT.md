@@ -1,0 +1,144 @@
+# 在自己的電腦開啟照片與語音助理
+
+<!-- 作者發布前核對並刪除此區。
+本稿預期正式位置 docs/natural-assistant/v4/STUDENT.md，以下相對連結按正式位置書寫。
+1. 加上與 public-release.json code_files 相符的固定 Git checkout；本稿不是匿名操作已通過的證據。
+2. 用新 public-release.json 真匿名 fetch/list/verify/serve，保留兼容的 natural-v3/<releaseid> 公開檔案前綴；學生目錄採 release-v4，正文無須暴露內部前綴。
+3. 最終 ASR 由 validation 選定，不假定已選 turbo，也不搬用 v3 記憶體、時間、下載量或成績。
+4. 在第2節結尾補一次新 CPU／GPU 實測小表：配套模型/精度、RAM/VRAM/磁碟、首載/生成計時範圍；不要稱為最低需求。
+5. 核對安裝版本、UI按鈕、格式與上限、刪除行為、語音CPU負擔、離線兩元件；正文操作所述源碼目前可對上，尚未做新版本端到端實測。
+-->
+
+這份指引帶你打開第 20 章的成品：打字聊天、加入照片，或先說一句中文再送出問題。先用最簡單的文字確認程式能回答，接著加圖片，最後加語音。每次多加一種輸入，遇到問題時就容易知道卡在哪一步。
+
+成品使用已訓練好的 Qwen3-VL 圖文模型，再載入本課訓練的 LoRA。LoRA 是一小份修正權重，像貼在原書旁的修改便條；使用時仍需要原書。下載程式先取得這份公開修正，第一次啟動時再取得配對的圖文底座。語音先由 Whisper 聽寫成文字，再交給同一位聊天助理；回答顯示為文字。
+
+原理入口是[20.1 的輸入分工](../../../course/chapters/20.md#20.1)，成品的能力及限制集中在[20.13](../../../course/chapters/20.md#20.13)。這份操作指引先帶你走一條完整路線，不要求先重新訓練模型。
+
+## 1. 取得程式，確認 Python
+
+以下使用 Linux 的 Bash 終端機與 Python 3.12。若尚未下載專案，在準備放置它的資料夾執行：
+
+```bash
+GIT_LFS_SKIP_SMUDGE=1 git clone https://github.com/birdhackor/tiny-perceptron-vlm.git
+cd tiny-perceptron-vlm
+python3.12 --version
+```
+
+第一行讓 Git 先取得程式與教材，跳過大型訓練資料。現在只使用成品，無須下載全部練習題。第三行應顯示 `Python 3.12.x`；如果找不到這個命令，先安裝 Python 3.12 及它的 `venv` 支援，再繼續。已有專案時，直接進入相同公開版本的專案根目錄即可。
+
+接下來的指令都在專案根目錄執行。看到 `scripts/`、`requirements-natural.txt` 與 `tiny_perceptron/`，就到了正確位置。
+
+## 2. 建立專用環境，選擇 CPU 或 NVIDIA GPU
+
+前面的小型教學實驗使用 `.venv`；這個成品另外建立 `.venv-natural`，讓兩套配套可以各自保留：
+
+```bash
+python3.12 -m venv .venv-natural
+.venv-natural/bin/python -m pip install --upgrade pip
+```
+
+每次明寫 `.venv-natural/bin/python`，就不用猜終端機正在使用哪套 Python。下面的 CPU 和 GPU 安裝選一種即可。
+
+沒有 NVIDIA GPU，或先準備 CPU 路線時：
+
+```bash
+.venv-natural/bin/python -m pip install torch==2.8.0 torchvision==0.23.0 --index-url https://download.pytorch.org/whl/cpu
+.venv-natural/bin/python -m pip install -r requirements-natural.txt
+```
+
+有 NVIDIA GPU，並準備用它執行圖文模型時：
+
+```bash
+nvidia-smi
+.venv-natural/bin/python -m pip install torch==2.8.0 torchvision==0.23.0 --index-url https://download.pytorch.org/whl/cu128
+.venv-natural/bin/python -m pip install -r requirements-natural.txt
+.venv-natural/bin/python -c "import torch; print('GPU 可用：', torch.cuda.is_available()); print('支援 bfloat16：', torch.cuda.is_bf16_supported())"
+```
+
+`nvidia-smi` 應能列出顯示卡與驅動。`cu128` 是這套 PyTorch 使用的 CUDA 12.8 配套，驅動也要能支援它；版本來自 [PyTorch 官方安裝指引](https://pytorch.org/get-started/previous-versions/#v280)。最後兩項是 True 時，可以使用後面的預設 GPU 指令。GPU 可用但不支援 bfloat16 時，本指引另提供 float16 啟動方式。
+
+CPU 與 GPU 兩條路都要載入完整圖文底座。小份修正檔很小，不代表整套模型也很小；磁碟要容納下載檔，記憶體還要放運算中間結果、照片與對話。語音辨識器另有自己的權重，這份程式在 CPU 執行聽寫。因此只看顯示卡容量，還不能判斷整套語音助理的負擔。[20.3](../../../course/chapters/20.md#20.3)用一個乘法例子解釋這個差別；正式實測的範圍見[能力卡](../../../course/chapters/20.md#20.13)。
+
+這套成品操作以 Linux 為驗證範圍。Windows、WSL 與 Apple 的安裝及裝置配套各有差異，需要另外的完整驗證，不能只換一下斜線便視為相同路線。
+
+## 3. 讀取公開清單，再下載調整權重
+
+先查看這一版實際配對的模型與檔案：
+
+```bash
+.venv-natural/bin/python scripts/fetch_natural_release.py --manifest docs/natural-assistant/v4/public-release.json --list
+```
+
+清單像零件表：底座、LoRA、圖片與文字處理工具，以及 ASR，都使用指定版本。程式按這份清單取得檔案，不自行換成最新版。只試用公開成品時，不需要 Hugging Face 登入。
+
+下載並核對：
+
+```bash
+.venv-natural/bin/python scripts/fetch_natural_release.py --manifest docs/natural-assistant/v4/public-release.json --output checkpoints/natural-assistant/release-v4
+.venv-natural/bin/python scripts/fetch_natural_release.py --manifest docs/natural-assistant/v4/public-release.json --output checkpoints/natural-assistant/release-v4 --verify
+```
+
+下載程式逐檔核對大小與 SHA-256；SHA-256 是從完整檔案算出的內容指紋。全部核對成功，才建立完整目錄。第二行只重新檢查已有檔案，不重新訓練，也不檢查回答能力。
+
+中途下載失敗，可以重跑同一下載指令。已完成的目錄使用 `--verify`；如果內容不同，程式會停止並保留它，請改用新的下載目錄，後面的 `--output` 也要一起改。自己的照片和錄音不放進權重目錄，以免被當成多出的檔案。
+
+## 4. 啟動助理，先試一句文字
+
+依安裝路線，CPU 使用：
+
+```bash
+.venv-natural/bin/python scripts/fetch_natural_release.py --manifest docs/natural-assistant/v4/public-release.json --output checkpoints/natural-assistant/release-v4 --serve --device cpu
+```
+
+NVIDIA GPU 使用：
+
+```bash
+.venv-natural/bin/python scripts/fetch_natural_release.py --manifest docs/natural-assistant/v4/public-release.json --output checkpoints/natural-assistant/release-v4 --serve --device cuda
+```
+
+第一次啟動會下載指定圖文底座，請等終端機顯示服務已開始。語音辨識器在第一次按「辨識語音」時載入，因此只有文字試用成功，還沒有確認語音權重已準備好。
+
+在執行程式的同一台電腦，用瀏覽器開啟：
+
+```text
+http://127.0.0.1:8766/
+```
+
+這個網址連的是你自己的電腦，終端機必須保持開啟。GitHub Pages 上的教材則是另一個網站。若程式在桌機上執行，手機的 `127.0.0.1` 會指向手機本身，不能用同一網址直接接上桌機。
+
+在「要送出的文字」輸入「你好，請用一句話回答」，按「送出問題」。等「對話」出現實際回應，確認最簡單的文字路線已通，再加下一種輸入。
+
+GPU 可以使用、但不支援 bfloat16 時，結束原服務，再以 float16 啟動：
+
+```bash
+.venv-natural/bin/python scripts/fetch_natural_release.py --manifest docs/natural-assistant/v4/public-release.json --output checkpoints/natural-assistant/release-v4 --serve --device cuda --dtype float16
+```
+
+這是另一種數值儲存形式，仍須足夠記憶體。若看到記憶體不足，先檢查其他程式佔用、照片大小與對話長度；不要因 LoRA 檔小，就省略對完整底座的需求。
+
+## 5. 加一張照片，保留同一段對話
+
+在「照片」選擇 PNG、JPEG 或 WebP。檔案上限是 8 MiB，約 8.39 MB；圖片最多一千六百萬像素，只接受單張靜態圖片。先選畫面清楚的照片，問「照片裡主要有哪些東西？」。回答後再問其中一個物件的位置，原照片會留在這段對話裡。
+
+需要它讀字時，把要求說清楚。例如「請逐字抄寫招牌上的中文，保留原字，不加說明」，和「這張告示大致在說什麼」，是不同任務。拿原圖逐字核對，才能知道抄寫有沒有完成；回答提到熟悉店名，還不足以證明每字都對。照片判尺見[20.9](../../../course/chapters/20.md#20.9)，逐字和行序見[20.10](../../../course/chapters/20.md#20.10)及[20.11](../../../course/chapters/20.md#20.11)。
+
+想開始新的話題時按「開始新對話」。這會清除歷史與這段對話上傳的檔案；追問原照片時，則保留目前對話。
+
+## 6. 改用語音，先檢查聽寫再送出
+
+準備一段最長 30 秒、上限 8 MiB 的中文錄音，格式使用 WAV、FLAC、MP3 或 OGG。在「中文語音」選取檔案，按「辨識語音」。這一步只聽寫，尚未請聊天助理回答。
+
+先讀「辨識原稿」與「要送出的文字」。如果你說「我不吃辣」，原稿卻寫「我吃辣」，就應先更正。按「送出問題」後，聊天模型會收到最後送出的那份文字，以及目前歷史與照片。原稿與更正是兩份不同記錄，介面會保留這個差別。
+
+這是一條兩站路線：先分清說了什麼，再回應需求。你可以直接輸入正確原話，比較同一問題的文字與語音回答；兩路回答措辭不必完全相同，重點是有沒有符合相同要求。[20.12](../../../course/chapters/20.md#20.12)解釋如何定位聽錯與回錯。成品只以文字回答，朗讀回覆需要另外的語音合成元件。
+
+## 7. 結束、離線使用與排除問題
+
+結束時回終端機按 `Ctrl+C`。介面這次收到的照片與聲音隨服務關閉而刪除，下載權重與模型快取仍可重用。
+
+想在之後離線使用，先在線上完整試過文字、照片及語音，確定圖文模型和語音模型都已下載，再把原啟動指令加上 `--local-files-only`。程式會只讀本機快取；缺檔時會直接說明，不再連網補抓。
+
+若下載核對失敗，先重新執行第 3 步的 `--verify`，分清缺檔和版本不同。若程式版本不符，回到公開清單配對的專案版本；不改清單指紋來繞過檢查。若語音格式無法讀取，可先轉成單聲道 WAV，再從短錄音開始測試。若對話太長，按「開始新對話」，確認短問題能回答後，再逐步加入前文。
+
+到這裡，你已能使用成品，也能看見每一站真正收到和回出的內容。接下來若想自己改資料、重新訓練，先讀[資料說明](DATA.md)，再依[訓練指引](TRAINING.md)建立自己的新實驗。
