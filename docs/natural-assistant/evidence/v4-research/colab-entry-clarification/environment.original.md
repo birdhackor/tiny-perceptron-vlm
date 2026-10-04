@@ -9,7 +9,7 @@
 | 你想做什麼？ | 從哪裡開始？ | 需要注意什麼？ |
 | --- | --- | --- |
 | 讀正文、看圖與結果 | [閱讀指南](../course/README.md) | 不必安裝Python，也不必租GPU。 |
-| 修改一節短程式 | 選定教材小節的Colab入口，或[本機暖身](../course/first-steps.md#W.1) | 小實驗用CPU即可；Notebook中的程式格要按順序執行。 |
+| 修改一節短程式 | 本節Colab入口，或[本機暖身](../course/first-steps.md#W.1) | 小實驗用CPU即可；Notebook中的程式格要按順序執行。 |
 | 重做小模型的正式訓練 | [訓練操作](../course/training.md) | 先讀對應概念，再看該項資料、步數與設備設定。 |
 | 試用照片與語音助理 | [學生操作指引](natural-assistant/v4/STUDENT.md) | 需要另外取得完整圖文模型和語音辨識器；這比短程式大得多。 |
 | 微調照片與語音助理 | [LoRA訓練指引](natural-assistant/v4/TRAINING.md) | 使用自己的NVIDIA GPU，按固定資料與配方建立候選，再做驗收。 |
