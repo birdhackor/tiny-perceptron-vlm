@@ -1,0 +1,21 @@
+from pathlib import Path
+import json
+D=Path(__file__).parent;r=json.loads((D/'browser-render-receipt.json').read_text())
+notes={
+'architecture_int4_packing':'Personally viewed PNG: signed -8/-1 codes0/7, first low nibble/right, second high nibble/left, byte112; 0/1 codes8/9 byte152. Crossed arrows preserve order.',
+'architecture_modal_answer_alignment':'Personally viewed PNG: teacher prefix16 vs student4, answer-prediction rows15/3,16/4,17/5. Same answer IDs, earlier causal prediction row, no naive full-logit alignment.',
+'architecture_online_softmax':'Personally viewed PNG: [0,ln2] values10/20 gives denominator1.5 numerator25; new ln4 rescales prior by1/2, denominator1.75 numerator42.5, result24.2857. Max/denominator/value arrows coherent.',
+'architecture_policy_update':'Personally viewed PNG: zero logits gradient(+.25,-.25), lr.1 gives(-.025,+.025), probability(.487503,.512497). Direction raises rewarded action without making certain.',
+'causal':'Personally viewed PNG: query rows/key columns, lower triangle including diagonal is allowed; future upper triangle blocked.',
+'flash_allocated_memory':'Personally viewed PNG: common65MiB gray baseline; forward increments24.25/.27; forward-backward32.75/2.03; total97.75/67.03. Bar scales and absolute vs incremental distinction match raw records and stated scope.',
+'foundations_bigram_row':'Personally viewed PNG: cat row counts1,1,1,3,1,1,1 sum9; look probability3/9, others1/9; count bars aligned.',
+'fsdd_speaker_holdout':'Personally viewed PNG: train jackson20, validation nicolas20 5/20, test theo20 3/20; 4591/8000=9182/16000=.573875seconds. Sinc interpolation does not add high-frequency information.',
+'multimodal_expand_image':'Personally viewed PNG: one image placeholder expands to3 feature positions; seven full labels have five ignored then73,2; one shift yields6 prediction labels, first answer predicted at assistant row.',
+'multimodal_lora_branches':'Personally viewed PNG: frozen W path and A16→2→B2→12 path sum; alpha/rank=2/2; 56 trainable adapter entries separate from W.',
+'qat_training_deployment':'Personally viewed PNG: float master weights, forward integers[1,3,7] scale.9/7 and reconstructed[.1286,.3857,.9]; approximate STE backward; deployment packed integers then FP32 reconstruction remains explicit.',
+'tokenizer_common_scale':'Personally viewed PNG: 20 test records/4193 raw bytes, byte4213 vs BPE2503 targets includingEOS; per-token losses2.77947/3.98741 reverse common BPB4.02906/3.43401 ranking. Separate panel scales are labeled.',
+'window_training':'Personally viewed PNG: contexts1/3/5 params833/1345/1857; train losses.334/.213/.199 vs validation.431/.306/.513. Curves and labeled axes do not present larger context as guaranteed improvement.',
+}
+out={'reviewer_task':'/root/v4_review_coordinator/factual_whole_training_course','personal_views_completed':True,'view_mechanism':'tools.view_image for every actual Chromium-rendered local PNG; personally inspected image blocks in this task before writing notes','original_render_receipt_preserved':'browser-render-receipt.json','figures':[{**f,'personal_view':'completed','inspection_note':notes[Path(f['render']).stem]} for f in r['figure_renders']],'browser_views':[{'render':'browser-training-T4.png','url':'http://127.0.0.1:8783/training.html#T.4','inspection_note':'Personally viewed actual T.4 heading, linked prerequisites and generated-data commands in rendered full-course page.'},{'render':'browser-training-realtext-table.png','url':'http://127.0.0.1:8783/training.html#T.4','inspection_note':'Personally viewed TinyStories/poetry before/after table, partition denominators and context-window paragraph; matches owned source.'}],'derivations':{'online_softmax':'old m=ln2, z=1.5, u=25; new m=ln4, old factor=exp(ln2-ln4)=.5; z=.75+1=1.75,u=12.5+30=42.5; u/z=24.2857142857','policy':'new logits=-.1*(.25,-.25)=(-.025,.025); p1=exp(.025)/(exp(-.025)+exp(.025))=.5124973965','int4':'codes(signed+8), packed=c0+16*c1;0+16*7=112;8+16*9=152','adapter_parameters':'A:2*16=32,B:12*2=24,total56'}}
+(D/'personal-view-notes.json').write_text(json.dumps(out,ensure_ascii=False,indent=2)+'\n')
+print('13 personal SVG views + 2 browser screenshots recorded; first render receipt retained unchanged')
