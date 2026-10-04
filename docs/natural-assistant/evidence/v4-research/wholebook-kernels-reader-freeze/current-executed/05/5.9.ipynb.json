@@ -1,0 +1,170 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 5.9 每次實驗用了多少資源？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "兩個模型都能回答，不代表成本相同。同樣參數格數也可能因為序列長短、實現或硬體而花不同時間。比較前先記錄「保存了多少數字」與「這臺機器做一次計算要多久」，否則一句「更快、更省」無法核對。我們先做極小CPU測量，理解記錄方式，暫不推論大型模型的速度。\n",
+    "\n",
+    "[4.8](https://birdhackor.github.io/tiny-perceptron-vlm/4.8.html) 介紹了參數格數。若每個參數用32位元浮點數FP32保存，32位元就是4 bytes，因此純參數數據大小約為格數×4。它不包含更新工具記住的過往梯度方向與平方大小、目前梯度、中間特徵及其他狀態，所以不能把這個數字當訓練總記憶體；歷史記錄的例子見[5.4](https://birdhackor.github.io/tiny-perceptron-vlm/5.4.html)。dtype是數字保存類型，例如FP32；同數量不同dtype也會有不同payload大小。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:11:27.926600Z",
+     "iopub.status.busy": "2026-10-04T19:11:27.926343Z",
+     "iopub.status.idle": "2026-10-04T19:11:29.353828Z",
+     "shell.execute_reply": "2026-10-04T19:11:29.348886Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7fbd18b5a610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:11:29.357687Z",
+     "iopub.status.busy": "2026-10-04T19:11:29.357392Z",
+     "iopub.status.idle": "2026-10-04T19:11:29.374433Z",
+     "shell.execute_reply": "2026-10-04T19:11:29.373400Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "參數格數 6104 FP32參數bytes 24416\n",
+      "CPU每次前向秒數 0.00022690420009894297\n"
+     ]
+    }
+   ],
+   "source": [
+    "import time\n",
+    "import torch\n",
+    "from tiny_perceptron.model import TinyLM, ModelConfig\n",
+    "\n",
+    "model = TinyLM(ModelConfig(width=8))\n",
+    "x = torch.tensor([[1, 2, 3]])\n",
+    "model.eval()\n",
+    "with torch.no_grad():\n",
+    "    model(x)\n",
+    "    start = time.perf_counter()\n",
+    "    for _ in range(10):\n",
+    "        model(x)\n",
+    "    average_seconds = (time.perf_counter() - start) / 10\n",
+    "parameters = model.description()[\"parameters\"]\n",
+    "print(\"參數格數\", parameters, \"FP32參數bytes\", parameters * 4)\n",
+    "print(\"CPU每次前向秒數\", average_seconds)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "輸入一筆三位置，模型用預設字表與位置表，width8。`model.eval()` 設為評估模式，`no_grad` 讓測量不保存求導關係，差別會在 [5.17](https://birdhackor.github.io/tiny-perceptron-vlm/5.17.html) 展開。第一次 `model(x)` 當暖身，讓初始化成本不要全算進正式計時。`perf_counter` 是適合量間隔的時鐘，循環十次後以總秒數除十。\n",
+    "\n",
+    "參數數量應為6104、純FP32數據24416 bytes；耗時則隨機器、線程與當前負載改變，應觀察自己測到的數而不期待統一答案。十次小運算可能受排程與計時雜訊影響，所以這是流程示例；正式速度比較需要更多重複、報告波動與相同設置。\n",
+    "\n",
+    "CPU的這段計算在回傳前已經完成。GPU常把工作排入佇列後立刻回傳，若只量Python發指令時間會低估實際執行；測GPU前後需要同步等待，例如 `torch.cuda.synchronize()`。本段沒有GPU，不需要加入同步，也不要把CPU測出的數寫成GPU速度。\n",
+    "\n",
+    "要比較兩次結果，應記錄硬體、PyTorch版本、dtype、筆數、序列長度、是否保存梯度與暖身方法。T表示一筆序列的位置數；[3.3的注意力比較](https://birdhackor.github.io/tiny-perceptron-vlm/3.3.html)讓每個位置與T個位置各算一次匹配，T個位置共形成T×T格。參數量相同但T從3變6，這張表便從3×3變6×6，這部分計算可能四倍；因果遮罩限制哪些格能讀，表格形狀仍是T×T。整個模型時間還含其他成本，不必恰好四倍。\n",
+    "\n",
+    "用[T.4的實跑](https://birdhackor.github.io/tiny-perceptron-vlm/training.html#T.4)練習讀成本，會更容易看出單位為什麼重要。那個模型有141,568個FP32參數，純參數數字約為566,272 bytes；更新600次、每次抽16篇短文，累計計分342,462個目標。這是同9篇材料反覆練習的曝光量，不是收集了342,462個不同文字，也不是342,462篇文章。\n",
+    "\n",
+    "在NVIDIA L4上，600次更新的訓練區間約6.1885秒，當中也有記錄與週期存檔。整組實驗約16.0354秒，還包括另四組小模型比較、評估與本機存檔；兩個數字都不包含雲端機器啟動、映像建置或上傳備份的時間。因此16秒可以幫我們安排這組實驗，卻不能拿它當純訓練速度，或直接與上面的CPU前向秒數相比。要回答硬體快多少，還得讓兩邊做同一件事，並使用相同的計時範圍。\n",
+    "\n",
+    "練習只把x改成六個位置 `[[1,2,3,1,2,3]]`，先預測參數格數與bytes不變、前向耗時可能上升，再測量核對。若十次結果反而稍低，不急着宣稱長序列更快，先增加重複次數檢視波動。記錄限制也是讓實驗可評估的一部分。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "5.9"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

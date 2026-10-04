@@ -1,0 +1,416 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 2.5 記憶範圍怎麼影響預測？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "兩句前文是「紅色物體是」與「藍色物體是」，希望分別接「圓」與「方」。如果只把最後一字「是」交給模型，兩題輸入完全一樣，答案卻不同。即使訓練很久，它也無法知道這一回究竟是哪種顏色：關鍵資訊從來沒有傳進去。先檢查可見資料，往往比先把模型加大更有用。\n",
+    "\n",
+    "上下文（context）指預測當前字時能夠使用的前文，窗口（window）則是我們實際取出的有限範圍。[2.2](https://birdhackor.github.io/tiny-perceptron-vlm/2.2.html) 把窗口內的字拼成固定長卡，所以窗口越長，可能保留更遠的線索；但眼前要知道多長才夠，而不是假定越長越好。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:09:52.163052Z",
+     "iopub.status.busy": "2026-10-04T19:09:52.162654Z",
+     "iopub.status.idle": "2026-10-04T19:09:53.748171Z",
+     "shell.execute_reply": "2026-10-04T19:09:53.736190Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7ff8e51da610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:09:53.757991Z",
+     "iopub.status.busy": "2026-10-04T19:09:53.756660Z",
+     "iopub.status.idle": "2026-10-04T19:09:53.774612Z",
+     "shell.execute_reply": "2026-10-04T19:09:53.769432Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "1 [('是', '圓'), ('是', '方')]\n",
+      "3 [('物體是', '圓'), ('物體是', '方')]\n",
+      "5 [('紅色物體是', '圓'), ('藍色物體是', '方')]\n"
+     ]
+    }
+   ],
+   "source": [
+    "examples = [(\"紅色物體是\", \"圓\"), (\"藍色物體是\", \"方\")]\n",
+    "for length in [1, 3, 5]:\n",
+    "    visible = []\n",
+    "    for prefix, answer in examples:\n",
+    "        visible.append((prefix[-length:], answer))\n",
+    "    print(length, visible)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "輸入是兩組「前文、答案」，用Python的兩項小組（tuple）保存；圓括號裡兩項的次序固定。每輪 `length` 指模型可見最近幾字。`prefix[-length:]` 從倒數第length個位置取到最後，這是 [1.3](https://birdhackor.github.io/tiny-perceptron-vlm/1.3.html) 切片的延伸，不是反過來讀文字。`visible` 逐筆保存目前能見到的片段與應答。\n",
+    "\n",
+    "輸出第一輪是 `('是','圓')` 與 `('是','方')`；第三字窗口則都是 `物體是`，仍不能區分。五字窗口纔看到完整的 `紅色物體是` 與 `藍色物體是`。模型給相同輸入就只能算出相同的一套候選分配；它可以同時給圓與方各一些機率，卻不能在沒有顏色線索時穩定挑對每題的唯一答案。隨機選擇也不會憑空補回被刪掉的資訊。\n",
+    "\n",
+    "這叫可辨識性問題：資料中是否有足以區分答案的線索。對這兩題，四字窗口其實也不夠，因為 `色物體是` 仍相同；必須到五字。反過來，即使五字已能辨識，也只是「有機會學」，不是「一定已學會」。模型如何用顏色建立規則、訓練資料是否夠、是否記住了特例，仍要另外驗證。\n",
+    "\n",
+    "擴大固定窗口還會增加計算與參數。若每字D個特徵、窗口C字，拼接後有C×D個輸入。Linear（線性層）用各輸入乘權重再相加來混合特徵，每個輸出有自己的一套權重，還可另加一個可調常數。接H個輸出就需要H×C×D個權重，因為「每個輸出都為每個輸入保存一個權重」；例如D=2、C從3變6，其他固定，輸入層權重也翻倍。更長窗口有代價，要用任務中線索的距離判斷是否值得。\n",
+    "\n",
+    "那麼，真的多看幾字就會猜得更好嗎？我們另外用12篇「顏色=紅；形狀=圓。」這類規則短文，讓三個小模型分別看最近1、3、5字。每個模型先查表、拼接，再把結果交給多層小網路猜字。這種由線性層與非線性轉換串成的網路，叫多層感知器（multilayer perceptron，MLP）；非線性讓它能表示[2.4](https://birdhackor.github.io/tiny-perceptron-vlm/2.4.html)講過的彎曲規則。三個模型都用相同的9篇練習、相同的1篇驗證短文，以及種子42、特徵寬度16，更新200次。下表是更新完成後重新計算的平均下一字代價；數字越低，代表這批文字的正確下一字獲得越高機率。\n",
+    "\n",
+    "| 可見窗口 | 參數格數 | 教過的9篇：訓練代價 | 未教過的1篇：驗證代價 |\n",
+    "| --- | ---: | ---: | ---: |\n",
+    "| 1字 | 833 | 0.33352 | 0.43103 |\n",
+    "| 3字 | 1,345 | 0.21302 | 0.30577 |\n",
+    "| 5字 | 1,857 | 0.19883 | 0.51252 |\n",
+    "\n",
+    "從1字改成3字，這次訓練與驗證的代價都降低了；再改成5字，教過的短文代價繼續降低，那篇新短文卻從0.30577升到0.51252。更多線索只是讓模型有機會學得更好，沒有保證它會把所學用在新句子上。如果只看練習過的題目，我們就會漏掉這個差別。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 3,
+   "metadata": {
+    "cellView": "form",
+    "course_figure": {
+     "alt": "MLP的1字、3字與5字窗口，在相同短文實驗中的訓練與驗證代價",
+     "name": "window_training"
+    },
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:09:53.778943Z",
+     "iopub.status.busy": "2026-10-04T19:09:53.778756Z",
+     "iopub.status.idle": "2026-10-04T19:09:53.815855Z",
+     "shell.execute_reply": "2026-10-04T19:09:53.813655Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "image/svg+xml": [
+       "<svg xmlns:xlink=\"http://www.w3.org/1999/xlink\" xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 648 345.6\" version=\"1.1\" role=\"img\" aria-labelledby=\"title desc\">\n",
+       " <title id=\"title\">窗口更長，這次的新題成績卻較差</title>\n",
+       " <desc id=\"desc\">三個特徵寬度16的MLP以相同切分、種子42，各更新200次。窗口1、3、5字的訓練平均下一字代價約為0.334、0.213、0.199；驗證代價約為0.431、0.306、0.513。窗口變長時參數也增多；驗證只有一篇短文。這次5字窗口的訓練代價較低，但驗證代價較高，不能推論所有任務都以3字最好。</desc>\n",
+       " <metadata>\n",
+       "  <rdf:RDF xmlns:dc=\"http://purl.org/dc/elements/1.1/\" xmlns:cc=\"http://creativecommons.org/ns#\" xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\n",
+       "   <cc:Work>\n",
+       "    <dc:type rdf:resource=\"http://purl.org/dc/dcmitype/StillImage\"/>\n",
+       "    <dc:format>image/svg+xml</dc:format>\n",
+       "    <dc:creator>\n",
+       "     <cc:Agent>\n",
+       "      <dc:title>Matplotlib v3.11.2, https://matplotlib.org/</dc:title>\n",
+       "     </cc:Agent>\n",
+       "    </dc:creator>\n",
+       "   </cc:Work>\n",
+       "  </rdf:RDF>\n",
+       " </metadata>\n",
+       " <defs>\n",
+       "  <style type=\"text/css\">*{stroke-linejoin: round; stroke-linecap: butt}</style>\n",
+       " </defs>\n",
+       " <g id=\"figure_1\">\n",
+       "  <g id=\"patch_1\">\n",
+       "   <path d=\"M 0 345.6  L 648 345.6  L 648 0  L 0 0  z \" style=\"fill: #ffffff\"/>\n",
+       "  </g>\n",
+       "  <g id=\"axes_1\">\n",
+       "   <g id=\"patch_2\">\n",
+       "    <path d=\"M 52.20774 302.47976  L 625.125466 302.47976  L 625.125466 32.96024  L 52.20774 32.96024  z \" style=\"fill: #ffffff\"/>\n",
+       "   </g>\n",
+       "   <g id=\"matplotlib.axis_1\">\n",
+       "    <g id=\"xtick_1\">\n",
+       "     <g id=\"line2d_1\">\n",
+       "      <defs>\n",
+       "       <path id=\"m0e5f11fe2d\" d=\"M 0 0  L 0 3.5  \" style=\"stroke: #000000; stroke-width: 0.8\"/>\n",
+       "      </defs>\n",
+       "      <g>\n",
+       "       <use xlink:href=\"#m0e5f11fe2d\" x=\"78.249455\" y=\"302.47976\" style=\"stroke: #000000; stroke-width: 0.8\"/>\n",
+       "      </g>\n",
+       "     </g>\n",
+       "     <g id=\"text_1\">\n",
+       "      <text style=\"font-size: 16px; font-family: 'Noto Sans CJK TC'\" transform=\"translate(38.224455 323.55976)\">看前 1 個字</text>\n",
+       "      <text style=\"font-size: 16px; font-family: 'Noto Sans CJK TC'\" transform=\"translate(39.136955 339.55976)\">833 個參數</text>\n",
+       "     </g>\n",
+       "    </g>\n",
+       "    <g id=\"xtick_2\">\n",
+       "     <g id=\"line2d_2\">\n",
+       "      <g>\n",
+       "       <use xlink:href=\"#m0e5f11fe2d\" x=\"338.666603\" y=\"302.47976\" style=\"stroke: #000000; stroke-width: 0.8\"/>\n",
+       "      </g>\n",
+       "     </g>\n",
+       "     <g id=\"text_2\">\n",
+       "      <text style=\"font-size: 16px; font-family: 'Noto Sans CJK TC'\" transform=\"translate(298.641603 323.55976)\">看前 3 個字</text>\n",
+       "      <text style=\"font-size: 16px; font-family: 'Noto Sans CJK TC'\" transform=\"translate(292.890353 339.55976)\">1,345 個參數</text>\n",
+       "     </g>\n",
+       "    </g>\n",
+       "    <g id=\"xtick_3\">\n",
+       "     <g id=\"line2d_3\">\n",
+       "      <g>\n",
+       "       <use xlink:href=\"#m0e5f11fe2d\" x=\"599.083752\" y=\"302.47976\" style=\"stroke: #000000; stroke-width: 0.8\"/>\n",
+       "      </g>\n",
+       "     </g>\n",
+       "     <g id=\"text_3\">\n",
+       "      <text style=\"font-size: 16px; font-family: 'Noto Sans CJK TC'\" transform=\"translate(559.058752 323.55976)\">看前 5 個字</text>\n",
+       "      <text style=\"font-size: 16px; font-family: 'Noto Sans CJK TC'\" transform=\"translate(553.307502 339.55976)\">1,857 個參數</text>\n",
+       "     </g>\n",
+       "    </g>\n",
+       "   </g>\n",
+       "   <g id=\"matplotlib.axis_2\">\n",
+       "    <g id=\"ytick_1\">\n",
+       "     <g id=\"line2d_4\">\n",
+       "      <defs>\n",
+       "       <path id=\"m72f089a72d\" d=\"M 0 0  L -3.5 0  \" style=\"stroke: #000000; stroke-width: 0.8\"/>\n",
+       "      </defs>\n",
+       "      <g>\n",
+       "       <use xlink:href=\"#m72f089a72d\" x=\"52.20774\" y=\"266.198286\" style=\"stroke: #000000; stroke-width: 0.8\"/>\n",
+       "      </g>\n",
+       "     </g>\n",
+       "     <g id=\"text_4\">\n",
+       "      <text style=\"font-size: 16px; font-family: 'Noto Sans CJK TC'; text-anchor: end\" x=\"45.20774\" y=\"273.238286\" transform=\"rotate(-0 45.20774 273.238286)\">0.2</text>\n",
+       "     </g>\n",
+       "    </g>\n",
+       "    <g id=\"ytick_2\">\n",
+       "     <g id=\"line2d_5\">\n",
+       "      <g>\n",
+       "       <use xlink:href=\"#m72f089a72d\" x=\"52.20774\" y=\"214.367609\" style=\"stroke: #000000; stroke-width: 0.8\"/>\n",
+       "      </g>\n",
+       "     </g>\n",
+       "     <g id=\"text_5\">\n",
+       "      <text style=\"font-size: 16px; font-family: 'Noto Sans CJK TC'; text-anchor: end\" x=\"45.20774\" y=\"221.407609\" transform=\"rotate(-0 45.20774 221.407609)\">0.3</text>\n",
+       "     </g>\n",
+       "    </g>\n",
+       "    <g id=\"ytick_3\">\n",
+       "     <g id=\"line2d_6\">\n",
+       "      <g>\n",
+       "       <use xlink:href=\"#m72f089a72d\" x=\"52.20774\" y=\"162.536932\" style=\"stroke: #000000; stroke-width: 0.8\"/>\n",
+       "      </g>\n",
+       "     </g>\n",
+       "     <g id=\"text_6\">\n",
+       "      <text style=\"font-size: 16px; font-family: 'Noto Sans CJK TC'; text-anchor: end\" x=\"45.20774\" y=\"169.576932\" transform=\"rotate(-0 45.20774 169.576932)\">0.4</text>\n",
+       "     </g>\n",
+       "    </g>\n",
+       "    <g id=\"ytick_4\">\n",
+       "     <g id=\"line2d_7\">\n",
+       "      <g>\n",
+       "       <use xlink:href=\"#m72f089a72d\" x=\"52.20774\" y=\"110.706255\" style=\"stroke: #000000; stroke-width: 0.8\"/>\n",
+       "      </g>\n",
+       "     </g>\n",
+       "     <g id=\"text_7\">\n",
+       "      <text style=\"font-size: 16px; font-family: 'Noto Sans CJK TC'; text-anchor: end\" x=\"45.20774\" y=\"117.746255\" transform=\"rotate(-0 45.20774 117.746255)\">0.5</text>\n",
+       "     </g>\n",
+       "    </g>\n",
+       "    <g id=\"ytick_5\">\n",
+       "     <g id=\"line2d_8\">\n",
+       "      <g>\n",
+       "       <use xlink:href=\"#m72f089a72d\" x=\"52.20774\" y=\"58.875578\" style=\"stroke: #000000; stroke-width: 0.8\"/>\n",
+       "      </g>\n",
+       "     </g>\n",
+       "     <g id=\"text_8\">\n",
+       "      <text style=\"font-size: 16px; font-family: 'Noto Sans CJK TC'; text-anchor: end\" x=\"45.20774\" y=\"65.915578\" transform=\"rotate(-0 45.20774 65.915578)\">0.6</text>\n",
+       "     </g>\n",
+       "    </g>\n",
+       "    <g id=\"text_9\">\n",
+       "     <text style=\"font-size: 16px; font-family: 'Noto Sans CJK TC'; text-anchor: middle\" x=\"21.08024\" y=\"167.72\" transform=\"rotate(-90 21.08024 167.72)\">平均猜錯代價（越低越好）</text>\n",
+       "    </g>\n",
+       "   </g>\n",
+       "   <g id=\"line2d_9\">\n",
+       "    <path d=\"M 78.249455 196.994988  L 338.666603 259.451301  L 599.083752 266.804415  \" clip-path=\"url(#pb083b5e771)\" style=\"fill: none; stroke: #2563eb; stroke-width: 2.5; stroke-linecap: square\"/>\n",
+       "    <defs>\n",
+       "     <path id=\"m34835479e6\" d=\"M 0 4  C 1.060812 4 2.078319 3.578535 2.828427 2.828427  C 3.578535 2.078319 4 1.060812 4 0  C 4 -1.060812 3.578535 -2.078319 2.828427 -2.828427  C 2.078319 -3.578535 1.060812 -4 0 -4  C -1.060812 -4 -2.078319 -3.578535 -2.828427 -2.828427  C -3.578535 -2.078319 -4 -1.060812 -4 0  C -4 1.060812 -3.578535 2.078319 -2.828427 2.828427  C -2.078319 3.578535 -1.060812 4 0 4  z \" style=\"stroke: #2563eb\"/>\n",
+       "    </defs>\n",
+       "    <g clip-path=\"url(#pb083b5e771)\">\n",
+       "     <use xlink:href=\"#m34835479e6\" x=\"78.249455\" y=\"196.994988\" style=\"fill: #2563eb; stroke: #2563eb\"/>\n",
+       "     <use xlink:href=\"#m34835479e6\" x=\"338.666603\" y=\"259.451301\" style=\"fill: #2563eb; stroke: #2563eb\"/>\n",
+       "     <use xlink:href=\"#m34835479e6\" x=\"599.083752\" y=\"266.804415\" style=\"fill: #2563eb; stroke: #2563eb\"/>\n",
+       "    </g>\n",
+       "   </g>\n",
+       "   <g id=\"line2d_10\">\n",
+       "    <path d=\"M 78.249455 146.456018  L 338.666603 211.377206  L 599.083752 104.217109  \" clip-path=\"url(#pb083b5e771)\" style=\"fill: none; stroke: #d97706; stroke-width: 2.5; stroke-linecap: square\"/>\n",
+       "    <defs>\n",
+       "     <path id=\"me5146488ab\" d=\"M 0 4  C 1.060812 4 2.078319 3.578535 2.828427 2.828427  C 3.578535 2.078319 4 1.060812 4 0  C 4 -1.060812 3.578535 -2.078319 2.828427 -2.828427  C 2.078319 -3.578535 1.060812 -4 0 -4  C -1.060812 -4 -2.078319 -3.578535 -2.828427 -2.828427  C -3.578535 -2.078319 -4 -1.060812 -4 0  C -4 1.060812 -3.578535 2.078319 -2.828427 2.828427  C -2.078319 3.578535 -1.060812 4 0 4  z \" style=\"stroke: #d97706\"/>\n",
+       "    </defs>\n",
+       "    <g clip-path=\"url(#pb083b5e771)\">\n",
+       "     <use xlink:href=\"#me5146488ab\" x=\"78.249455\" y=\"146.456018\" style=\"fill: #d97706; stroke: #d97706\"/>\n",
+       "     <use xlink:href=\"#me5146488ab\" x=\"338.666603\" y=\"211.377206\" style=\"fill: #d97706; stroke: #d97706\"/>\n",
+       "     <use xlink:href=\"#me5146488ab\" x=\"599.083752\" y=\"104.217109\" style=\"fill: #d97706; stroke: #d97706\"/>\n",
+       "    </g>\n",
+       "   </g>\n",
+       "   <g id=\"patch_3\">\n",
+       "    <path d=\"M 52.20774 302.47976  L 52.20774 32.96024  \" style=\"fill: none; stroke: #000000; stroke-width: 0.8; stroke-linejoin: miter; stroke-linecap: square\"/>\n",
+       "   </g>\n",
+       "   <g id=\"patch_4\">\n",
+       "    <path d=\"M 52.20774 302.47976  L 625.125466 302.47976  \" style=\"fill: none; stroke: #000000; stroke-width: 0.8; stroke-linejoin: miter; stroke-linecap: square\"/>\n",
+       "   </g>\n",
+       "   <g id=\"text_10\">\n",
+       "    <text style=\"font-size: 16px; font-family: 'Noto Sans CJK TC'; text-anchor: middle; fill: #2563eb\" x=\"78.249455\" y=\"221.994988\" transform=\"rotate(-0 78.249455 221.994988)\">0.334</text>\n",
+       "   </g>\n",
+       "   <g id=\"text_11\">\n",
+       "    <text style=\"font-size: 16px; font-family: 'Noto Sans CJK TC'; text-anchor: middle; fill: #2563eb\" x=\"338.666603\" y=\"284.451301\" transform=\"rotate(-0 338.666603 284.451301)\">0.213</text>\n",
+       "   </g>\n",
+       "   <g id=\"text_12\">\n",
+       "    <text style=\"font-size: 16px; font-family: 'Noto Sans CJK TC'; text-anchor: middle; fill: #2563eb\" x=\"599.083752\" y=\"291.804415\" transform=\"rotate(-0 599.083752 291.804415)\">0.199</text>\n",
+       "   </g>\n",
+       "   <g id=\"text_13\">\n",
+       "    <text style=\"font-size: 16px; font-family: 'Noto Sans CJK TC'; text-anchor: middle; fill: #d97706\" x=\"78.249455\" y=\"134.456018\" transform=\"rotate(-0 78.249455 134.456018)\">0.431</text>\n",
+       "   </g>\n",
+       "   <g id=\"text_14\">\n",
+       "    <text style=\"font-size: 16px; font-family: 'Noto Sans CJK TC'; text-anchor: middle; fill: #d97706\" x=\"338.666603\" y=\"199.377206\" transform=\"rotate(-0 338.666603 199.377206)\">0.306</text>\n",
+       "   </g>\n",
+       "   <g id=\"text_15\">\n",
+       "    <text style=\"font-size: 16px; font-family: 'Noto Sans CJK TC'; text-anchor: middle; fill: #d97706\" x=\"599.083752\" y=\"92.217109\" transform=\"rotate(-0 599.083752 92.217109)\">0.513</text>\n",
+       "   </g>\n",
+       "   <g id=\"text_16\">\n",
+       "     <text style=\"font-weight: 700; font-size: 17px; font-family: 'Noto Sans CJK TC'; text-anchor: start\" x=\"52.20774\" y=\"24.96024\">窗口更長，這次的新題成績卻較差</text>\n",
+       "   </g>\n",
+       "   <g id=\"legend_1\">\n",
+       "    <g id=\"line2d_11\">\n",
+       "     <path d=\"M 64.80774 52.98024  L 78.80774 52.98024  L 92.80774 52.98024  \" style=\"fill: none; stroke: #2563eb; stroke-width: 2.5; stroke-linecap: square\"/>\n",
+       "     <g>\n",
+       "      <use xlink:href=\"#m34835479e6\" x=\"78.80774\" y=\"52.98024\" style=\"fill: #2563eb; stroke: #2563eb\"/>\n",
+       "     </g>\n",
+       "    </g>\n",
+       "    <g id=\"text_17\">\n",
+       "     <text style=\"font-size: 14px; font-family: 'Noto Sans CJK TC'; text-anchor: start\" x=\"104.00774\" y=\"57.88024\" transform=\"rotate(-0 104.00774 57.88024)\">教過的 9 篇短文</text>\n",
+       "    </g>\n",
+       "    <g id=\"line2d_12\">\n",
+       "     <path d=\"M 64.80774 73.98024  L 78.80774 73.98024  L 92.80774 73.98024  \" style=\"fill: none; stroke: #d97706; stroke-width: 2.5; stroke-linecap: square\"/>\n",
+       "     <g>\n",
+       "      <use xlink:href=\"#me5146488ab\" x=\"78.80774\" y=\"73.98024\" style=\"fill: #d97706; stroke: #d97706\"/>\n",
+       "     </g>\n",
+       "    </g>\n",
+       "    <g id=\"text_18\">\n",
+       "     <text style=\"font-size: 14px; font-family: 'Noto Sans CJK TC'; text-anchor: start\" x=\"104.00774\" y=\"78.88024\" transform=\"rotate(-0 104.00774 78.88024)\">沒有教過的 1 篇短文</text>\n",
+       "    </g>\n",
+       "   </g>\n",
+       "  </g>\n",
+       " </g>\n",
+       " <defs>\n",
+       "  <clipPath id=\"pb083b5e771\">\n",
+       "   <rect x=\"52.20774\" y=\"32.96024\" width=\"572.917726\" height=\"269.51952\"/>\n",
+       "  </clipPath>\n",
+       " </defs>\n",
+       "</svg>"
+      ],
+      "text/plain": [
+       "<IPython.core.display.SVG object>"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    }
+   ],
+   "source": [
+    "# @title 本節圖解\n",
+    "from IPython.display import SVG, display\n",
+    "\n",
+    "display(SVG(filename=str(root / \"course/figures/window_training.svg\")))"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "圖中的橫軸是窗口長度，兩條線分別連起表裡的訓練與驗證代價，並不是訓練隨時間的變化。還要記得，窗口加長時，參數也從833增至1,857，因此這不是只改可見範圍、其他完全相同的比較。而驗證只有一篇「顏色=紅；形狀=圓。」，不能由它宣布所有任務都以3字最好。這次實驗支持的是：先把需要的線索送進去，再用未教過的題目檢查，別只追訓練代價。[T.3](https://birdhackor.github.io/tiny-perceptron-vlm/training.html#T.3)保留完整切分、重做命令及另外兩篇最後檢查的結果。\n",
+    "\n",
+    "練習把兩句前文改成「紅色的小小物體是」與「藍色的小小物體是」，保持答案不變。先手數顏色區別字離末尾多遠，再加入窗口長度8、7進行核對；區別紅與藍的是第一個字，整句八字，所以八字能區分、七字仍不能。你不是在訓練模型，而是在確認題目有沒有把所需線索交出去。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "2.5"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

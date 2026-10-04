@@ -1,0 +1,239 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 13.17 為什麼DPO不用另外教評分員？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "我們已經有「同一道題，哪篇回答比較合適」的資料。PPO路線先用它教評分員，再讓策略作答、評分、更新；另一個想法是直接用比較調整策略，省去中間那位獨立評分員。這就是[7.18](https://birdhackor.github.io/tiny-perceptron-vlm/7.18.html)先看過的DPO路線。它仍利用偏好資訊，並不是沒有標準也能自己知道哪篇好。\n",
+    "\n",
+    "前置是[13.5的DPO代價轉換](https://birdhackor.github.io/tiny-perceptron-vlm/13.5.html)、[13.12的回答機率](https://birdhackor.github.io/tiny-perceptron-vlm/13.12.html)與[13.14的固定參考](https://birdhackor.github.io/tiny-perceptron-vlm/13.14.html)。對同題較佳與較差回答，DPO比較策略的log機率差，再扣掉固定參考的同一差距，得到margin，也就是相對偏好差距；乘上正係數beta，代價是`−log(sigmoid(beta × margin))`。sigmoid把差距轉成0到1的偏好機率，再取負log，沿用13.5的轉換。減去參考是在問「相對起點，更偏向較佳回答了嗎」，不是強迫每篇回答只增加不減少。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:16:39.507208Z",
+     "iopub.status.busy": "2026-10-04T19:16:39.506992Z",
+     "iopub.status.idle": "2026-10-04T19:16:40.792744Z",
+     "shell.execute_reply": "2026-10-04T19:16:40.791624Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7faf7434a610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:16:40.794886Z",
+     "iopub.status.busy": "2026-10-04T19:16:40.794635Z",
+     "iopub.status.idle": "2026-10-04T19:16:40.806950Z",
+     "shell.execute_reply": "2026-10-04T19:16:40.806299Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "較佳／較差機率 [0.5, 0.5] 偏好代價 0.6931\n",
+      "較佳／較差機率 [0.7, 0.3] 偏好代價 0.3567\n"
+     ]
+    }
+   ],
+   "source": [
+    "import torch\n",
+    "from tiny_perceptron.alignment import dpo_loss\n",
+    "\n",
+    "reference = torch.tensor([0.5, 0.5]).log()\n",
+    "for probabilities in [[0.5, 0.5], [0.7, 0.3]]:\n",
+    "    policy = torch.tensor(probabilities).log()\n",
+    "    loss = dpo_loss(policy[:1], policy[1:], reference[:1], reference[1:], beta=1.0)\n",
+    "    print(\"較佳／較差機率\", probabilities, \"偏好代價\", round(loss.item(), 4))"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "這份透明例子只有兩張卡，第一張被標為較佳，參考各0.5。目前策略也各0.5時，相對差距0，sigmoid為0.5，代價`−log(0.5)`約0.6931；改成0.7與0.3時，margin是`log(0.7/0.3)`，sigmoid為0.7，代價`−log(0.7)`降為0.3567。這裡beta固定1讓算例容易核對；正式實驗另用0.1，不能直接拿這個小例的代價數字當正式結果。沒有評分網路參與，偏好標籤卻仍決定更新方向。\n",
+    "\n",
+    "[DPO原論文第4節公式7](https://arxiv.org/pdf/2305.18290v3)從帶參考約束的偏好目標推導這個方法，不等於「它保證與任何PPO實作得到同一個模型」。真實資料不完美、模型有限、更新配方也不同；兩者都要另外檢查用途。想追完整文字回答的log機率與梯度，可回看[13.3–13.6](https://birdhackor.github.io/tiny-perceptron-vlm/13.3.html)，那條路使用語言模型，與本章的有限選卡實驗分開。\n",
+    "\n",
+    "圖從同一份示範選卡checkpoint分叉：左路教評分員、取樣與PPO更新；右路直接拿偏好對做DPO。兩路都保留同一個固定起點作reference，最後用相同題目驗收。這不是「先PPO再DPO」的必修流水線。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 3,
+   "metadata": {
+    "cellView": "form",
+    "course_figure": {
+     "alt": "同一示範起點分叉成PPO與DPO，最後用共同任務檢查比較",
+     "name": "ppo_dpo_routes"
+    },
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:16:40.808792Z",
+     "iopub.status.busy": "2026-10-04T19:16:40.808466Z",
+     "iopub.status.idle": "2026-10-04T19:16:40.819349Z",
+     "shell.execute_reply": "2026-10-04T19:16:40.817426Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "image/svg+xml": [
+       "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 820 520\" role=\"img\" aria-labelledby=\"title desc\">\n",
+       "  <title id=\"title\">同一示範起點分叉成PPO與DPO路線</title>\n",
+       "  <desc id=\"desc\">同一示範選卡模型複製成兩支。PPO支線先訓練評分員，選卡後評分並更新；DPO支線直接學偏好對。兩支共用固定起點參考與同一套最後檢查。沒有要求先PPO再DPO。</desc>\n",
+       "  <defs><marker id=\"arrow\" markerWidth=\"8\" markerHeight=\"8\" refX=\"7\" refY=\"4\" orient=\"auto\"><path d=\"M0 0L8 4L0 8\" fill=\"#475569\"/></marker></defs>\n",
+       "  <rect width=\"820\" height=\"520\" rx=\"16\" fill=\"#f8fafc\"/>\n",
+       "  <g font-family=\"Noto Sans CJK TC, sans-serif\" fill=\"#0f172a\" text-anchor=\"middle\">\n",
+       "    <text x=\"410\" y=\"38\" font-size=\"24\" font-weight=\"bold\">比較兩條路：先讓起點與驗收相同</text>\n",
+       "    <rect x=\"250\" y=\"70\" width=\"320\" height=\"70\" rx=\"12\" fill=\"#dbeafe\" stroke=\"#2563eb\"/>\n",
+       "    <text x=\"410\" y=\"101\" font-size=\"21\" font-weight=\"bold\">同一份示範選卡模型</text>\n",
+       "    <text x=\"410\" y=\"126\" font-size=\"18\">SFT checkpoint，複製兩份</text>\n",
+       "    <path d=\"M410 145V164\" fill=\"none\" stroke=\"#475569\" stroke-width=\"3\"/>\n",
+       "    <path d=\"M410 164H210V188\" fill=\"none\" stroke=\"#475569\" stroke-width=\"3\" marker-end=\"url(#arrow)\"/>\n",
+       "    <path d=\"M410 164H610V188\" fill=\"none\" stroke=\"#475569\" stroke-width=\"3\" marker-end=\"url(#arrow)\"/>\n",
+       "    <rect x=\"40\" y=\"200\" width=\"340\" height=\"150\" rx=\"12\" fill=\"#fef3c7\" stroke=\"#b45309\"/>\n",
+       "    <text x=\"210\" y=\"234\" font-size=\"23\" font-weight=\"bold\">PPO 路線</text>\n",
+       "    <text x=\"210\" y=\"267\" font-size=\"19\">偏好對 → 先教評分員</text>\n",
+       "    <text x=\"210\" y=\"297\" font-size=\"19\">取樣選卡 → 評分 → 更新</text>\n",
+       "    <text x=\"210\" y=\"326\" font-size=\"18\">另有價值估計與參考約束</text>\n",
+       "    <rect x=\"440\" y=\"200\" width=\"340\" height=\"150\" rx=\"12\" fill=\"#dcfce7\" stroke=\"#15803d\"/>\n",
+       "    <text x=\"610\" y=\"234\" font-size=\"23\" font-weight=\"bold\">DPO 路線</text>\n",
+       "    <text x=\"610\" y=\"267\" font-size=\"19\">偏好對 → 直接更新策略</text>\n",
+       "    <text x=\"610\" y=\"297\" font-size=\"19\">比較同題的兩篇機率</text>\n",
+       "    <text x=\"610\" y=\"326\" font-size=\"18\">保留同一個固定參考</text>\n",
+       "    <path d=\"M210 355V386H610V355\" fill=\"none\" stroke=\"#475569\" stroke-width=\"3\"/>\n",
+       "    <path d=\"M410 386V396\" fill=\"none\" stroke=\"#475569\" stroke-width=\"3\" marker-end=\"url(#arrow)\"/>\n",
+       "    <rect x=\"250\" y=\"408\" width=\"320\" height=\"60\" rx=\"12\" fill=\"#ede9fe\" stroke=\"#7c3aed\"/>\n",
+       "    <text x=\"410\" y=\"445\" font-size=\"21\" font-weight=\"bold\">相同題目與獨立規則驗收</text>\n",
+       "    <text x=\"410\" y=\"501\" font-size=\"18\">相同步數仍可能有不同資料與計算成本；不用兩法依序全跑。</text>\n",
+       "  </g>\n",
+       "</svg>"
+      ],
+      "text/plain": [
+       "<IPython.core.display.SVG object>"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    }
+   ],
+   "source": [
+    "# @title 本節圖解\n",
+    "from IPython.display import SVG, display\n",
+    "\n",
+    "display(SVG(filename=str(root / \"course/figures/ppo_dpo_routes.svg\")))"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "正式CPU比較先保存148參數的示範起點，PPO與DPO兩支從逐項相同的權重開始；偏好都來自同一批訓練家族。這裡的家族把使用相同兩個加數的題目放在一起，不因交換加數或改變回答要求就拆開，例如1加2與2加1屬於同一家族；兩路都只使用分在訓練組的44個家族。PPO做360次策略更新，DPO也做360次、每批64對，共抽用23,040對。兩者都在最後18題通過12題，且[13.16](https://birdhackor.github.io/tiny-perceptron-vlm/13.16.html)列出的分項相同：數字與求補資訊成功，句子要求仍未學好。但同樣更新360次，不等於同樣計算或資料預算：PPO另有300次評分員更新、360次critic更新、7,680次真實取樣；DPO直接重讀偏好對。\n",
+    "\n",
+    "這次PPO段約0.66秒，DPO段約0.34秒；評分員另花約0.27秒，都是本機CPU小網路的段落時間，不是大型LLM效能結論。偏好資料含示範階段沒教的條件，因此也不能說PPO或DPO勝過同資料、同預算的SFT。表格支持「這個固定配方新增了求補資訊的選擇，仍沒完成全部要求」，不支持哪種方法普遍比較好。\n",
+    "\n",
+    "當回饋來自真人比較，獎勵模型與PPO可以組成典型RLHF流程；本實驗的標籤則是作者寫定規則由程式套用。最終[19.8](https://birdhackor.github.io/tiny-perceptron-vlm/19.8.html)會把分支與實際成品的選擇說清楚，有限選卡PPO不會被冒稱已回灌成品語言模型。方法可以教在一起，能力與權重來源仍要逐一分清。\n",
+    "\n",
+    "練習只把目前策略的第二組機率改成0.3與0.7，先預測它更偏向較差卡，代價升為1.2040，再執行核對。接著指出：即使偏好代價下降，仍缺哪些證據才可發布助理？至少還要實際選擇或生成的任務結果，以及原有能力、格式與誠實等檢查。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "13.17"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

@@ -1,0 +1,157 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 6.1 字元切詞有什麼成本？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "[1.1](https://birdhackor.github.io/tiny-perceptron-vlm/1.1.html) 每個字給一個ID，很容易理解「貓看狗」需要三格。但英文的 `perceptron` 若一字母一格，會有十格；中文若改成逐byte，又常一字需要三格。同一份原文用不同單位表示，模型所見的序列長度就不同，成本也跟着變。選擇怎樣拆文字，不只是換一張字表。\n",
+    "\n",
+    "token是模型一次處理的文字片段，tokenizer是把原文拆成這些片段、轉成ID並能解迴文字的工具。「切詞」是常用翻譯，卻不保證片段正好是人類的詞；一個token可以是一字、多個字，或一個字元所需bytes中的部分，例如🙂的四個bytes分別當四個token。此處不是再把一個byte拆成位元；一byte一token時，每個byte仍完整包含八個位元。先分清原文、拆分單位與ID，後面改拆法纔不會把各種長短當同一個數字。\n",
+    "\n",
+    "Unicode給文字元素統一編號，Python的 `len(字串)` 數這些碼點；一個碼點可以理解為Unicode中的一個文字編號，不一定等於肉眼的一個完整字符，因為重音或組合emoji可能用多個碼點。UTF-8則把文字存成0到255的bytes，每byte八位元，中文與emoji通常要多個byte。下面只用簡單單碼點例子。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:11:30.512096Z",
+     "iopub.status.busy": "2026-10-04T19:11:30.511912Z",
+     "iopub.status.idle": "2026-10-04T19:11:31.814201Z",
+     "shell.execute_reply": "2026-10-04T19:11:31.813221Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7f7fb9572610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:11:31.816477Z",
+     "iopub.status.busy": "2026-10-04T19:11:31.816214Z",
+     "iopub.status.idle": "2026-10-04T19:11:31.824283Z",
+     "shell.execute_reply": "2026-10-04T19:11:31.822590Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "小小貓 Unicode碼點 3 UTF-8 bytes 9\n",
+      "cat Unicode碼點 3 UTF-8 bytes 3\n",
+      "🙂 Unicode碼點 1 UTF-8 bytes 4\n"
+     ]
+    }
+   ],
+   "source": [
+    "texts = [\"小小貓\", \"cat\", \"🙂\"]\n",
+    "for text in texts:\n",
+    "    raw = text.encode(\"utf-8\")\n",
+    "    print(text, \"Unicode碼點\", len(text), \"UTF-8 bytes\", len(raw))"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "輸入三段文字，`.encode(\"utf-8\")` 把字串轉為這種儲存編碼的byte序列。三行應分別看到3與9、3與3、1與4。兩種三字文本，實際存儲bytes不同；🙂顯示一個圖案卻需四byte。一字元一token時前兩段都是三格，一byte一token時則九格與三格，這些單位不能互換。\n",
+    "\n",
+    "為何模型成本受影響？[3.6](https://birdhackor.github.io/tiny-perceptron-vlm/3.6.html) 的注意力權重有T×T格，T是token序列長度；從三格變九格，這張表便從9格變81格。字表則影響 [2.1](https://birdhackor.github.io/tiny-perceptron-vlm/2.1.html) 的V×D參數，V是可用token種類數。較細拆法常讓V較小、T較長，較粗拆法相反，不能只看字表小就說全模型省。\n",
+    "\n",
+    "逐字元表還要處理未見字；固定256種byte則涵蓋任何UTF-8原文，能把沒見過的字拆得更細表示。這帶來可靠還原，也可能讓中文序列較長。下一節用常見相鄰片段合併，讓頻繁組合用更少格。\n",
+    "\n",
+    "「能表示原文」和「模型會生成合法文字」也要分開。[T.4的中文詩實跑](https://birdhackor.github.io/tiny-perceptron-vlm/training.html#T.4)給一筆驗證詩的開頭`渡漢江\\n李頻\\n嶺外`，實際新生成部分是`孟沙，天夜天天天天春�`；這裡的`\\n`表示原文中的換行。提示取至多24個byte，且只在完整Unicode碼點後結束，沒有把半個中文字交給模型。生成卻是逐byte選候選，最多寫32個新byte：這筆最後只寫到下一字的前兩個byte就達到上限，解碼便顯示替代符號`�`。中間的重複字另是一個品質問題，不能靠補齊末字解決。相同的32格讓英文常能寫32個字母或標點，中文卻通常只夠約十個字；看生成長短前，先問每格究竟是什麼單位。\n",
+    "\n",
+    "練習只加入 `\"cat🙂\"`，先預測Unicode碼點4、UTF-8 bytes7，再執行核對。再把英文cat換成貓，應是2與7：碼點減少，byte數卻一樣。你可以看到「幾字」不能直接當成「模型處理幾token」，還得說明採用哪種拆法。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "6.1"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

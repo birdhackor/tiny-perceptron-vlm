@@ -1,0 +1,251 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 18.5 如何顯示較低機率的候選？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "教師分布如果第一名占94%，其他候選只剩少許份量，學生很難從中看出次要關係。可以讓分布平一些，保留排名但縮小差距嗎？前置是[軟目標](https://birdhackor.github.io/tiny-perceptron-vlm/18.4.html)與[softmax分數尺度](https://birdhackor.github.io/tiny-perceptron-vlm/14.3.html)。我們先把教師logits除以正數T，再softmax；這個T叫蒸餾temperature（溫度），T越大通常分布越平。\n",
+    "\n",
+    "取候選 `[4,3,5]`的分數 `[4,1,0]`。`exp(x)`就是`e ** x`，e約為2.718，把分數轉為正數份量。softmax把各份量除以同一個總和；兩個機率相除時，共同總和消掉，所以候選4比候選3是`exp(4/T) / exp(1/T) = exp(3/T)`。T=1時，第一和第二分數差3，機率比為 `exp(3)`約20.1；T=2時，差縮為1.5，比例約4.48，所以第二名相對份量增加。T=4時差0.75，比例約2.12。沒有改教師排名，改的是它展示給學生的選項差距；溫度不是答案正確率，也不是讓教師重新推理一次。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:19:51.781517Z",
+     "iopub.status.busy": "2026-10-04T19:19:51.781351Z",
+     "iopub.status.idle": "2026-10-04T19:19:53.078216Z",
+     "shell.execute_reply": "2026-10-04T19:19:53.077389Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7f80a6766610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:19:53.088603Z",
+     "iopub.status.busy": "2026-10-04T19:19:53.088307Z",
+     "iopub.status.idle": "2026-10-04T19:19:53.097392Z",
+     "shell.execute_reply": "2026-10-04T19:19:53.095853Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "T 1.0 機率 [0.9362000226974487, 0.04659999907016754, 0.017100000753998756] 第一比第二 20.0855\n",
+      "T 2.0 機率 [0.7361000180244446, 0.16429999470710754, 0.09960000216960907] 第一比第二 4.4817\n",
+      "T 4.0 機率 [0.54339998960495, 0.2567000091075897, 0.19990000128746033] 第一比第二 2.117\n"
+     ]
+    }
+   ],
+   "source": [
+    "import torch\n",
+    "\n",
+    "logits = torch.tensor([4.0, 1.0, 0.0])\n",
+    "for temperature in (1.0, 2.0, 4.0):\n",
+    "    probability = (logits / temperature).softmax(0)\n",
+    "    print(\n",
+    "        \"T\",\n",
+    "        temperature,\n",
+    "        \"機率\",\n",
+    "        probability.round(decimals=4).tolist(),\n",
+    "        \"第一比第二\",\n",
+    "        round((probability[0] / probability[1]).item(), 4),\n",
+    "    )"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "輸入三個固定分數，不用已訓練教師。`softmax(0)`沿候選軸轉成機率；temperature在softmax前除，不是將最後機率隨便除T，那會讓總和不再為一。T=1機率約 `[0.9362,0.0466,0.0171]`，T=2約 `[0.7361,0.1643,0.0996]`，T=4約 `[0.5434,0.2567,0.1999]`。最後一個候選從1.71%增到19.99%，因此比較能參與學生的學習誤差。\n",
+    "\n",
+    "下圖每條的完整長度都是100%機率，由左到右的顏色固定對應候選4、3、5。溫度提高時，橘色與綠色份量變大，藍色候選4仍是第一名；這表示次要選項更清楚，不表示答案排名改了。百分比四捨五入到小數點後兩位，條寬按原始機率繪製。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 3,
+   "metadata": {
+    "cellView": "form",
+    "course_figure": {
+     "alt": "提高蒸餾溫度讓次要候選份量增加，三個候選排名保持相同",
+     "name": "architecture_distillation_temperature"
+    },
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:19:53.100299Z",
+     "iopub.status.busy": "2026-10-04T19:19:53.100122Z",
+     "iopub.status.idle": "2026-10-04T19:19:53.112183Z",
+     "shell.execute_reply": "2026-10-04T19:19:53.110612Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "image/svg+xml": [
+       "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 600 810\" role=\"img\" aria-labelledby=\"title desc\">\n",
+       "<title id=\"title\">提高蒸餾溫度，低機率候選的份量增加</title>\n",
+       "<desc id=\"desc\">三個候選4、3、5的固定分數是4、1、0。各條總和100%。溫度1時份量約93.62%、4.66%、1.71%；溫度2時73.61%、16.43%、9.96%；溫度4時54.34%、25.67%、19.99%。排名不變；百分比標註四捨五入。</desc>\n",
+       "<style>text{font-family:\"Noto Sans CJK TC\",\"Microsoft JhengHei\",sans-serif;fill:#163552;text-anchor:middle}.label{font-size:24px}.percent{font-size:28px;font-weight:600}.note{font-size:23px}</style>\n",
+       "<rect width=\"600\" height=\"810\" rx=\"12\" fill=\"#f7fafc\"/>\n",
+       "<text x=\"300\" y=\"39\" font-size=\"30\">候選不換，改變展示給學生的比例</text>\n",
+       "<text x=\"300\" y=\"79\" class=\"note\">每條總和100%；由左至右是候選4、3、5。</text>\n",
+       "<text x=\"40\" y=\"120\" class=\"label\" style=\"text-anchor:start\">溫度 T = 1</text>\n",
+       "<defs><clipPath id=\"bar-1\"><rect x=\"40\" y=\"144\" width=\"520\" height=\"43\" rx=\"8\"/></clipPath></defs><g clip-path=\"url(#bar-1)\">\n",
+       "<rect x=\"40.0000\" y=\"144\" width=\"486.8446\" height=\"43\" fill=\"#4f83c7\"/>\n",
+       "<rect x=\"526.8446\" y=\"144\" width=\"24.2386\" height=\"43\" fill=\"#e8a04b\"/>\n",
+       "<rect x=\"551.0831\" y=\"144\" width=\"8.9169\" height=\"43\" fill=\"#58a285\"/>\n",
+       "</g>\n",
+       "<rect x=\"78\" y=\"207\" width=\"14\" height=\"14\" rx=\"3\" fill=\"#4f83c7\"/><text x=\"140\" y=\"222\" class=\"label\">候選4</text><text x=\"130\" y=\"259\" class=\"percent\">93.62%</text>\n",
+       "<rect x=\"248\" y=\"207\" width=\"14\" height=\"14\" rx=\"3\" fill=\"#e8a04b\"/><text x=\"310\" y=\"222\" class=\"label\">候選3</text><text x=\"300\" y=\"259\" class=\"percent\">4.66%</text>\n",
+       "<rect x=\"418\" y=\"207\" width=\"14\" height=\"14\" rx=\"3\" fill=\"#58a285\"/><text x=\"480\" y=\"222\" class=\"label\">候選5</text><text x=\"470\" y=\"259\" class=\"percent\">1.71%</text>\n",
+       "<text x=\"40\" y=\"335\" class=\"label\" style=\"text-anchor:start\">溫度 T = 2</text>\n",
+       "<defs><clipPath id=\"bar-2\"><rect x=\"40\" y=\"359\" width=\"520\" height=\"43\" rx=\"8\"/></clipPath></defs><g clip-path=\"url(#bar-2)\">\n",
+       "<rect x=\"40.0000\" y=\"359\" width=\"382.7849\" height=\"43\" fill=\"#4f83c7\"/>\n",
+       "<rect x=\"422.7849\" y=\"359\" width=\"85.4108\" height=\"43\" fill=\"#e8a04b\"/>\n",
+       "<rect x=\"508.1957\" y=\"359\" width=\"51.8043\" height=\"43\" fill=\"#58a285\"/>\n",
+       "</g>\n",
+       "<rect x=\"78\" y=\"422\" width=\"14\" height=\"14\" rx=\"3\" fill=\"#4f83c7\"/><text x=\"140\" y=\"437\" class=\"label\">候選4</text><text x=\"130\" y=\"474\" class=\"percent\">73.61%</text>\n",
+       "<rect x=\"248\" y=\"422\" width=\"14\" height=\"14\" rx=\"3\" fill=\"#e8a04b\"/><text x=\"310\" y=\"437\" class=\"label\">候選3</text><text x=\"300\" y=\"474\" class=\"percent\">16.43%</text>\n",
+       "<rect x=\"418\" y=\"422\" width=\"14\" height=\"14\" rx=\"3\" fill=\"#58a285\"/><text x=\"480\" y=\"437\" class=\"label\">候選5</text><text x=\"470\" y=\"474\" class=\"percent\">9.96%</text>\n",
+       "<text x=\"40\" y=\"550\" class=\"label\" style=\"text-anchor:start\">溫度 T = 4</text>\n",
+       "<defs><clipPath id=\"bar-4\"><rect x=\"40\" y=\"574\" width=\"520\" height=\"43\" rx=\"8\"/></clipPath></defs><g clip-path=\"url(#bar-4)\">\n",
+       "<rect x=\"40.0000\" y=\"574\" width=\"282.5709\" height=\"43\" fill=\"#4f83c7\"/>\n",
+       "<rect x=\"322.5709\" y=\"574\" width=\"133.4771\" height=\"43\" fill=\"#e8a04b\"/>\n",
+       "<rect x=\"456.0480\" y=\"574\" width=\"103.9520\" height=\"43\" fill=\"#58a285\"/>\n",
+       "</g>\n",
+       "<rect x=\"78\" y=\"637\" width=\"14\" height=\"14\" rx=\"3\" fill=\"#4f83c7\"/><text x=\"140\" y=\"652\" class=\"label\">候選4</text><text x=\"130\" y=\"689\" class=\"percent\">54.34%</text>\n",
+       "<rect x=\"248\" y=\"637\" width=\"14\" height=\"14\" rx=\"3\" fill=\"#e8a04b\"/><text x=\"310\" y=\"652\" class=\"label\">候選3</text><text x=\"300\" y=\"689\" class=\"percent\">25.67%</text>\n",
+       "<rect x=\"418\" y=\"637\" width=\"14\" height=\"14\" rx=\"3\" fill=\"#58a285\"/><text x=\"480\" y=\"652\" class=\"label\">候選5</text><text x=\"470\" y=\"689\" class=\"percent\">19.99%</text>\n",
+       "<text x=\"300\" y=\"754\" class=\"label\">第一名仍是候選4，次要選項更清楚。</text>\n",
+       "<text x=\"300\" y=\"793\" class=\"note\">比例標註四捨五入到小數點後兩位。</text></svg>"
+      ],
+      "text/plain": [
+       "<IPython.core.display.SVG object>"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    }
+   ],
+   "source": [
+    "# @title 本節圖解\n",
+    "from IPython.display import SVG, display\n",
+    "\n",
+    "display(SVG(filename=str(root / \"course/figures/architecture_distillation_temperature.svg\")))"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "分布更平不一定更有用。T非常大時各候選接近平均，原本有意義的差異也被抹掉；教師給錯候選的份量同樣會變得更可見。需要用獨立驗證集選T：留出沒有用來訓練學生的題目，比較不同T訓練出的學生在這批題目上的回答品質，再決定T，而不是只希望所有候選都平均。最後報成績的測試題另留，不拿來反覆選T；資料分工可回看[1.2](https://birdhackor.github.io/tiny-perceptron-vlm/1.2.html)。對學生也應使用相同T來形成比較分布，否則比較的是兩套不同尺度。\n",
+    "\n",
+    "除以T也會改變分數對誤差的敏感度。本教材[分布蒸餾誤差](https://birdhackor.github.io/tiny-perceptron-vlm/18.8.html)會使用T²乘數作為尺度約定，並明確記在公式與函數中；這不是T讓教師突然多教T²倍知識。使用計算蒸餾誤差的輔助函式時，需知道是否已內建乘數，避免重複相乘；例如18.8的`distillation_kl`負責比較兩邊分布，內部已乘T²，外層就不用再乘。\n",
+    "\n",
+    "[Hinton等人的原文第2節](https://arxiv.org/abs/1503.02531v1)先讓教師與學生都用同一高溫softmax，再以T²調整軟目標梯度的相對尺度。本輪正式實驗預設T=2、真值與教師各占一半，報告逐支記錄`temperature_squared_applied_once=true`；沒有跑多個溫度挑最好成績，不能把T=2寫成這些任務的最佳設定。最終留出生成則用greedy，不沿用蒸餾溫度抽樣。\n",
+    "\n",
+    "蒸餾T和[生成抽樣設定](https://birdhackor.github.io/tiny-perceptron-vlm/1.15.html)的溫度應分開記錄。這裡改的是訓練用的教師/學生分布，不是要求最終回答以相同T抽樣；同一個蒸餾學生可以使用不同生成策略。\n",
+    "\n",
+    "練習只把logits改成 `[8,2,0]`，temperature列表不變。先預測新T=2與原T=1結果相同，新T=4與原T=2相同，再執行核對。兩者都是相同的「分數除溫度」，這能幫你分辨絕對數值與相對尺度的作用。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "18.5"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

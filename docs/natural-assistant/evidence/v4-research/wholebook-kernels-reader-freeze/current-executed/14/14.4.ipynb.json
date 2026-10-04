@@ -1,0 +1,158 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 14.4 MLP activation 可以怎麼選？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "假設一層模型先把「這裡需要某項特徵」算成數字，輸出可能是負的、零或正的。接下來應直接把它送出，還是改變不同大小的通過方式？先只看一個數字x：先乘2、再乘3，總能改寫成一次乘6，輸入1與2時輸出6與12，始終按同一倍數變化。如果在中間平方，輸出卻變成 `3×(2x)²`，輸入1與2時是12與48；第一個輸入需要乘12，第二個需要乘24，已不能用同一倍數描述。前者叫線性，後者叫非線性，畫出輸入與輸出的關係也不再是原來那種直線。模型中矩陣乘法只是把這種乘係數、再相加的規則擴展到一列數字；若各層都只有矩陣乘法，連續兩次仍可合成一次，增加層數也不能提供這種新關係。[混合位置後處理特徵](https://birdhackor.github.io/tiny-perceptron-vlm/4.4.html)所用的MLP，就是在矩陣乘法之間加入非線性函數；activation（啟動函數）指的便是這個逐項改數字的步驟。\n",
+    "\n",
+    "用三個容易追蹤的輸入 `[-1,0,2]` 看兩種選擇。ReLU先把負數改成零、保留正數，因此得到 `[0,0,2]`；ReLU²再平方，得到 `[0,0,4]`。GELU則平滑地縮小數字。它可寫成 `x × Φ(x)`：把標準常態分布想成以0為中心、左右對稱的鐘形分布，Φ(x)是落在x及其左邊的比例，所以介於0和1。x很負時左邊只剩很少比例，Φ接近0；x很正時幾乎全在左邊，Φ接近1。對x=-1，Φ約0.1587，輸出約-0.1587；對x=2，Φ約0.9772，輸出約1.9545。這個公式用來理解通過的比例，實際數值交給下面的 `F.gelu` 計算。負值沒有整段硬切成零，而大正值接近原值。\n",
+    "\n",
+    "下面擴成五個固定輸入，避免隨機值讓重點難辨。`F`是PyTorch提供常用函數的模組；`F.gelu`實作上述GELU，`F.relu(x).square()`清楚分成截掉負值、再平方兩步。所有函數都逐項工作，輸入與輸出形狀相同。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:17:10.671269Z",
+     "iopub.status.busy": "2026-10-04T19:17:10.670988Z",
+     "iopub.status.idle": "2026-10-04T19:17:12.393841Z",
+     "shell.execute_reply": "2026-10-04T19:17:12.392947Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7feebee56610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:17:12.396318Z",
+     "iopub.status.busy": "2026-10-04T19:17:12.395986Z",
+     "iopub.status.idle": "2026-10-04T19:17:12.406614Z",
+     "shell.execute_reply": "2026-10-04T19:17:12.405658Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "輸入 [-2.0, -1.0, 0.0, 1.0, 2.0]\n",
+      "GELU [-0.045499999076128006, -0.15870000422000885, 0.0, 0.8413000106811523, 1.9544999599456787]\n",
+      "ReLU平方 [0.0, 0.0, 0.0, 1.0, 4.0]\n"
+     ]
+    }
+   ],
+   "source": [
+    "import torch\n",
+    "import torch.nn.functional as F\n",
+    "\n",
+    "x = torch.tensor([-2.0, -1.0, 0.0, 1.0, 2.0])\n",
+    "print(\"輸入\", x.tolist())\n",
+    "print(\"GELU\", F.gelu(x).round(decimals=4).tolist())\n",
+    "print(\"ReLU平方\", F.relu(x).square().tolist())"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "GELU約輸出 `[-0.0455,-0.1587,0,0.8413,1.9545]`；ReLU²為 `[0,0,0,1,4]`。觀察x=-2與-1：GELU並不是把所有負值乘同一個常數，更大的負值反而更接近零。觀察正側：ReLU²在x=2時變成4，比x=1時的1大四倍，因此對大正值更敏感。這些數字說明函數如何處理訊號，還沒有說明它們在文字任務上誰比較好。\n",
+    "\n",
+    "把啟動函數換到訓練好的模型，會改變下一層收到的尺度和負值分布。即使新函數不增加參數，也可能需要讓權重重新適應。公平比較應固定訓練資料、層數、特徵寬度與訓練步數，分別訓練後再比較驗證loss（未用於更新權重的資料上，預測答案的誤差）及耗時。單看函數名字、單次輸出或省一個運算，不能替整個模型排名。\n",
+    "\n",
+    "[T.8](https://birdhackor.github.io/tiny-perceptron-vlm/training.html#T.8)另保持全部141,568個參數與抽題順序，分別用GELU、ReLU²更新240次。驗證代價為2.26331與2.23590，最後檢查為2.29163與2.26438；每步中位數13.062與12.893毫秒。ReLU²在這輪略低、略快，但最後檢查的第一筆仍續寫 `was a was the the the the ar and`，不能把更低的代價換成「已能寫好故事」。小時間差與單一種子（產生隨機初始化與抽樣序列的起始設定）也需要更多重複測量才適合外推。\n",
+    "\n",
+    "練習把建立`x`的清單改成 `[-4.0,-2.0,0.0,2.0,4.0]`，保留小數寫法，讓PyTorch建立浮點數表；若全部寫成整數，預設會得到整數表，`F.gelu`不能接受。執行前先預測ReLU²最後一項是16，GELU最後一項接近4；再核對負側是否依然保留很小的負數。第一項可能印成`-9.999999747378752e-05`，這個科學記號寫法在這裡約等於`-0.0001`，因此仍是很小的負值。若畫圖，橫軸應是輸入，縱軸應是各函數輸出，不能把這條曲線當作訓練品質圖。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "14.4"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

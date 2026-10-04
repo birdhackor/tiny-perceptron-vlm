@@ -1,0 +1,244 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 7.17 為什麼先大量讀文章，再練習當助理？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "一個人讀過許多食譜，不代表接到「請列出三種不含花生的點心」時，就會直接列三項。他可能接著介紹食材，也可能沿用文章的開場白。模型也有類似的差別：文章裡合理的下一句，未必是這位使用者需要的回答。[7.11](https://birdhackor.github.io/tiny-perceptron-vlm/7.11.html)已讓我們看見，可以沿用同一個模型，換成問答示範繼續訓練。現在要問的是：為什麼常見的大模型配方把這兩件事分開做？\n",
+    "\n",
+    "先看兩份教學材料。第一份是一般文章，例如「花生可用來製作糖果」。只要取得、清理文字，文章本身就提供「前文後面實際寫了什麼」這個答案；不必另外請人替每個位置寫標籤。模型反覆練習這種預測，可以逐漸學到語言、知識關聯與各種文字中的做法。這個大量學習的階段叫**預訓練**，英文pre-training。資料是否近似重複、同一家族是否混入訓練與測試兩邊，要按[5.12](https://birdhackor.github.io/tiny-perceptron-vlm/5.12.html)檢查；這項檢查不會替我們判斷文章內容是否真實。自動取得答案不代表資料免費或正確。\n",
+    "\n",
+    "第二份是「使用者要求→理想回答」，還要確認有沒有避開花生、是否真的只有三項。這種材料更貼近助理的工作，卻需要設計題目、撰寫或篩選回答、核對要求。大量閱讀得到的同一組權重，可以接著用這些材料更新；這個後續階段叫**後訓練**，英文post-training。[7.1](https://birdhackor.github.io/tiny-perceptron-vlm/7.1.html)的SFT是其中一種方法。它讓訓練訊號更集中在使用者希望模型完成的任務上。\n",
+    "\n",
+    "下面只做資料成本的透明算例。假設已整理好的文章每筆需要1個處理單位，經人工核對的問答每筆需要20個單位；數字是為了算清楚取捨，沒有宣稱是實際金錢或產業平均。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:12:11.683640Z",
+     "iopub.status.busy": "2026-10-04T19:12:11.683408Z",
+     "iopub.status.idle": "2026-10-04T19:12:12.977127Z",
+     "shell.execute_reply": "2026-10-04T19:12:12.975940Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7f075c046610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:12:12.979078Z",
+     "iopub.status.busy": "2026-10-04T19:12:12.978825Z",
+     "iopub.status.idle": "2026-10-04T19:12:12.984325Z",
+     "shell.execute_reply": "2026-10-04T19:12:12.982989Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "文章整理成本 1000\n",
+      "問答整理成本 1000\n",
+      "若1000筆都逐筆核對問答 20000\n"
+     ]
+    }
+   ],
+   "source": [
+    "article_count, checked_chat_count = 1000, 50\n",
+    "article_cost, checked_chat_cost = 1, 20\n",
+    "print(\"文章整理成本\", article_count * article_cost)\n",
+    "print(\"問答整理成本\", checked_chat_count * checked_chat_cost)\n",
+    "print(\"若1000筆都逐筆核對問答\", article_count * checked_chat_cost)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "輸入是筆數與假設的每筆成本。三行分別是1000、1000、20000：少量需要仔細核對的問答，已經能花掉與大量文章相同的整理預算。這段沒有訓練模型，也沒計算訓練運算費用；它說明為何資料取得方式會影響配方，不能證明「先預訓練一定比較省」或「50筆問答一定夠」。兩階段的實際成效，仍要用固定預算與留出題檢查。\n",
+    "\n",
+    "另一個理由是重用。已經學到不少通用模式的底座，可以保存成一份checkpoint，也就是可重新載入的權重檔，再分別教成客服、程式助理或圖文模型。下面的圖從大量文章走到一份共用底座，之後分叉成不同用途；每條分支都會有自己的資料、更新與評測。箭頭表示繼續訓練，不是把「客服」標籤貼上去就得到能力。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 3,
+   "metadata": {
+    "cellView": "form",
+    "course_figure": {
+     "alt": "預訓練建立共用底座，後訓練依不同任務繼續更新與評測",
+     "name": "posttrain_stages"
+    },
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:12:12.987754Z",
+     "iopub.status.busy": "2026-10-04T19:12:12.987534Z",
+     "iopub.status.idle": "2026-10-04T19:12:12.999343Z",
+     "shell.execute_reply": "2026-10-04T19:12:12.997050Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "image/svg+xml": [
+       "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 820 460\" role=\"img\" aria-labelledby=\"title desc\">\n",
+       "  <title id=\"title\">大量閱讀形成共用底座，再依任務繼續訓練</title>\n",
+       "  <desc id=\"desc\">一般文章用來預訓練底座；同一份底座可以另存三個副本，分別以任務資料後訓練並評測。此圖不表示後訓練只有風格，也不表示所有配方階段相同。</desc>\n",
+       "  <defs><marker id=\"arrow\" markerWidth=\"8\" markerHeight=\"8\" refX=\"7\" refY=\"4\" orient=\"auto\"><path d=\"M0 0L8 4L0 8\" fill=\"#475569\"/></marker></defs>\n",
+       "  <rect width=\"820\" height=\"460\" rx=\"16\" fill=\"#f8fafc\"/>\n",
+       "  <g font-family=\"Noto Sans CJK TC, sans-serif\" fill=\"#0f172a\" text-anchor=\"middle\">\n",
+       "    <text x=\"410\" y=\"38\" font-size=\"24\" font-weight=\"bold\">兩個階段，回應兩種資料問題</text>\n",
+       "    <rect x=\"40\" y=\"76\" width=\"220\" height=\"108\" rx=\"12\" fill=\"#dbeafe\" stroke=\"#2563eb\"/>\n",
+       "    <text x=\"150\" y=\"107\" font-size=\"21\" font-weight=\"bold\">一般文章</text>\n",
+       "    <text x=\"150\" y=\"138\" font-size=\"18\">前文 → 原文下一項</text>\n",
+       "    <text x=\"150\" y=\"166\" font-size=\"17\">文字本身提供預測目標</text>\n",
+       "    <path d=\"M265 130H330\" stroke=\"#475569\" stroke-width=\"3\" marker-end=\"url(#arrow)\"/>\n",
+       "    <rect x=\"340\" y=\"76\" width=\"220\" height=\"108\" rx=\"12\" fill=\"#dcfce7\" stroke=\"#15803d\"/>\n",
+       "    <text x=\"450\" y=\"108\" font-size=\"21\" font-weight=\"bold\">預訓練底座</text>\n",
+       "    <text x=\"450\" y=\"140\" font-size=\"18\">保存已學到的權重</text>\n",
+       "    <text x=\"450\" y=\"166\" font-size=\"17\">可另存副本，繼續更新</text>\n",
+       "    <text x=\"650\" y=\"111\" font-size=\"18\">語言、知識關聯</text>\n",
+       "    <text x=\"650\" y=\"140\" font-size=\"18\">與文字中的做法</text>\n",
+       "    <path d=\"M450 189V215\" fill=\"none\" stroke=\"#475569\" stroke-width=\"3\"/>\n",
+       "    <path d=\"M450 215H160V247\" fill=\"none\" stroke=\"#475569\" stroke-width=\"3\" marker-end=\"url(#arrow)\"/>\n",
+       "    <path d=\"M450 215V247\" fill=\"none\" stroke=\"#475569\" stroke-width=\"3\" marker-end=\"url(#arrow)\"/>\n",
+       "    <path d=\"M450 215H700V247\" fill=\"none\" stroke=\"#475569\" stroke-width=\"3\" marker-end=\"url(#arrow)\"/>\n",
+       "    <rect x=\"40\" y=\"260\" width=\"240\" height=\"126\" rx=\"12\" fill=\"#fff7ed\" stroke=\"#c2410c\"/>\n",
+       "    <text x=\"160\" y=\"291\" font-size=\"21\" font-weight=\"bold\">客服助理</text>\n",
+       "    <text x=\"160\" y=\"323\" font-size=\"18\">客服示範／回饋</text>\n",
+       "    <text x=\"160\" y=\"354\" font-size=\"18\">更新後另做客服評測</text>\n",
+       "    <rect x=\"330\" y=\"260\" width=\"240\" height=\"126\" rx=\"12\" fill=\"#fff7ed\" stroke=\"#c2410c\"/>\n",
+       "    <text x=\"450\" y=\"291\" font-size=\"21\" font-weight=\"bold\">程式助理</text>\n",
+       "    <text x=\"450\" y=\"323\" font-size=\"18\">程式示範／回饋</text>\n",
+       "    <text x=\"450\" y=\"354\" font-size=\"18\">更新後另做程式評測</text>\n",
+       "    <rect x=\"610\" y=\"260\" width=\"180\" height=\"126\" rx=\"12\" fill=\"#fff7ed\" stroke=\"#c2410c\"/>\n",
+       "    <text x=\"700\" y=\"291\" font-size=\"21\" font-weight=\"bold\">圖文助理</text>\n",
+       "    <text x=\"700\" y=\"323\" font-size=\"18\">圖文資料</text>\n",
+       "    <text x=\"700\" y=\"354\" font-size=\"18\">另測圖文表現</text>\n",
+       "    <text x=\"410\" y=\"423\" font-size=\"18\">後訓練可學任務能力；效果由新題驗證，不由箭頭保證。</text>\n",
+       "  </g>\n",
+       "</svg>"
+      ],
+      "text/plain": [
+       "<IPython.core.display.SVG object>"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    }
+   ],
+   "source": [
+    "# @title 本節圖解\n",
+    "from IPython.display import SVG, display\n",
+    "\n",
+    "display(SVG(filename=str(root / \"course/figures/posttrain_stages.svg\")))"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "這個分工可以從[InstructGPT原論文的引言與3.1節](https://arxiv.org/pdf/2203.02155v1)看見：預測一般文字與有用地遵循指令，目標並不相同；作者從已預訓練模型接上示範與回饋訓練。這是常見配方的具體案例，不代表所有模型都必須跑一樣的階段。後訓練也可能提高推理等任務能力，不能把它縮成只學禮貌與格式，下一節會繼續說明。\n",
+    "\n",
+    "本教材的[7.12實測](https://birdhackor.github.io/tiny-perceptron-vlm/7.12.html)讓這條路變得可操作：同一個小世界文字模型，最後十題從對話微調前1題答對，變成微調後7題答對。但它的文字階段只讀同一批45題的材料，沒有學到廣泛知識；與直接SFT的5／10相比，它還多了250次文字更新。因此這份實驗驗證了接續流程與這次成績，沒有隔離產業採用兩階段的因果理由。[19.4](https://birdhackor.github.io/tiny-perceptron-vlm/19.4.html)會把保存與接續用到整合模型，而不是要求你先相信兩階段必勝。\n",
+    "\n",
+    "練習只把`checked_chat_cost`改成5，先預測問答整理成本變250、全部逐筆核對變5000，再執行核對。接著寫一句這個算例還缺什麼才能選配方：至少缺實際資料品質、訓練成本與留出表現。這些不是用成本比例就能代填的數字。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "7.17"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

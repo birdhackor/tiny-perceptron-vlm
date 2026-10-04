@@ -1,0 +1,233 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 16.8 手寫 attention 怎麼換成最佳化介面？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "手寫注意力讓每一步容易檢查，但矩陣分數、遮罩、softmax與加權取回分開執行，也可能多次配置與搬移中間資料。PyTorch提供把這段運算合在一起的介面，稱scaled dot-product attention（縮放點積注意力，SDPA）。更換時第一件事不是計時，而是確認輸入軸、縮放和遮罩語意相同；否則較快的結果可能已經算了另一個問題。\n",
+    "\n",
+    "前置是[Q/K/V的匹配與混合](https://birdhackor.github.io/tiny-perceptron-vlm/3.4.html)、[分數縮放](https://birdhackor.github.io/tiny-perceptron-vlm/3.5.html)、[因果遮罩](https://birdhackor.github.io/tiny-perceptron-vlm/3.6.html)與[多頭的形狀](https://birdhackor.github.io/tiny-perceptron-vlm/3.7.html)。Query表示目前要找什麼，Key表示各位置可以怎麼匹配，Value是匹配後要取回的內容。每個頭的Query、Key有D項特徵，原分數是 `QKᵀ/√D`，softmax後乘Value。本例一段輸入、一頭、四位置、每位置三項特徵，所以Q/K/V形狀都是 `[1,1,4,3]`，D=3。布林遮罩True在這個SDPA介面表示「允許讀」，不是「遮掉」。\n",
+    "\n",
+    "程式的`@`取左邊矩陣的一列、右邊的一欄，對應項相乘再相加。Q與轉置後的K相乘，為每個Query算出四個候選Key分數，所以scores形狀是 `[1,1,4,4]`；`softmax(-1)`沿最後的四個候選分配比例，weights形狀相同。weights再乘V，把四份三項特徵按比例混合，得到每個Query的三項輸出，形狀回到 `[1,1,4,3]`。\n",
+    "\n",
+    "圖的列是Query，欄是Key位置，對角線包含自己，左下角是過去，右上角是未來。綠色允許、灰色禁止；下方的最後位置可以讀四格，而第一位置只能讀自己。下面程式的 `tril`正是建立這個下三角規則。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:18:36.867407Z",
+     "iopub.status.busy": "2026-10-04T19:18:36.867156Z",
+     "iopub.status.idle": "2026-10-04T19:18:38.779096Z",
+     "shell.execute_reply": "2026-10-04T19:18:38.777903Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7f562290a610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "cellView": "form",
+    "course_figure": {
+     "alt": "因果注意力只允許讀取自己與較早位置",
+     "name": "causal"
+    },
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:18:38.785400Z",
+     "iopub.status.busy": "2026-10-04T19:18:38.785074Z",
+     "iopub.status.idle": "2026-10-04T19:18:38.797458Z",
+     "shell.execute_reply": "2026-10-04T19:18:38.796642Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "image/svg+xml": [
+       "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 800 330\" role=\"img\" aria-labelledby=\"title desc\">\n",
+       "    <title id=\"title\">不能偷看明天的答案</title><desc id=\"desc\">對角線可看；右上角未來位置禁止。。橘色輪流提示閱讀步驟，所有內容靜態可見。</desc>\n",
+       "    <style>\n",
+       "    text{font-family:\"Noto Sans CJK TC\",\"Microsoft JhengHei\",\"PingFang TC\",sans-serif}\n",
+       "    rect.pulse,.pulse rect{animation:pulse 6s infinite}.step1,.step1 rect{animation-delay:0s}.step2,.step2 rect{animation-delay:1.5s}.step3,.step3 rect{animation-delay:3s}.step4,.step4 rect{animation-delay:4.5s}\n",
+       "    @keyframes pulse{0%,23%{stroke:#e87924;stroke-width:4}24%,100%{stroke:#8da8ca;stroke-width:1}}\n",
+       "    @media(prefers-reduced-motion:reduce){rect.pulse,.pulse rect{animation:none}}\n",
+       "    </style><defs><marker id=\"arrow\" markerWidth=\"10\" markerHeight=\"10\" refX=\"9\" refY=\"5\" orient=\"auto\"><path d=\"M0 0L10 5L0 10\" fill=\"#466b97\"/></marker></defs>\n",
+       "    <rect width=\"800\" height=\"330\" fill=\"#fff\"/><text x=\"400\" y=\"32\" font-size=\"24\" fill=\"#172b4d\" text-anchor=\"middle\">不能偷看明天的答案</text>\n",
+       "    <text x=\"400\" y=\"69\" font-size=\"17\" fill=\"#172b4d\" text-anchor=\"middle\">欄：可以讀取的過去／目前位置</text><text x=\"235\" y=\"110\" font-size=\"16\" fill=\"#172b4d\" text-anchor=\"middle\">查詢 0</text><rect class=\"pulse step1\" x=\"300\" y=\"82\" width=\"68\" height=\"34\" fill=\"#d7f5e6\" stroke=\"#8da8ca\"/><text x=\"334\" y=\"105\" font-size=\"15\" fill=\"#172b4d\" text-anchor=\"middle\">可看</text><rect class=\"pulse step1\" x=\"378\" y=\"82\" width=\"68\" height=\"34\" fill=\"#edf0f4\" stroke=\"#8da8ca\"/><text x=\"412\" y=\"105\" font-size=\"15\" fill=\"#172b4d\" text-anchor=\"middle\">禁止</text><rect class=\"pulse step1\" x=\"456\" y=\"82\" width=\"68\" height=\"34\" fill=\"#edf0f4\" stroke=\"#8da8ca\"/><text x=\"490\" y=\"105\" font-size=\"15\" fill=\"#172b4d\" text-anchor=\"middle\">禁止</text><rect class=\"pulse step1\" x=\"534\" y=\"82\" width=\"68\" height=\"34\" fill=\"#edf0f4\" stroke=\"#8da8ca\"/><text x=\"568\" y=\"105\" font-size=\"15\" fill=\"#172b4d\" text-anchor=\"middle\">禁止</text><text x=\"235\" y=\"152\" font-size=\"16\" fill=\"#172b4d\" text-anchor=\"middle\">查詢 1</text><rect class=\"pulse step2\" x=\"300\" y=\"124\" width=\"68\" height=\"34\" fill=\"#d7f5e6\" stroke=\"#8da8ca\"/><text x=\"334\" y=\"147\" font-size=\"15\" fill=\"#172b4d\" text-anchor=\"middle\">可看</text><rect class=\"pulse step2\" x=\"378\" y=\"124\" width=\"68\" height=\"34\" fill=\"#d7f5e6\" stroke=\"#8da8ca\"/><text x=\"412\" y=\"147\" font-size=\"15\" fill=\"#172b4d\" text-anchor=\"middle\">可看</text><rect class=\"pulse step2\" x=\"456\" y=\"124\" width=\"68\" height=\"34\" fill=\"#edf0f4\" stroke=\"#8da8ca\"/><text x=\"490\" y=\"147\" font-size=\"15\" fill=\"#172b4d\" text-anchor=\"middle\">禁止</text><rect class=\"pulse step2\" x=\"534\" y=\"124\" width=\"68\" height=\"34\" fill=\"#edf0f4\" stroke=\"#8da8ca\"/><text x=\"568\" y=\"147\" font-size=\"15\" fill=\"#172b4d\" text-anchor=\"middle\">禁止</text><text x=\"235\" y=\"194\" font-size=\"16\" fill=\"#172b4d\" text-anchor=\"middle\">查詢 2</text><rect class=\"pulse step3\" x=\"300\" y=\"166\" width=\"68\" height=\"34\" fill=\"#d7f5e6\" stroke=\"#8da8ca\"/><text x=\"334\" y=\"189\" font-size=\"15\" fill=\"#172b4d\" text-anchor=\"middle\">可看</text><rect class=\"pulse step3\" x=\"378\" y=\"166\" width=\"68\" height=\"34\" fill=\"#d7f5e6\" stroke=\"#8da8ca\"/><text x=\"412\" y=\"189\" font-size=\"15\" fill=\"#172b4d\" text-anchor=\"middle\">可看</text><rect class=\"pulse step3\" x=\"456\" y=\"166\" width=\"68\" height=\"34\" fill=\"#d7f5e6\" stroke=\"#8da8ca\"/><text x=\"490\" y=\"189\" font-size=\"15\" fill=\"#172b4d\" text-anchor=\"middle\">可看</text><rect class=\"pulse step3\" x=\"534\" y=\"166\" width=\"68\" height=\"34\" fill=\"#edf0f4\" stroke=\"#8da8ca\"/><text x=\"568\" y=\"189\" font-size=\"15\" fill=\"#172b4d\" text-anchor=\"middle\">禁止</text><text x=\"235\" y=\"236\" font-size=\"16\" fill=\"#172b4d\" text-anchor=\"middle\">查詢 3</text><rect class=\"pulse step4\" x=\"300\" y=\"208\" width=\"68\" height=\"34\" fill=\"#d7f5e6\" stroke=\"#8da8ca\"/><text x=\"334\" y=\"231\" font-size=\"15\" fill=\"#172b4d\" text-anchor=\"middle\">可看</text><rect class=\"pulse step4\" x=\"378\" y=\"208\" width=\"68\" height=\"34\" fill=\"#d7f5e6\" stroke=\"#8da8ca\"/><text x=\"412\" y=\"231\" font-size=\"15\" fill=\"#172b4d\" text-anchor=\"middle\">可看</text><rect class=\"pulse step4\" x=\"456\" y=\"208\" width=\"68\" height=\"34\" fill=\"#d7f5e6\" stroke=\"#8da8ca\"/><text x=\"490\" y=\"231\" font-size=\"15\" fill=\"#172b4d\" text-anchor=\"middle\">可看</text><rect class=\"pulse step4\" x=\"534\" y=\"208\" width=\"68\" height=\"34\" fill=\"#d7f5e6\" stroke=\"#8da8ca\"/><text x=\"568\" y=\"231\" font-size=\"15\" fill=\"#172b4d\" text-anchor=\"middle\">可看</text><text x=\"400\" y=\"314\" font-size=\"15\" fill=\"#172b4d\" text-anchor=\"middle\">對角線可看；右上角未來位置禁止。</text>\n",
+       "    </svg>"
+      ],
+      "text/plain": [
+       "<IPython.core.display.SVG object>"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    }
+   ],
+   "source": [
+    "# @title 本節圖解\n",
+    "from IPython.display import SVG, display\n",
+    "\n",
+    "display(SVG(filename=str(root / \"course/figures/causal.svg\")))"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 3,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:18:38.801878Z",
+     "iopub.status.busy": "2026-10-04T19:18:38.801646Z",
+     "iopub.status.idle": "2026-10-04T19:18:38.832626Z",
+     "shell.execute_reply": "2026-10-04T19:18:38.831622Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "輸出形狀 (1, 1, 4, 3)\n",
+      "最大差異 5.960464477539063e-08\n"
+     ]
+    }
+   ],
+   "source": [
+    "import torch\n",
+    "import torch.nn.functional as F\n",
+    "\n",
+    "torch.manual_seed(0)\n",
+    "q, k, v = [torch.randn(1, 1, 4, 3) for _ in range(3)]\n",
+    "allowed = torch.ones(4, 4, dtype=torch.bool).tril()[None, None]\n",
+    "scores = q @ k.transpose(-2, -1) / (3**0.5)\n",
+    "weights = scores.masked_fill(~allowed, float(\"-inf\")).softmax(-1)\n",
+    "manual = weights @ v\n",
+    "optimized = F.scaled_dot_product_attention(q, k, v, attn_mask=allowed, dropout_p=0.0)\n",
+    "print(\"輸出形狀\", tuple(optimized.shape))\n",
+    "print(\"最大差異\", (manual - optimized).abs().max().item())\n",
+    "assert torch.allclose(manual, optimized, atol=1e-6)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "`transpose(-2,-1)`只交換Key的最後兩軸，保留batch和head；`[None,None]`替四乘四遮罩補上前兩軸，以便同一規則套到注意力分數。手寫路徑先縮放一次，把禁止格填成負無窮大，它們softmax後權重為零。SDPA內部已做相同縮放，傳入q時不要再先除√3，否則會縮放兩次。`dropout_p=0.0`停用隨機丟棄權重，讓兩路比較同一數學問題。[模型的eval評估模式](https://birdhackor.github.io/tiny-perceptron-vlm/5.17.html)會停用模型層中的某些訓練行為，但這個SDPA函式仍照傳入的`dropout_p`執行；評估時也必須明確傳0.0，不能期待它隨模型模式自動清零。\n",
+    "\n",
+    "輸出形狀應為 `(1,1,4,3)`，最大差異通常是零或約10⁻⁷的浮點尾數，assert確認接近。SDPA可能依裝置、精度和形狀選擇不同底層算法；[FlashAttention](https://birdhackor.github.io/tiny-perceptron-vlm/16.9.html)是一種減少注意力中間資料讀寫的GPU實作，使用SDPA介面不保證選到它，更不保證在CPU小尺寸下加速。模型訓練還要核對梯度，這個例子只隔離向前數值與資料契約。\n",
+    "\n",
+    "[PyTorch 2.14 SDPA文件](https://docs.pytorch.org/docs/2.14/generated/torch.nn.functional.scaled_dot_product_attention.html)明列上述True與`dropout_p`語意，也提醒不同後端的浮點結果可能不同。先說明實測用的數字格式：dtype指儲存數字的型別；FP32是32位元浮點數，FP16與BF16是兩種16位元浮點格式。較少位元與不同格式可能產生不同捨入，因此比較容差需按格式事先設定，詳見[精度小例子](https://birdhackor.github.io/tiny-perceptron-vlm/16.7.html)。\n",
+    "\n",
+    "實際整模型核對用NVIDIA L4圖形處理器、四個Query頭各自保留一組Key與Value（四KV頭）、四題補齊為53位置，數字格式是FP32。logit是模型對每個候選token尚未轉成機率的原始分數；整模型logit最高差3.81470×10⁻⁶，權重梯度最高差1.60071×10⁻¹⁰。梯度表示各個可調數字對代價的敏感度，見[梯度暖身](https://birdhackor.github.io/tiny-perceptron-vlm/first-steps.html#W.6)。以向前絕對容差10⁻⁵、梯度10⁻⁸閱讀這次核對，兩者都在範圍內；不能套用單個CPU例子的10⁻⁶容差去要求所有大型輸出逐bit相同。\n",
+    "\n",
+    "運算追蹤工具profiler實際記到`aten::_scaled_dot_product_efficient_attention`與`aten::_efficient_attention_forward`，所以本次是節省中間資料記憶體的memory-efficient實作，沒有觀察到CUDA Flash；CUDA是NVIDIA GPU的運算環境。暖機後向前中位數手寫2.990毫秒、SDPA2.346毫秒，量的是完整TinyLM、不是只有attention核心。兩個副本再各更新40次、2,328個有效目標，最後檢查都5/10，權重最高差3.51369×10⁻⁵；手寫與SDPA每步14.070、12.849毫秒。這些結果支持此次形狀的接近與較低耗時，不能以API名字替其他dtype或GQA輸入指定後端。GQA讓多個Query頭共用較少組Key與Value，兩邊頭數因而可能不同；共享方式與形狀見[16.4](https://birdhackor.github.io/tiny-perceptron-vlm/16.4.html)。\n",
+    "\n",
+    "我們另做一份只核對注意力核心的[CUDA Flash補驗報告](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/course-experiments/results/flash_probe.json)。Q/K/V都固定為`[2,4,512,32]`：兩段輸入、每段四頭、512個位置、每頭32項特徵；把控制隨機數起點的seed固定為42建立，再分別轉成FP16與BF16。這次明確只開`SDPBackend.FLASH_ATTENTION`，不提供額外遮罩，以`is_causal=True`限制未來、`dropout_p=0.0`停用隨機丟棄。L4上的profiler在兩種精度都記到CUDA Flash前向與反傳運算子，以及真正的GPU運算程式（CUDA kernel），才確認使用了Flash。\n",
+    "\n",
+    "先核對再計時。手寫對照的QK與PV乘法使用同一低精度，P指softmax後的權重；分數縮放、遮罩與softmax用FP32，它不是所有運算都用FP32的真值。反傳時需要知道後續代價對每格輸出的敏感度，這份由輸出端送回的數值表叫上游梯度。本次將同一份表送給兩路，再比較它們算出的Q/K/V敏感度，才是在相同輸入條件下核對反傳。兩路的輸出與Q/K/V梯度差如下：\n",
+    "\n",
+    "| 精度 | 輸出最大絕對差 | Q/K/V梯度中的最大絕對差 |\n",
+    "| --- | ---: | ---: |\n",
+    "| FP16 | 0.001953125 | 0.000244140625 |\n",
+    "| BF16 | 0.015625 | 0.001953125 |\n",
+    "\n",
+    "全部數值有限，且在執行前固定的容差內：FP16輸出`atol=rtol=0.01`、梯度0.03；BF16輸出`atol=0.06, rtol=0.04`、梯度均0.08。`atol`是接近零時仍允許的絕對差，`rtol`是隨對照數值大小調整的相對差；兩者共同判斷接近，並沒有要求逐bit相同。完整報告另列三份梯度各自的誤差，時間與記憶體在下一節閱讀。這份補驗沒有訓練模型，也沒有替上面的整模型品質比較增加一組成績。\n",
+    "\n",
+    "練習只將SDPA的 `attn_mask=allowed` 改成 `attn_mask=~allowed`，保留手寫路徑。先預測兩路不再相同，再執行觀察assert失敗；這不是最佳化誤差，而是可見位置完全改變。練習結束改回原遮罩，再把`torch.manual_seed(0)`的0改成1，從頭執行以產生另一組可重現的Q/K/V。先預測輸出形狀不變、兩路仍應接近且assert通過，再核對，確認對齊不是只發生在原來那組輸入。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "16.8"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

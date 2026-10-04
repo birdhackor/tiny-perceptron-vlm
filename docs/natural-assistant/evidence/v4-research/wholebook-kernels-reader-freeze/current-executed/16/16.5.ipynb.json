@@ -1,0 +1,216 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 16.5 Padding 花掉多少工作？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "訓練設定每段固定四格，兩份短文件各只有兩個token，若分別補到四格，就有八個位置、只有四個是真實內容。補進去的PAD雖然不算答案誤差，普通矩陣運算仍可能處理它們。把短文件接到同一段、充分使用這四格，叫sequence packing（序列裝填）。但我們若想讓兩份文件各自獨立，接起來時還要阻止它們互相讀取，不能只省空間而改了學習問題。\n",
+    "\n",
+    "前置是[因果遮罩](https://birdhackor.github.io/tiny-perceptron-vlm/3.6.html)和[填充位置](https://birdhackor.github.io/tiny-perceptron-vlm/7.7.html)。PAD是補齊長度的符號，EOS是文件或回答結束的符號。EOS只是模型看到的一個token，不會讓注意力自動失明。例如A占位置0、1，B占2、3；普通因果遮罩允許位置3讀0至3，其中就包含A。若需要文件隔離，除了不能看未來，還要限制Query與Key屬於同一文件。\n",
+    "\n",
+    "圖的列是Query所在位置，欄從左至右是可讀位置0至3。綠格代表允許，灰格代表禁止。B的兩列雖然排在A之後，左側兩欄仍為灰色；右上角禁止是因果限制，左下角禁止則來自跨文件隔離，兩者理由不同。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:18:27.973069Z",
+     "iopub.status.busy": "2026-10-04T19:18:27.972830Z",
+     "iopub.status.idle": "2026-10-04T19:18:29.858414Z",
+     "shell.execute_reply": "2026-10-04T19:18:29.854204Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7fbab806e610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "cellView": "form",
+    "course_figure": {
+     "alt": "同文件且不在未來的格子才允許讀取",
+     "name": "packing"
+    },
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:18:29.862877Z",
+     "iopub.status.busy": "2026-10-04T19:18:29.862533Z",
+     "iopub.status.idle": "2026-10-04T19:18:29.876054Z",
+     "shell.execute_reply": "2026-10-04T19:18:29.875212Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "image/svg+xml": [
+       "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 800 330\" role=\"img\" aria-labelledby=\"title desc\">\n",
+       "    <title id=\"title\">兩份文件隔開：EOS 不等於牆</title><desc id=\"desc\">例中0–1為文件A，2–3為文件B。。橘色輪流提示閱讀步驟，所有內容靜態可見。</desc>\n",
+       "    <style>\n",
+       "    text{font-family:\"Noto Sans CJK TC\",\"Microsoft JhengHei\",\"PingFang TC\",sans-serif}\n",
+       "    rect.pulse,.pulse rect{animation:pulse 6s infinite}.step1,.step1 rect{animation-delay:0s}.step2,.step2 rect{animation-delay:1.5s}.step3,.step3 rect{animation-delay:3s}.step4,.step4 rect{animation-delay:4.5s}\n",
+       "    @keyframes pulse{0%,23%{stroke:#e87924;stroke-width:4}24%,100%{stroke:#8da8ca;stroke-width:1}}\n",
+       "    @media(prefers-reduced-motion:reduce){rect.pulse,.pulse rect{animation:none}}\n",
+       "    </style><defs><marker id=\"arrow\" markerWidth=\"10\" markerHeight=\"10\" refX=\"9\" refY=\"5\" orient=\"auto\"><path d=\"M0 0L10 5L0 10\" fill=\"#466b97\"/></marker></defs>\n",
+       "    <rect width=\"800\" height=\"330\" fill=\"#fff\"/><text x=\"400\" y=\"32\" font-size=\"24\" fill=\"#172b4d\" text-anchor=\"middle\">兩份文件隔開：EOS 不等於牆</text>\n",
+       "    <text x=\"400\" y=\"69\" font-size=\"17\" fill=\"#172b4d\" text-anchor=\"middle\">欄：可以讀取的過去／目前位置</text><text x=\"235\" y=\"110\" font-size=\"16\" fill=\"#172b4d\" text-anchor=\"middle\">查詢 0</text><rect class=\"pulse step1\" x=\"300\" y=\"82\" width=\"68\" height=\"34\" fill=\"#d7f5e6\" stroke=\"#8da8ca\"/><text x=\"334\" y=\"105\" font-size=\"15\" fill=\"#172b4d\" text-anchor=\"middle\">可看</text><rect class=\"pulse step1\" x=\"378\" y=\"82\" width=\"68\" height=\"34\" fill=\"#edf0f4\" stroke=\"#8da8ca\"/><text x=\"412\" y=\"105\" font-size=\"15\" fill=\"#172b4d\" text-anchor=\"middle\">禁止</text><rect class=\"pulse step1\" x=\"456\" y=\"82\" width=\"68\" height=\"34\" fill=\"#edf0f4\" stroke=\"#8da8ca\"/><text x=\"490\" y=\"105\" font-size=\"15\" fill=\"#172b4d\" text-anchor=\"middle\">禁止</text><rect class=\"pulse step1\" x=\"534\" y=\"82\" width=\"68\" height=\"34\" fill=\"#edf0f4\" stroke=\"#8da8ca\"/><text x=\"568\" y=\"105\" font-size=\"15\" fill=\"#172b4d\" text-anchor=\"middle\">禁止</text><text x=\"235\" y=\"152\" font-size=\"16\" fill=\"#172b4d\" text-anchor=\"middle\">查詢 1</text><rect class=\"pulse step2\" x=\"300\" y=\"124\" width=\"68\" height=\"34\" fill=\"#d7f5e6\" stroke=\"#8da8ca\"/><text x=\"334\" y=\"147\" font-size=\"15\" fill=\"#172b4d\" text-anchor=\"middle\">可看</text><rect class=\"pulse step2\" x=\"378\" y=\"124\" width=\"68\" height=\"34\" fill=\"#d7f5e6\" stroke=\"#8da8ca\"/><text x=\"412\" y=\"147\" font-size=\"15\" fill=\"#172b4d\" text-anchor=\"middle\">可看</text><rect class=\"pulse step2\" x=\"456\" y=\"124\" width=\"68\" height=\"34\" fill=\"#edf0f4\" stroke=\"#8da8ca\"/><text x=\"490\" y=\"147\" font-size=\"15\" fill=\"#172b4d\" text-anchor=\"middle\">禁止</text><rect class=\"pulse step2\" x=\"534\" y=\"124\" width=\"68\" height=\"34\" fill=\"#edf0f4\" stroke=\"#8da8ca\"/><text x=\"568\" y=\"147\" font-size=\"15\" fill=\"#172b4d\" text-anchor=\"middle\">禁止</text><text x=\"235\" y=\"194\" font-size=\"16\" fill=\"#172b4d\" text-anchor=\"middle\">查詢 2</text><rect class=\"pulse step3\" x=\"300\" y=\"166\" width=\"68\" height=\"34\" fill=\"#edf0f4\" stroke=\"#8da8ca\"/><text x=\"334\" y=\"189\" font-size=\"15\" fill=\"#172b4d\" text-anchor=\"middle\">禁止</text><rect class=\"pulse step3\" x=\"378\" y=\"166\" width=\"68\" height=\"34\" fill=\"#edf0f4\" stroke=\"#8da8ca\"/><text x=\"412\" y=\"189\" font-size=\"15\" fill=\"#172b4d\" text-anchor=\"middle\">禁止</text><rect class=\"pulse step3\" x=\"456\" y=\"166\" width=\"68\" height=\"34\" fill=\"#d7f5e6\" stroke=\"#8da8ca\"/><text x=\"490\" y=\"189\" font-size=\"15\" fill=\"#172b4d\" text-anchor=\"middle\">可看</text><rect class=\"pulse step3\" x=\"534\" y=\"166\" width=\"68\" height=\"34\" fill=\"#edf0f4\" stroke=\"#8da8ca\"/><text x=\"568\" y=\"189\" font-size=\"15\" fill=\"#172b4d\" text-anchor=\"middle\">禁止</text><text x=\"235\" y=\"236\" font-size=\"16\" fill=\"#172b4d\" text-anchor=\"middle\">查詢 3</text><rect class=\"pulse step4\" x=\"300\" y=\"208\" width=\"68\" height=\"34\" fill=\"#edf0f4\" stroke=\"#8da8ca\"/><text x=\"334\" y=\"231\" font-size=\"15\" fill=\"#172b4d\" text-anchor=\"middle\">禁止</text><rect class=\"pulse step4\" x=\"378\" y=\"208\" width=\"68\" height=\"34\" fill=\"#edf0f4\" stroke=\"#8da8ca\"/><text x=\"412\" y=\"231\" font-size=\"15\" fill=\"#172b4d\" text-anchor=\"middle\">禁止</text><rect class=\"pulse step4\" x=\"456\" y=\"208\" width=\"68\" height=\"34\" fill=\"#d7f5e6\" stroke=\"#8da8ca\"/><text x=\"490\" y=\"231\" font-size=\"15\" fill=\"#172b4d\" text-anchor=\"middle\">可看</text><rect class=\"pulse step4\" x=\"534\" y=\"208\" width=\"68\" height=\"34\" fill=\"#d7f5e6\" stroke=\"#8da8ca\"/><text x=\"568\" y=\"231\" font-size=\"15\" fill=\"#172b4d\" text-anchor=\"middle\">可看</text><text x=\"400\" y=\"314\" font-size=\"15\" fill=\"#172b4d\" text-anchor=\"middle\">例中0–1為文件A，2–3為文件B。</text>\n",
+       "    </svg>"
+      ],
+      "text/plain": [
+       "<IPython.core.display.SVG object>"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    }
+   ],
+   "source": [
+    "# @title 本節圖解\n",
+    "from IPython.display import SVG, display\n",
+    "\n",
+    "display(SVG(filename=str(root / \"course/figures/packing.svg\")))"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 3,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:18:29.879223Z",
+     "iopub.status.busy": "2026-10-04T19:18:29.879007Z",
+     "iopub.status.idle": "2026-10-04T19:18:29.890199Z",
+     "shell.execute_reply": "2026-10-04T19:18:29.889260Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "隔離文件 [[1, 0, 0, 0], [1, 1, 0, 0], [0, 0, 1, 0], [0, 0, 1, 1]]\n",
+      "只用因果的最後一列 [1, 1, 1, 1]\n"
+     ]
+    }
+   ],
+   "source": [
+    "import torch\n",
+    "from tiny_perceptron.attention import attention_mask\n",
+    "\n",
+    "position = torch.arange(4)\n",
+    "segment = torch.tensor([[0, 0, 1, 1]])\n",
+    "allowed = attention_mask(position, position, segments=segment)\n",
+    "print(\"隔離文件\", allowed[0, 0].int().tolist())\n",
+    "causal_only = attention_mask(position, position)\n",
+    "print(\"只用因果的最後一列\", causal_only[0, 0, -1].int().tolist())"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "`segment`每項記錄該位置的文件編號；0與1不是權重或時間，是兩份文件的身份。`attention_mask`把「Key位置不晚於Query」與「文件編號相同」取交集，返回batch、head、Query、Key四軸布林表。batch是同時處理的資料筆數，head是[一種注意力讀法](https://birdhackor.github.io/tiny-perceptron-vlm/3.7.html)；本例這兩軸的長度都為1，完整形狀是 `(1,1,4,4)`。`[0,0]`取第一段、第一頭，`int`把True/False印成1/0。四列應為 `[1,0,0,0]`、`[1,1,0,0]`、`[0,0,1,0]`、`[0,0,1,1]`，正好對應圖。只用因果的最後一列則為 `[1,1,1,1]`。\n",
+    "\n",
+    "packing還需處理每份文件的位置編號，以及跨邊界的下一字答案。例如A的EOS後面雖接著B第一字，不應把「預測B第一字」當成A的目標，除非你有意訓練跨文件續寫。每份文件可以重新從位置0開始，但注意力遮罩仍要知道文內先後與segment，不能把兩個位置0誤當同一token。這段程式只核對隔離遮罩，沒有悄悄完成資料裝填的所有步驟。\n",
+    "\n",
+    "實測用NVIDIA L4圖形處理器，取了兩段真實助手文字，各七個輸入位置。這裡的logit是模型給每個候選token的原始分數，尚未轉成機率；權重梯度則是各個可調數字對答案代價的敏感度，表示接下來更新的方向與強弱，見[梯度暖身](https://birdhackor.github.io/tiny-perceptron-vlm/first-steps.html#W.6)。逐段PAD與隔離packing都占14個位置，這個例子沒有省PAD，只檢查語意：各文件位置重新從0開始、不增加跨文件目標，logit最高差1.90735×10⁻⁶、權重梯度最高差1.78814×10⁻⁷。這是在逐項比較「模型給出的分數」和「學習時算出的敏感度」，差值接近零支持兩種裝填在本次條件下接近。改掉第一段後，隔離路徑第二段分數差為0；只留因果遮罩時卻差5.42937，證明EOS或先後順序不能代替文件隔離。\n",
+    "\n",
+    "接著兩支各以三段助手文字短前綴更新40次，均計845個有效目標，更新後權重最大差5.97909×10⁻⁶；每步中位數PAD為10.799毫秒、packing為11.191毫秒，這輪沒有加速。原模型用示範問答做監督式微調（SFT，見[最短更新路線](https://birdhackor.github.io/tiny-perceptron-vlm/training.html#T.4)）：問題保留在輸入，依對話角色選出助手答案與結束符號來計算代價，user提問不作為要模仿的答案，見[答案位置](https://birdhackor.github.io/tiny-perceptron-vlm/7.3.html)。此處則只剩助手文字的續寫，已拿掉問題與原先按角色選答案的設定，不能與完整問答目標混成一次效率比較。\n",
+    "\n",
+    "再測原問答，分數寫成「完整答案答對題數／總題數」；驗證五題是訓練時用來檢查品質的題組，最後檢查十題則留到最後評估，兩組都不拿來更新權重，見[兩種保留題組](https://birdhackor.github.io/tiny-perceptron-vlm/5.10.html)。兩支驗證都0/5、最後檢查都1/10，較續訓前的[多頭注意力](https://birdhackor.github.io/tiny-perceptron-vlm/3.7.html)基準模型的2/5、6/10差；對同一最後檢查`shape?`題，理想為`circle`卻生成`low`。兩種裝填結果接近，不等於改後的學習任務仍保持問答品質。\n",
+    "\n",
+    "練習只移除 `segments=segment`，先預測位置2也能讀0、1，與圖左下角不同，再執行核對。裝填減少PAD不代表同樣比例的速度收益：某些實作仍建立完整方陣，需看實際運算；若刻意允許文件互相讀取，也要將它記成另一種訓練設定。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "16.5"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

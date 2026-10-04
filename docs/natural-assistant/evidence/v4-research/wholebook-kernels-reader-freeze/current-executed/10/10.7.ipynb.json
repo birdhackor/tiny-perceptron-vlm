@@ -1,0 +1,217 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 10.7 模型怎麼知道圖片放在哪？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "問題文字是「這張圖是什麼顏色」，圖片卻不是普通字詞。我們在序列放一個圖片佔位標記，表示這裡要插入視覺特徵。假如標記原本佔1格、視覺特徵有3格，後面的回答就要整體往後移動2格；答案標籤若沒有同步移動，會把正確文字放到錯誤位置。\n",
+    "\n",
+    "前置是[10.6接頭輸出](https://birdhackor.github.io/tiny-perceptron-vlm/10.6.html)與[7.4下一位置的答案對齊](https://birdhackor.github.io/tiny-perceptron-vlm/7.4.html)。本節的序列先是完整未錯位的輸入和標籤，插入後才做一次shift，指輸入去最後一格、目標去第一格，讓每個輸入預測下一格。圖片位置標籤填`-100`，表示這些位置不直接猜文字，但仍可作為回答的上下文。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:14:46.479280Z",
+     "iopub.status.busy": "2026-10-04T19:14:46.479027Z",
+     "iopub.status.idle": "2026-10-04T19:14:48.126742Z",
+     "shell.execute_reply": "2026-10-04T19:14:48.125655Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7faa4c266610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:14:48.129245Z",
+     "iopub.status.busy": "2026-10-04T19:14:48.128933Z",
+     "iopub.status.idle": "2026-10-04T19:14:48.141160Z",
+     "shell.execute_reply": "2026-10-04T19:14:48.138906Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "輸入特徵 (1, 6, 8)\n",
+      "下一格目標 [[-100, -100, -100, -100, 73, 2]]\n"
+     ]
+    }
+   ],
+   "source": [
+    "import torch\n",
+    "from torch import nn\n",
+    "from tiny_perceptron.multimodal import expand_modalities\n",
+    "\n",
+    "embedding = nn.Embedding(264, 8)\n",
+    "ids = torch.tensor([1, 5, 4, 73, 2])\n",
+    "labels = torch.tensor([-100, -100, -100, 73, 2])\n",
+    "features = {5: torch.randn(3, 8)}\n",
+    "x, y = expand_modalities(ids, labels, embedding, features, {5})\n",
+    "print(\"輸入特徵\", tuple(x.shape))\n",
+    "print(\"下一格目標\", y.tolist())"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "輸入編號1表示開頭、5表示圖片、4表示助手角色、73是示範答案片段、2表示結束。數字73這裡只是已有詞表中的合法編號，不代表模型已會回答顏色。`nn.Embedding(264,8)`建立264列查表，可查編號0到263，每列有8個數字；`embedding`把普通編號轉換成8維向量，`features`給圖片標記5提供三條8維特徵；`{5}`告訴工具哪些編號需要展開。\n",
+    "\n",
+    "展開後完整目標是`[-100,-100,-100,-100,-100,73,2]`：開頭、三條視覺特徵、助手角色都不算文字代價。再去掉第一個目標，與去掉最後一條輸入對應，輸出`x`形狀`(1,6,8)`，即批次中1筆樣本、6個輸入位置、每位置8個特徵，`y`為`[[-100,-100,-100,-100,73,2]]`。答案73的目標位在索引4，對應輸入中的助手角色，因此首個答案仍由它前面的上下文預測。\n",
+    "\n",
+    "交給後續文字模型的是對齊後這6格輸入，因此[位置編號](https://birdhackor.github.io/tiny-perceptron-vlm/4.1.html)是0到5，指格子順序，與代表內容的詞表編號1、5、4、73、2不同。[防偷看的注意力遮罩](https://birdhackor.github.io/tiny-perceptron-vlm/3.6.html)也要配合這6格，形成6×6的表：每列是一個讀取位置，每欄是一個被讀取位置，只允許讀取自己與之前的格子。這些設定不能沿用原來5格的長度，也不能誤用完整未對齊7格的長度。\n",
+    "\n",
+    "圖中第一列是五格原序列，第二列把圖片一格換成三格，形成七格。下面先列完整目標，再用箭頭表示只去掉第一個目標一次，得到六格的下一位置目標。73仍由前面的助手位置預測；淡橘色三格表示視覺上下文，不是三個要輸出的字。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 3,
+   "metadata": {
+    "cellView": "form",
+    "course_figure": {
+     "alt": "圖片展開前後與下一位置目標對齊",
+     "name": "multimodal_expand_image"
+    },
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:14:48.148816Z",
+     "iopub.status.busy": "2026-10-04T19:14:48.148635Z",
+     "iopub.status.idle": "2026-10-04T19:14:48.160583Z",
+     "shell.execute_reply": "2026-10-04T19:14:48.159467Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "image/svg+xml": [
+       "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 900 400\" role=\"img\" aria-labelledby=\"title desc\"><title id=\"title\">插入圖片後，答案位置一起移動</title><desc id=\"desc\">五格未展開序列，圖片換三格視覺特徵後有七格；最後做一次下一位置對齊成六格。</desc><defs><marker id=\"arrow\" markerWidth=\"8\" markerHeight=\"8\" refX=\"7\" refY=\"4\" orient=\"auto\"><path d=\"M0 0L8 4L0 8\" fill=\"#54768c\"/></marker></defs><style>text{font-family:\"Noto Sans CJK TC\",\"Microsoft JhengHei\",sans-serif}svg{background:white}</style><rect width=\"900\" height=\"400\" fill=\"#fff\"/><text x=\"450\" y=\"34\" text-anchor=\"middle\" font-size=\"24\" fill=\"#18354a\">插入圖片後，答案位置一起移動</text><text x=\"80\" y=\"85\" text-anchor=\"middle\" font-size=\"17\" fill=\"#18354a\">未展開輸入</text><rect x=\"140\" y=\"55\" width=\"130\" height=\"58\" rx=\"8\" fill=\"#eef5ff\" stroke=\"#54768c\"/><text x=\"205.0\" y=\"90.0\" text-anchor=\"middle\" font-size=\"19\" fill=\"#18354a\">開頭</text><rect x=\"285\" y=\"55\" width=\"130\" height=\"58\" rx=\"8\" fill=\"#fff3de\" stroke=\"#54768c\"/><text x=\"350.0\" y=\"90.0\" text-anchor=\"middle\" font-size=\"19\" fill=\"#18354a\">圖片</text><rect x=\"430\" y=\"55\" width=\"130\" height=\"58\" rx=\"8\" fill=\"#eef5ff\" stroke=\"#54768c\"/><text x=\"495.0\" y=\"90.0\" text-anchor=\"middle\" font-size=\"19\" fill=\"#18354a\">助手</text><rect x=\"575\" y=\"55\" width=\"130\" height=\"58\" rx=\"8\" fill=\"#eef5ff\" stroke=\"#54768c\"/><text x=\"640.0\" y=\"90.0\" text-anchor=\"middle\" font-size=\"19\" fill=\"#18354a\">73</text><rect x=\"720\" y=\"55\" width=\"130\" height=\"58\" rx=\"8\" fill=\"#eef5ff\" stroke=\"#54768c\"/><text x=\"785.0\" y=\"90.0\" text-anchor=\"middle\" font-size=\"19\" fill=\"#18354a\">結束2</text><text x=\"450\" y=\"149\" text-anchor=\"middle\" font-size=\"18\" fill=\"#18354a\">圖片1格 → 三條特徵；新增格的目標都是忽略 -100</text><rect x=\"110\" y=\"180\" width=\"100\" height=\"48\" rx=\"8\" fill=\"#eef5ff\" stroke=\"#54768c\"/><text x=\"160.0\" y=\"210.0\" text-anchor=\"middle\" font-size=\"19\" fill=\"#18354a\">開頭</text><rect x=\"220\" y=\"180\" width=\"100\" height=\"48\" rx=\"8\" fill=\"#fff3de\" stroke=\"#54768c\"/><text x=\"270.0\" y=\"210.0\" text-anchor=\"middle\" font-size=\"19\" fill=\"#18354a\">視覺1</text><rect x=\"330\" y=\"180\" width=\"100\" height=\"48\" rx=\"8\" fill=\"#fff3de\" stroke=\"#54768c\"/><text x=\"380.0\" y=\"210.0\" text-anchor=\"middle\" font-size=\"19\" fill=\"#18354a\">視覺2</text><rect x=\"440\" y=\"180\" width=\"100\" height=\"48\" rx=\"8\" fill=\"#fff3de\" stroke=\"#54768c\"/><text x=\"490.0\" y=\"210.0\" text-anchor=\"middle\" font-size=\"19\" fill=\"#18354a\">視覺3</text><rect x=\"550\" y=\"180\" width=\"100\" height=\"48\" rx=\"8\" fill=\"#eef5ff\" stroke=\"#54768c\"/><text x=\"600.0\" y=\"210.0\" text-anchor=\"middle\" font-size=\"19\" fill=\"#18354a\">助手</text><rect x=\"660\" y=\"180\" width=\"100\" height=\"48\" rx=\"8\" fill=\"#eef5ff\" stroke=\"#54768c\"/><text x=\"710.0\" y=\"210.0\" text-anchor=\"middle\" font-size=\"19\" fill=\"#18354a\">73</text><rect x=\"770\" y=\"180\" width=\"100\" height=\"48\" rx=\"8\" fill=\"#eef5ff\" stroke=\"#54768c\"/><text x=\"820.0\" y=\"210.0\" text-anchor=\"middle\" font-size=\"19\" fill=\"#18354a\">結束2</text><text x=\"450\" y=\"265\" text-anchor=\"middle\" font-size=\"18\" fill=\"#18354a\">完整目標：[-100, -100, -100, -100, -100, 73, 2]</text><path d=\"M450 279L450 307\" fill=\"none\" stroke=\"#54768c\" stroke-width=\"2\" marker-end=\"url(#arrow)\"/><text x=\"450\" y=\"338\" text-anchor=\"middle\" font-size=\"18\" fill=\"#18354a\">去掉第一個目標 → [-100, -100, -100, -100, 73, 2]</text><text x=\"450\" y=\"370\" text-anchor=\"middle\" font-size=\"17\" fill=\"#18354a\">輸入去最後一格；助手位置預測首個答案73。</text></svg>"
+      ],
+      "text/plain": [
+       "<IPython.core.display.SVG object>"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    }
+   ],
+   "source": [
+    "# @title 本節圖解\n",
+    "from IPython.display import SVG, display\n",
+    "\n",
+    "display(SVG(filename=str(root / \"course/figures/multimodal_expand_image.svg\")))"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "只調整輸入而沿用舊標籤，可能不報錯卻把錯誤位置當答案，訓練意義就變了。圖片格不計代價不等於看不見，這點可回看[7.5](https://birdhackor.github.io/tiny-perceptron-vlm/7.5.html)。\n",
+    "\n",
+    "正式接頭訓練用問題`describe`及目標`red circle`等六種描述。以這個紅圓例子算一次：前綴有開頭、用戶、圖片、describe的八個byte、用戶結束與助手角色，共13格；答案十個byte加EOS，共11格。24格完整序列把一個圖片標記換成16條特徵，變39格，再錯位一次，得到38個輸入位置。代價只取11個回答目標，並不把16條視覺特徵算成16個答案。\n",
+    "\n",
+    "一次訓練步會各自隨機抽出4筆圖片描述，允許重複抽到同一筆；處理完這4筆才更新一次權重。先加總每筆回答的byte數加1個EOS，得到該步的有效目標數，再累加300步，共處理1,200筆抽樣，實際累計14,408個有效回答目標。例如一個步驟若四筆都是`red circle`，就是4×11＝44個目標；實際也會抽到較長的`green square`等描述，所以每步數量不同。14,408來自這些回答長度的實際加總，不是300乘圖片位置數。\n",
+    "\n",
+    "注意y的索引4雖放著73，它不是要模型在輸入第4格直接看到73再抄。展開後輸入的第4格是助手角色，目標正好在其後，這才是「預測下一格」。最後一個輸入是73、目標是結束2。若先將原標籤shift、再展開圖片，就容易把角色、圖片或答案錯配；工具要求未shift的完整序列，就是為了讓這個責任只發生一次。\n",
+    "\n",
+    "練習只把`randn(3,8)`改成`randn(5,8)`，先預測輸出長度8，目標中前六格忽略、末兩格仍73與2，再執行核對。回答內容沒變，移動的是它所在的位置。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "10.7"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

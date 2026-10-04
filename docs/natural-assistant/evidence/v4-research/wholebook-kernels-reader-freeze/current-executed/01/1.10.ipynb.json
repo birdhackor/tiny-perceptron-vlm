@@ -1,0 +1,213 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 1.10 影響怎麼穿過多個運算？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "[1.9](https://birdhackor.github.io/tiny-perceptron-vlm/1.9.html) 用一個旋鈕直接算代價。真實模型卻會先查表、再混合數字、最後才得到代價；參數的影響怎樣穿過中間步驟？想像水龍頭旋鈕增加一格，流量增加兩單位，而每增加一單位流量，裝滿水桶的成本又增加十二單位。旋鈕的一格影響最後成本就是 `2×12=24`，不是把兩段影響相加。\n",
+    "\n",
+    "我們用兩段運算精確追蹤這件事：先令 `u=2*w`，再令 `loss=u²`。目前 w=3，u=6，代價為 36。第一段對 w 的敏感度是 2，第二段在 u=6 附近對 u 的敏感度是 `2*u=12`。若 w 微增 0.001，u 微增 0.002；代價約增加 `12×0.002=0.024`。所以相對於 w，總代價的敏感度是 `0.024/0.001≈24`。\n",
+    "\n",
+    "把相連步驟的區域性敏感度相乘，叫鏈式法則（chain rule）。用符號寫就是 `dL/dw = (dL/du) × (du/dw)`：L 是最後的 loss，`dL/du` 問 u 微動會讓 L 改多少，`du/dw` 問 w 微動讓 u 改多少。不是另一種神秘公式，只是把「每單位」從 u 換回 w。這裡用平方代價方便手算，並非所有模型代價都是平方。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:09:07.917644Z",
+     "iopub.status.busy": "2026-10-04T19:09:07.917393Z",
+     "iopub.status.idle": "2026-10-04T19:09:09.207537Z",
+     "shell.execute_reply": "2026-10-04T19:09:09.206673Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7f8788d6a610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:09:09.209347Z",
+     "iopub.status.busy": "2026-10-04T19:09:09.209092Z",
+     "iopub.status.idle": "2026-10-04T19:09:09.220933Z",
+     "shell.execute_reply": "2026-10-04T19:09:09.217461Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "中間值 6.0 代價 36.0\n",
+      "兩段敏感度 12.0 2\n",
+      "合成梯度 24.0\n"
+     ]
+    }
+   ],
+   "source": [
+    "import torch\n",
+    "\n",
+    "w = torch.tensor(3.0, requires_grad=True)\n",
+    "u = 2 * w\n",
+    "loss = u.square()\n",
+    "loss.backward()\n",
+    "print(\"中間值\", u.item(), \"代價\", loss.item())\n",
+    "print(\"兩段敏感度\", 2 * u.detach().item(), 2)\n",
+    "print(\"合成梯度\", w.grad.item())\n",
+    "assert w.grad.item() == 24"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "`import torch` 載入 PyTorch 這個數值計算工具庫，後面的 `torch.` 便是在使用它提供的工具。`torch.tensor(3.0, ...)` 建立一個數值容器，叫 tensor（張量）；本例只在裡面放一個數字 3。用這個容器，PyTorch 才能替接下來的計算保存求導關係，普通的 Python 數字本身沒有這份記錄。`requires_grad=True` 要求記錄和 w 有關的運算。`u = 2 * w` 和 `loss = u.square()` 依序產生 u=6、loss=36，這一方向叫前向計算（forward）。\n",
+    "\n",
+    "`backward()` 再沿運算關係反方向求導，最後把 24 放在 `w.grad`。`.item()` 從只有一個數字的 tensor 中取出那個普通數字，供 `print` 顯示，所以第一次列印看到中間值 6 與代價 36。第二次列印手算兩段敏感度 12 與 2，第三次列印自動算出的梯度 24，可以親眼核對乘積是否相同。最後的 `assert` 是檢查：`==` 比較兩邊是否相等，和用來設定變數的單一 `=` 不同。相等時它不印任何東西；不相等時會報 `AssertionError` 並停止程式。因此正常執行只有三次列印的輸出。\n",
+    "\n",
+    "`.detach()` 表示拿出一份不再追蹤求導關係的數值，用來顯示手算結果，沒有改變 w 或 u。PyTorch 的自動求導系統叫 autograd；它在前向時記住哪些運算連在一起，這份關係叫計算圖（computational graph）。`backward` 使用各工具已知道的區域性求導規則沿圖傳回，並不是從程式文字猜公式。若一個參數走兩條路影響同個代價，兩條路算出的影響還要相加，因為兩路同時受到那個參數的改變。\n",
+    "\n",
+    "這個例子中梯度為正，只說明當前附近增加 w 會增加代價。程式沒有更新參數，跟 [1.9](https://birdhackor.github.io/tiny-perceptron-vlm/1.9.html) 一樣仍在測敏感度。後面真正的模型雖有更多步驟，也遵守相同的追蹤方式。\n",
+    "\n",
+    "下圖上方藍箭頭跟著程式前向走：w=3乘2得到u=6，再平方得到L=36。下方橘箭頭反方向讀，先從L回到u得到敏感度12，再從u回到w乘敏感度2；底部24才是對w的總梯度。箭頭方向區分算數值和算影響，沒有把數值36當成梯度。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 3,
+   "metadata": {
+    "cellView": "form",
+    "course_figure": {
+     "alt": "前向數值與反向鏈式求導",
+     "name": "foundations_chain"
+    },
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:09:09.222840Z",
+     "iopub.status.busy": "2026-10-04T19:09:09.222669Z",
+     "iopub.status.idle": "2026-10-04T19:09:09.231861Z",
+     "shell.execute_reply": "2026-10-04T19:09:09.230963Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "image/svg+xml": [
+       "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"680\" height=\"325\" viewBox=\"0 0 680 325\" role=\"img\" aria-labelledby=\"title desc\"><title id=\"title\">兩段運算的敏感度相乘</title><desc id=\"desc\">w等於三，乘二得到u等於六，再平方得到代價三十六。反向時，代價對u的敏感度十二乘u對w的敏感度二，得到w梯度二十四。</desc><defs><marker id=\"arrow\" markerWidth=\"8\" markerHeight=\"8\" refX=\"6\" refY=\"4\" orient=\"auto\"><path d=\"M0 0L8 4L0 8\" fill=\"#334155\"/></marker><marker id=\"blue\" markerWidth=\"8\" markerHeight=\"8\" refX=\"6\" refY=\"4\" orient=\"auto\"><path d=\"M0 0L8 4L0 8\" fill=\"#2563eb\"/></marker><marker id=\"orange\" markerWidth=\"8\" markerHeight=\"8\" refX=\"6\" refY=\"4\" orient=\"auto\"><path d=\"M0 0L8 4L0 8\" fill=\"#c2410c\"/></marker></defs><rect width=\"680\" height=\"325\" rx=\"12\" fill=\"#f8fafc\"/><g font-family=\"sans-serif\" fill=\"#0f172a\"><text x=\"340\" y=\"36\" font-size=\"28\" text-anchor=\"middle\" fill=\"#0f172a\">向右算數值，向左算局部敏感度</text><rect x=\"20\" y=\"85\" width=\"150\" height=\"65\" rx=\"8\" fill=\"#dbeafe\" stroke=\"#2563eb\" stroke-width=\"2\"/><text x=\"95\" y=\"130\" font-size=\"32\" text-anchor=\"middle\" fill=\"#0f172a\">w = 3</text><rect x=\"265\" y=\"85\" width=\"150\" height=\"65\" rx=\"8\" fill=\"#dbeafe\" stroke=\"#2563eb\" stroke-width=\"2\"/><text x=\"340\" y=\"130\" font-size=\"32\" text-anchor=\"middle\" fill=\"#0f172a\">u = 6</text><rect x=\"510\" y=\"85\" width=\"150\" height=\"65\" rx=\"8\" fill=\"#dbeafe\" stroke=\"#2563eb\" stroke-width=\"2\"/><text x=\"585\" y=\"130\" font-size=\"32\" text-anchor=\"middle\" fill=\"#0f172a\">L = 36</text><path d=\"M176 117H252\" fill=\"none\" stroke=\"#2563eb\" stroke-width=\"3\" marker-end=\"url(#blue)\"/><path d=\"M421 117H497\" fill=\"none\" stroke=\"#2563eb\" stroke-width=\"3\" marker-end=\"url(#blue)\"/><text x=\"215\" y=\"77\" font-size=\"25\" text-anchor=\"middle\" fill=\"#0f172a\">u = 2w</text><text x=\"460\" y=\"77\" font-size=\"25\" text-anchor=\"middle\" fill=\"#0f172a\">L = u²</text><path d=\"M252 200H176\" fill=\"none\" stroke=\"#c2410c\" stroke-width=\"3\" marker-end=\"url(#orange)\"/><path d=\"M497 200H421\" fill=\"none\" stroke=\"#c2410c\" stroke-width=\"3\" marker-end=\"url(#orange)\"/><text x=\"215\" y=\"243\" font-size=\"26\" text-anchor=\"middle\" fill=\"#9a3412\">du/dw = 2</text><text x=\"460\" y=\"243\" font-size=\"26\" text-anchor=\"middle\" fill=\"#9a3412\">dL/du = 12</text><text x=\"340\" y=\"302\" font-size=\"30\" text-anchor=\"middle\" fill=\"#9a3412\">w 的梯度：12 × 2 = 24</text></g></svg>"
+      ],
+      "text/plain": [
+       "<IPython.core.display.SVG object>"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    }
+   ],
+   "source": [
+    "# @title 本節圖解\n",
+    "from IPython.display import SVG, display\n",
+    "\n",
+    "display(SVG(filename=str(root / \"course/figures/foundations_chain.svg\")))"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "練習把 `u = 2 * w` 改成 `u = 3 * w`，把列印「兩段敏感度」那行最後的常數 `2` 改成 `3`，並把最後檢查中的 `24` 改成你算出的梯度。列印行是在顯示手算結果，不會自動讀取前面的倍率，所以也要一起修改。先算 w=3 時 u=9、兩段敏感度為 18 和 3，合成應為 54，代價為 81，所以檢查應改成 `assert w.grad.item() == 54`。執行核對這些數；若只把舊梯度 24 乘 1.5 會得到 36，那是忘記第二段也因 u 的位置改變了。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "1.10"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

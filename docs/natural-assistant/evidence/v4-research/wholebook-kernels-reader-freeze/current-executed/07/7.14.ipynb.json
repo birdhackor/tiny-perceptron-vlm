@@ -1,0 +1,171 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 7.14 少量錯誤答案會被學走嗎？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "你故意把1+1答案寫成3，交叉熵會知道人類標錯了嗎？不會。它只衡量模型是否相信我們交給它的目標，沒有內建算術裁判。若把錯答案給高機率，錯標資料的loss就會下降。因此訓練分數很好，可能表示正確示範學好了，也可能把錯誤一起記住。\n",
+    "\n",
+    "[1.8](https://birdhackor.github.io/tiny-perceptron-vlm/1.8.html) 的loss只取提供label那一格的機率。本節縮成四個候選「0、1、2、3」，ID也恰好0到3，方便對比真實答案2與錯標籤3。這是獨立的小分類表，不是ByteTokenizer的數字字符ID，避免和 [7.11](https://birdhackor.github.io/tiny-perceptron-vlm/7.11.html) 的byte答案映射混淆。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:12:04.557297Z",
+     "iopub.status.busy": "2026-10-04T19:12:04.557140Z",
+     "iopub.status.idle": "2026-10-04T19:12:05.793467Z",
+     "shell.execute_reply": "2026-10-04T19:12:05.792436Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7f8562f66610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:12:05.796486Z",
+     "iopub.status.busy": "2026-10-04T19:12:05.796248Z",
+     "iopub.status.idle": "2026-10-04T19:12:05.806899Z",
+     "shell.execute_reply": "2026-10-04T19:12:05.805960Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "提供的答案ID 2 代價 0.21099762618541718\n",
+      "提供的答案ID 3 代價 2.2109975814819336\n",
+      "提高錯字分數後，錯標代價 0.13872769474983215\n"
+     ]
+    }
+   ],
+   "source": [
+    "import torch\n",
+    "from torch.nn import functional as F\n",
+    "\n",
+    "logits = torch.tensor([[0.0, 0.0, 3.0, 1.0]])\n",
+    "for label in [2, 3]:\n",
+    "    loss = F.cross_entropy(logits, torch.tensor([label]))\n",
+    "    print(\"提供的答案ID\", label, \"代價\", loss.item())\n",
+    "wrong_favored = torch.tensor([[0.0, 0.0, 3.0, 5.0]])\n",
+    "print(\"提高錯字分數後，錯標代價\", F.cross_entropy(wrong_favored, torch.tensor([3])).item())"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "輸入四分數，真實候選2得3、錯候選3得1。softmax後2約0.810，3約0.110，所以提供label2時代價約0.211、label3時約2.211。最後把錯候選分數提高到5，錯誤標籤的代價降到約0.139，儘管真實答案2的相對支持變少。交叉熵完整遵從輸入label，沒有自動檢查1+1的數學事實。\n",
+    "\n",
+    "真實訓練中，錯誤答案也會產生清楚梯度，推動這類前文更常接錯字。如果錯例反覆出現或答案很長，其有效token影響可能超出筆數比例，見 [5.16](https://birdhackor.github.io/tiny-perceptron-vlm/5.16.html)。少量錯誤有沒有可觀影響還要實測，不能只靠這一格代價給出所有模型都會如何的量化結論。\n",
+    "\n",
+    "比較錯標影響時，應保持樣本數、問題、更新步數與種子相同，只換某部分答案。種子是隨機數產生器的起始設定，用來控制開始權重與抽樣等隨機選擇；兩次保持相同，有助於比較標籤改動，而不是不同隨機起點。這能區分資料變多與標籤改變。\n",
+    "\n",
+    "評估要使用答案已獨立核對的留出題，也就是在訓練前保留、沒有參與更新模型的新題，分組原則見[1.2](https://birdhackor.github.io/tiny-perceptron-vlm/1.2.html)。例如訓練用過的1+1另按正解2檢查，是在檢查舊題；預先保留且沒拿來訓練的2+1，再按正解3檢查，才是在看新題。兩種結果分開保存，才能知道影響只限於原問題，還是延伸到新問題。不要把同一錯標訓練集的低loss當成正確率證據。\n",
+    "\n",
+    "資料品質檢查因此不是可有可無的裝飾：明確可驗證任務先核對答案，開放式示例則需檢查是否支持事實、是否足夠資訊與是否一致。模型也可能有已有知識抵抗少量錯誤，但這不能代替資料負責人確認label。\n",
+    "\n",
+    "我們已從[7.12的直接對話基模](https://birdhackor.github.io/tiny-perceptron-vlm/7.12.html)各複製一份，做這個比較。兩支都用同樣45筆訓練題再更新300次、每批16筆；一支保留正確答案，另一支把其中四筆的`circle`與`square`對調，約佔8.9%。四筆集中在兩個已教過的屬性家族，並不是隨機把所有任務均勻汙染。問題、更新步數與抽題起點不變，兩支實際都計分33,733個訓練目標；留出題仍按獨立正解檢查。\n",
+    "\n",
+    "| 繼續練習的答案 | 驗證完整答對 | 最後檢查完整答對 | 最後檢查平均代價 |\n",
+    "| --- | ---: | ---: | ---: |\n",
+    "| 全部保留正解 | 2／5 | 7／10 | 0.37101 |\n",
+    "| 四筆形狀答案寫錯 | 1／5 | 6／10 | 0.34698 |\n",
+    "\n",
+    "這次錯標支線少答對一題，最後檢查的平均代價卻略低。這並不矛盾：代價看正確前文下各位置的機率，完整答對看模型沿自己的輸出最後是否生成整份答案，[5.8](https://birdhackor.github.io/tiny-perceptron-vlm/5.8.html)已拆過兩者。兩支在全部留出題都會EOS結束，也不能替內容過關。只有一個種子、兩個被改動的家族和很少的新題，這些數字不能推成固定比例的錯標必然造成多少損失；它們提醒我們保存兩種結果，而不是挑較低loss就說資料無害。[實測報告](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/course-experiments/results/sft_ablation.json)列出四筆改動，重做入口在[T.4](https://birdhackor.github.io/tiny-perceptron-vlm/training.html#T.4)。\n",
+    "\n",
+    "練習只把最後錯候選分數5改成8，先預測錯標loss繼續下降、但真答案的loss變大，再執行並另算label2核對。這次只改模型偏好，沒有更改算術事實，能直接看到「優化提供目標」與「外部任務正確」的差別。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "7.14"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

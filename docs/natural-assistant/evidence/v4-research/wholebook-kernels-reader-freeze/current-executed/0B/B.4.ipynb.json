@@ -1,0 +1,183 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# B.4 任務完成後怎麼停止？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "工具已算出2+3=5，系統還要繼續要求工具嗎？需要一個明確的完成信號；同時，也要設上限，避免一直重複請求。前置是[工具返回與執行軌跡](https://birdhackor.github.io/tiny-perceptron-vlm/B.3.html)。完成、被上限截停、請求錯誤與尚缺後續輸出，是四種不同結局，不能全部寫成「已回答」。\n",
+    "\n",
+    "本地`tool_loop`接收預先列好的請求清單，用它測試外層流程，不包含模型。第一筆要求add，a=2、b=3；第二筆`done=True`宣告完成並提供answer=5。max_steps設定最多可處理幾筆，本工具也把完成訊息算作一筆。所以只允許一筆時，雖然加法已算完，第二筆完成訊息仍會被上限擋住。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:13:56.191093Z",
+     "iopub.status.busy": "2026-10-04T19:13:56.190873Z",
+     "iopub.status.idle": "2026-10-04T19:13:57.467700Z",
+     "shell.execute_reply": "2026-10-04T19:13:57.467198Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7fe0ac46a610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:13:57.470095Z",
+     "iopub.status.busy": "2026-10-04T19:13:57.469804Z",
+     "iopub.status.idle": "2026-10-04T19:13:57.475919Z",
+     "shell.execute_reply": "2026-10-04T19:13:57.475342Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "done 工具執行筆數 1 答案 5\n",
+      "step_limit 工具執行筆數 1 答案 None\n",
+      "needs_more_model_output 工具執行筆數 1 答案 None\n",
+      "invalid_request 工具執行筆數 0 答案 None\n"
+     ]
+    }
+   ],
+   "source": [
+    "from tiny_perceptron.retrieval import tool_loop\n",
+    "\n",
+    "requests = [\n",
+    "    {\"name\": \"add\", \"arguments\": {\"a\": 2, \"b\": 3}},\n",
+    "    {\"done\": True, \"answer\": 5},\n",
+    "]\n",
+    "runs = [\n",
+    "    tool_loop(requests, max_steps=3),\n",
+    "    tool_loop(requests, max_steps=1),\n",
+    "    tool_loop(requests[:1], max_steps=3),\n",
+    "    tool_loop([{\"name\": \"unknown\", \"arguments\": {\"a\": 2, \"b\": 3}}]),\n",
+    "]\n",
+    "for run in runs:\n",
+    "    print(run[\"status\"], \"工具執行筆數\", len(run[\"trace\"]), \"答案\", run.get(\"answer\"))"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "每次`tool_loop`都回傳一個字典。status保存停止原因，trace保存實際執行工具的紀錄，每次執行佔一筆；它不同於[B.3手寫的兩筆對話紀錄](https://birdhackor.github.io/tiny-perceptron-vlm/B.3.html)，不把請求與結果拆成兩筆來計數。`len(run[\"trace\"])`數這份執行清單的筆數；`run.get(\"answer\")`讀取答案欄位，沒有答案時得到None，表示尚無完成答案。\n",
+    "\n",
+    "輸出依序是done、step_limit、needs_more_model_output、invalid_request；工具執行筆數依序1、1、1、0，只有第一行答案是5，其餘是None。`requests[:1]`只留下第一筆：清單耗盡時仍沒有done，表示需要更多模型輸出，不會替模型自動宣告完成。最後一份未知工具在驗證階段被拒絕，沒有合法工具結果可加入trace。\n",
+    "\n",
+    "done是這份協議的完成宣告，不是答案正確的保證；如果宣告answer=6，這個小循環仍會回傳done。正式系統還需用任務判準核對，例如本題真值是5。step_limit表示流程被預算截停，不表示題目一定無解；invalid_request則保存錯誤原因，可能需要修正名稱或參數後再試。三者的處理方式不同，保存status可以避免把截停當成功或把格式錯誤藏起來。\n",
+    "\n",
+    "真實模型版本不是一開始就有整份requests，而是每次生成一個新請求，驗證執行後把結果送回，再生成下一個動作。這時要統計成功率、真正工具執行次數與等待時間，並保留每次輸入輸出。工具只做出被請求的運算，循環也只管理順序；這兩部分都不能代替模型理解何時已解決原問題。\n",
+    "\n",
+    "正式組每題最多生成三個動作，done也算一個。20題的完整結果如下；「首動作解析」只代表得到JSON object，不能單獨當成白名單驗證或任務成功。\n",
+    "\n",
+    "| 核對項目 | 完整分母與結果 |\n",
+    "| --- | --- |\n",
+    "| 首動作解析成JSON object | 20/20題 |\n",
+    "| 發出合法done完成宣告 | 19/20題 |\n",
+    "| 最後數字答對 | 19/20題 |\n",
+    "| 答對且完成要求的工具行為 | 19/20題 |\n",
+    "| 真正工具呼叫 | 18次，18/18名稱與參數符合原題 |\n",
+    "| 最終status | done 19題、invalid_request 1題 |\n",
+    "\n",
+    "算術題的成功另外要求真正執行對應原題的工具，且最後答案符合真實返回值；即使直接猜對數字，也不能算這份工具協議成功。COPY題則要求沒有執行工具。再將相同18道算術題的上限改成一個動作，模型仍各自真正執行一次，全部18題卻成為`step_limit`：沒有預算讓模型生成完成回答。這些是重新生成的18份軌跡，沒有拿前一次已完成的答案補進來。\n",
+    "\n",
+    "正常流程裡18道算術題各生成請求與完成回答，共36次；兩道COPY題各生成一次，共2次。一步上限又讓18道算術題各生成一次，所以合計36＋2＋18＝56次實際生成。這56次全部有EOS、沒有非法控制token；56/56停止率仍不能替代20道正常任務的19/20成功率。[實測報告](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/course-experiments/results/tools.json)的results.generated_tokens合計2,072，是生成的文字單位數，也包含一步上限支線。results.samples中每題的seconds量整個工具流程，各筆trace裡generation.seconds只量那一次生成，不能拿單次生成時間當整個任務等待。本輪沒有一般自然語言選工具、任意程式執行或長程agent任務的成績。\n",
+    "\n",
+    "練習只把第二次run的max_steps由1改成2。先預測它現在能讀到完成訊息，status變done、答案變5，工具執行筆數仍是1，再執行核對。這說明放寬的是可處理訊息數，不是強迫多算一次，也不是提高答案的數學正確率。\n",
+    "\n",
+    "到這裡，我們已經能沿著一次工具請求，追到實際運算、回填與完成。還有一個問題留在請求之前：如果使用者只問「1加2等於多少」，沒有寫CALC，模型應該自己答，還是先請計算器幫忙？[下一節B.5](https://birdhackor.github.io/tiny-perceptron-vlm/B.5.html)先訂清楚怎樣的選擇符合任務，再教模型選，最後檢查這個選擇是否可靠。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "B.4"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

@@ -1,0 +1,161 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 6.6 邊界標記怎麼保持完整？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "一份對話要區分「是誰說話」，不能只靠普通句子裡的文字。用戶也許真的想討論 `<assistant>` 這串字，如果程式看到拼寫就當成換角色，會把內容誤作結構。我們要讓角色、開始、結束與模態邊界有獨立ID，普通內容即使拼寫一樣仍按文字編碼。這裡角色指資料中的user、assistant等欄位，不是模型猜出講話人。\n",
+    "\n",
+    "本專案簡單ByteTokenizer保留ID0到7做結構：PAD填充、BOS開始、EOS結束，接著user、assistant、image、audio、system。PAD是為了把不同長度排成同一張表的空位；image、audio表示後面有影像或音訊輸入。原文byte則統一加8，所以0至255的byte用8至263的ID，與結構區完全不重疊。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:11:42.673829Z",
+     "iopub.status.busy": "2026-10-04T19:11:42.673632Z",
+     "iopub.status.idle": "2026-10-04T19:11:44.117319Z",
+     "shell.execute_reply": "2026-10-04T19:11:44.115038Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7fedcc166610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:11:44.121797Z",
+     "iopub.status.busy": "2026-10-04T19:11:44.121471Z",
+     "iopub.status.idle": "2026-10-04T19:11:44.129173Z",
+     "shell.execute_reply": "2026-10-04T19:11:44.128455Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "[(0, '<pad>'), (1, '<bos>'), (2, '<eos>'), (3, '<user>'), (4, '<assistant>'), (5, '<image>'), (6, '<audio>'), (7, '<system>')]\n",
+      "普通文字的ID [68, 105, 123, 123, 113, 123, 124, 105, 118, 124, 70]\n",
+      "還原 <assistant>\n"
+     ]
+    }
+   ],
+   "source": [
+    "from tiny_perceptron.data import ByteTokenizer, SPECIALS\n",
+    "\n",
+    "tok = ByteTokenizer()\n",
+    "print(list(enumerate(SPECIALS)))\n",
+    "literal = tok.encode(\"<assistant>\")\n",
+    "print(\"普通文字的ID\", literal)\n",
+    "print(\"還原\", tok.decode(literal))\n",
+    "assert tok.assistant_id not in literal"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "輸入字串 `<assistant>` 是要討論的普通文字。第一行把八種結構拼寫與位置印出，assistant的專用ID為4。`encode` 僅把原文每個UTF-8 byte加8；所以ASCII的 `<` 原來60變68，末尾 `>` 原來62變70，所有內容ID都至少8，絕不含4。decode減回偏移並拼成bytes，再恢復原拼寫，最後檢查這串文字沒有被升格成assistant角色。\n",
+    "\n",
+    "真正需要插入角色時，資料工具按結構化記錄的role欄位明確加入4，再附內容ID。例如record中的 `role=\"assistant\"` 是元資料決定，不是掃描內容發現那個單詞就轉換。第 [7.1](https://birdhackor.github.io/tiny-perceptron-vlm/7.1.html)、[7.2](https://birdhackor.github.io/tiny-perceptron-vlm/7.2.html) 將把完整對話走一次。原文與結構分開，能保持邊界完整，也讓內容可無損還原。\n",
+    "\n",
+    "另一類切詞方法叫BPE：把經常相鄰的片段合成一個新單位，例如把`a`與`b`合成`ab`，詳見[6.2](https://birdhackor.github.io/tiny-perceptron-vlm/6.2.html)。這類工具通常允許先登記特殊標記，約定整串`<assistant>`使用一個專用ID，不被拆開，也不與旁邊的普通文字再合併。登記後仍要決定用戶內容中的相同拼寫怎樣處理，不能以為登記本身就自動解決「內容還是結構」的判斷。當前byte版本的偏移區分很直白，適合作為對話格式的起點。\n",
+    "\n",
+    "這些標記不代替模型訓練。插入assistant ID只是把位置標出來，模型還要看很多正確示例才知道之後怎樣回答；image標記也不會自己創造影像特徵。它們是接口約定，讓資料與模型共享一種表示。\n",
+    "\n",
+    "這次實跑的BPE也遵守相同區分：普通內容編碼不把特殊標記的字面拼寫升格成角色ID，結構仍由程式按資料欄位插入。實際核對`<user>這只是引用文字`時，它完整還原為同一段原文，內容ID中沒有任何八種控制ID。只把`<user>`登記成特殊項，卻讓內容編碼自動識別它，不能保證這個結果；使用工具時要連同「普通內容怎麼編碼」一起保存，不能只有一份詞表。\n",
+    "\n",
+    "練習只把literal的輸入改成 `<image>`，並把檢查改為 `tok.image_id not in literal`。先預測還原仍是這七個字符、內容ID都至少8，不出現專用image ID5，再執行核對。只有工具顯式插入5才表示影像邊界，字面討論標記仍是一段文字。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "6.6"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

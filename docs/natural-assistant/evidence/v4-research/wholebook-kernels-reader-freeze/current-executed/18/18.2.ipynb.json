@@ -1,0 +1,157 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 18.2 怎麼讓學生本身更小？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "把模型取名student，再讓它向教師學習，權重檔就會自動縮小嗎？不會。蒸餾改變學習目標，不會直接刪掉模型的參數。要得到較小學生，必須先選較少層、較窄特徵，或不同結構，再看教師訊號能否幫它彌補容量減少。前置是[教師提供的訊號](https://birdhackor.github.io/tiny-perceptron-vlm/18.1.html)與[層深度](https://birdhackor.github.io/tiny-perceptron-vlm/4.8.html)；「小」要有實際參數與成本記錄，不是模型名稱。\n",
+    "\n",
+    "用相同詞表264項，教師寬度16、兩層，學生寬度8、一層。width是每個位置的特徵數，layers是重複處理特徵與注意力的層數。詞表相同讓兩者的每個輸出候選能對上，內部特徵卻可以不同。較窄學生的查字表、矩陣與中間特徵都會縮小；較少層則減少重複處理的次數。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:19:43.821601Z",
+     "iopub.status.busy": "2026-10-04T19:19:43.821363Z",
+     "iopub.status.idle": "2026-10-04T19:19:45.049416Z",
+     "shell.execute_reply": "2026-10-04T19:19:45.048286Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7f1a98362610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:19:45.056460Z",
+     "iopub.status.busy": "2026-10-04T19:19:45.056207Z",
+     "iopub.status.idle": "2026-10-04T19:19:45.071651Z",
+     "shell.execute_reply": "2026-10-04T19:19:45.069536Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "教師 寬度 16 層數 2 參數 16960 FP32數字bytes 67840\n",
+      "學生 寬度 8 層數 1 參數 6104 FP32數字bytes 24416\n"
+     ]
+    }
+   ],
+   "source": [
+    "from tiny_perceptron.model import TinyLM, ModelConfig\n",
+    "\n",
+    "configs = [(\"教師\", ModelConfig(width=16, layers=2)), (\"學生\", ModelConfig(width=8, layers=1))]\n",
+    "for name, config in configs:\n",
+    "    model = TinyLM(config)\n",
+    "    parameters = sum(p.numel() for p in model.parameters())\n",
+    "    print(name, \"寬度\", config.width, \"層數\", config.layers, \"參數\", parameters, \"FP32數字bytes\", parameters * 4)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "`ModelConfig`描述架構，`TinyLM`按它建立模型；`parameters()`列出可學權重，`numel`逐一數元素。兩個模型仍然是隨機初始化，沒有教師能力，也沒有訓練學生；這段只確認所選的學生真的較小。FP32是32位元浮點數的儲存格式，每個數占32位元；一byte是8位元，所以每個FP32數占32/8=4bytes，程式用參數數量乘4。輸出應為教師16960個參數、67840bytes，學生6104個、24416bytes。這只量權重數字部分，沒有量檔案容器與執行峰值。\n",
+    "\n",
+    "寬度減半、層數減半不代表完整參數減到八分之一。token是文字切分後的編碼單位，每項有自己的編號，切分例子見[6.1](https://birdhackor.github.io/tiny-perceptron-vlm/6.1.html)。FFN與注意力的某些矩陣兩個邊都隨寬度變，數量大致平方變化；字嵌入與輸出詞表每個token仍要一列特徵，它們只隨寬度線性變化，也不隨層數重複。比較完整模型時應數所有模組，不能只看一層中的最大矩陣。\n",
+    "\n",
+    "正式屬性教師寬64、兩層，共141,568個參數，FP32數值566,272 bytes；兩個學生都一層、兩個attention heads，寬16有13,744個參數／54,976 bytes，寬32有33,632個／134,528 bytes。這些縮小先由架構決定。同寬度的普通CE、教師生成硬目標與CE+KL三支，參數個數和初始化完全相同；其輸出投影也相同，沒有讓蒸餾支線偷偷多一個接頭。但寬16與寬32的投影和表示容量本來就不同，不能跨寬度把所有品質差都歸給教師訊號。\n",
+    "\n",
+    "學生更小可能損失表達能力。應先用相同學生架構建立未蒸餾基準，再加入教師文字或分布，才能知道好處來自教師訊號，還是原本學生設置。固定同一學生架構時也需記錄訓練資料、已讀token數、初始化與評估方法；已讀token數是訓練累計處理多少個編碼單位，不是候選詞表有幾項。後面[蒸餾是否有幫助](https://birdhackor.github.io/tiny-perceptron-vlm/18.10.html)會比較這些條件。\n",
+    "\n",
+    "練習只把學生width由8改成16、layers仍為1。先預測它比原學生大、比兩層教師小，但不是教師參數恰好一半；再重跑，應得到13744個參數。這時雙方寬度相同、只有層數不同，能看見字嵌入等共享部分為何不隨層數減半。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "18.2"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

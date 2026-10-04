@@ -1,0 +1,162 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 15.4 能只啟動少數 experts 嗎？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "如果有八位expert，讓每位都算完再混合，儲存和計算都比Dense增加。我們真正希望的是保留多套規則，但每個token只花其中少數幾套的計算成本。前置是[router產生比例](https://birdhackor.github.io/tiny-perceptron-vlm/15.3.html)：router依token特徵算出每位expert的分數，softmax轉成總和為一的比例。現在再加一道選擇，只保留比例最大的k位，這叫top-k routing。後面談到學習路徑時，可先看[梯度暖身](https://birdhackor.github.io/tiny-perceptron-vlm/first-steps.html#W.6)：梯度描述微小改動某個數字如何影響誤差，讓訓練知道該向哪邊調整。\n",
+    "\n",
+    "例如三位的比例是 `[0.1,0.7,0.2]`。top-2選第1位和第2位（索引從0開始），對應比例0.7與0.2；top-1只選第1位。另一個token比例 `[0.6,0.3,0.1]`則top-2選第0與第1位。不同token可以走不同路，因此儲存的三套權重不代表每個token都執行三套。k是每個token要選幾位，不是整個batch（一起處理的一批輸入）只選幾位。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:17:46.958978Z",
+     "iopub.status.busy": "2026-10-04T19:17:46.958723Z",
+     "iopub.status.idle": "2026-10-04T19:17:48.392483Z",
+     "shell.execute_reply": "2026-10-04T19:17:48.391605Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7ff458262610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:17:48.394196Z",
+     "iopub.status.busy": "2026-10-04T19:17:48.393888Z",
+     "iopub.status.idle": "2026-10-04T19:17:48.399943Z",
+     "shell.execute_reply": "2026-10-04T19:17:48.399199Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "k 2 expert索引 [[1, 2], [0, 1]]\n",
+      "原比例 [[0.699999988079071, 0.20000000298023224], [0.6000000238418579, 0.30000001192092896]]\n",
+      "保留比例總和 [0.8999999761581421, 0.9000000357627869]\n",
+      "k 1 expert索引 [[1], [0]]\n",
+      "原比例 [[0.699999988079071], [0.6000000238418579]]\n",
+      "保留比例總和 [0.699999988079071, 0.6000000238418579]\n"
+     ]
+    }
+   ],
+   "source": [
+    "import torch\n",
+    "\n",
+    "prob = torch.tensor([[0.1, 0.7, 0.2], [0.6, 0.3, 0.1]])\n",
+    "for k in (2, 1):\n",
+    "    weights, chosen = prob.topk(k, dim=-1)\n",
+    "    print(\"k\", k, \"expert索引\", chosen.tolist())\n",
+    "    print(\"原比例\", weights.tolist())\n",
+    "    print(\"保留比例總和\", weights.sum(-1).tolist())"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "輸入兩列代表兩個token，三欄代表三位expert。`topk`沿最後一軸挑最大的k項，回傳值與原欄索引；它不計算expert、也不重新正規化比例。k=2時索引為 `[[1,2],[0,1]]`，保留總和約0.9與0.9；k=1時為 `[[1],[0]]`，總和約0.7與0.6。注意 `tolist()`可能顯示0.699999等尾數，這是二進位浮點表示造成的，應看接近的數字。\n",
+    "\n",
+    "被選中的比例總和小於一，是因為未選的部分被拿掉了。下一節會決定如何合併與是否再除以保留總和。這裡先把兩件事分開：chosen是整數索引，決定要執行哪位；weights是連續數值，決定輸出乘多少。索引在微小改動下通常不變，跨過排名邊界時又突然跳到另一位，因此不能像一般連續運算那樣對「選誰」直接求梯度。保留的比例在選擇未換人的範圍內，仍隨分數連續改變，所以誤差能沿比例的微小變化回到router，告訴它怎樣調整分數。\n",
+    "\n",
+    "要讓稀疏路由真的省計算，實作必須先選擇，再只執行被選的expert。若先算三位輸出、最後只取兩位，輸出形式雖然像top-2，三位的計算成本卻已花掉。訓練與效能比較都應檢查實際執行路徑，而不是只看結果裡有幾個非零係數。\n",
+    "\n",
+    "把這個選擇規則放進[正式MoE短訓與驗證](https://birdhackor.github.io/tiny-perceptron-vlm/15.13.html)的兩層模型後，我們另記錄完整驗證集的分派統計；這個模型每層有四位expert，條件與結果可由該節連到正式報告。不同長度的故事同批計算時，需要先補成相同長度；PAD就是為補齊而放入的佔位符號。這裡的「有效輸入位置」指排除這些補齊佔位後、實際參與分派統計的位置，共39,256個。top-1每層統計39,256筆分派，top-2則78,512筆；一個token經過兩位expert會被數兩次。因此比較「某位占多少」時，分母應是有效輸入數×k，不能都除以token數，也不能把兩層的工作誤當同一層。報告保留每層四位的完整次數，讓分母與分派份額都能核對。\n",
+    "\n",
+    "練習把第一列改成 `[0.1,0.2,0.7]`，先預測top-2索引變成 `[2,1]`，數值仍是 `[0.7,0.2]`，再重跑核對。再把k改成3，確認所有比例保留、總和回到一。若遇到相同分數，不要假設各裝置一定選同一個索引順序；在比較實驗中應避免未說明的平手情況。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "15.4"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

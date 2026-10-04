@@ -1,0 +1,260 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 17.8 4-bit 如何真的存成較小檔案？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "七個四位元數若各放一個int8元素，仍會占七bytes，只限制數值範圍並沒有省掉容器。要真正縮小，可以把兩個四位元碼放進同一byte：一個占低四位，另一個占高四位。七個值需四bytes，最後半個byte作為補格；還原時必須知道原來只有七個，才能裁掉補格。前置是[bit數與容器大小](https://birdhackor.github.io/tiny-perceptron-vlm/17.6.html)及[刻度還原](https://birdhackor.github.io/tiny-perceptron-vlm/17.2.html)。\n",
+    "\n",
+    "本教材允許signed值-8至7，先加8，得到0至15的儲存碼。例如-8變0，四位元寫成0000；-1變7，寫成0111。第一碼放低四位，第二碼往左移四位再合併，byte便是 `0111 0000`，十進位112。這套「加8」是我們的編碼約定，其他格式可能不同，拆碼時必須使用配套規則。\n",
+    "\n",
+    "這是打包器可容納的範圍；本章量化函數實際採正負對稱的-7至7，會留下代表-8的儲存碼不用。兩者不能混為一談：打包不改整數值，量化才決定哪些整數格子能表示浮點權重。\n",
+    "\n",
+    "圖由上方例子開始讀：原數字-8、-1各加8，映成四位元碼0000、0111。綠色虛線把第一碼指向byte右側的低四位，橘色實線把第二碼指向左側的高四位。交叉箭頭指示碼存入哪四位；拆回時仍依第一碼、第二碼還原原數字的順序。下方例子的0、1同理變成1000、1001，byte為10011000，也就是152。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:19:22.176925Z",
+     "iopub.status.busy": "2026-10-04T19:19:22.176730Z",
+     "iopub.status.idle": "2026-10-04T19:19:23.733850Z",
+     "shell.execute_reply": "2026-10-04T19:19:23.732913Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7fb58c066610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "cellView": "form",
+    "course_figure": {
+     "alt": "第一個四位元碼放低位，第二個碼放高位",
+     "name": "architecture_int4_packing"
+    },
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:19:23.736373Z",
+     "iopub.status.busy": "2026-10-04T19:19:23.736121Z",
+     "iopub.status.idle": "2026-10-04T19:19:23.748211Z",
+     "shell.execute_reply": "2026-10-04T19:19:23.747348Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "image/svg+xml": [
+       "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 600 850\" role=\"img\" aria-labelledby=\"title desc\">\n",
+       "<title id=\"title\">兩個四位元碼裝進同一byte</title>\n",
+       "<desc id=\"desc\">由上而下看兩組例子。每個signed值先加8；綠色的第一碼放低四位，橘色的第二碼放高四位。-8與-1得到01110000，即112；0與1得到10011000，即152。交叉箭頭表示高低位的排列，沒有交換原數字的順序。</desc>\n",
+       "<style>\n",
+       "text{font-family:\"Noto Sans CJK TC\",\"Microsoft JhengHei\",sans-serif;fill:#172b4d;text-anchor:middle}\n",
+       ".low{fill:#d7f5e6;stroke:#26875b;stroke-width:2}\n",
+       ".high{fill:#ffe8ce;stroke:#c38a47;stroke-width:2}\n",
+       ".first{fill:none;stroke:#26875b;stroke-width:3;stroke-dasharray:7 5}\n",
+       ".second{fill:none;stroke:#c38a47;stroke-width:3}\n",
+       "</style>\n",
+       "<defs>\n",
+       "<marker id=\"low-arrow\" markerWidth=\"8\" markerHeight=\"8\" refX=\"7\" refY=\"4\" orient=\"auto\"><path d=\"M0 0L8 4L0 8\" fill=\"#26875b\"/></marker>\n",
+       "<marker id=\"high-arrow\" markerWidth=\"8\" markerHeight=\"8\" refX=\"7\" refY=\"4\" orient=\"auto\"><path d=\"M0 0L8 4L0 8\" fill=\"#c38a47\"/></marker>\n",
+       "</defs>\n",
+       "<rect width=\"600\" height=\"850\" fill=\"white\"/>\n",
+       "<text x=\"300\" y=\"38\" font-size=\"30\">兩個四位元碼 → 一個byte</text>\n",
+       "<text x=\"300\" y=\"77\" font-size=\"25\">本教材約定：儲存碼 = 原數字 + 8</text>\n",
+       "\n",
+       "<g>\n",
+       "<rect x=\"24\" y=\"98\" width=\"552\" height=\"304\" rx=\"14\" fill=\"#f7f9fc\"/>\n",
+       "<text x=\"300\" y=\"134\" font-size=\"28\">原順序：−8，−1</text>\n",
+       "<text x=\"300\" y=\"174\" font-size=\"26\">各加8 → 0，7</text>\n",
+       "<text x=\"170\" y=\"210\" font-size=\"24\">第1碼</text><text x=\"430\" y=\"210\" font-size=\"24\">第2碼</text>\n",
+       "<rect class=\"low\" x=\"90\" y=\"221\" width=\"160\" height=\"48\" rx=\"7\"/>\n",
+       "<rect class=\"high\" x=\"350\" y=\"221\" width=\"160\" height=\"48\" rx=\"7\"/>\n",
+       "<text x=\"170\" y=\"255\" font-size=\"33\">0000</text><text x=\"430\" y=\"255\" font-size=\"33\">0111</text>\n",
+       "<path class=\"first\" d=\"M170 270L385 309\" marker-end=\"url(#low-arrow)\"/>\n",
+       "<path class=\"second\" d=\"M430 270L215 309\" marker-end=\"url(#high-arrow)\"/>\n",
+       "<rect class=\"high\" x=\"130\" y=\"316\" width=\"170\" height=\"72\"/>\n",
+       "<rect class=\"low\" x=\"300\" y=\"316\" width=\"170\" height=\"72\"/>\n",
+       "<text x=\"215\" y=\"349\" font-size=\"33\">0111</text><text x=\"385\" y=\"349\" font-size=\"33\">0000</text>\n",
+       "<text x=\"215\" y=\"377\" font-size=\"23\">高四位</text><text x=\"385\" y=\"377\" font-size=\"23\">低四位</text>\n",
+       "</g>\n",
+       "<text x=\"300\" y=\"439\" font-size=\"29\">0111 0000 → 十進位112</text>\n",
+       "\n",
+       "<g transform=\"translate(0 355)\">\n",
+       "<rect x=\"24\" y=\"98\" width=\"552\" height=\"304\" rx=\"14\" fill=\"#f7f9fc\"/>\n",
+       "<text x=\"300\" y=\"134\" font-size=\"28\">原順序：0，1</text>\n",
+       "<text x=\"300\" y=\"174\" font-size=\"26\">各加8 → 8，9</text>\n",
+       "<text x=\"170\" y=\"210\" font-size=\"24\">第1碼</text><text x=\"430\" y=\"210\" font-size=\"24\">第2碼</text>\n",
+       "<rect class=\"low\" x=\"90\" y=\"221\" width=\"160\" height=\"48\" rx=\"7\"/>\n",
+       "<rect class=\"high\" x=\"350\" y=\"221\" width=\"160\" height=\"48\" rx=\"7\"/>\n",
+       "<text x=\"170\" y=\"255\" font-size=\"33\">1000</text><text x=\"430\" y=\"255\" font-size=\"33\">1001</text>\n",
+       "<path class=\"first\" d=\"M170 270L385 309\" marker-end=\"url(#low-arrow)\"/>\n",
+       "<path class=\"second\" d=\"M430 270L215 309\" marker-end=\"url(#high-arrow)\"/>\n",
+       "<rect class=\"high\" x=\"130\" y=\"316\" width=\"170\" height=\"72\"/>\n",
+       "<rect class=\"low\" x=\"300\" y=\"316\" width=\"170\" height=\"72\"/>\n",
+       "<text x=\"215\" y=\"349\" font-size=\"33\">1001</text><text x=\"385\" y=\"349\" font-size=\"33\">1000</text>\n",
+       "<text x=\"215\" y=\"377\" font-size=\"23\">高四位</text><text x=\"385\" y=\"377\" font-size=\"23\">低四位</text>\n",
+       "</g>\n",
+       "<text x=\"300\" y=\"794\" font-size=\"29\">1001 1000 → 十進位152</text>\n",
+       "<text x=\"300\" y=\"831\" font-size=\"24\">第一碼在右邊的低位；第二碼在左邊的高位</text>\n",
+       "</svg>"
+      ],
+      "text/plain": [
+       "<IPython.core.display.SVG object>"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    }
+   ],
+   "source": [
+    "# @title 本節圖解\n",
+    "from IPython.display import SVG, display\n",
+    "\n",
+    "display(SVG(filename=str(root / \"course/figures/architecture_int4_packing.svg\")))"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 3,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:19:23.749880Z",
+     "iopub.status.busy": "2026-10-04T19:19:23.749711Z",
+     "iopub.status.idle": "2026-10-04T19:19:23.760046Z",
+     "shell.execute_reply": "2026-10-04T19:19:23.759137Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "原數字 [-8, -1, 0, 1, 7, 2, 3]\n",
+      "packed [112, 152, 175, 139] bytes 4\n",
+      "拆回 [-8, -1, 0, 1, 7, 2, 3]\n"
+     ]
+    }
+   ],
+   "source": [
+    "import torch\n",
+    "from tiny_perceptron.quantization import pack_int4, unpack_int4\n",
+    "\n",
+    "q = torch.tensor([-8, -1, 0, 1, 7, 2, 3], dtype=torch.int8)\n",
+    "packed = pack_int4(q)\n",
+    "restored = unpack_int4(packed, q.shape)\n",
+    "print(\"原數字\", q.tolist())\n",
+    "print(\"packed\", packed.tolist(), \"bytes\", packed.numel() * packed.element_size())\n",
+    "print(\"拆回\", restored.tolist())\n",
+    "assert torch.equal(q, restored)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "`pack_int4`先攤平q，加8映成碼；把第二碼用 `<<4`左移，再與第一碼用位元OR合併。這裡兩碼占不同四位區域，OR就像把它們各自填進空位，不是浮點相加。拆回時 `&15`留下低四位，`>>4`移出高四位，再各減8。q.shape提供原形狀與元素數，避免將尾端補格當作真實權重。\n",
+    "\n",
+    "第二行應為 `[112,152,175,139]`，占四bytes。第三組7、2加8得15、10，byte為 `10×16+15=175`；最後3加8得11，另一格補成碼8（還原為0），byte為 `8×16+11=139`。拆回輸出應與原七項完全相同，assert核對的是整數碼的無損打包，不代表先前浮點量化沒有誤差。\n",
+    "\n",
+    "完整模型還要保存scale、原形狀與位元數；若線性層有bias，還要保存這份加在輸出上的偏移值，見[2.3的線性層配方](https://birdhackor.github.io/tiny-perceptron-vlm/2.3.html)。所以四bytes只是這段整數資料區（buffer）。存檔可能另有標頭，也就是記錄型別、形狀等資訊的部分，真正的檔案大小要另量。打包省儲存，但普通線性運算不能直接拿112等byte當權重乘輸入，必須先按格式拆解或使用懂該格式的專用運算。\n",
+    "\n",
+    "正式4-bit模型的13個Linear共保存57,600 bytes整數碼、5,664 bytes逐列scale與2,560 bytes浮點bias，合計65,824 bytes的buffer。其他浮點參數還需102,912 bytes，兩邊相加才是[17.1](https://birdhackor.github.io/tiny-perceptron-vlm/17.1.html)的168,736 bytes。報告`storage.buffers`逐層列出這些數字，能核對刻度確實存下來了；它們是實際容器大小，不是先用參數個數除以二推估的理想值。\n",
+    "\n",
+    "練習只在q最後加一項4。先預測仍占四bytes，最後byte由139變203，因為高四位不再補碼8，而是4加8得到12；拆回應有八項。重跑核對，說明原元素數為何是打包格式不可缺的一部分。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "17.8"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

@@ -1,0 +1,164 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 4.1 怎麼知道字的順序？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "「貓追狗」與「狗追貓」用了同樣三個字，角色卻交換了。[2.1](https://birdhackor.github.io/tiny-perceptron-vlm/2.1.html) 的字向量只由ID查出，相同字在不同位置會得到相同起始數字；而 [3.6](https://birdhackor.github.io/tiny-perceptron-vlm/3.6.html) 的因果許可決定誰能讀誰，也不是直接替每格提供「這是第幾個位置」的特徵。因此我們再準備一張位置表，讓文字內容與位置一起成為後續計算的線索。\n",
+    "\n",
+    "每個文字位置也查出一個向量，與字向量逐格相加。若字向量有D數，位置向量也必須有D數，才能相加而不丟掉特徵。這叫位置表示（positional embedding）。本節用可調查表的絕對位置：位置0、1、2各有一列參數，訓練時可按答案代價改變，不是直接把位置編號乘進字ID。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:10:13.355246Z",
+     "iopub.status.busy": "2026-10-04T19:10:13.355010Z",
+     "iopub.status.idle": "2026-10-04T19:10:14.647150Z",
+     "shell.execute_reply": "2026-10-04T19:10:14.646162Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7f4ba0b66610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:10:14.653501Z",
+     "iopub.status.busy": "2026-10-04T19:10:14.653220Z",
+     "iopub.status.idle": "2026-10-04T19:10:14.668410Z",
+     "shell.execute_reply": "2026-10-04T19:10:14.667690Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "tensor([0, 1, 2])\n",
+      "tensor([[1.0000, 0.0000, 0.0000],\n",
+      "        [0.1000, 1.2000, 0.3000],\n",
+      "        [1.2000, 0.4000, 0.6000]], grad_fn=<AddBackward0>)\n"
+     ]
+    }
+   ],
+   "source": [
+    "import torch\n",
+    "from torch import nn\n",
+    "\n",
+    "e = nn.Embedding(4, 3)\n",
+    "p = nn.Embedding(5, 3)\n",
+    "with torch.no_grad():\n",
+    "    e.weight.copy_(torch.tensor([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]))\n",
+    "    p.weight.copy_(torch.tensor([[0.0, 0.0, 0.0], [0.1, 0.2, 0.3], [0.2, 0.4, 0.6], [0.3, 0.6, 0.9], [0.4, 0.8, 1.2]]))\n",
+    "ids = torch.tensor([1, 2, 1])\n",
+    "positions = torch.arange(3)\n",
+    "x = e(ids) + p(positions)\n",
+    "print(positions)\n",
+    "print(x)\n",
+    "assert not torch.equal(x[0], x[2])"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "輸入ID為1、2、1，兩次ID1原先都查到 `[1,0,0]`。`torch.arange(3)` 建立位置編號 `[0,1,2]`，每個位置使用相應的p列。位置0加入 `[0,0,0]`，結果仍 `[1,0,0]`；位置1為 `[0.1,1.2,0.3]`；位置2的ID1則變 `[1.2,0.4,0.6]`。輸出尾端的 `grad_fn=<AddBackward0>` 是工具附加的求導記錄名稱，表示它記住了字向量與位置向量相加的關係；本節尚未求導，先核對前面的三排數值即可。最後檢查兩個相同字的表示確實不再完全一樣。\n",
+    "\n",
+    "這些手動小數只是讓例子透明，並不是某種公認的位置公式。正式模型中p通常從亂數開始，與字表一同學習。相加後的向量同時含有兩種資訊。後面的[Linear（線性層）](https://birdhackor.github.io/tiny-perceptron-vlm/2.3.html)會用權重把多個輸入特徵加權混合成新數字；它與注意力還需要在訓練中學會使用內容與位置線索。相加本身沒有確保模型已懂語序，也無法從一個數值看出它「知道第一個字」。\n",
+    "\n",
+    "查表法還有明確的長度限制。`nn.Embedding(5,3)` 只提供位置0到4；若輸入位置5，就索引超出範圍。模型不能把沒學過的新位置悄悄當成舊位置重用，否則遠處的順序會被混淆。後續的其他位置方法會改變計算方式，眼前先用表格建立可檢驗的起點。\n",
+    "\n",
+    "練習把所有位置向量清零。請在`with torch.no_grad():`區塊內，第二個`p.weight.copy_(...)`完整呼叫結束後新增`p.weight.zero_()`，行首保留與`copy_`相同的四個空格；下一行`ids = torch.tensor([1, 2, 1])`仍從最左邊開始。這個區塊包住手動設定參數的操作，背景可看[1.12](https://birdhackor.github.io/tiny-perceptron-vlm/1.12.html)。同時把最後檢查改成`assert torch.equal(x[0], x[2])`。先預測相同ID1又會得到相同`[1,0,0]`，再從頭執行核對。這次字表沒改，變化完全來自位置資訊，能明確指出兩張表各貢獻了什麼。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "4.1"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

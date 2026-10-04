@@ -1,0 +1,162 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# A.3 文件多了怎麼找相關段落？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "十份公告可以逐份讀，一萬份公告就需要先縮小範圍。問「書店地址」時，希望先取出有地址的段落，而不是把所有文件塞進模型。這一步叫retrieval（檢索）：依問題排序文件，挑出若幹候選。前置是[RAG的找資料與回答兩階段](https://birdhackor.github.io/tiny-perceptron-vlm/A.2.html)。本節先用能逐項核對的字詞匹配，理解檢索器到底憑什麼選文件。\n",
+    "\n",
+    "查詢「書店地址」有書、店、地、址四個字。文件d1「貓喜歡曬太陽」一個也沒有，分數0；d2「書店地址是青街8號」四個都有，分數4。分數不是回答正確的機率，只是這套規則算出的重合數。它不理解青街8號是地址，也不知道文件是否最新，但能把d2排在d1前面。\n",
+    "\n",
+    "工具的`lexical_terms`先把英文轉小寫，中文按單字拆開，英文與數字按連續片段拆開。因此「Book shop」成為book、shop；中文的書店成為書、店，並沒有使用語言模型理解完整詞義。`Counter`記錄每個片段出現次數；每項貢獻取「查詢次數與文件次數中較小者」，再加總。查詢只出現一次「書」，文件重複十次「書」仍只貢獻1，不會變成10分。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:13:36.661490Z",
+     "iopub.status.busy": "2026-10-04T19:13:36.661330Z",
+     "iopub.status.idle": "2026-10-04T19:13:37.883793Z",
+     "shell.execute_reply": "2026-10-04T19:13:37.881547Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7f13dc166610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:13:37.889253Z",
+     "iopub.status.busy": "2026-10-04T19:13:37.888912Z",
+     "iopub.status.idle": "2026-10-04T19:13:37.897114Z",
+     "shell.execute_reply": "2026-10-04T19:13:37.896205Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "查詢片段 ['書', '店', '地', '址']\n",
+      "取回 [{'id': 'd2', 'text': '書店地址是青街8號'}]\n",
+      "改問法 []\n"
+     ]
+    }
+   ],
+   "source": [
+    "from tiny_perceptron.retrieval import lexical_terms, retrieve\n",
+    "\n",
+    "query = \"書店地址\"\n",
+    "docs = [\n",
+    "    {\"id\": \"d1\", \"text\": \"貓喜歡曬太陽\"},\n",
+    "    {\"id\": \"d2\", \"text\": \"書店地址是青街8號\"},\n",
+    "]\n",
+    "print(\"查詢片段\", lexical_terms(query))\n",
+    "hits = retrieve(query, docs, k=1)\n",
+    "print(\"取回\", hits)\n",
+    "print(\"改問法\", retrieve(\"營業處在哪\", docs, k=1))"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "輸入是查詢字串與兩份含id、text的文件，`k=1`表示最多取回一份。第一行應印四個中文字片段，第二行只含d2及其原文。最後一行是空清單：營、業、處、在、哪與兩份原文沒有重合，雖然人可能猜到在問營業地點，這個檢索器沒有同義詞知識。零分文件不會回傳；同分時按id排序，結果也不一定剛好是最有用的文件。\n",
+    "\n",
+    "更實用的檢索可以考慮不同詞的重要性，或把問題與段落轉成數字特徵，比較語意接近程度。但換方法前，仍應用一組有標準來源的問題量「是否找到所需資料」。取回段落只完成RAG的第一步，生成模型還得讀對，來源還得可信。像「書店地址尚未公布」也會拿到4分，卻沒有可回答的地址，這是匹配分數的界限。\n",
+    "\n",
+    "上述正式組把12份新公告混入60份其他店公告，共72份，這個字詞檢索器一次取一份。12題中九題用`K017`這類原店名查詢，三題刻意換成`shop003`這類它不懂的別名；正確來源命中9/12。這三次miss是已知的查詢限制，不是語言模型生成錯誤。檢索文件的持久編號如`doc-K017`，與放進提示的短引用編號如`D1`的對應也逐題保存，避免改了標籤卻無法回查。\n",
+    "\n",
+    "練習只把d2的原文改成「書店地址尚未公布」，保持查詢與k不變。先預測仍會取回d2，再執行核對；然後用一句話說明為何這份hit不能支持「青街8號」。你要分開判斷「被檢索器選中」與「足夠回答問題」，不能從非空清單直接跳到答案。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "A.3"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

@@ -1,0 +1,160 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 6.8 訓練窗口是在切詞嗎？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "原文已由tokenizer變成ID0、1、2……，模型一次只看三個位置，怎麼辦？我們從這份ID序列取短段作為訓練題，這叫窗口。它決定每題看到多遠，沒有重新定義哪個字應合成哪個token。把token拆分與窗口長度混在一起，會讓你誤以為改context就改變了詞表。\n",
+    "\n",
+    "[6.2](https://birdhackor.github.io/tiny-perceptron-vlm/6.2.html) 的合併發生在文字表示規則，[2.5](https://birdhackor.github.io/tiny-perceptron-vlm/2.5.html) 的context則是可見前文範圍。為建立C格下一token問題，還要有它們右邊的C格答案，所以從原始ID需取C+1格，再按 [1.3](https://birdhackor.github.io/tiny-perceptron-vlm/1.3.html) shift一次。C=3時取 `[0,1,2,3]`，輸入 `[0,1,2]`，答案 `[1,2,3]`。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:11:48.047223Z",
+     "iopub.status.busy": "2026-10-04T19:11:48.047015Z",
+     "iopub.status.idle": "2026-10-04T19:11:49.380936Z",
+     "shell.execute_reply": "2026-10-04T19:11:49.380099Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7f31a406a610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:11:49.386483Z",
+     "iopub.status.busy": "2026-10-04T19:11:49.385971Z",
+     "iopub.status.idle": "2026-10-04T19:11:49.396728Z",
+     "shell.execute_reply": "2026-10-04T19:11:49.395616Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "起點 0 輸入 [0, 1, 2] 答案 [1, 2, 3]\n",
+      "起點 3 輸入 [3, 4, 5] 答案 [4, 5, 6]\n",
+      "起點 6 輸入 [6, 7, 8] 答案 [7, 8, 9]\n"
+     ]
+    }
+   ],
+   "source": [
+    "from tiny_perceptron.data import shifted\n",
+    "\n",
+    "ids = list(range(10))\n",
+    "context = 3\n",
+    "for start in [0, 3, 6]:\n",
+    "    segment = ids[start : start + context + 1]\n",
+    "    x, y = shifted(segment)\n",
+    "    print(\"起點\", start, \"輸入\", x.tolist(), \"答案\", y.tolist())\n",
+    "    assert len(x) == len(y) == context"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "輸入十個已有ID與窗口長度3，`range(10)` 建0到9的一排整數；本例它們只當容易追蹤的代號。三起點分別取0–3、3–6、6–9，共各四格；shift後輸出 `(0,1,2)→(1,2,3)`、`(3,4,5)→(4,5,6)`、`(6,7,8)→(7,8,9)`。`.tolist()` 將tensor轉回普通清單方便顯示，檢查每題確實三輸入、三答案。\n",
+    "\n",
+    "相鄰窗口共用邊界token3與6，但它們提供的位置角色不同；本例所有題屬於同一份已分組訓練資料，允許這種共用。不能先從同一文件取這些高度重疊窗口，再隨機分訓練與驗證，[1.2](https://birdhackor.github.io/tiny-perceptron-vlm/1.2.html) 已說明原因。也不能跨文件邊界直接連成一個「上一文件末尾預測下一文件開頭」目標，除非明確設計並標記這種邊界。\n",
+    "\n",
+    "資料末尾還要處理長度不足。若剩下的段只有C格，shift只能給C-1道題；我們的檢查會發現與目標C不合。可以丟掉尾段，或另明示補齊與忽略答案規則，但不應悄悄當作足長題。第7章會處理不同長短batch，當前用剛好可取的起點。\n",
+    "\n",
+    "這次[6.5的兩工具比較](https://birdhackor.github.io/tiny-perceptron-vlm/6.5.html)還把「取原文多少」與「模型可看幾格」分開：先把完整篇章分側，再取同一份最多256byte的片段，兩工具各自編碼，模型最多容納384格，因此每篇片段都能放進同一題，沒有因BPE較短就多取後面的文字。這讓兩模型的原文曝光相同；若只固定256個token，BPE那側通常會收到更多原文，就已經換了資料預算。\n",
+    "\n",
+    "練習只把context改成4，保留三個起點，先預測起點6只有 `[6,7,8,9]` 四個原ID，shift後只有三道題，最後檢查失敗。執行核對，再把起點列表改成 `[0,4]`，兩次都可取五格、建立四題。這次沒有改tokenizer，只改每題資料取段的契約。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "6.8"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

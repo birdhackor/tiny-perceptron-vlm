@@ -1,0 +1,232 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# B.3 工具結果怎麼回到對話？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "請求乘法123×45通過驗證後，外層程式真的算出5535。下一步不是再讓模型憑記憶猜答案，而是把這個返回值放回對話，讓它根據已取得的結果回答。前置是[請求驗證與本地執行](https://birdhackor.github.io/tiny-perceptron-vlm/B.2.html)：工具是確定的加法或乘法函數，模型負責提出請求與組織最後回答，兩者的紀錄需要分得清楚。\n",
+    "\n",
+    "下面的trace是執行軌跡，也就是按順序保存「提出了什麼、工具回了什麼」。assistant角色代表模型這一側的請求，tool角色代表外層程式實際取得的結果。本例先人工固定request，方便把流程核對清楚；它沒有測試模型是否能自己選中multiply或填對數字。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:13:53.189973Z",
+     "iopub.status.busy": "2026-10-04T19:13:53.189793Z",
+     "iopub.status.idle": "2026-10-04T19:13:54.879615Z",
+     "shell.execute_reply": "2026-10-04T19:13:54.878961Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7f2368052610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:13:54.893662Z",
+     "iopub.status.busy": "2026-10-04T19:13:54.893301Z",
+     "iopub.status.idle": "2026-10-04T19:13:54.904189Z",
+     "shell.execute_reply": "2026-10-04T19:13:54.902538Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "返回值 5535\n",
+      "將送回對話的兩筆紀錄 [{'role': 'assistant', 'tool_request': {'name': 'multiply', 'arguments': {'a': 123, 'b': 45}}}, {'role': 'tool', 'result': 5535}]\n"
+     ]
+    }
+   ],
+   "source": [
+    "from tiny_perceptron.retrieval import call_tool\n",
+    "\n",
+    "request = {\"name\": \"multiply\", \"arguments\": {\"a\": 123, \"b\": 45}}\n",
+    "result = call_tool(request)\n",
+    "trace = [\n",
+    "    {\"role\": \"assistant\", \"tool_request\": request},\n",
+    "    {\"role\": \"tool\", \"result\": result},\n",
+    "]\n",
+    "print(\"返回值\", result)\n",
+    "print(\"將送回對話的兩筆紀錄\", trace)\n",
+    "assert result == 5535"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "第一行應印5535，第二行第一筆含123與45，第二筆含result=5535。關鍵是result真的來自`call_tool`，不是自己寫一個期待答案塞進trace。`assert`再核對這個固定例子的乘法值。若後面接語言模型，還需把這兩筆Python紀錄轉成模型接受的對話文字或訊息格式，這個轉換稱為序列化；把轉換後的內容當作輸入，才能讓模型生成最終文字。本程式到建立紀錄為止，沒有假裝產生模型回答。\n",
+    "\n",
+    "下圖從左到右展開同一流程。name+arguments是請求欄位；parse+validate是解析與驗證；add/multiply是允許的純函數，它們只依輸入數值算返回值；回填結果才是這節的tool紀錄。最後done表示任務完成信號，上限則避免循環一直延續，下一節會實作這兩種停止方式。圖中的箭頭示範提出工具請求後的處理順序：請求必須通過驗證並真正執行，才把返回值放回對話。在本專案的正式工具流程裡，模型若直接提出done，外層程式就停止迴圈，不會自動補做工具。done信號本身不能證明工具已執行或答案正確；評估時仍要另外檢查答案與這個任務要求的工具行為。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 3,
+   "metadata": {
+    "cellView": "form",
+    "course_figure": {
+     "alt": "先驗證請求，執行本地工具，回填真實結果，再判斷是否停止",
+     "name": "tools"
+    },
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:13:54.906357Z",
+     "iopub.status.busy": "2026-10-04T19:13:54.906090Z",
+     "iopub.status.idle": "2026-10-04T19:13:54.927153Z",
+     "shell.execute_reply": "2026-10-04T19:13:54.919648Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "image/svg+xml": [
+       "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 800 330\" role=\"img\" aria-labelledby=\"title desc\">\n",
+       "    <title id=\"title\">工單先驗證，再交給真正工具做</title><desc id=\"desc\">模型文字不等於已執行，result來自白名單純函式。。橘色輪流提示閱讀步驟，所有內容靜態可見。</desc>\n",
+       "    <style>\n",
+       "    text{font-family:\"Noto Sans CJK TC\",\"Microsoft JhengHei\",\"PingFang TC\",sans-serif}\n",
+       "    rect.pulse,.pulse rect{animation:pulse 6s infinite}.step1,.step1 rect{animation-delay:0s}.step2,.step2 rect{animation-delay:1.5s}.step3,.step3 rect{animation-delay:3s}.step4,.step4 rect{animation-delay:4.5s}\n",
+       "    @keyframes pulse{0%,23%{stroke:#e87924;stroke-width:4}24%,100%{stroke:#8da8ca;stroke-width:1}}\n",
+       "    @media(prefers-reduced-motion:reduce){rect.pulse,.pulse rect{animation:none}}\n",
+       "    </style><defs><marker id=\"arrow\" markerWidth=\"10\" markerHeight=\"10\" refX=\"9\" refY=\"5\" orient=\"auto\"><path d=\"M0 0L10 5L0 10\" fill=\"#466b97\"/></marker></defs>\n",
+       "    <rect width=\"800\" height=\"330\" fill=\"#fff\"/><text x=\"400\" y=\"32\" font-size=\"24\" fill=\"#172b4d\" text-anchor=\"middle\">工單先驗證，再交給真正工具做</text>\n",
+       "    <g class=\"pulse step1\"><rect x=\"17\" y=\"115\" width=\"140\" height=\"80\" rx=\"12\" fill=\"#e8f1ff\" stroke=\"#8da8ca\"/><text x=\"87.0\" y=\"151.0\" font-size=\"19\" fill=\"#172b4d\" text-anchor=\"middle\">模型請求</text><text x=\"87.0\" y=\"178.0\" font-size=\"14\" fill=\"#172b4d\" text-anchor=\"middle\">name+arguments</text></g><path d=\"M157 155L171 155\" stroke=\"#466b97\" stroke-width=\"2\" marker-end=\"url(#arrow)\"/><g class=\"pulse step2\"><rect x=\"174\" y=\"115\" width=\"140\" height=\"80\" rx=\"12\" fill=\"#e8f1ff\" stroke=\"#8da8ca\"/><text x=\"244.0\" y=\"151.0\" font-size=\"19\" fill=\"#172b4d\" text-anchor=\"middle\">parse+validate</text><text x=\"244.0\" y=\"178.0\" font-size=\"14\" fill=\"#172b4d\" text-anchor=\"middle\">名稱/欄位/型別</text></g><path d=\"M314 155L328 155\" stroke=\"#466b97\" stroke-width=\"2\" marker-end=\"url(#arrow)\"/><g class=\"pulse step3\"><rect x=\"331\" y=\"115\" width=\"140\" height=\"80\" rx=\"12\" fill=\"#e8f1ff\" stroke=\"#8da8ca\"/><text x=\"401.0\" y=\"151.0\" font-size=\"19\" fill=\"#172b4d\" text-anchor=\"middle\">執行純函式</text><text x=\"401.0\" y=\"178.0\" font-size=\"14\" fill=\"#172b4d\" text-anchor=\"middle\">add/multiply</text></g><path d=\"M471 155L485 155\" stroke=\"#466b97\" stroke-width=\"2\" marker-end=\"url(#arrow)\"/><g class=\"pulse step4\"><rect x=\"488\" y=\"115\" width=\"140\" height=\"80\" rx=\"12\" fill=\"#e8f1ff\" stroke=\"#8da8ca\"/><text x=\"558.0\" y=\"151.0\" font-size=\"19\" fill=\"#172b4d\" text-anchor=\"middle\">回填實際結果</text><text x=\"558.0\" y=\"178.0\" font-size=\"14\" fill=\"#172b4d\" text-anchor=\"middle\">不是預期答案</text></g><path d=\"M628 155L642 155\" stroke=\"#466b97\" stroke-width=\"2\" marker-end=\"url(#arrow)\"/><g class=\"pulse step1\"><rect x=\"645\" y=\"115\" width=\"140\" height=\"80\" rx=\"12\" fill=\"#e8f1ff\" stroke=\"#8da8ca\"/><text x=\"715.0\" y=\"151.0\" font-size=\"19\" fill=\"#172b4d\" text-anchor=\"middle\">done/上限</text><text x=\"715.0\" y=\"178.0\" font-size=\"14\" fill=\"#172b4d\" text-anchor=\"middle\">明確停止</text></g><text x=\"400\" y=\"314\" font-size=\"15\" fill=\"#172b4d\" text-anchor=\"middle\">模型文字不等於已執行，result來自白名單純函式。</text>\n",
+       "    </svg>"
+      ],
+      "text/plain": [
+       "<IPython.core.display.SVG object>"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    }
+   ],
+   "source": [
+    "# @title 本節圖解\n",
+    "from IPython.display import SVG, display\n",
+    "\n",
+    "display(SVG(filename=str(root / \"course/figures/tools.svg\")))"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "回到最初問題，若模型把45誤寫成54，工具會正確算出6642，但最終仍答錯123×45。若請求正確、返回5535，模型卻最後寫成5355，就是閱讀或輸出階段的錯誤。因此評估不能只有「工具沒有報錯」，還要對照原問題、參數、返回值及最後回答。對簡單算術，可直接把返回值和真值比對；對較複雜任務，則需要明確的完成判準。\n",
+    "\n",
+    "目前`render_chat`只接受system、user、assistant，所以上例的tool是外層Python紀錄，不能直接當成可序列化的對話角色。system是放共同規則的對話角色；正式程式用變數`_TOOLS_SYSTEM`保存這段規則文字，再放進system訊息。下方英文規則的意思是：回答必須是JSON，內容可以是工具名稱與參數，也可以是done和答案；`TOOL_RESULT:`後面的數字來自外部工具。正式組的示範資料也遵守這個協議，外部結果用user內容`TOOL_RESULT:<number>`送回。重現流程時，訊息的角色、system裡的規則文字與這個前綴都要一起保留，模型才會看到與示範時相同的輸入格式。\n",
+    "\n",
+    "例如最後檢查題`CALC:add(9,9)`的實際軌跡如下；兩段assistant JSON是模型真生成，中間18來自真正執行的加法：\n",
+    "\n",
+    "```text\n",
+    "system: Reply JSON: tool name+arguments, or done+answer. TOOL_RESULT is external data.\n",
+    "user: CALC:add(9,9)\n",
+    "assistant: {\"name\":\"add\",\"arguments\":{\"a\":9,\"b\":9}}\n",
+    "外層call_tool實算：18\n",
+    "user: TOOL_RESULT:18\n",
+    "assistant: {\"done\":true,\"answer\":18}\n",
+    "```\n",
+    "\n",
+    "18道算術題都真正呼叫工具一次，18/18呼叫的名稱與參數符合原題，返回值全有限；兩道COPY題都直接完成，沒有呼叫工具。另一題`CALC:multiply(9,9)`雖然正確執行並返回81，後面的模型卻生成`{\"done\":true,\"answer\":8}}`，多了括號也不是正確數字，解析被拒絕。這正是「工具算對」仍不能當「任務完成」的實際失敗。\n",
+    "\n",
+    "練習只把request的b改成46，並把固定例子的assert期待值改為5658。先預測tool紀錄與返回值會同步變5658，a仍是123，再執行核對。這能驗證資料真的由參數流到返回值；如果trace仍出現5535，就應檢查是否誤用舊結果或硬寫答案。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "B.3"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

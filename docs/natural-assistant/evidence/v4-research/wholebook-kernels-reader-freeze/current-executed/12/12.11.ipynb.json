@@ -1,0 +1,162 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 12.11 先轉成文字會少掉什麼？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "兩個人都說「你好」，一段音高較低、另一段音高較高，轉寫結果可能完全相同。如果問題是「他們說了什麼」，文字轉寫很有用；如果問「哪段更高音」，僅靠兩個一樣的你好就不夠。本節比較的是中間表示保留了哪些資訊，不直接決定哪條模型路線更好。\n",
+    "\n",
+    "前置是[12.1頻率與振幅](https://birdhackor.github.io/tiny-perceptron-vlm/12.1.html)及[12.8聲音特徵](https://birdhackor.github.io/tiny-perceptron-vlm/12.8.html)。ASR是Automatic Speech Recognition，自動語音辨識，將錄音變成文字轉寫。轉寫通常重視說話內容，不一定保存音高、時長或環境聲。直接特徵路線保留聲學輸入，卻仍需要訓練模型學會讀這些屬性。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:15:50.743606Z",
+     "iopub.status.busy": "2026-10-04T19:15:50.743295Z",
+     "iopub.status.idle": "2026-10-04T19:15:52.071136Z",
+     "shell.execute_reply": "2026-10-04T19:15:52.070715Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7f89d005e610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:15:52.075874Z",
+     "iopub.status.busy": "2026-10-04T19:15:52.075630Z",
+     "iopub.status.idle": "2026-10-04T19:15:52.081784Z",
+     "shell.execute_reply": "2026-10-04T19:15:52.080565Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "轉寫相同 True\n",
+      "音高相同 False\n",
+      "只看轉寫 你好 實際標籤 low\n",
+      "只看轉寫 你好 實際標籤 high\n"
+     ]
+    }
+   ],
+   "source": [
+    "examples = [\n",
+    "    {\"transcript\": \"你好\", \"pitch\": \"low\"},\n",
+    "    {\"transcript\": \"你好\", \"pitch\": \"high\"},\n",
+    "]\n",
+    "print(\"轉寫相同\", examples[0][\"transcript\"] == examples[1][\"transcript\"])\n",
+    "print(\"音高相同\", examples[0][\"pitch\"] == examples[1][\"pitch\"])\n",
+    "for row in examples:\n",
+    "    print(\"只看轉寫\", row[\"transcript\"], \"實際標籤\", row[\"pitch\"])"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "輸入是人工指定的轉寫與音高標籤，沒有調用辨識服務，也沒有合成人聲。前兩行輸出True與False，後面同樣的你好分別對應low與high。若程式只拿`transcript`作輸入，兩個例子無法區分，確定性分類器是相同輸入每次給相同輸出的判類別程式，因此不能憑兩份相同輸入，可靠給出兩個不同答案。\n",
+    "\n",
+    "這並不表示所有轉寫系統都無法保存音高。可以在文字旁增加「高音」等標注，或把時間戳與聲音屬性另存；那時輸入已不是純轉寫，比較條件就改變了。同樣地，直接波形有更多原始資料，也可能更難訓練、需要更多算力，並非一定更準。\n",
+    "\n",
+    "任務決定要保留什麼。如果只是查語句，先轉寫可以借用已有文字能力；若要判斷笑聲、警報或說話強弱，僅有詞句可能缺關鍵資訊。應明確告訴讀者系統收到了什麼，並用能區分兩種路線的測試，而不是把「端到端」四個字當成效果證明；端到端這裡指從聲學輸入直接訓練到最終文字輸出。\n",
+    "\n",
+    "12.9至12.10的正式11/14是直接從合成單音生成high或low的結果，沒有語句轉寫，也沒有訓練或評估ASR系統。它只能說這個小問答模型在部分新頻率與換聲音檢查中利用了聲學線索，不能拿來宣布直接聲音路線勝過ASR。若要比較本節兩條路線，仍需同一批真實錄音、同一個問題、明確保存的轉寫內容與各自的實際回答。\n",
+    "\n",
+    "同樣的詞句也可以拉長、帶笑聲或夾雜背景警報。若問題要判斷哪段更久，單獨保存你好無法計時；若問有沒有警報，轉寫也可能完全忽略那段非語言聲音。給文字增加時間戳或事件標籤可以補回特定屬性，但這些標註仍須從聲學資料取得。例如語音辨識模型可以同時輸出文字與時間戳，不一定要另接系統。這樣路線依然可以合理，只是應承認輸入內容已改變。比較兩種系統時要用同一任務真值與相同可用資料；真值是拿來核對預測的正確答案，例如本例人工指定的low與high，不是Python判斷式輸出的True或False。記錄轉寫漏字和聲學判斷各自的錯誤，不能把兩種資訊來源的差異混成一個總質量標籤。\n",
+    "\n",
+    "練習把兩筆transcript分別改成「低音的你好」與「高音的你好」，先預測轉寫相同變False，再執行核對。解釋為什麼現在文字路線可以分高低：我們額外提供了目標相關屬性，並沒有從原本同樣的你好裡憑空推理出來。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "12.11"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

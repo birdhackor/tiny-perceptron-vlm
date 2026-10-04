@@ -1,0 +1,166 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 12.10 模型有聽聲音嗎？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "一個問句總是「這是高音還是低音」，資料裡高音佔九成，模型只答高也可能得九成。要證明它聽了波形，需要換聲音、保持問句相同，觀察答案是否按頻率規則改變。本節先算完全不聽的基準，讓高分有可比較的起點。\n",
+    "\n",
+    "前置是[12.9聲音訓練接口](https://birdhackor.github.io/tiny-perceptron-vlm/12.9.html)與[11.8替圖檢驗](https://birdhackor.github.io/tiny-perceptron-vlm/11.8.html)。規則在這裡明確設為頻率大於300Hz叫high，否則low；不是宣稱人類聽覺的統一高低音界線。保留測試應含沒用於訓練的頻率，但仍按相同規則給真值。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:15:48.333785Z",
+     "iopub.status.busy": "2026-10-04T19:15:48.333495Z",
+     "iopub.status.idle": "2026-10-04T19:15:49.671058Z",
+     "shell.execute_reply": "2026-10-04T19:15:49.669898Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7fecac08e610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:15:49.679695Z",
+     "iopub.status.busy": "2026-10-04T19:15:49.679377Z",
+     "iopub.status.idle": "2026-10-04T19:15:49.685039Z",
+     "shell.execute_reply": "2026-10-04T19:15:49.683838Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "頻率 [200, 220, 440, 660]\n",
+      "標準答案 ['low', 'low', 'high', 'high']\n",
+      "不聽聲音的固定猜測 0.5\n"
+     ]
+    }
+   ],
+   "source": [
+    "frequencies = [200, 220, 440, 660]\n",
+    "truth = [\"high\" if f > 300 else \"low\" for f in frequencies]\n",
+    "no_audio = [\"high\"] * len(frequencies)\n",
+    "accuracy = sum(a == b for a, b in zip(truth, no_audio)) / len(truth)\n",
+    "print(\"頻率\", frequencies)\n",
+    "print(\"標準答案\", truth)\n",
+    "print(\"不聽聲音的固定猜測\", accuracy)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "輸入四個Hz值，兩低兩高。清單生成式逐個判斷f>300，輸出[low,low,high,high]。`no_audio`故意不讀取波形、全猜high，後面逐項核對只有兩題正確，輸出0.5。這不是訓練後音訊模型的測量，只有構造的規則基準。\n",
+    "\n",
+    "真實模型測試應先保存原聲音的回答，再將200Hz換成440Hz，仍問同一句，正確答案必須從low變high。替換660為440，兩者同屬high，理想類別答案則不必變化。這種按規則的變化比「兩個輸出不一樣」更嚴格；隨機數字也會不同，卻不一定答對。\n",
+    "\n",
+    "另可把錄音打亂配對，但要分開兩種評分。依換入頻率重新標答案，量的是新波形的正確率，真正聽聲音的模型仍應答對；保留原答案則量原答案一致率，是檢查輸出是否依聲音改變，不是新波形的真實正確率。例如四段從[200,220,440,660]換成[440,660,200,220]，新答案為[high,high,low,low]；理想模型照新聲音回答，按新標籤是1.0，按舊標籤則是0.0。不能把前者下降當成成功，也不能把後者下降直接稱為辨音能力退步。靜音在規則裡沒有有效單音頻率，沒有可重新判為high或low的新真值；仍可保留原標籤作消融參考，量移除線索後有多少原題答案留下，卻不能把這個數字叫靜音的音高辨識正確率。也應記錄它是否仍固定猜同一類，作為缺資訊時的單獨檢查。單音識別成功也不能外推成理解說話內容，真實語音的噪聲、多人聲音與詞句需要額外任務。\n",
+    "\n",
+    "高低音真值來自合成頻率，不是來自模型輸出。因此若要評新聲音的辨音正確率，替換後必須同步重新計算真值；保留原答案low來核對440Hz時，量的則是原答案一致率。另一方面，問題字串不應偷偷加「這是高音」，否則文字已經泄漏目標，聽不聽都能答。一個好的成對實驗只換實際波形與由規則確定的標籤，其他可見條件固定。將問句-only、原聲音、替換聲音與靜音結果並排，會讓每項證據比較清楚；只有原聲音一欄高分時，應再查其它欄，避免靠單一成功故事下結論。\n",
+    "\n",
+    "正式14題的頻率是200、280、290、300、310、320、400Hz，每個兩段，因而low有8題、high有6題。固定猜low就是8/14，約57.1%；報告的`text_only_majority_accuracy`只是從標籤比例計算這個基準，沒有另外訓練一個只讀問題的模型。原聲音11/14超過固定猜測，但仍漏掉三個邊界例。靜音時全部答high，按原答案留下6/14，約42.9%；這是原題參考答案一致率，沒有證明靜音屬於high。\n",
+    "\n",
+    "錯配採固定規則，將第0題換入第7題的錄音，第1題換入第8題，以此循環。仍按原答案只有3/14，改按換入錄音的真值逐題核對卻是11/14；每段錄音都恰好用了一次。比如200Hz換入300Hz的長版本後回答high，對原200Hz和新300Hz都錯；另一個200Hz換入310Hz後也答high，對原題錯，對新錄音則對。這樣的逐題對照支持回答使用了聲音，並保留它在邊界仍會犯錯的限制，不能把3/14寫成新聲音辨識成績。\n",
+    "\n",
+    "14組錯配中，有12組的正確高低類別應改變，兩組仍同為low；即使理想模型把換入聲音全部讀對，按舊答案仍會得到2/14。因此不能預設錯配後必須零分。這個規則像交換兩張寫有溫度的紙條：先確定要核對原紙條還是換入紙條，才知道同一個回答該算對或錯。這批只有七個測試頻率家族、單一種子與乾淨短單音，足以看這次介入，尚不能代表各種聲音環境。\n",
+    "\n",
+    "FSDD真人數字支線的測試則只有3/20，不能和單音11/14合併成一個「聲音能力」分數：前者要辨認另一位說話者念的0至9，後者只按300Hz界線辨兩類。真人支線沒有另跑靜音或錯配檢查，不能替它填入本節單音的消融成績；要判斷它到底利用了哪種聲學線索，仍需自己的介入證據。這次能說的是資料、重採樣與更新都接通，而跨說話者辨識仍很弱。\n",
+    "\n",
+    "練習只把測試頻率改成[180,260,480,720]，先預測標籤仍兩低兩高、固定猜測仍0.5，再執行核對。它們是不同數值而同一規則的例子；若模型只背過200與440，新頻率測試更容易暴露這種限制。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "12.10"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

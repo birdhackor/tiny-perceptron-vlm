@@ -1,0 +1,168 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 18.3 只能看到教師回答也能學嗎？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "如果服務只回傳教師的回答文字，拿不到各候選分數，仍可以用這些文字教學生。做法是把題目與教師回答保存成對話，檢查品質，再照[對話SFT](https://birdhackor.github.io/tiny-perceptron-vlm/7.11.html)訓練學生，讓學生提高回答中各token的機率。這就是[黑盒蒸餾](https://birdhackor.github.io/tiny-perceptron-vlm/18.1.html)，不是逼學生重建未取得的完整分布。\n",
+    "\n",
+    "以兩筆「2+2=?」為例，候選回答一筆4、一筆5。我們知道標準答案是4，應先排除5，而不是期待學生自己發現教師錯誤。下面故意用人工記錄模擬格式，沒有呼叫任何教師；來源欄也清楚標成示例，避免教材跑完後產生「已收集教師資料」的誤解。實際生成應保存教師權重版本、提示、生成設定與檢查結果，才能追蹤錯誤來源。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:19:46.504829Z",
+     "iopub.status.busy": "2026-10-04T19:19:46.504640Z",
+     "iopub.status.idle": "2026-10-04T19:19:48.045431Z",
+     "shell.execute_reply": "2026-10-04T19:19:48.044781Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7f27caa5e610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:19:48.047112Z",
+     "iopub.status.busy": "2026-10-04T19:19:48.046906Z",
+     "iopub.status.idle": "2026-10-04T19:19:48.055542Z",
+     "shell.execute_reply": "2026-10-04T19:19:48.054530Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "保留筆數 1\n",
+      "{\"messages\": [{\"role\": \"user\", \"content\": \"2+2=?\"}, {\"role\": \"assistant\", \"content\": \"4\"}], \"teacher_revision\": null, \"provenance\": \"人工示例，非教師生成\"}\n"
+     ]
+    }
+   ],
+   "source": [
+    "import json\n",
+    "\n",
+    "records = [{\"numbers\": [2, 2], \"answer\": \"4\"}, {\"numbers\": [2, 2], \"answer\": \"5\"}]\n",
+    "accepted = []\n",
+    "for record in records:\n",
+    "    if record[\"answer\"] == str(sum(record[\"numbers\"])):\n",
+    "        accepted.append(\n",
+    "            {\n",
+    "                \"messages\": [{\"role\": \"user\", \"content\": \"2+2=?\"}, {\"role\": \"assistant\", \"content\": record[\"answer\"]}],\n",
+    "                \"teacher_revision\": None,\n",
+    "                \"provenance\": \"人工示例，非教師生成\",\n",
+    "            }\n",
+    "        )\n",
+    "print(\"保留筆數\", len(accepted))\n",
+    "for record in accepted:\n",
+    "    print(json.dumps(record, ensure_ascii=False))"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "輸入兩筆字典，numbers只供這個簡單驗證器核對數學，answer是要交給學生的文字。`sum`算出真值，`str`轉成文字再比較；不合格記錄不進入accepted。輸出應保留一筆，內容包含user問題與assistant的4。`json.dumps`將字典編成JSON，`ensure_ascii=False`讓中文直接顯示；若將每筆JSON各存一行，就稱JSONL。此程式只印出，不建立資料檔也不訓練模型。\n",
+    "\n",
+    "學生訓練時應讓assistant回答位置計入誤差，user題目作可見前文，回顧[哪些位置應該學](https://birdhackor.github.io/tiny-perceptron-vlm/7.3.html)。回答先作為文字取得，再由學生自己的tokenizer切分，所以教師與學生不必使用同一詞表。這與白盒逐欄機率比較不同，不要把有answer字段當成已經有teacher logits。\n",
+    "\n",
+    "上方驗證器示範篩選；正式實驗的`teacher_hard`對照則保留全部實際教師回答，量出其錯誤後果。屬性教師對45筆訓練題全答對、全部EOS，因此硬目標的原始ID恰好和真值相同；同一初始化與batch計畫下，CE與教師硬目標學生的權重及成績也相同，這不是額外知識帶來的提升。風格教師185筆中180筆正確，另外五筆已知日期卻把日子加10，例如要求確認`2026-10-06`，回答`已確認2026-10-16。`，這些錯標籤仍保存在`style-hard-targets.json`的審核記錄。\n",
+    "\n",
+    "本輪兩組共230個硬目標都有實際EOS、無非法控制ID，也沒有零長度目標。工具逐筆保存完整`teacher_ids`與EOS旗標，再直接用原始ID作標籤；若教師達生成上限卻未EOS，就不補一個假的結束。零個目標則明確失敗並保存題數，不能悄悄丟題。對只有文字的外部服務，結束原因也應另外保存，普通文字解碼可能隱藏控制token，不能由「畫面像一句完整話」推定正常停止。\n",
+    "\n",
+    "生成本身會花教師算力，資料還需要驗證與保存，成本不能只算學生訓練。對於無法用加法檢查的任務，需依來源、規格或評分規則檢查，不能用學生模仿程度當真值。GSM8K是收錄小學程度文字算術題與人寫解答的公開資料集；若使用其原有答案，也應保存原資料來源，不能換一個provenance名稱就宣稱由教師生成。\n",
+    "\n",
+    "練習只把第二筆answer從5改成4。先預測保留兩筆，再執行核對。這會得到重複題目與回答，說明「通過正確性檢查」和「資料有多樣性」仍是兩個問題；練習不要求你假裝取得新的教師版本或運行長訓練。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "18.3"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

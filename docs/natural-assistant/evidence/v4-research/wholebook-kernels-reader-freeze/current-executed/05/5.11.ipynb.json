@@ -1,0 +1,162 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 5.11 同一段文字出現很多次會怎樣？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "資料裡同一句重複一百次，並不等於一百份新知識。若每筆記錄有相同的機會被抽到，這句話就更容易反覆出現。一次更新可以同時看多筆資料，可先看[5.2的例子](https://birdhackor.github.io/tiny-perceptron-vlm/5.2.html)。因此，副本有一百份，也不能直接算成參數更新了一百次。重複還可能讓同一句跨到訓練與驗證兩邊，重現 [1.2](https://birdhackor.github.io/tiny-perceptron-vlm/1.2.html) 的洩漏。但兩個看起來一樣的句子，可能只是多一個空格，直接比原文就漏掉它。我們先明示哪些差異可以忽略，再找完全重複。\n",
+    "\n",
+    "正規化（normalization）是在比較前統一某些寫法，這裡只合並空白：`\"貓  看狗\"` 與 `\"貓 看狗\"` 都變成 `\"貓 看狗\"`。這不是 [4.3](https://birdhackor.github.io/tiny-perceptron-vlm/4.3.html) 的數值正規化，雖然名稱相同，處理對象與規則不同。我們沒有刪掉所有空格，也沒有改字義或標點。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:10:45.282119Z",
+     "iopub.status.busy": "2026-10-04T19:10:45.281943Z",
+     "iopub.status.idle": "2026-10-04T19:10:46.899386Z",
+     "shell.execute_reply": "2026-10-04T19:10:46.896033Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7f4bb0542610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:10:46.903120Z",
+     "iopub.status.busy": "2026-10-04T19:10:46.902832Z",
+     "iopub.status.idle": "2026-10-04T19:10:46.910187Z",
+     "shell.execute_reply": "2026-10-04T19:10:46.908741Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "['貓 看狗', '貓 看狗', '狗 看貓']\n",
+      "原始筆數 3 正規化後不同內容 2\n",
+      "指紋字元數 64\n"
+     ]
+    }
+   ],
+   "source": [
+    "from tiny_perceptron.data import fingerprint\n",
+    "\n",
+    "docs = [\"貓  看狗\", \"貓 看狗\", \"狗 看貓\"]\n",
+    "normalized = [\" \".join(text.split()) for text in docs]\n",
+    "hashes = [fingerprint(text) for text in docs]\n",
+    "print(normalized)\n",
+    "print(\"原始筆數\", len(docs), \"正規化後不同內容\", len(set(hashes)))\n",
+    "print(\"指紋字元數\", len(hashes[0]))\n",
+    "assert hashes[0] == hashes[1]"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "輸入三段文字，前兩段只有空白數量不同。`split()` 不給參數時按空白分段，`\" \".join(...)` 用單一空格接回，第一行應顯示兩份 `貓 看狗` 與一份 `狗 看貓`。`fingerprint` 使用同樣規則再算SHA-256，輸出固定長的內容指紋，也叫hash。內容相同得到同一指紋，所以三個原始記錄只剩兩種不同內容；完整指紋有64個十六進位字元，也就是每格使用0–9或a–f這16種符號之一。\n",
+    "\n",
+    "我們常用指紋比較長文件，不必每次逐字掃描。它不是可還原的文字壓縮，也不證明兩段文字在意思上相同；換一個字往往會讓指紋整體改變。碰撞指兩份不同的正規化內容偶然得到同一個完整指紋；SHA-256發生這種情況的機會極小，但判定重要重複時仍可保留原文核對。只取極短前綴則丟掉了許多區分資訊，更容易讓不同內容對上相同短字串，不能當成絕對唯一。\n",
+    "\n",
+    "正規化規則必須按資料種類選擇。程式碼的縮排可能有意義，詩的換行與連續空白可能有排版功能，字串裡面的空白也可能屬於值。把所有資料套進這一份規則，會把原本不同的內容誤當重複。應先抽查樣本，記下規則，再去重與分組，而不是單看去掉多少比例。\n",
+    "\n",
+    "重複也會改訓練分配：某個來源複製更多次，會更常被抽到，像 [1.4](https://birdhackor.github.io/tiny-perceptron-vlm/1.4.html) 的字頻會因重複增加。因此即使重複只留在訓練組，仍影響我們究竟強調什麼。去重是在控制統計與切分，不自動保證剩下的每筆都高品質。\n",
+    "\n",
+    "這個想法已用在[T.4的真實文字實驗](https://birdhackor.github.io/tiny-perceptron-vlm/training.html#T.4)：先以合併空白後的完整文字判定重複，對相同內容只留一份。留下的記錄加上完整內容指紋作分組標籤，再切分。TinyStories的512篇仍是512篇，資料包中的365首詩也仍是365首，這一步沒有再刪掉記錄。原文仍保留自己的空白與換行來訓練；合併空白只是比較內容的規則。注意「沒有找到這種重複」只回答了完整內容是否相同，改寫、同一故事的相似版本還要另查，下一節就看這個缺口。\n",
+    "\n",
+    "練習只把第二段改成 `\"鳥 看狗\"`。先預測正規化不同內容變3、前兩指紋不相同，最後舊assert會失敗，再執行核對。將檢查改成 `hashes[0] != hashes[1]`，確認一個字變化被保留；如果你改的是多一個空格，則本規則仍視為同一內容。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "5.11"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

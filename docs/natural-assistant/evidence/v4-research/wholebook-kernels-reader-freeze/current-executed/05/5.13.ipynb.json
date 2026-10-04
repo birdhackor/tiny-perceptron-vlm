@@ -1,0 +1,179 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 5.13 資料或模型變大，哪個值得花預算？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "小模型看少資料和大模型看多資料相比，後者如果更好，我們仍不知道功勞來自更多參數、更多題目還是更久訓練。要回答「預算先花在哪」，先把模型容量與資料量分開變化，像試食譜時分別改變食材與烹調時間，而不是把所有條件一次換掉。\n",
+    "\n",
+    "最小設計是兩種寬度乘兩種資料量，共四格。[4.8](https://birdhackor.github.io/tiny-perceptron-vlm/4.8.html) 說明寬度會改參數成本；這裡width8與16、不同記錄16與64形成組合。每格計劃跑100步，卻還要明示每步多少筆與有效答案，才能知道究竟看了多少token。token是模型處理的一個文字片段，目前可先當作字，後面第6章會改變拆法。這裡每個「有效答案」指一個有正確目標、實際參與訓練誤差的下一token預測位置，不是一道完整問題。例如前文「貓」要接「看」，再以「貓看」預測「狗」，就是兩個有效位置；用來湊齊長度的空格若設為忽略，就不計入。本節的有效token預算就是這些有效答案位置的總數，可回看[5.2的有效目標計數](https://birdhackor.github.io/tiny-perceptron-vlm/5.2.html)。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:10:50.507365Z",
+     "iopub.status.busy": "2026-10-04T19:10:50.507104Z",
+     "iopub.status.idle": "2026-10-04T19:10:52.103740Z",
+     "shell.execute_reply": "2026-10-04T19:10:52.101945Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7fbc87f66610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:10:52.107103Z",
+     "iopub.status.busy": "2026-10-04T19:10:52.106839Z",
+     "iopub.status.idle": "2026-10-04T19:10:52.120947Z",
+     "shell.execute_reply": "2026-10-04T19:10:52.120021Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "{'width': 8, '不同記錄': 16, '參數格數': 6104, '更新步數': 100, '有效答案預算': 3200, '品質': '尚待訓練與量測'}\n",
+      "{'width': 8, '不同記錄': 64, '參數格數': 6104, '更新步數': 100, '有效答案預算': 3200, '品質': '尚待訓練與量測'}\n",
+      "{'width': 16, '不同記錄': 16, '參數格數': 13744, '更新步數': 100, '有效答案預算': 3200, '品質': '尚待訓練與量測'}\n",
+      "{'width': 16, '不同記錄': 64, '參數格數': 13744, '更新步數': 100, '有效答案預算': 3200, '品質': '尚待訓練與量測'}\n"
+     ]
+    }
+   ],
+   "source": [
+    "from tiny_perceptron.model import TinyLM, ModelConfig\n",
+    "\n",
+    "for width in [8, 16]:\n",
+    "    parameters = TinyLM(ModelConfig(width=width)).description()[\"parameters\"]\n",
+    "    for records in [16, 64]:\n",
+    "        batch_size, answers_per_record, steps = 4, 8, 100\n",
+    "        print(\n",
+    "            {\n",
+    "                \"width\": width,\n",
+    "                \"不同記錄\": records,\n",
+    "                \"參數格數\": parameters,\n",
+    "                \"更新步數\": steps,\n",
+    "                \"有效答案預算\": batch_size * answers_per_record * steps,\n",
+    "                \"品質\": \"尚待訓練與量測\",\n",
+    "            }\n",
+    "        )"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "輸入是實驗計劃，不是現成的訓練資料。`records` 指不同例子數，batch_size是每步四筆，假定每筆八個有效答案，所以每格共3200答案；16筆資料會被重複更多次，64筆則包含更多不同題。程序只建立模型數參數並印四份計畫，品質欄保留未測狀態，不能從參數數字推定分數。\n",
+    "\n",
+    "「公平預算」有多種定義。固定步數方便看每次更新效果；固定有效token數讓見到的監督總量相近；固定時間或FLOPs則更直接限制計算成本。FLOPs是浮點運算次數，例如一次乘法與一次加法各算一個。D是輸入特徵數，H是輸出特徵數；密集Linear用一張H橫排、D欄的權重表，把D個輸入數加權混合成H個輸出數，每個輸出都使用全部輸入。處理一個位置約需2×D×H次運算，這裡忽略每個輸出混合完再加上一個可調數字的成本（這個數字叫偏置），以及其他較小成本：8進8出約128次，16進16出約512次。模型變寬會同時放大兩邊，所以相同token預算也不等於相同計算預算。耗時測量可回看 [5.9](https://birdhackor.github.io/tiny-perceptron-vlm/5.9.html)。\n",
+    "\n",
+    "還要用共同的驗證與測試資料評品質，才能把四格的變化歸因於訓練條件。若大資料格包含驗證題，或大模型多選了幾次最好種子，比較會混入別的差異，見 [5.10](https://birdhackor.github.io/tiny-perceptron-vlm/5.10.html)、[5.15](https://birdhackor.github.io/tiny-perceptron-vlm/5.15.html)。保存數據版本與實際有效token數，比只寫「100步」更能讓別人複覈。\n",
+    "\n",
+    "把計畫落成實驗，結果不必沿用上面的示意數字。我們已另外產生80篇`object=67;color=red;shape=circle.`這類短文，先按物體編號留出8篇驗證與8篇test，再從其餘64篇中取16篇或全部64篇練習。模型寬度改用16或32，各一層，種子42；四組都更新150次、每次4篇。寬度16的模型有13,744個參數，寬度32則有33,632個。下面是實際測得的四格，代價都是更新完成後重算的平均下一文字單位代價：\n",
+    "\n",
+    "| 模型寬度 | 不同練習短文 | 累計有效目標 | 訓練代價 | 驗證代價 | test代價 |\n",
+    "| --- | ---: | ---: | ---: | ---: | ---: |\n",
+    "| 16 | 16篇 | 20,765 | 0.27166 | 0.49288 | 0.39779 |\n",
+    "| 16 | 64篇 | 20,623 | 0.33032 | 0.31105 | 0.31061 |\n",
+    "| 32 | 16篇 | 20,765 | 0.14502 | 0.40927 | 0.27961 |\n",
+    "| 32 | 64篇 | 20,623 | 0.20107 | 0.21914 | 0.22258 |\n",
+    "\n",
+    "這一次，兩種寬度下，64篇的驗證代價都比16篇低，訓練代價卻較高。要記得，兩組訓練平均數涵蓋的是不同的材料，不能把它們當成在同一批新題的成績。固定150步也不等於所有材料都練同樣多次，16篇會被反覆抽到更多。有效目標20,765與20,623並不相同，因為實際抽到的短文長度不同；我們匹配的是更新次數與每批筆數，沒有把監督總量或計算成本控制成完全相等。\n",
+    "\n",
+    "較大模型與更多資料如何共同影響品質，常被研究成scaling law（規模與表現的經驗規律）。眼前只有一個種子、有限的規則短文、四個小設定，能回答的是這批資料在這個更新預算下如何變化，不能由此說64篇必然較好，更不能外推大型模型的規律。[實測原始報告](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/course-experiments/results/text_foundation.json)保留四組資料與成本；重做入口在[T.4](https://birdhackor.github.io/tiny-perceptron-vlm/training.html#T.4)。\n",
+    "\n",
+    "練習保持每步四筆，假設某格每筆有效答案只有四個，想維持3200token預算應跑幾步？先算 `3200/(4×4)=200`，再改該格記錄核對。若仍寫100步，那格只有1600答案，已經不是同樣監督預算。將計劃中的假設換成實測長度統計，纔會成為真實資源記錄。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "5.13"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

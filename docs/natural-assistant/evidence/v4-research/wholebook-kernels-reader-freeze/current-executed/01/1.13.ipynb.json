@@ -1,0 +1,161 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 1.13 第二次 backward 為什麼梯度變大？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "你按同一個按鈕兩次，本來想得到同樣結果，卻發現記錄的數字翻倍。不是參數突然變得更敏感，而是軟體把第二次結果加在第一次上了。PyTorch 的 `.grad` 就像一個收集桶：每次 `backward()` 把新梯度倒進去，不會自動先清空。若我們想每輪只按當前這批資料更新，就要把上輪的桶清掉。\n",
+    "\n",
+    "先回顧 [1.10](https://birdhackor.github.io/tiny-perceptron-vlm/1.10.html) 的前向計算與求導：運算建立關係，`backward` 再往回算敏感度。這裡用 w=2、代價 w²，梯度是 `2*w=4`。不更新 w，再建立一次同樣代價並求導，新的梯度仍是 4；但 `.grad` 存放的是舊4+新4=8。這種累加是設計的一部分，後面可利用它合併多小份資料的梯度；忘記它才會成為錯誤。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:09:15.093194Z",
+     "iopub.status.busy": "2026-10-04T19:09:15.092779Z",
+     "iopub.status.idle": "2026-10-04T19:09:16.355540Z",
+     "shell.execute_reply": "2026-10-04T19:09:16.353212Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7f7466b46610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:09:16.357727Z",
+     "iopub.status.busy": "2026-10-04T19:09:16.357438Z",
+     "iopub.status.idle": "2026-10-04T19:09:16.365196Z",
+     "shell.execute_reply": "2026-10-04T19:09:16.363693Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "4.0 8.0 4.0 2.0\n"
+     ]
+    }
+   ],
+   "source": [
+    "import torch\n",
+    "from torch import nn\n",
+    "\n",
+    "w = nn.Parameter(torch.tensor(2.0))\n",
+    "(w.square()).backward()\n",
+    "first = w.grad.clone()\n",
+    "(w.square()).backward()\n",
+    "second = w.grad.clone()\n",
+    "w.grad = None\n",
+    "(w.square()).backward()\n",
+    "print(first.item(), second.item(), w.grad.item(), w.item())\n",
+    "assert second.item() == 2 * first.item()"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "`nn.Parameter` 把 tensor 標成模型的可調參數，並預設追蹤梯度。輸入 w=2。每行 `w.square()` 都重新做一次前向計算，再對這次結果求導。`clone()` 把當時梯度複製一份，讓 `first`、`second` 儲存當時的數字，而不是以後跟著桶裡的內容變。輸出應為 `4,8,4,2`：前兩次記錄4與8，清除後第三次又只存4，參數始終2。\n",
+    "\n",
+    "`w.grad=None` 表示把收集桶清空，下次求導會重新建立梯度。也可將現有梯度設為零；正式使用最佳化器時通常呼叫 `optimizer.zero_grad()`，這會對它負責的參數一起清除。最佳化器（optimizer）是按更新規則管理參數的工具，本例還沒有建立它。`backward` 只負責求導和累加，最佳化器的 `step()` 才會動參數。\n",
+    "\n",
+    "要分清另一個不同問題：對同一個 `loss` 物件連續呼叫兩次 `backward`，可能出現「計算圖已經釋放」的錯誤。PyTorch 預設第一次求導後釋放部分中間材料；本例每次重新算 `w.square()`，所以用的是新關係，不需要保留舊圖。累加發生在可調參數 w 自己的 `.grad`，不需要把舊前向圖保留到下一輪。\n",
+    "\n",
+    "通常一輪訓練依序是清除舊梯度、算新預測與代價、求導、更新。刻意跨小份累積時則會改變清除與更新的時機，第 [16.6](https://birdhackor.github.io/tiny-perceptron-vlm/16.6.html) 節會展開。現在先把「新的敏感度」與「桶裡累積的總和」分開讀。\n",
+    "\n",
+    "練習只註釋掉 `w.grad = None`，在行首加 `#` 就會讓它不執行。先預測第三次記錄應為12、參數仍2，再跑核對。最後的檢查仍只比較前兩次，所以會通過；要判斷清除是否正確，還得看第三個輸出。這提醒我們，某個檢查通過只說明它檢查的那件事。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "1.13"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

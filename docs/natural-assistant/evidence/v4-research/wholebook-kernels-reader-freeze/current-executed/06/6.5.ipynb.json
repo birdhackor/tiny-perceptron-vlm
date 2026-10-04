@@ -1,0 +1,245 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 6.5 換 tokenizer 後如何比較模型？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "同一段原文，甲拆成十token、平均代價0.6，乙拆成五token、平均代價1.0。只看平均會說甲較好，可是甲總代價6、乙只有5。單位改變後，「每token」不是同樣的一份文字，因此比較應回到固定原文，量整段總負對數機率，再用同一個原文長度單位除。\n",
+    "\n",
+    "[1.8](https://birdhackor.github.io/tiny-perceptron-vlm/1.8.html) 的每位置代價是正確token機率的負自然對數，把整段加總叫negative log likelihood（負對數似然，NLL）。例如A已提供，接著猜B、C：整段的機率是「看到A時猜B的機率」乘「看到A、B時猜C的機率」。若兩項分別是0.5、0.25，這段在已知A下的機率就是0.125；每項已帶自己的前文條件，不要求字與字互相獨立。接著用[W.4的對數加法](https://birdhackor.github.io/tiny-perceptron-vlm/first-steps.html#W.4)，把這個乘積的負對數轉成各位置代價的和。\n",
+    "\n",
+    "再除以原文UTF-8的byte數量、除以 `log(2)` 換成bit，得到bits per byte，簡稱BPB，表示每原始byte的代價。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:11:40.289541Z",
+     "iopub.status.busy": "2026-10-04T19:11:40.289363Z",
+     "iopub.status.idle": "2026-10-04T19:11:41.517509Z",
+     "shell.execute_reply": "2026-10-04T19:11:41.516825Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7f678ac5a610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:11:41.520463Z",
+     "iopub.status.busy": "2026-10-04T19:11:41.520196Z",
+     "iopub.status.idle": "2026-10-04T19:11:41.525666Z",
+     "shell.execute_reply": "2026-10-04T19:11:41.524606Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "示例A 原文bytes 7 BPB 1.030496457777831\n",
+      "示例B 原文bytes 7 BPB 0.8243971662222649\n"
+     ]
+    }
+   ],
+   "source": [
+    "import math\n",
+    "\n",
+    "raw = \"貓🙂\"\n",
+    "bytes_count = len(raw.encode(\"utf-8\"))\n",
+    "for name, total_nll in [(\"示例A\", 5.0), (\"示例B\", 4.0)]:\n",
+    "    bpb = total_nll / (bytes_count * math.log(2))\n",
+    "    print(name, \"原文bytes\", bytes_count, \"BPB\", bpb)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "輸入同一原文貓與🙂，共三加四等於七bytes，長度差的來源見 [6.1](https://birdhackor.github.io/tiny-perceptron-vlm/6.1.html)。總NLL5與4是手工例子，尚非模型量測。輸出A約1.0305、B約0.8244，因為除數同為 `7×0.6931`，B較低表示這份原文總負對數代價較小。即使兩者token數不同，也回到了相同分母。\n",
+    "\n",
+    "真正測量時，先用各自tokenizer編碼同一份驗證文件，再交給與它匹配的模型預測。有效目標位置是「有真實的下一文字單位，而且這次要替它計代價」的位置；只用來提供前文的內容，或為湊等長而額外填入的記號，不算本次的原文目標。把這些目標的負log機率加總，才是本次的總NLL。不能拿甲的ID丟進乙的模型，也不能只拿平均loss、沒有目標數量就推BPB。\n",
+    "\n",
+    "長文件放不進模型時，會截成有限長度的片段，叫窗口，詳見[6.8](https://birdhackor.github.io/tiny-perceptron-vlm/6.8.html)。例如原文有四個token，依次稱為A、B、C、D；若A先當已知前文，本次要評的是接著猜B、C、D。切成`[A,B,C]`與`[B,C,D]`兩個重疊窗口時，可在第一個計B、C的代價；第二個的B、C只提供前文，計D即可。若第二個又計C，同一原文目標就被算了兩次。兩個模型都要採用一致的計分約定，並記錄各目標能讀到多少前文。文件開始的已知條件、結束標記是否計入NLL，也要先說清楚，才能比較同一份原文的相同事件。\n",
+    "\n",
+    "BOS是開始標記、EOS是結束標記，後面 [6.6](https://birdhackor.github.io/tiny-perceptron-vlm/6.6.html) 會給專用ID；這裡先理解它們屬於結構，不是原文bytes。若把EOS代價計入分子，卻用原文bytes分母，這可以作為一種明確的評估契約，但兩方法都要一致，不可只為一方略過難預測的結尾。\n",
+    "\n",
+    "BPB讓拆分單位較可比，卻也不是回答品質的唯一指標。模型善於預測原文，並不自動善於自由回答問題，[5.8](https://birdhackor.github.io/tiny-perceptron-vlm/5.8.html) 已區分這兩者。對照應同時保留任務表現、上下文預算與總資源；byte長度統一不表示兩者訓練成本也相同。\n",
+    "\n",
+    "現在看真正的排名反轉。我們讓逐byte與BPE各自匹配的模型都更新400次，每次抽八篇；每一步用相同的原文片段，累計都看了664,759個原文byte。模型同樣寬度32、一層、最多384個位置，學習率0.003、種子42。在20篇最後檢查片段上，逐byte的每token代價2.77947，比BPE的3.98741低。可是前者計的是4,213個目標，後者只計2,503個；它們猜的不是同樣大的一口文字。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 3,
+   "metadata": {
+    "cellView": "form",
+    "course_figure": {
+     "alt": "逐token平均代價與共同原文byte尺度的實測排名反轉",
+     "name": "tokenizer_common_scale"
+    },
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:11:41.528031Z",
+     "iopub.status.busy": "2026-10-04T19:11:41.527862Z",
+     "iopub.status.idle": "2026-10-04T19:11:41.538640Z",
+     "shell.execute_reply": "2026-10-04T19:11:41.538003Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "image/svg+xml": [
+       "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 1120 560\" role=\"img\" aria-labelledby=\"title desc\">\n",
+       "  <title id=\"title\">換成共同原文尺度後，byte與BPE的代價排名不同</title>\n",
+       "  <desc id=\"desc\">同20篇最後檢查片段共4193個原文byte。逐byte模型的每目標代價2.77947低於BPE的3.98741，但共同原文byte尺度的BPB是4.02906高於BPE的3.43401。兩者計分目標數為4213與2503，均包含結束標記。</desc>\n",
+       "  <rect width=\"1120\" height=\"560\" rx=\"20\" fill=\"#f8fafc\"/>\n",
+       "  <g font-family=\"system-ui, 'Noto Sans TC', sans-serif\" fill=\"#172033\">\n",
+       "    <text x=\"48\" y=\"52\" font-size=\"30\" font-weight=\"700\">同一批原文，先問「每一份」有多大</text>\n",
+       "    <text x=\"48\" y=\"90\" font-size=\"23\">20篇最後檢查片段，共4,193個原文 UTF-8 bytes</text>\n",
+       "    <rect x=\"40\" y=\"120\" width=\"488\" height=\"328\" rx=\"16\" fill=\"white\" stroke=\"#cbd5e1\" stroke-width=\"2\"/>\n",
+       "    <rect x=\"592\" y=\"120\" width=\"488\" height=\"328\" rx=\"16\" fill=\"white\" stroke=\"#cbd5e1\" stroke-width=\"2\"/>\n",
+       "    <text x=\"68\" y=\"163\" font-size=\"25\" font-weight=\"700\">每個 token 的平均代價</text>\n",
+       "    <text x=\"68\" y=\"196\" font-size=\"21\" fill=\"#475569\">一個 token 含的原文量不同</text>\n",
+       "    <text x=\"620\" y=\"163\" font-size=\"25\" font-weight=\"700\">每個原文 byte 的代價（BPB）</text>\n",
+       "    <text x=\"620\" y=\"196\" font-size=\"21\" fill=\"#475569\">分母都用同一份原文的4,193 bytes</text>\n",
+       "    <text x=\"68\" y=\"242\" font-size=\"23\">逐 byte</text>\n",
+       "    <rect x=\"68\" y=\"258\" width=\"208\" height=\"40\" rx=\"6\" fill=\"#d97706\"/>\n",
+       "    <text x=\"286\" y=\"286\" font-size=\"24\" font-weight=\"700\">2.77947</text>\n",
+       "    <text x=\"68\" y=\"336\" font-size=\"23\">BPE</text>\n",
+       "    <rect x=\"68\" y=\"352\" width=\"299\" height=\"40\" rx=\"6\" fill=\"#2563eb\"/>\n",
+       "    <text x=\"377\" y=\"380\" font-size=\"24\" font-weight=\"700\">3.98741</text>\n",
+       "    <text x=\"68\" y=\"429\" font-size=\"23\" fill=\"#92400e\">這個尺度下：逐 byte 較低</text>\n",
+       "    <text x=\"620\" y=\"242\" font-size=\"23\">逐 byte</text>\n",
+       "    <rect x=\"620\" y=\"258\" width=\"390\" height=\"40\" rx=\"6\" fill=\"#d97706\"/>\n",
+       "    <text x=\"620\" y=\"322\" font-size=\"24\" font-weight=\"700\">4.02906</text>\n",
+       "    <text x=\"620\" y=\"359\" font-size=\"23\">BPE</text>\n",
+       "    <rect x=\"620\" y=\"375\" width=\"332\" height=\"40\" rx=\"6\" fill=\"#2563eb\"/>\n",
+       "    <text x=\"962\" y=\"403\" font-size=\"21\" font-weight=\"700\">3.43401</text>\n",
+       "    <text x=\"620\" y=\"439\" font-size=\"21\" fill=\"#1d4ed8\">換成共同尺度：BPE 較低</text>\n",
+       "    <text x=\"48\" y=\"488\" font-size=\"22\">左圖計分目標：逐 byte 4,213個；BPE 2,503個。兩者都包含各篇的結束目標。</text>\n",
+       "    <text x=\"48\" y=\"528\" font-size=\"22\" fill=\"#475569\">兩種代價都以較低為佳；本例只比較這批片段的預測，不代表一般回答能力。</text>\n",
+       "  </g>\n",
+       "</svg>"
+      ],
+      "text/plain": [
+       "<IPython.core.display.SVG object>"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    }
+   ],
+   "source": [
+    "# @title 本節圖解\n",
+    "from IPython.display import SVG, display\n",
+    "\n",
+    "display(SVG(filename=str(root / \"course/figures/tokenizer_common_scale.svg\")))"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "圖的右半把兩份總代價都除以同一批原文4,193個byte，再換成bit；結束目標計入分子，結構標記不算原文bytes。逐byte的BPB是4.02906，BPE則是3.43401，這次共同尺度下反而BPE較低。驗證側也有同樣方向：逐byte的BPB由訓練前8.29037降至3.59830，BPE由5.04502降至3.06109。起始分數本來就不同，因為兩張字表定義的預測事件不同，不能把兩份隨機模型當作相同基線。\n",
+    "\n",
+    "這次匹配的是原文曝光與更新次數，沒有匹配參數數量、監督token數或總運算量；[6.4](https://birdhackor.github.io/tiny-perceptron-vlm/6.4.html)已看到BPE模型多了參數。它回答的是這份小型混合資料、這個設定下怎麼讀比較，不能由此宣稱512是最佳詞表。生成也要另看：都准許寫32個新token時，BPE能寫的原文通常更長，不能把「寫得長」直接當成回答更好。[完整實測報告](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/course-experiments/results/tokenizer.json)保留所有留出片段的生成與兩種代價，讓你按同一篇原文核對。\n",
+    "\n",
+    "練習只把A與B的total_nll都乘2，先預測BPB都翻倍、排序不變，再執行核對。然後只把raw換成兩倍原文 `\"貓🙂貓🙂\"`，保留同一總NLL，數值會減半；這一步是在演示分母作用，真實模型換文本必須重測NLL，不能用舊數字當新結果。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "6.5"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

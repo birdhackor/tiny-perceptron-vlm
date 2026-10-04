@@ -1,0 +1,253 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 19.7 計算器算對，為什麼助理還可能答錯？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "你請同學向計算器確認1加2，他可能按錯數字，也可能讀到3卻在回覆時寫成4。工具使用正是這種兩段工作：模型先寫請求，程式執行，再由同一模型讀結果與回答。若最後直接把程式算出的3當成模型答案，會把「會讀回結果」這項能力藏起來。\n",
+    "\n",
+    "前置是[工具請求](https://birdhackor.github.io/tiny-perceptron-vlm/B.1.html)、[驗證與執行](https://birdhackor.github.io/tiny-perceptron-vlm/B.2.html)、[結果回填](https://birdhackor.github.io/tiny-perceptron-vlm/B.3.html)、[停止原因](https://birdhackor.github.io/tiny-perceptron-vlm/B.4.html)與[本成品的動作／EOS](https://birdhackor.github.io/tiny-perceptron-vlm/19.1.html)。B章用JSON請求單；這個小成品將同樣欄位縮成`TOOL:calculator:1+2`，依序是動作、工具名與參數。byte是儲存資料的位元組；這段英文字母、數字與符號各佔一個byte，在本小模型裡各佔一個需要生成的位置。縮短請求就減少需要生成的位置。本成品只開放一個calculator工具，接受有限範圍的非負整數加法。allowlist是明確允許的工具名清單；模型寫出未列入的名字時，程式拒絕執行，而不是隨意把文字當成Python程式碼。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:20:28.260768Z",
+     "iopub.status.busy": "2026-10-04T19:20:28.260525Z",
+     "iopub.status.idle": "2026-10-04T19:20:29.493077Z",
+     "shell.execute_reply": "2026-10-04T19:20:29.492145Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7fa4caf66610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "cellView": "form",
+    "course_figure": {
+     "alt": "模型先提出請求，程式驗證與計算，再把實際結果交回同一模型生成最後回答",
+     "name": "capstone_tool_loop"
+    },
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:20:29.495541Z",
+     "iopub.status.busy": "2026-10-04T19:20:29.495286Z",
+     "iopub.status.idle": "2026-10-04T19:20:29.506052Z",
+     "shell.execute_reply": "2026-10-04T19:20:29.505216Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "image/svg+xml": [
+       "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 900 640\" role=\"img\" aria-labelledby=\"title desc\">\n",
+       "  <title id=\"title\">工具結果由程式算，最後答案仍由同一模型生成</title>\n",
+       "  <desc id=\"desc\">人工流程例子一加二：同一語言模型先生成TOOL請求，程式檢查工具名、型別、範圍和可用性，真的計算得三，然後把真結果交回原模型生成DIRECT三。錯誤、未結束和錯誤最終回答各自保留；此圖不表示模型實測。</desc>\n",
+       "  <style>text{font-family:\"Noto Sans CJK TC\",\"Microsoft JhengHei\",\"PingFang TC\",sans-serif;fill:#172b4d}.title{font-size:28px;font-weight:600}.main{font-size:25px}.small{font-size:22px}</style>\n",
+       "  <defs><marker id=\"arrow\" markerWidth=\"9\" markerHeight=\"9\" refX=\"8\" refY=\"4.5\" orient=\"auto\"><path d=\"M0 0L9 4.5L0 9\" fill=\"#496a93\"/></marker></defs>\n",
+       "  <rect width=\"900\" height=\"640\" fill=\"#fff\"/>\n",
+       "  <text x=\"450\" y=\"41\" text-anchor=\"middle\" class=\"title\">兩次生成，中間只有一次真正計算</text>\n",
+       "  <rect x=\"30\" y=\"71\" width=\"840\" height=\"58\" rx=\"12\" fill=\"#f4f6fa\" stroke=\"#8199be\"/>\n",
+       "  <text x=\"450\" y=\"109\" text-anchor=\"middle\" class=\"main\">使用者：請算 1 加 2；計算器開啟</text>\n",
+       "  <path d=\"M450 134V161\" fill=\"none\" stroke=\"#496a93\" stroke-width=\"3\" marker-end=\"url(#arrow)\"/>\n",
+       "  <rect x=\"30\" y=\"173\" width=\"840\" height=\"80\" rx=\"12\" fill=\"#e8f1ff\" stroke=\"#8199be\"/>\n",
+       "  <text x=\"450\" y=\"205\" text-anchor=\"middle\" class=\"main\">① 模型生成請求：TOOL:calculator:1+2</text>\n",
+       "  <text x=\"450\" y=\"238\" text-anchor=\"middle\" class=\"small\">只是請求；另外檢查正常結束與格式</text>\n",
+       "  <path d=\"M450 258V285\" fill=\"none\" stroke=\"#496a93\" stroke-width=\"3\" marker-end=\"url(#arrow)\"/>\n",
+       "  <rect x=\"30\" y=\"297\" width=\"840\" height=\"87\" rx=\"12\" fill=\"#fff0d8\" stroke=\"#c49855\"/>\n",
+       "  <text x=\"450\" y=\"332\" text-anchor=\"middle\" class=\"main\">② 程式驗證：允許工具、整數、範圍與可用性</text>\n",
+       "  <text x=\"450\" y=\"365\" text-anchor=\"middle\" class=\"small\">實際計算 1+2 → 結果 3；錯誤就保存錯誤</text>\n",
+       "  <path d=\"M450 389V416\" fill=\"none\" stroke=\"#496a93\" stroke-width=\"3\" marker-end=\"url(#arrow)\"/>\n",
+       "  <rect x=\"30\" y=\"428\" width=\"840\" height=\"85\" rx=\"12\" fill=\"#e8f1ff\" stroke=\"#8199be\"/>\n",
+       "  <text x=\"450\" y=\"462\" text-anchor=\"middle\" class=\"main\">③ 原題＋真結果 → 同一模型生成 DIRECT:3</text>\n",
+       "  <text x=\"450\" y=\"495\" text-anchor=\"middle\" class=\"small\">不能把程式的 3 直接冒充這次模型回答</text>\n",
+       "  <rect x=\"30\" y=\"540\" width=\"840\" height=\"57\" rx=\"12\" fill=\"#e0f3e8\" stroke=\"#639778\"/>\n",
+       "  <text x=\"450\" y=\"577\" text-anchor=\"middle\" class=\"main\">分開核對：選對動作 → 參數正確 → 執行 → 最後答對</text>\n",
+       "  <text x=\"450\" y=\"628\" text-anchor=\"middle\" class=\"small\">人工流程示意；主成品實報另外保留成功與失敗的完整紀錄。</text>\n",
+       "</svg>"
+      ],
+      "text/plain": [
+       "<IPython.core.display.SVG object>"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    }
+   ],
+   "source": [
+    "# @title 本節圖解\n",
+    "from IPython.display import SVG, display\n",
+    "\n",
+    "display(SVG(filename=str(root / \"course/figures/capstone_tool_loop.svg\")))"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 3,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:20:29.508301Z",
+     "iopub.status.busy": "2026-10-04T19:20:29.508128Z",
+     "iopub.status.idle": "2026-10-04T19:20:29.519056Z",
+     "shell.execute_reply": "2026-10-04T19:20:29.517710Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "解析後的請求 {'status': 'tool', 'name': 'calculator', 'a': 1, 'b': 2}\n",
+      "計算器可用 True 實際執行結果 {'status': 'ok', 'result': '3'}\n",
+      "計算器可用 False 實際執行結果 {'status': 'error', 'reason': 'calculator_unavailable'}\n",
+      "還沒有模型讀回結果，也沒有最終模型答案\n"
+     ]
+    }
+   ],
+   "source": [
+    "from tiny_perceptron.capstone import calculator_runtime, parse_action\n",
+    "\n",
+    "trace = {\"raw\": \"TOOL:calculator:1+2\", \"eos\": True}\n",
+    "action = parse_action(trace)\n",
+    "print(\"解析後的請求\", action)\n",
+    "for available in (True, False):\n",
+    "    result = calculator_runtime(action, available=available)\n",
+    "    print(\"計算器可用\", available, \"實際執行結果\", result)\n",
+    "print(\"還沒有模型讀回結果，也沒有最終模型答案\")"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "`trace`是本例人工填寫的紀錄字典，`raw`保存手寫請求文字，`eos=True`也是人工宣告「此例已正常結束」；不是模型真的生成EOS的證據。`parse_action`把它解析成`{\"status\": \"tool\", \"name\": \"calculator\", \"a\": 1, \"b\": 2}`：請求種類是tool、工具名是calculator，兩個數字已轉成整數。這份`action`才是`calculator_runtime`收到的輸入。\n",
+    "\n",
+    "請求是人工指定的，但工具在這裡真的執行了。可用時應得到`status=ok`、`result=\"3\"`；關閉時應得到計算器不可用的錯誤。它不會因為加法很簡單就繞過開關，也不會把錯誤當成功結果。最後一行故意提醒目前的界限：parse與工具成功，只是整個流程的中間站；後面的實測才有模型生成的請求與EOS。\n",
+    "\n",
+    "正式`run_assistant`先保留模型的`action_trace`，再記錄`runtime`；若執行成功，把原題與真結果組成「原題：1+2。計算器回報：3。請回答。」這份新的user前文，呼叫同一個語言核心生成`final_trace`。這是本小世界採用的回填格式；B章介紹的tool角色可以在未來擴充成更完整的對話協定。只有最後回答正常結束且內容正確，才算整題成功。若工具名正確、數字錯誤，工具會算另一題；若數字正確、回覆錯誤，仍是失敗。這些例子都要留在報告裡。\n",
+    "\n",
+    "本輪動作評分還要求數字順序符合請求規格：「請算2加1」要生成`2+1`。`1+2`在數學上同樣得到3，但沒有照這份參數順序規格。報告的`action_correct`比對第一段完整字串與EOS，包含TOOL工具名與參數、或DIRECT／ASK的內容，不是只選對動作卡；`answer`與`expected_final`則讓你另查最後內容。端到端分數要求首段吻合且最後回答正確，不能把它直接叫作數學能力。\n",
+    "\n",
+    "SFT驗證中的「4+4等於多少？」真的走完了這條迴圈：模型先產生`TOOL:calculator:4+4`，程式實際回傳`8`，同一模型讀回結果後產生`DIRECT:8`，兩次生成都正常結束。它與19.4那個同題失敗形成對照；這裡的最後8是模型生成的內容，沒有用程式結果冒充模型回答。\n",
+    "\n",
+    "| SFT驗證的工具關卡 | 通過／該關卡總數 |\n",
+    "| --- | --- |\n",
+    "| 動作、工具名、數字及順序完整吻合 | 10／10個計算請求 |\n",
+    "| 真正執行計算器並收到成功結果 | 10／10個計算請求 |\n",
+    "| 同一模型讀回結果，正常結束且答對 | 10／10個計算請求 |\n",
+    "| 工具關閉時產生ASK且沒有執行 | 10／10個不可用情境 |\n",
+    "| 單獨提供工具結果後回答 | 5／5個回填題 |\n",
+    "\n",
+    "最後一列是獨立的回填題，不能加到10個完整迴圈裡說成15個。數字家族雖與訓練分開，問法仍是固定模板；這些結果不代表任何自然語言計算題都能正確選工具。[SFT完整紀錄](https://github.com/birdhackor/tiny-perceptron-vlm/blob/1df335318bda03fd771807f66976953231d5a00b/docs/course-experiments/capstone-evidence/sft/validation.json)保留請求、執行結果與兩次生成，可逐項核對。\n",
+    "\n",
+    "joint共同訓練版與後續DPO分支在同一份驗證中也保留了這些工具行為。DPO是用[好壞回答配對](https://birdhackor.github.io/tiny-perceptron-vlm/13.2.html)做偏好訓練的方法。這裡沒有觀察到新增圖音輸入破壞固定題型的工具流程，但圖音能力仍需分開檢查。定版後的各項工具分母統一見[19.12](https://birdhackor.github.io/tiny-perceptron-vlm/19.12.html)。\n",
+    "\n",
+    "最後檢查真的出現了驗證沒看到的讀回失敗。推薦joint對12個計算請求都產生正確工具名、數字與順序，程式也全部執行成功，最後同一模型卻只答對10／12。兩次失敗如下，兩次最後生成都有EOS，所以不是只差一個結束符號。\n",
+    "\n",
+    "| 原問題 | 模型請求／工具真結果 | 模型讀回後生成 | 結果 |\n",
+    "| --- | --- | --- | --- |\n",
+    "| 0+1等於多少？ | `TOOL:calculator:0+1`／`1` | `DIRECT:0` | 工具正確，回答錯誤 |\n",
+    "| 請算1加0。 | `TOOL:calculator:1+0`／`1` | `DIRECT:111` | 工具正確，回答錯誤 |\n",
+    "\n",
+    "另一方面，最後12個計算器關閉情境全部正確產生ASK且未執行；獨立回填題是5／6，其中「原題：0+1。計算器回報：1。請回答。」同樣答成0。預先留出的1加2與2加1則都請求正確、實際得到3、由模型最後答3。這些結果能區分「知道這類題該用工具」與「可靠讀回任何結果」：前者在此通過12／12，後者仍有失敗。\n",
+    "\n",
+    "[正式逐題工具紀錄](https://github.com/birdhackor/tiny-perceptron-vlm/blob/1df335318bda03fd771807f66976953231d5a00b/docs/course-experiments/capstone-evidence/deployment/test-joint.json)保留請求、實際結果與最後生成；[原始資料](https://github.com/birdhackor/tiny-perceptron-vlm/blob/1df335318bda03fd771807f66976953231d5a00b/docs/course-experiments/capstone-evidence/deployment/data.json)可按`id`查問句。這仍是固定加法模板的工具策略，不是模型已會校準所有任務的不確定性。\n",
+    "\n",
+    "練習只把請求中的calculator改成unknown。先預測解析仍能讀懂一張工具請求，但執行器會拒絕未允許的工具，再核對。能理解格式與獲准執行是兩層檢查，不應該讓生成文字自己決定許可權。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "19.7"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

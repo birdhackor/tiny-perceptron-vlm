@@ -1,0 +1,166 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 5.15 一次比較略好就有進步嗎？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "兩次考試差一分，可能是學習有效，也可能剛好遇到擅長的題。模型初始化、批次抽樣與生成抽樣都有隨機變化。訓練時，每次可能從資料中隨機選一小組例子，這組稱為批次；抽到不同例子，更新結果也可能不同。某個方法一次略好，不能立刻下結論。尤其每種方法只挑最好的一次，就像各挑最幸運的試卷，再把運氣寫成穩定進步。\n",
+    "\n",
+    "[1.14](https://birdhackor.github.io/tiny-perceptron-vlm/1.14.html) 的seed固定隨機過程起點。本節用幾個種子建立模型，讓你看到相同架構初值會不同。種子不是資料質量或參數好壞的排名，只是重現一條隨機路線的編號。真比較時應用同一組種子分別訓練兩種方法，再記每次品質與同種子的差值。\n",
+    "\n",
+    "`TinyLM`是本專案的小型語言模型，`ModelConfig`保存它的設定；`width=8`讓每個文字位置用8個特徵數表示。`embedding.weight`是可學習的數值表，每個文字ID對應一橫排8個數；它不是1.14中列字元名稱的清單，而是把該ID轉為特徵的表。下面「字表初值」指這張數值表剛建立時的隨機數字，背景見[4.1的查表](https://birdhackor.github.io/tiny-perceptron-vlm/4.1.html)與[4.7的模型](https://birdhackor.github.io/tiny-perceptron-vlm/4.7.html)。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:10:56.059448Z",
+     "iopub.status.busy": "2026-10-04T19:10:56.059222Z",
+     "iopub.status.idle": "2026-10-04T19:10:57.504535Z",
+     "shell.execute_reply": "2026-10-04T19:10:57.503886Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7f030c152610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:10:57.507047Z",
+     "iopub.status.busy": "2026-10-04T19:10:57.506797Z",
+     "iopub.status.idle": "2026-10-04T19:10:57.532290Z",
+     "shell.execute_reply": "2026-10-04T19:10:57.531801Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "種子 1 字表初值標準差 1.035154938697815\n",
+      "種子 2 字表初值標準差 1.0004743337631226\n",
+      "種子 3 字表初值標準差 1.0190640687942505\n",
+      "同種子重建字表相同 True\n"
+     ]
+    }
+   ],
+   "source": [
+    "import torch\n",
+    "from tiny_perceptron.model import TinyLM, ModelConfig\n",
+    "\n",
+    "for seed in [1, 2, 3]:\n",
+    "    torch.manual_seed(seed)\n",
+    "    model = TinyLM(ModelConfig(width=8))\n",
+    "    print(\"種子\", seed, \"字表初值標準差\", model.embedding.weight.std().item())\n",
+    "torch.manual_seed(1)\n",
+    "a = TinyLM(ModelConfig(width=8))\n",
+    "torch.manual_seed(1)\n",
+    "b = TinyLM(ModelConfig(width=8))\n",
+    "print(\"同種子重建字表相同\", torch.equal(a.embedding.weight, b.embedding.weight))"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "輸入種子1、2、3，架構不動。`torch.manual_seed` 重設PyTorch的隨機起始狀態，隨後所有亂數初始化受它控制；三個標準差一般都接近1，卻不完全相同。標準差含義見 [3.5](https://birdhackor.github.io/tiny-perceptron-vlm/3.5.html)。最後兩次建模都在之前重設seed1，所以字表應逐格相同，打印True。這段觀察初始化，不是品質測量。\n",
+    "\n",
+    "假設實際測得方法A三個成績0.70、0.72、0.69，B為0.71、0.71、0.73；同種子差是+0.01、-0.01、+0.04。直接報B最高0.73比A最高0.72高，看不見第二次B反而較差。保存全部值與範圍，讓人看出波動與平均趨勢，才知道「略好」有多穩定。\n",
+    "\n",
+    "配對種子也不保證兩次每批資料完全一樣。架構若消耗隨機數次數不同，後續抽樣就可能錯開；必要時把資料抽樣種子與模型初始化種子分開，並記錄版本與配置。模型會使用其他隨機工具時，也要各自設置，例如Python的random；只設Torch不是所有隨機過程都重現。\n",
+    "\n",
+    "三次實驗只提供粗略的局部證據，不能支撐精確的置信度或通用結論。資料樣本數、任務範圍與方法選擇次數也會影響不確定性。這裡不要求先學統計檢驗，而是先拒絕把「選到最好一次」等同於「通常更好」。\n",
+    "\n",
+    "練習只刪除建立b之前第二次 `torch.manual_seed(1)`，先預測a建立時已經消耗亂數，b會接着往下抽，最後比較通常False，再執行核對。再次設seed纔會從同起點重建；保留同一個整數變量名稱，並不會自動讓隨機狀態回頭。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "5.15"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

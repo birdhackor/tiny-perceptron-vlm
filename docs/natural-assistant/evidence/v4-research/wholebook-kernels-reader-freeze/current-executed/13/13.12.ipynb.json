@@ -1,0 +1,159 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 13.12 更新前後回答機率差多少？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "某張卡在收集資料時只有20%機率被選中，更新幾次之後變成40%。它在目前策略裡已經是原來兩倍常見。若反覆拿同一批作答當作每次都剛發生，就會忽略這個變化；我們需要保留作答當時的機率，讓更新知道這份樣本來自哪個策略。\n",
+    "\n",
+    "前置是[13.11的策略與優勢](https://birdhackor.github.io/tiny-perceptron-vlm/13.11.html)。收集這批作答時的策略叫**old policy，舊策略**；正在被更新的是目前策略。對同一道題、同一張選中的卡，計算「新機率÷舊機率」，得到**ratio，機率比**。它等於1表示尚未改變，大於1表示這張卡更常見，小於1表示更少見。[PPO原論文第3節公式6–7](https://arxiv.org/pdf/1707.06347)用這個比值建構更新目標。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:16:26.600665Z",
+     "iopub.status.busy": "2026-10-04T19:16:26.600396Z",
+     "iopub.status.idle": "2026-10-04T19:16:27.800405Z",
+     "shell.execute_reply": "2026-10-04T19:16:27.799651Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7fd49d54e610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:16:27.803709Z",
+     "iopub.status.busy": "2026-10-04T19:16:27.803431Z",
+     "iopub.status.idle": "2026-10-04T19:16:27.810022Z",
+     "shell.execute_reply": "2026-10-04T19:16:27.808846Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "更新前後的機率比 [2.0, 0.5]\n"
+     ]
+    }
+   ],
+   "source": [
+    "import torch\n",
+    "\n",
+    "old_probability = torch.tensor([0.2, 0.2])\n",
+    "new_probability = torch.tensor([0.4, 0.1])\n",
+    "old_log_probability = old_probability.log().detach()\n",
+    "new_log_probability = new_probability.log()\n",
+    "ratio = (new_log_probability - old_log_probability).exp()\n",
+    "print(\"更新前後的機率比\", [round(value, 4) for value in ratio.tolist()])"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "兩格代表兩次作答各自選中的那張卡，不是一份只有兩張卡且機率需加成1的完整分布。輸入舊機率都是0.2，新機率分別0.4、0.1。自然log相減，再取exp，等於直接相除，因此輸出`[2.0,0.5]`；第一張兩倍常見，第二張一半常見。實作通常保存log機率，避免很小的機率相除；本例的數字則方便手算。\n",
+    "\n",
+    "`.detach()`讓這份舊log機率停止被追蹤梯度，在更新時當作常數。它不會替我們保存歷史：收集作答後，仍要保留同一份數值，不能改用新策略重算來替換。本例手填的數字本來就沒有梯度；保留這個呼叫，是展示實際收集策略作答時的寫法。\n",
+    "\n",
+    "將ratio乘上固定的優勢，可以形成一個待提高的分數。例如優勢0.6、ratio2，得到1.2；同一正向選擇在目前策略中更常見，這項分數就變大。這不是最終正確率，也不表示拿到兩倍品質，而是這批樣本對更新提供的目標。下一節會在這裡加入限制鼓勵程度的裁切。\n",
+    "\n",
+    "舊機率不能每改一次參數就重新用新模型算。如果分母也同步更新，ratio會永遠接近1，失去「相對收集資料那一刻改多少」的用途。一輪作答可以用來做數個更新回合，其old log機率與優勢都要固定；開始下一輪時，才用更新後的策略重新取樣、保存新的old資料。[PPO原論文演算法1](https://arxiv.org/pdf/1707.06347)就是先收集，再做數次更新，最後再收集。\n",
+    "\n",
+    "還有一份在[13.4](https://birdhackor.github.io/tiny-perceptron-vlm/13.4.html)出現的reference，固定參考模型。它跟old policy的用途不同：old對照這一輪開始時的機率；reference對照整個後訓練起點，避免偏離太遠。完成一輪後old會更新，reference仍可以是最初那份SFT副本。把兩個都叫「舊模型」，很容易在程式裡凍結錯對象。\n",
+    "\n",
+    "練習只把第一個new_probability改成0.3，先預測比值1.5，第二格仍0.5，再執行核對。接著假設錯誤地用新機率作分母，口頭算會得到什麼：兩格都1，正好把我們要觀察的改變抹掉。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "13.12"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

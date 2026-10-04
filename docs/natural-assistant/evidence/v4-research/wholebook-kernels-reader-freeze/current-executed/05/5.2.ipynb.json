@@ -1,0 +1,162 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 5.2 一次看多少例子？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "一次只看一道題，更新方向可能很受那題影響；一次把幾題放在一起，可以用平均代價決定一次更新。這一小組資料叫mini-batch，通常簡稱batch。它不是整份訓練資料，而是當前這一輪同時計算的幾筆。batch較大常讓抽樣引起的梯度起伏變小，也讓每步花更多計算與記憶體，並非免費地變穩定。\n",
+    "\n",
+    "文字題還有長度差異：第一筆有四個有效答案，第二筆只有一個，其餘格是為排成矩陣補的位置。如果目標是「平均每個答案的代價」，分母應該是五，不是兩筆各分一半。例子的長短不應該被補齊的空格改變；答案略過的約定見 [5.1](https://birdhackor.github.io/tiny-perceptron-vlm/5.1.html)，位置對應見 [4.7](https://birdhackor.github.io/tiny-perceptron-vlm/4.7.html)，分數轉機率及猜錯代價分別見[1.7](https://birdhackor.github.io/tiny-perceptron-vlm/1.7.html)、[1.8](https://birdhackor.github.io/tiny-perceptron-vlm/1.8.html)。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:11:04.836032Z",
+     "iopub.status.busy": "2026-10-04T19:11:04.835865Z",
+     "iopub.status.idle": "2026-10-04T19:11:06.330389Z",
+     "shell.execute_reply": "2026-10-04T19:11:06.329037Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7f55afb5a610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:11:06.333406Z",
+     "iopub.status.busy": "2026-10-04T19:11:06.333135Z",
+     "iopub.status.idle": "2026-10-04T19:11:06.348405Z",
+     "shell.execute_reply": "2026-10-04T19:11:06.347188Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "有效答案 5\n",
+      "總代價 8.047189712524414 平均代價 1.6094379425048828\n"
+     ]
+    }
+   ],
+   "source": [
+    "import torch\n",
+    "from tiny_perceptron.model import loss_sum\n",
+    "\n",
+    "logits = torch.zeros(2, 4, 5, requires_grad=True)\n",
+    "labels = torch.tensor([[1, 2, 3, 4], [1, -100, -100, -100]])\n",
+    "total, count = loss_sum(logits, labels)\n",
+    "mean_loss = total / count\n",
+    "print(\"有效答案\", count.item())\n",
+    "print(\"總代價\", total.item(), \"平均代價\", mean_loss.item())\n",
+    "mean_loss.backward()"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "輸入logits形狀 `[2,4,5]`：兩筆、每筆四位置、五候選。這些是尚未轉成機率的分數；五個相同的0分經過同一轉換，會得到相同機率，而五個機率總和是1，所以各為1÷5＝0.2。按1.8的負對數代價，任何有效答案的代價都是 `-log(0.2)≈1.609`。labels中五格是真答案，三格-100被排除。`loss_sum` 分別回傳代價總和與有效數量，所以輸出count=5、總數約8.047、平均約1.609。\n",
+    "\n",
+    "`requires_grad=True`讓PyTorch記錄以這份分數進行的計算，供稍後`backward()`求出它們對代價的梯度。count、total和mean_loss都各自是只含一個數的tensor；`.item()`取出普通Python數字，方便列印。最後`backward()`對平均代價求導，被忽略的位置沒有答案代價貢獻。\n",
+    "\n",
+    "若先對第一筆四題平均，再對第二筆一題平均，最後將兩筆平均，第二筆那一題就佔一半，第一筆每題只佔八分之一。那也是一個可選目標，卻不同於每題各五分之一。要先說明希望按筆數還是按有效答案平均；本課選擇後者，後面累積小批梯度時也保持同一分母。\n",
+    "\n",
+    "梯度能隨代價相加與平均：先把五個題的代價平均再求導，等於把五題各自的梯度平均。這說明batch如何把多題意見合成一步方向，而不是給每題各做一步再把參數平均。參數更新是之後優化器做的事，這段只算一次平均梯度。\n",
+    "\n",
+    "上面統一用零分數，讓每格代價相同以便手算；真模型每格不同，平均規則仍相同。補齊位置怎樣防止被讀作線索，會在第7章另談；「不算答案loss」不等於「模型看不見輸入」。\n",
+    "\n",
+    "練習把第二筆第二格答案從-100改成2，先預測有效數變6、總代價變約9.657、平均仍1.609，再執行核對。接著改回-100，應回到五；你改的是哪些答案進入統計，不是模型的候選字表。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "5.2"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

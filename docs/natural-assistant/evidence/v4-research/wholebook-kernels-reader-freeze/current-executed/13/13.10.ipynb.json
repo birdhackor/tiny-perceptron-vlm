@@ -1,0 +1,162 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 13.10 比較能不能教一位評分員？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "老師比較了許多份作業，不能每天再替模型新寫的每篇回答評分。能不能先教一位評分員，估計老師比較時會偏好哪篇？對「只回數字：1+2=?」，我們仍沿用[13.1](https://birdhackor.github.io/tiny-perceptron-vlm/13.1.html)的規則：`3`比`1+2等於3。`合適。現在收到這個比較的，不是將來要回答的模型，而是另一個輸出分數的模型。\n",
+    "\n",
+    "這位評分員叫**reward model，獎勵模型**。它讀取問題與回答，輸出一個數；分數越高表示它估計這份回答越合適。同題兩篇的分數差，可以轉成「較佳回答勝出」的機率：差0時是0.5，差正2時約0.881。[DPO原論文第3節的公式1–2](https://arxiv.org/pdf/2305.18290v3)先描述這種偏好模型，再介紹DPO如何省去獨立評分網路。前置是[13.2的偏好資料](https://birdhackor.github.io/tiny-perceptron-vlm/13.2.html)與[1.8的猜錯代價](https://birdhackor.github.io/tiny-perceptron-vlm/1.8.html)。\n",
+    "\n",
+    "怎麼從分數差算到機率？這裡採用一個固定換算規則：把「較佳回答的分數減去另一篇的分數」記成`d`，機率就取`1 / (1 + exp(-d))`，程式把這個換算叫做`sigmoid`。`exp(x)`表示`e`的`x`次方，`e`約為2.718。差距是0時，`exp(0)=1`，所以機率是`1 / (1 + 1)=0.5`；差距是2時，`exp(-2)`約為0.1353，所以是`1 / (1 + 0.1353)`，約0.8808。差距若是負數，機率就低於0.5。這個規則把沒有固定範圍的分數差換到0和1之間；它描述評分員估計老師會選哪篇，並不表示回答真的答對的機率。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:16:21.747273Z",
+     "iopub.status.busy": "2026-10-04T19:16:21.747095Z",
+     "iopub.status.idle": "2026-10-04T19:16:23.041031Z",
+     "shell.execute_reply": "2026-10-04T19:16:23.039939Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7fa3b0752610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:16:23.043438Z",
+     "iopub.status.busy": "2026-10-04T19:16:23.043208Z",
+     "iopub.status.idle": "2026-10-04T19:16:23.052015Z",
+     "shell.execute_reply": "2026-10-04T19:16:23.050092Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "差距 0.0 勝出機率 0.5 代價 0.6931\n",
+      "差距 2.0 勝出機率 0.8808 代價 0.1269\n"
+     ]
+    }
+   ],
+   "source": [
+    "import torch\n",
+    "from tiny_perceptron.posttraining import preference_loss\n",
+    "\n",
+    "for preferred_score in [0.0, 2.0]:\n",
+    "    chosen = torch.tensor([preferred_score])\n",
+    "    rejected = torch.tensor([0.0])\n",
+    "    gap = chosen - rejected\n",
+    "    win_probability = torch.sigmoid(gap)\n",
+    "    loss = preference_loss(chosen, rejected)\n",
+    "    print(\"差距\", gap.item(), \"勝出機率\", round(win_probability.item(), 4), \"代價\", round(loss.item(), 4))"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "輸入是人工設定的兩篇分數，不是模型實測。`chosen`代表較佳回答的分數，`rejected`代表較差回答；`gap`保存較佳分數減較差分數的差距，`gap.item()`取出這個單一數字供打印；`sigmoid`把這個差映成0到1。`preference_loss`取這個勝出機率的負自然log，再平均樣本。兩行依序為機率0.5、代價0.6931，以及機率0.8808、代價0.1269。若標籤說chosen較佳，提高它相對rejected的分數，就能降低代價。\n",
+    "\n",
+    "但分數3不代表「有三成正確」或「比1多懂三倍」。給同題所有回答的分數一起加10，上面的差與代價都不變。比較提供的是相對排序訊號，無法直接把每個原始分數當成校準過的正確率。評分員也可能把長回答、固定措辭或禮貌誤當成好答案，所以要用未教過的問題與反例檢查它。\n",
+    "\n",
+    "為了把流程縮到可看清的小實驗，本章實際準備四張回答卡：正確的短答、包含算式與結果的一句話、錯誤數字，以及請求補資訊。題目有「只回數字」「用一句話解釋」「購買數量沒給」三種條件；最後一種情境下，直接報總價的前三張都缺少依據，應請補數量。程式已先算好候選文字；評分網路讀的是問題條件與候選編號的數字特徵，不讀中文，也沒有學會加法。偏好標籤來自我們寫定的程式規則，沒有招募真人標注，因此這份實驗不是人類回饋資料的RLHF實證。\n",
+    "\n",
+    "實際訓練時先用訓練家族的偏好對更新評分網路，再凍結它，供[13.15](https://birdhackor.github.io/tiny-perceptron-vlm/13.15.html)的選擇模型使用。數字對調仍屬同一家族，不會把`1+2`與`2+1`分到訓練和最後測試兩邊。評分員是否把未見家族也排對，與它的訓練代價，會分別保存；預寫卡裡有正確答案，不等於模型會自己寫出答案。\n",
+    "\n",
+    "練習把rejected分數改成1，先算兩個新差距為−1與1：勝出機率約0.2689與0.7311，代價約1.3133與0.3133，再執行核對。接著將兩個分數一起加10，應得到相同機率與代價。這能讓你分清比較學習與絕對正確率。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "13.10"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

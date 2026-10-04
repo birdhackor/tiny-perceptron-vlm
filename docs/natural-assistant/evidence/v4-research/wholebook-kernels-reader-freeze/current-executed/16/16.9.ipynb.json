@@ -1,0 +1,334 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 16.9 Attention 中間矩陣為何佔空間？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "長度T的注意力要比較每個Query與每個Key，分數表有T×T格。T由4增到8，格數由16變64；若T=8192，一個頭就有約6711萬格。即使不增加模型權重，保存分數與softmax權重的中間表也可能很占記憶體。能否分塊讀Key、Value，一邊計算一邊累積結果，不把整張表保存在GPU容量較大的顯示記憶體裡？\n",
+    "\n",
+    "前置是[SDPA的縮放點積與softmax](https://birdhackor.github.io/tiny-perceptron-vlm/16.8.html)。FlashAttention的關鍵做法是分塊與減少中間資料搬移；它仍計算完整注意力，不是任意丟掉低權重位置。這裡的log是自然對數，exp是自然指數，兩者互逆：`exp(log(1))=1`、`exp(log(2))=2`、`exp(log(4))=4`，其中log(1)=0、log(2)約0.6931、log(4)約1.3863。程式用`math.log`計算自然對數、`torch.exp`計算自然指數。\n",
+    "\n",
+    "先看一個Query、三個候選：分數 `[0,log(2),log(4)]`，Value為 `[10,20,30]`。取指數得到 `[1,2,4]`，加權結果 `(10+40+120)/7=24.2857`。我們要在兩塊內得到同一數字。每個分數減去同一個值，再取指數，相當於所有權重乘上同一係數；例如都減log(4)，權重變成 `[0.25,0.5,1]`。分子170與分母7都乘0.25，變成42.5與1.75，相除的比例不變。一般規則是 `exp(a-b)=exp(a)/exp(b)`，所以 `exp(log(2)-log(4))=2/4=0.5`。\n",
+    "\n",
+    "softmax為避免指數太大，會減去本列最大分數。第一塊只有前兩項，最大是log2，指數權重 `[0.5,1]`，分母1.5，加權分子25。第二塊帶來log4，最大值改了；舊分子、分母都要乘 `exp(log2-log4)=0.5`，再加新權重1與新Value30，得到分母1.75、分子42.5。兩者相除仍24.2857。只保留分母或忘記同步縮放分子，都會算錯。\n",
+    "\n",
+    "圖中的分子是尚未除以總權重的加權總和，箭頭是處理先後。第三框的「×0.5」把舊統計改到新最大值的基準，再加入第二塊，並不是給第二塊額外折扣。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:18:40.765337Z",
+     "iopub.status.busy": "2026-10-04T19:18:40.765042Z",
+     "iopub.status.idle": "2026-10-04T19:18:42.639195Z",
+     "shell.execute_reply": "2026-10-04T19:18:42.638475Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7fb79fa66610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "cellView": "form",
+    "course_figure": {
+     "alt": "最大分數改變時，同步調整已累積分母與分子",
+     "name": "architecture_online_softmax"
+    },
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:18:42.645409Z",
+     "iopub.status.busy": "2026-10-04T19:18:42.645078Z",
+     "iopub.status.idle": "2026-10-04T19:18:42.659621Z",
+     "shell.execute_reply": "2026-10-04T19:18:42.658387Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "image/svg+xml": [
+       "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 960 330\" role=\"img\" aria-labelledby=\"title desc\">\n",
+       "<title id=\"title\">分塊softmax：最大值改變時同步縮放舊統計</title><desc id=\"desc\">第一塊分數0與log2，值10與20；最大值log2，分母1.5，分子25。第二塊分數log4，值30；舊分母與分子乘0.5，新分母1.75，分子42.5，結果24.2857。</desc>\n",
+       "<style>text{font-family:\"Noto Sans CJK TC\",\"Microsoft JhengHei\",sans-serif;fill:#172b4d}rect.box{fill:#eef5ff;stroke:#8da8ca;stroke-width:2}.arrow{fill:none;stroke:#466b97;stroke-width:2}</style>\n",
+       "<defs><marker id=\"arrow\" markerWidth=\"8\" markerHeight=\"8\" refX=\"7\" refY=\"4\" orient=\"auto\"><path d=\"M0 0L8 4L0 8\" fill=\"#466b97\"/></marker></defs>\n",
+       "<rect width=\"960\" height=\"330\" fill=\"white\"/><text x=\"480\" y=\"32\" font-size=\"22\" text-anchor=\"middle\">不用保存整列權重，仍得到相同加權平均</text>\n",
+       "<rect class=\"box\" x=\"15\" y=\"94\" width=\"210\" height=\"155\" rx=\"10\"/><rect class=\"box\" x=\"255\" y=\"94\" width=\"210\" height=\"155\" rx=\"10\"/><rect class=\"box\" x=\"495\" y=\"94\" width=\"210\" height=\"155\" rx=\"10\"/><rect x=\"735\" y=\"94\" width=\"210\" height=\"155\" rx=\"10\" fill=\"#d7f5e6\" stroke=\"#26875b\" stroke-width=\"2\"/>\n",
+       "<g text-anchor=\"middle\" font-size=\"17\"><text x=\"120\" y=\"122\">第一塊</text><text x=\"120\" y=\"152\">分數：[0, log2]</text><text x=\"120\" y=\"181\">值：[10, 20]</text><text x=\"120\" y=\"211\">權重：[0.5, 1]</text><text x=\"360\" y=\"122\">目前統計</text><text x=\"360\" y=\"152\">最大值：log2</text><text x=\"360\" y=\"181\">分母：1.5</text><text x=\"360\" y=\"211\">分子：25</text><text x=\"600\" y=\"122\">新最大值：log4</text><text x=\"600\" y=\"152\">舊統計 × 0.5</text><text x=\"600\" y=\"181\">分母：0.75 + 1</text><text x=\"600\" y=\"211\">分子：12.5 + 30</text><text x=\"840\" y=\"122\">第二塊合併後</text><text x=\"840\" y=\"152\">分母：1.75</text><text x=\"840\" y=\"181\">分子：42.5</text><text x=\"840\" y=\"211\">42.5 / 1.75</text><text x=\"840\" y=\"238\">= 24.2857</text></g>\n",
+       "<path class=\"arrow\" d=\"M225 171L255 171\" marker-end=\"url(#arrow)\"/>\n",
+       "<path class=\"arrow\" d=\"M465 171L495 171\" marker-end=\"url(#arrow)\"/>\n",
+       "<path class=\"arrow\" d=\"M705 171L735 171\" marker-end=\"url(#arrow)\"/>\n",
+       "<text x=\"480\" y=\"290\" font-size=\"16\" text-anchor=\"middle\">第二塊：分數log4、值30；乘0.5讓舊資料改以新最大值為基準</text>\n",
+       "</svg>"
+      ],
+      "text/plain": [
+       "<IPython.core.display.SVG object>"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    }
+   ],
+   "source": [
+    "# @title 本節圖解\n",
+    "from IPython.display import SVG, display\n",
+    "\n",
+    "display(SVG(filename=str(root / \"course/figures/architecture_online_softmax.svg\")))"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 3,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:18:42.666709Z",
+     "iopub.status.busy": "2026-10-04T19:18:42.666472Z",
+     "iopub.status.idle": "2026-10-04T19:18:42.679957Z",
+     "shell.execute_reply": "2026-10-04T19:18:42.679055Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "分母/分子 1.5 25.0\n",
+      "分母/分子 1.75 42.5\n",
+      "分塊結果 24.2857\n",
+      "完整結果 24.2857\n"
+     ]
+    }
+   ],
+   "source": [
+    "import math\n",
+    "import torch\n",
+    "\n",
+    "scores = torch.tensor([0.0, math.log(2), math.log(4)])\n",
+    "values = torch.tensor([10.0, 20.0, 30.0])\n",
+    "m = torch.tensor(float(\"-inf\"))\n",
+    "denominator = torch.tensor(0.0)\n",
+    "numerator = torch.tensor(0.0)\n",
+    "for start in range(0, 3, 2):\n",
+    "    block = scores[start : start + 2]\n",
+    "    new_m = torch.maximum(m, block.max())\n",
+    "    factor = torch.exp(m - new_m)\n",
+    "    weight = torch.exp(block - new_m)\n",
+    "    denominator = denominator * factor + weight.sum()\n",
+    "    numerator = numerator * factor + (weight * values[start : start + 2]).sum()\n",
+    "    m = new_m\n",
+    "    print(\"分母/分子\", denominator.item(), numerator.item())\n",
+    "print(\"分塊結果\", round((numerator / denominator).item(), 4))\n",
+    "print(\"完整結果\", round((scores.softmax(0) * values).sum().item(), 4))"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "初始最大值是負無窮大，第一次縮放係數為零，沒有舊貢獻。兩輪印出1.5/25與1.75/42.5，最後兩行都是24.2857。`range(0,3,2)`每次讀最多兩項，最後只有一項；沒有保存完整softmax權重。這種依序更新統計的技巧稱online softmax，online指逐塊處理，不是連上網路。\n",
+    "\n",
+    "這個CPU標量例子只示範數學。實際FlashAttention還將Query、Key、Value分塊放入GPU較快的片上記憶體，安排專用運算與反向重算；Python迴圈本身不具這些速度或訓練記憶體收益。要驗證收益，應在相容硬體使用對應SDPA後端，再量測時間與最高記憶體占用。\n",
+    "\n",
+    "論文所用的HBM是high-bandwidth memory（高頻寬記憶體），屬於GPU容量較大的顯示記憶體；前文的片上記憶體則位在運算晶片內，容量較小但更快。分塊讓一小份資料留在片上反覆計算，減少與較大顯示記憶體之間的搬移。分塊、統計合併與少讀寫HBM的原始推導見[FlashAttention第3.1節、Algorithm 1與Theorem 1，第3.2節Theorem 2](https://arxiv.org/pdf/2205.14135v2)。其中exact表示完整注意力的數學問題，並不保證不同運算順序的浮點輸出逐bit一致；上節實報仍保留數值誤差。\n",
+    "\n",
+    "efficiency組的FP32 SDPA實際用了memory-efficient，所以上節0.644毫秒的差不能稱為Flash加速。[NVIDIA硬體表](https://developer.nvidia.com/cuda-gpus)列L4 compute capability 8.9；compute capability是GPU運算能力的版本號，這裡的SM8.x按8.x版本分類，8.9屬於其中。L4滿足[PyTorch 2.14.1官方選擇程式](https://github.com/pytorch/pytorch/blob/5c4886908584029761b579af026dcfb627c84070/aten/src/ATen/native/transformers/cuda/sdp_utils.cpp#L413)的SM範圍；同檔的`check_dtypes_flash_attention`對SM8.x要求FP16／BF16，還要檢查安裝的PyTorch是否編入Flash支援，以及形狀、遮罩等條件。硬體名稱或API名字本身都不能替代當次後端核驗。\n",
+    "\n",
+    "上節的額外Flash補驗已確認兩種低精度的真正CUDA前向與反傳，現在才讀成本。每條路線先暖機三次，再量九次、在兩側等待GPU完成，取中位數；記憶體單位MiB是1024×1024 bytes，也就是1,048,576 bytes。下面只是固定Q/K/V注意力核心，沒有語言模型、任務loss或更新器：\n",
+    "\n",
+    "| 精度與運算範圍 | 手寫毫秒 | 強制Flash毫秒 | 手寫新增峰值MiB | Flash新增峰值MiB |\n",
+    "| --- | ---: | ---: | ---: | ---: |\n",
+    "| FP16，只向前 | 0.513 | 0.076 | 24.25 | 0.267 |\n",
+    "| FP16，向前＋Q/K/V反傳 | 1.689 | 0.503 | 32.75 | 2.032 |\n",
+    "| BF16，只向前 | 0.516 | 0.071 | 24.25 | 0.267 |\n",
+    "| BF16，向前＋Q/K/V反傳 | 1.502 | 0.458 | 32.75 | 2.032 |\n",
+    "\n",
+    "圖把FP16的記憶體起點也畫出來：灰色是每條路線暖機後已配置的65.00MiB，彩色才是呼叫期間增加的峰值。反傳路線總峰值由97.75降到約67.03MiB；不能只把新增32.75與2.032相比，就宣稱整張GPU少用了同樣倍數的記憶體。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 4,
+   "metadata": {
+    "cellView": "form",
+    "course_figure": {
+     "alt": "相同65MiB基線上，手寫與Flash注意力增加的峰值不同",
+     "name": "flash_allocated_memory"
+    },
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:18:42.684651Z",
+     "iopub.status.busy": "2026-10-04T19:18:42.684380Z",
+     "iopub.status.idle": "2026-10-04T19:18:42.794712Z",
+     "shell.execute_reply": "2026-10-04T19:18:42.775747Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "image/svg+xml": [
+       "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 800 530\" role=\"img\" aria-labelledby=\"title desc\">\n",
+       "  <title id=\"title\">相同記憶體基線上，手寫與Flash注意力的新增峰值</title>\n",
+       "  <desc id=\"desc\">FP16、固定QKV形狀2乘4乘512乘32的L4補驗。四條路線暖機後基線均65MiB。手寫向前增加24.25、總峰值89.25MiB；Flash向前增加約0.267、總峰值約65.267MiB；手寫向前與反傳增加32.75、總峰值97.75MiB；Flash向前與反傳增加約2.032、總峰值約67.032MiB。灰色為基線，彩色為新增配置。這是PyTorch CUDA allocated bytes，並非整張GPU用量或完整模型訓練記憶體。</desc>\n",
+       "  <rect width=\"800\" height=\"530\" fill=\"#fff\"/>\n",
+       "  <g font-family=\"sans-serif\" fill=\"#172b4d\">\n",
+       "    <text x=\"400\" y=\"36\" font-size=\"26\" text-anchor=\"middle\">先看起點，再比較注意力新增的記憶體</text>\n",
+       "    <text x=\"18\" y=\"76\" font-size=\"20\">FP16：固定Q/K/V，L4實測</text>\n",
+       "    <text x=\"780\" y=\"76\" font-size=\"20\" text-anchor=\"end\">總峰值 MiB</text>\n",
+       "    <text x=\"18\" y=\"136\" font-size=\"21\">手寫：只向前</text>\n",
+       "    <rect x=\"240\" y=\"111\" width=\"292.5\" height=\"34\" rx=\"3\" fill=\"#cbd5e1\"/>\n",
+       "    <rect x=\"532.5\" y=\"111\" width=\"109.125\" height=\"34\" fill=\"#f4a64c\"/>\n",
+       "    <text x=\"386.25\" y=\"135\" font-size=\"20\" text-anchor=\"middle\">65.00 基線</text>\n",
+       "    <text x=\"587.06\" y=\"135\" font-size=\"20\" text-anchor=\"middle\">24.25</text>\n",
+       "    <text x=\"780\" y=\"136\" font-size=\"21\" text-anchor=\"end\">89.25</text>\n",
+       "    <text x=\"18\" y=\"211\" font-size=\"21\">Flash：只向前</text>\n",
+       "    <rect x=\"240\" y=\"186\" width=\"292.5\" height=\"34\" rx=\"3\" fill=\"#cbd5e1\"/>\n",
+       "    <rect x=\"532.5\" y=\"186\" width=\"1.20\" height=\"34\" fill=\"#167947\"/>\n",
+       "    <text x=\"386.25\" y=\"210\" font-size=\"20\" text-anchor=\"middle\">65.00 基線</text>\n",
+       "    <text x=\"545\" y=\"210\" font-size=\"19\" fill=\"#167947\">新增 0.27</text>\n",
+       "    <text x=\"780\" y=\"211\" font-size=\"21\" text-anchor=\"end\">65.27</text>\n",
+       "    <text x=\"18\" y=\"286\" font-size=\"21\">手寫：向前＋反傳</text>\n",
+       "    <rect x=\"240\" y=\"261\" width=\"292.5\" height=\"34\" rx=\"3\" fill=\"#cbd5e1\"/>\n",
+       "    <rect x=\"532.5\" y=\"261\" width=\"147.375\" height=\"34\" fill=\"#f4a64c\"/>\n",
+       "    <text x=\"386.25\" y=\"285\" font-size=\"20\" text-anchor=\"middle\">65.00 基線</text>\n",
+       "    <text x=\"606.19\" y=\"285\" font-size=\"20\" text-anchor=\"middle\">32.75</text>\n",
+       "    <text x=\"780\" y=\"286\" font-size=\"21\" text-anchor=\"end\">97.75</text>\n",
+       "    <text x=\"18\" y=\"361\" font-size=\"21\">Flash：向前＋反傳</text>\n",
+       "    <rect x=\"240\" y=\"336\" width=\"292.5\" height=\"34\" rx=\"3\" fill=\"#cbd5e1\"/>\n",
+       "    <rect x=\"532.5\" y=\"336\" width=\"9.15\" height=\"34\" fill=\"#167947\"/>\n",
+       "    <text x=\"386.25\" y=\"360\" font-size=\"20\" text-anchor=\"middle\">65.00 基線</text>\n",
+       "    <text x=\"553\" y=\"360\" font-size=\"19\" fill=\"#167947\">新增 2.03</text>\n",
+       "    <text x=\"780\" y=\"361\" font-size=\"21\" text-anchor=\"end\">67.03</text>\n",
+       "    <rect x=\"18\" y=\"405\" width=\"18\" height=\"18\" fill=\"#cbd5e1\"/>\n",
+       "    <text x=\"45\" y=\"421\" font-size=\"20\">呼叫前現存配置</text>\n",
+       "    <rect x=\"250\" y=\"405\" width=\"18\" height=\"18\" fill=\"#f4a64c\"/>\n",
+       "    <text x=\"278\" y=\"421\" font-size=\"20\">手寫新增</text>\n",
+       "    <rect x=\"425\" y=\"405\" width=\"18\" height=\"18\" fill=\"#167947\"/>\n",
+       "    <text x=\"453\" y=\"421\" font-size=\"20\">Flash新增</text>\n",
+       "    <text x=\"18\" y=\"460\" font-size=\"18\">灰色包含現存張量與工作空間；不是整張顯示卡用量。</text>\n",
+       "    <text x=\"18\" y=\"488\" font-size=\"18\">三次暖機、九次量測；沒有模型權重、loss或更新器。</text>\n",
+       "    <text x=\"18\" y=\"516\" font-size=\"18\">四條圖柱都使用相同尺度；細綠線表示新增配置很少。</text>\n",
+       "  </g>\n",
+       "</svg>"
+      ],
+      "text/plain": [
+       "<IPython.core.display.SVG object>"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    }
+   ],
+   "source": [
+    "# @title 本節圖解\n",
+    "from IPython.display import SVG, display\n",
+    "\n",
+    "display(SVG(filename=str(root / \"course/figures/flash_allocated_memory.svg\")))"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "這些是PyTorch追蹤的CUDA已配置記憶體，包含當時現存的張量與工作空間；不是整張顯示卡用量，也不含尚未使用的配置器保留區或驅動配置。只向前時停用梯度；向前加反傳包含圖、保存值、暫存與Q/K/V梯度。固定輸入建立、數值核對和profiler都在量測區間外。這次核心較快、新增配置較少，但沒有量整個模型訓練加速或品質；若改長度、頭數、dtype與遮罩，需重新核驗。實際數值、CUDA wheel、driver、每次時間與峰值在[完整補驗報告](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/course-experiments/results/flash_probe.json)，重跑方法見[T.8](https://birdhackor.github.io/tiny-perceptron-vlm/training.html#T.8)。\n",
+    "\n",
+    "練習把每塊大小由2改成1：`range(0, 3, 2)`最後的2，以及兩處切片`scores[start : start + 2]`、`values[start : start + 2]`裡的2，都一起改成1。迴圈步長與每次讀取數量要一致，才不會重複讀取候選。先預測中間統計出現三輪，但最終仍24.2857，再執行核對。分塊方式應影響儲存與工作安排，不能改變所計算的加權平均。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "16.9"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

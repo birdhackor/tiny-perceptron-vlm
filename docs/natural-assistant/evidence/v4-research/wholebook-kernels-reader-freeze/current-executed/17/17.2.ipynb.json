@@ -1,0 +1,219 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 17.2 浮點數怎麼放進少量整數格子？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "權重可能是0.7或1.2，整數欄位卻只能放0、1、2等數字。直接去掉小數，會把許多不同權重變成同一個0；比較合理的做法是讓整數每一格代表某個浮點間隔。這個間隔叫scale（刻度）。前置是[每種表示占多少bytes](https://birdhackor.github.io/tiny-perceptron-vlm/17.1.html)：int8可用較少空間，但我們還要保存數字如何對應原範圍的規則。\n",
+    "\n",
+    "假設scale=0.5，整數1代表0.5，2代表1.0，-1代表-0.5。0.7先除以0.5得到1.4，再取最近整數1；保存1，還原時乘回0.5，得到0.5。原值與還原值差0.2，這是刻度變粗時失去的細節。1.2同理變2.4、取整數2、還原1.0。把浮點數映成少量離散格子的步驟稱quantization（量化）；乘回刻度近似還原稱dequantization（反量化）。\n",
+    "\n",
+    "圖的箭頭分別是除刻度、取整數、乘刻度，兩列就是上面兩個數值。注意最右端沒有還原成最左端：保存的整數只告訴我們最近哪個格子，沒有記住原值在格子附近的偏移。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:19:05.992970Z",
+     "iopub.status.busy": "2026-10-04T19:19:05.992707Z",
+     "iopub.status.idle": "2026-10-04T19:19:07.300401Z",
+     "shell.execute_reply": "2026-10-04T19:19:07.299594Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7f3892b56610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "cellView": "form",
+    "course_figure": {
+     "alt": "0.7與1.2使用0.5刻度，分別還原成0.5與1.0",
+     "name": "architecture_quantize_grid"
+    },
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:19:07.303939Z",
+     "iopub.status.busy": "2026-10-04T19:19:07.303671Z",
+     "iopub.status.idle": "2026-10-04T19:19:07.315103Z",
+     "shell.execute_reply": "2026-10-04T19:19:07.314294Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "image/svg+xml": [
+       "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 860 240\" role=\"img\" aria-labelledby=\"title desc\">\n",
+       "<title id=\"title\">刻度0.5：浮點數對應整數格，再還原</title><desc id=\"desc\">0.7除0.5得到1.4，取最近整數1，還原為0.5；1.2除0.5得到2.4，取整數2，還原為1.0。兩者與原值相差0.2。</desc>\n",
+       "<style>text{font-family:\"Noto Sans CJK TC\",\"Microsoft JhengHei\",sans-serif;fill:#172b4d}.box{fill:#eef5ff;stroke:#8da8ca}.arrow{stroke:#466b97;stroke-width:2;fill:none}</style><defs><marker id=\"arrow\" markerWidth=\"8\" markerHeight=\"8\" refX=\"7\" refY=\"4\" orient=\"auto\"><path d=\"M0 0L8 4L0 8\" fill=\"#466b97\"/></marker></defs>\n",
+       "<rect width=\"860\" height=\"240\" fill=\"white\"/><text x=\"430\" y=\"29\" font-size=\"22\" text-anchor=\"middle\">scale = 0.5；一格代表0.5</text>\n",
+       "<g font-size=\"17\" text-anchor=\"middle\"><text x=\"100\" y=\"62\">原數字</text><text x=\"320\" y=\"62\">除以scale</text><text x=\"540\" y=\"62\">取最近整數</text><text x=\"760\" y=\"62\">乘回scale</text>\n",
+       "<rect class=\"box\" x=\"25\" y=\"80\" width=\"150\" height=\"45\" rx=\"8\"/><text x=\"100\" y=\"109\">0.7</text><rect class=\"box\" x=\"245\" y=\"80\" width=\"150\" height=\"45\" rx=\"8\"/><text x=\"320\" y=\"109\">1.4</text><rect class=\"box\" x=\"465\" y=\"80\" width=\"150\" height=\"45\" rx=\"8\"/><text x=\"540\" y=\"109\">1</text><rect class=\"box\" x=\"685\" y=\"80\" width=\"150\" height=\"45\" rx=\"8\"/><text x=\"760\" y=\"109\">0.5</text>\n",
+       "<rect class=\"box\" x=\"25\" y=\"146\" width=\"150\" height=\"45\" rx=\"8\"/><text x=\"100\" y=\"175\">1.2</text><rect class=\"box\" x=\"245\" y=\"146\" width=\"150\" height=\"45\" rx=\"8\"/><text x=\"320\" y=\"175\">2.4</text><rect class=\"box\" x=\"465\" y=\"146\" width=\"150\" height=\"45\" rx=\"8\"/><text x=\"540\" y=\"175\">2</text><rect class=\"box\" x=\"685\" y=\"146\" width=\"150\" height=\"45\" rx=\"8\"/><text x=\"760\" y=\"175\">1.0</text></g>\n",
+       "<path class=\"arrow\" d=\"M175 102L245 102\" marker-end=\"url(#arrow)\"/>\n",
+       "<path class=\"arrow\" d=\"M395 102L465 102\" marker-end=\"url(#arrow)\"/>\n",
+       "<path class=\"arrow\" d=\"M615 102L685 102\" marker-end=\"url(#arrow)\"/>\n",
+       "<path class=\"arrow\" d=\"M175 168L245 168\" marker-end=\"url(#arrow)\"/>\n",
+       "<path class=\"arrow\" d=\"M395 168L465 168\" marker-end=\"url(#arrow)\"/>\n",
+       "<path class=\"arrow\" d=\"M615 168L685 168\" marker-end=\"url(#arrow)\"/>\n",
+       "<text x=\"430\" y=\"226\" font-size=\"16\" text-anchor=\"middle\">還原有損：0.7 − 0.5 = 0.2；1.2 − 1.0 = 0.2</text>\n",
+       "</svg>"
+      ],
+      "text/plain": [
+       "<IPython.core.display.SVG object>"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    }
+   ],
+   "source": [
+    "# @title 本節圖解\n",
+    "from IPython.display import SVG, display\n",
+    "\n",
+    "display(SVG(filename=str(root / \"course/figures/architecture_quantize_grid.svg\")))"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 3,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:19:07.318843Z",
+     "iopub.status.busy": "2026-10-04T19:19:07.317613Z",
+     "iopub.status.idle": "2026-10-04T19:19:07.327201Z",
+     "shell.execute_reply": "2026-10-04T19:19:07.326377Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "整數格 [-1, 0, 1, 2]\n",
+      "還原值 [-0.5, 0.0, 0.5, 1.0]\n",
+      "差值 [-0.20000000298023224, 0.20000000298023224, 0.20000000298023224, 0.20000000298023224]\n"
+     ]
+    }
+   ],
+   "source": [
+    "import torch\n",
+    "\n",
+    "x = torch.tensor([-0.7, 0.2, 0.7, 1.2])\n",
+    "scale = 0.5\n",
+    "q = (x / scale).round().clamp(-127, 127).to(torch.int8)\n",
+    "restored = q.float() * scale\n",
+    "print(\"整數格\", q.tolist())\n",
+    "print(\"還原值\", restored.tolist())\n",
+    "print(\"差值\", (x - restored).round(decimals=4).tolist())"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "輸入四個固定浮點數。`torch.tensor([...])`把Python清單做成可逐格運算的數字表；`x / scale`讓每格各自除以同一刻度，`x - restored`則讓同位置的兩個數相減。`round`逐格取最近整數，`clamp`把超出範圍的數字限制在端點；此例沒有碰到端點，但真實低位元欄位範圍有限，不能略過這步。這裡採對稱int8範圍-127至127，雖然int8也能存-128，我們為正負對稱保留一種編碼不用。最後 `to(int8)`真的將每格存成一byte，而不是留在浮點tensor裡假裝已壓縮。\n",
+    "\n",
+    "還原時的`q.float()`先把整數表轉成FP32浮點數表，數字仍是[-1,0,1,2]，再讓每格乘scale，得到-0.5、0.5這些有小數的近似值。`tolist()`把數字表轉成普通Python清單，方便閱讀列印結果；它不會改動原表。\n",
+    "\n",
+    "輸出q為 `[-1,0,1,2]`，還原 `[-0.5,0,0.5,1]`，差值 `[-0.2,0.2,0.2,0.2]`。0.2被映成0並非程式錯誤，是因為它更靠近刻度0而非0.5。一般最近格的捨入在未截斷時，誤差不超過半格；超出端點後則可能更大。剛好在兩格中間時，PyTorch round採最近偶數，不是所有情況都往上。\n",
+    "\n",
+    "這些差值是便於閱讀的近似十進位寫法。實際`.round(decimals=4).tolist()`仍可能印出`0.20000000298023224`：`round`的結果仍存在有限精度的浮點tensor裡，0.2只能近似表示；`tolist()`轉成普通Python清單時顯示出這個保存值，沒有把每個數字格式化成四位小數。[1.9的浮點數說明](https://birdhackor.github.io/tiny-perceptron-vlm/1.9.html)可幫你區分這種很小的表示尾數與本例約0.2的量化誤差。\n",
+    "\n",
+    "練習只把scale改成0.25，先預測整數為 `[-3,1,3,5]`，還原 `[-0.75,0.25,0.75,1.25]`，各項絕對差約0.05，再執行核對。刻度更細能保留細節，但同樣127個正格只覆蓋到31.75，範圍也縮小了；選scale必須一起考慮精度與極值。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "17.2"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

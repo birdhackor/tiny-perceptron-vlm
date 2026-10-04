@@ -1,0 +1,159 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# A.7 多輪對話和答案怎麼分配長度？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "對話愈聊愈長，又要加入檢索公告，最後還得留空間讓模型回答。假設模型最多處理100個token，歷史20、當前問題與格式15、檢索資料40，已用75；若想生成最多25，就剛好用滿。前置是[上下文中的外部資料](https://birdhackor.github.io/tiny-perceptron-vlm/A.2.html)與[token不等於中文字數](https://birdhackor.github.io/tiny-perceptron-vlm/6.7.html)。本節要先在送入模型前算清楚預算，避免重要公告被意外切掉。\n",
+    "\n",
+    "這裡context length（上下文長度）指一次生成過程能使用的位置數。輸入占用的位置加上新增答案，不能超過模型支援的上限。當前問題那15格已包含本例的系統文字與對話分隔符，不能把格式當免費；保留的25格是允許新增的答案上限，不代表實際每次必定生成25格。實際操作要先把歷史、系統文字、當前問題與檢索資料，依模型的對話格式組成輸入文字，這步稱為序列化；再用該模型的切分工具（tokenizer），把完整輸入文字切成token並計數。不同工具的切法可能不同，格式用到的token也必須算進去，不能只數尚未組合的問題字數。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:13:46.186032Z",
+     "iopub.status.busy": "2026-10-04T19:13:46.185817Z",
+     "iopub.status.idle": "2026-10-04T19:13:47.524860Z",
+     "shell.execute_reply": "2026-10-04T19:13:47.523361Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7f97c064e610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:13:47.530495Z",
+     "iopub.status.busy": "2026-10-04T19:13:47.529967Z",
+     "iopub.status.idle": "2026-10-04T19:13:47.535414Z",
+     "shell.execute_reply": "2026-10-04T19:13:47.534276Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "輸入 75 答案預留 25\n",
+      "總預算 100 放得下 True\n",
+      "歷史變長後 130 超出 30\n"
+     ]
+    }
+   ],
+   "source": [
+    "budget = {\"history\": 20, \"question_and_format\": 15, \"retrieval\": 40, \"answer\": 25}\n",
+    "limit = 100\n",
+    "used = sum(budget.values())\n",
+    "print(\"輸入\", used - budget[\"answer\"], \"答案預留\", budget[\"answer\"])\n",
+    "print(\"總預算\", used, \"放得下\", used <= limit)\n",
+    "budget[\"history\"] += 30\n",
+    "used = sum(budget.values())\n",
+    "print(\"歷史變長後\", used, \"超出\", max(0, used - limit))"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "輸入是四種用途的人工token數，不是字串長度；`.values()`取出20、15、40、25，加總100。前兩行應顯示輸入75、答案預留25，以及總預算100、True。歷史再加30後變50，總預算130，超出30。程式沒有自動截斷，它只是指出必須做出取捨，不能等模型報長度錯誤才臨時刪資料。\n",
+    "\n",
+    "可以先移除與當前問題無關的舊回合，但要保留仍在使用的條件，例如使用者剛指定的店名。也可以減少檢索段落數或選更短的相關片段，可是不能切掉地址、日期或來源編號，然後仍宣稱回答有完整證據。縮短答案預留則可能讓回答在地址或引用還沒寫完時終止。不同任務適合不同次序，預算規則應能說明保留了哪些必要資訊。\n",
+    "\n",
+    "若將舊對話改成摘要，摘要本身也可能漏掉條件；如果移除一份引用來源，就要重新判斷問題是否仍可回答。[KV快取](https://birdhackor.github.io/tiny-perceptron-vlm/16.3.html)能省重算，不能把不再可見的內容變成可靠記憶。支援更長序列也只說明形狀和儲存容得下，不保證模型一定能從很遠的段落找對細節；仍需用需要跨距離線索的題目評估。\n",
+    "\n",
+    "本輪84份RAG生成的完整序列化輸入各用58至94個token，另預留最多16個新增token，均放得進160位置；沒有靠切掉公告完成評分。全部84份都有EOS，沒有非法控制token，內容仍會失敗。報告保存`input_ids`、`generated_ids`、生成上限與EOS；先檢查原始ID中的控制標記，再比對回答文字，不讓解碼隱藏角色標記而誤計成功。本輪沒有長歷史或摘要實驗，這些短題的停止率不能替代長上下文品質評測。\n",
+    "\n",
+    "練習保留程式裡新增的30格歷史，只把retrieval由40改成10。先預測總預算回到100、超出變0，再執行核對。接著指出原本40格資料中有哪30格可以安全移除，或說明目前無法判斷。算術上放得下與證據足夠是兩個檢查，不能只看總數合格就完成資料裁切。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "A.7"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

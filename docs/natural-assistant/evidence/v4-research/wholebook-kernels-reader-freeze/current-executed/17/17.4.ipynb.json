@@ -1,0 +1,163 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 17.4 零點偏移有什麼作用？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "四位元有16種編碼，若原數值範圍是-1到2，為何一定要平均分給負側和正側？可以把16個整數碼0至15對應到這段不對稱範圍，另外記住「哪個整數碼代表浮點零」。這個整數碼叫zero-point（零點）。前置是[刻度與反量化](https://birdhackor.github.io/tiny-perceptron-vlm/17.2.html)：scale決定相鄰格差多少，zero-point決定浮點零落在哪一格。\n",
+    "\n",
+    "取 `[-1,0,1,2]`，範圍寬3，用0至15之間十五個間隔，scale是 `3/15=0.2`。-1應落在碼0，浮點零比-1多五格，所以zero-point=5；1落在10，2落在15。保存 `[0,5,10,15]`後，還原先減5再乘0.2，恰好得到原值。注意整數碼0對應浮點-1，而不是浮點零；「零點」名字指浮點0對應的碼5。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:19:10.627176Z",
+     "iopub.status.busy": "2026-10-04T19:19:10.627008Z",
+     "iopub.status.idle": "2026-10-04T19:19:11.862363Z",
+     "shell.execute_reply": "2026-10-04T19:19:11.861027Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7ff2e0546610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:19:11.865223Z",
+     "iopub.status.busy": "2026-10-04T19:19:11.864664Z",
+     "iopub.status.idle": "2026-10-04T19:19:11.875093Z",
+     "shell.execute_reply": "2026-10-04T19:19:11.873869Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "scale/zero 0.2 5\n",
+      "整數碼 [0, 5, 10, 15]\n",
+      "還原 [-1.0, 0.0, 1.0, 2.0]\n"
+     ]
+    }
+   ],
+   "source": [
+    "import torch\n",
+    "\n",
+    "x = torch.tensor([-1.0, 0.0, 1.0, 2.0])\n",
+    "low = min(x.min().item(), 0.0)\n",
+    "high = max(x.max().item(), 0.0)\n",
+    "scale = (high - low) / 15\n",
+    "zero = round(-low / scale)\n",
+    "q = (x / scale + zero).round().clamp(0, 15).to(torch.uint8)\n",
+    "restored = (q.float() - zero) * scale\n",
+    "print(\"scale/zero\", scale, zero)\n",
+    "print(\"整數碼\", q.tolist())\n",
+    "print(\"還原\", restored.round(decimals=4).tolist())"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "`x.min()`與`x.max()`先從數字表取出最小值和最大值，各自得到只含一個數的tensor；`.item()`再取出其中的普通Python數字。本例得到-1.0與2.0。外層Python `min(...,0.0)`選兩者較小的數，使low不大於0；`max(...,0.0)`選較大的數，使high不小於0。因此本例low＝-1.0、high＝2.0；若資料全在2至3，這兩行則得到low＝0、high＝3，範圍仍包含浮點零。\n",
+    "\n",
+    "這樣才能為浮點零安排合法整數碼。`zero`用Python的`round`取最近整數；`q`先縮放、加零點再取整與限制範圍。uint8表示不含負數的八位元整數容器，此時只使用0至15的16種碼，尚未把兩個四位元碼裝進一byte。這裡是表示規則，不是完整檔案打包。\n",
+    "\n",
+    "輸出scale約0.2、zero為5，整數碼 `[0,5,10,15]`，還原 `[-1,0,1,2]`。此例剛好落在刻度上，所以沒有捨入誤差；一般數字仍會有。帶刻度與零點的方式常叫affine quantization（仿射量化），相對於把零固定在整數零、正負對稱分格的方式，多了一個可保存的偏移。\n",
+    "\n",
+    "能準確還原浮點零很實用，因為補齊或空白特徵常使用零；但這不表示所有非零值都精確，也不表示所有量化實作採unsigned碼。本章後面的int4打包使用-8至7的signed數字，再映到儲存碼，必須知道各層在使用哪種表示，不能看到「4-bit」就直接混用。\n",
+    "\n",
+    "練習把x改成 `[-2,0,1]`。先預測scale仍0.2，zero移到10，整數碼為 `[0,10,15]`，再執行核對。範圍寬度不變，刻度不變，但零的位置不同；這正是scale與zero-point分工的差別。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "17.4"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

@@ -1,0 +1,262 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 20.1 照片、打字與說話，怎麼交給同一位助理？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "假設你先打字說「接下來請用繁體中文回答」，再附一張照片問「招牌寫什麼」。下一輪改用說話提問時，剛才的照片與語言要求仍然有用。我們希望換的是提問方式，不是每按一個按鈕，就換成一位忘記前文的助理。\n",
+    "\n",
+    "先讀過[7.1的對話角色](https://birdhackor.github.io/tiny-perceptron-vlm/7.1.html)與[12.14的共同聊天入口](https://birdhackor.github.io/tiny-perceptron-vlm/12.14.html)，會更容易理解這張路線圖。打字直接成為這一輪的使用者訊息；錄音先交給語音辨識器，轉成它認出的文字，再接進同一份對話。語音辨識常簡稱 ASR，可以把它想成先替你聽寫的同學。聽寫完成的文字叫逐字稿，還不是回答。\n",
+    "\n",
+    "圖片另提供畫面線索，和對話一起交給圖文聊天模型。底座是我們接手時已訓練好的權重；本課另練一小份候選修正，像原書旁的修改筆記。修正要和底座一起使用，也可以關閉修正只用底座。兩種配置都能接收相同輸入，最後由驗證決定交付哪一種，詳見[20.8](https://birdhackor.github.io/tiny-perceptron-vlm/20.8.html)。聲音辨識則是前面另一站。\n",
+    "\n",
+    "下圖在聊天核心裡標出「可選本課微調」。無論是否加上這份修正，打字、圖片與語音逐字稿仍會交給同一位助理。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:20:35.640712Z",
+     "iopub.status.busy": "2026-10-04T19:20:35.640491Z",
+     "iopub.status.idle": "2026-10-04T19:20:37.069452Z",
+     "shell.execute_reply": "2026-10-04T19:20:37.068259Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7f28eea62610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "cellView": "form",
+    "course_figure": {
+     "alt": "打字與語音逐字稿接回同一份對話，照片提供共同畫面線索",
+     "name": "natural_shared_chat"
+    },
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:20:37.071949Z",
+     "iopub.status.busy": "2026-10-04T19:20:37.071701Z",
+     "iopub.status.idle": "2026-10-04T19:20:37.083881Z",
+     "shell.execute_reply": "2026-10-04T19:20:37.081156Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "image/svg+xml": [
+       "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 720 1010\" role=\"img\" aria-labelledby=\"title desc\">\n",
+       "  <title id=\"title\">打字與說話，共用同一位聊天助理</title>\n",
+       "  <desc id=\"desc\">打字問題直接加入對話，不經語音辨識。錄音先經獨立的語音辨識模型，得到可能出錯的實際逐字稿，不用正確原話冒充逐字稿。兩條路共用對話歷史，再與實際圖片一起交給同一份圖文底座及可選的本課微調，最終生成文字回答；不包含語音合成。</desc>\n",
+       "  <style>\n",
+       "    text{font-family:\"Noto Sans CJK TC\",\"Microsoft JhengHei\",\"PingFang TC\",sans-serif;fill:#172b4d}\n",
+       "    .title{font-size:34px;font-weight:600}\n",
+       "    .main{font-size:34px;font-weight:600}\n",
+       "    .small{font-size:30px}\n",
+       "    .edge{fill:none;stroke:#496a93;stroke-width:4;stroke-linejoin:round}\n",
+       "  </style>\n",
+       "  <defs>\n",
+       "    <marker id=\"arrow\" markerWidth=\"8\" markerHeight=\"8\" refX=\"7\" refY=\"4\" orient=\"auto\"><path d=\"M0 0L8 4L0 8\" fill=\"#496a93\"/></marker>\n",
+       "  </defs>\n",
+       "  <rect width=\"720\" height=\"1010\" fill=\"#fff\"/>\n",
+       "  <text x=\"360\" y=\"44\" text-anchor=\"middle\" class=\"title\">打字與說話，共用同一位助理</text>\n",
+       "\n",
+       "  <rect x=\"30\" y=\"76\" width=\"300\" height=\"116\" rx=\"16\" fill=\"#e0f3e8\" stroke=\"#6a9b80\" stroke-width=\"2\"/>\n",
+       "  <text x=\"180\" y=\"120\" text-anchor=\"middle\" class=\"main\">打字提問</text>\n",
+       "  <text x=\"180\" y=\"167\" text-anchor=\"middle\" class=\"small\">「招牌寫什麼？」</text>\n",
+       "  <rect x=\"390\" y=\"76\" width=\"300\" height=\"116\" rx=\"16\" fill=\"#e8f1ff\" stroke=\"#8199be\" stroke-width=\"2\"/>\n",
+       "  <text x=\"540\" y=\"120\" text-anchor=\"middle\" class=\"main\">錄音提問</text>\n",
+       "  <text x=\"540\" y=\"167\" text-anchor=\"middle\" class=\"small\">同一句話的聲音</text>\n",
+       "\n",
+       "  <path d=\"M540 199V219\" class=\"edge\" marker-end=\"url(#arrow)\"/>\n",
+       "  <rect x=\"390\" y=\"232\" width=\"300\" height=\"169\" rx=\"16\" fill=\"#e8f1ff\" stroke=\"#8199be\" stroke-width=\"2\"/>\n",
+       "  <text x=\"540\" y=\"279\" text-anchor=\"middle\" class=\"main\">語音辨識：聽寫</text>\n",
+       "  <text x=\"540\" y=\"328\" text-anchor=\"middle\" class=\"small\">認出的逐字稿</text>\n",
+       "  <text x=\"540\" y=\"377\" text-anchor=\"middle\" class=\"small\">可能漏字或聽錯</text>\n",
+       "\n",
+       "  <path d=\"M180 199V423H250V445\" class=\"edge\" marker-end=\"url(#arrow)\"/>\n",
+       "  <rect x=\"75\" y=\"258\" width=\"210\" height=\"88\" rx=\"12\" fill=\"#fff\"/>\n",
+       "  <text x=\"180\" y=\"291\" text-anchor=\"middle\" class=\"small\">直接加入</text>\n",
+       "  <text x=\"180\" y=\"334\" text-anchor=\"middle\" class=\"small\">不經聽寫</text>\n",
+       "  <path d=\"M540 408V423H470V445\" class=\"edge\" marker-end=\"url(#arrow)\"/>\n",
+       "\n",
+       "  <rect x=\"30\" y=\"458\" width=\"660\" height=\"141\" rx=\"16\" fill=\"#f4f6fa\" stroke=\"#8199be\" stroke-width=\"2\"/>\n",
+       "  <text x=\"360\" y=\"503\" text-anchor=\"middle\" class=\"main\">同一份歷史＋目前問題</text>\n",
+       "  <text x=\"360\" y=\"548\" text-anchor=\"middle\" class=\"small\">語音路線用實際辨識結果</text>\n",
+       "  <text x=\"360\" y=\"587\" text-anchor=\"middle\" class=\"small\">不用正確原話冒充逐字稿</text>\n",
+       "  <path d=\"M495 606V628\" class=\"edge\" marker-end=\"url(#arrow)\"/>\n",
+       "\n",
+       "  <rect x=\"30\" y=\"663\" width=\"200\" height=\"115\" rx=\"16\" fill=\"#fff0d8\" stroke=\"#bc8e49\" stroke-width=\"2\"/>\n",
+       "  <text x=\"130\" y=\"710\" text-anchor=\"middle\" class=\"main\">實際圖片</text>\n",
+       "  <text x=\"130\" y=\"754\" text-anchor=\"middle\" class=\"small\">圖片像素</text>\n",
+       "  <path d=\"M237 720H287\" class=\"edge\" marker-end=\"url(#arrow)\"/>\n",
+       "  <rect x=\"300\" y=\"641\" width=\"390\" height=\"169\" rx=\"16\" fill=\"#e0f3e8\" stroke=\"#6a9b80\" stroke-width=\"2\"/>\n",
+       "  <text x=\"495\" y=\"683\" text-anchor=\"middle\" class=\"main\">同一圖文底座</text>\n",
+       "  <text x=\"495\" y=\"723\" text-anchor=\"middle\" class=\"main\">可選本課微調</text>\n",
+       "  <text x=\"495\" y=\"764\" text-anchor=\"middle\" class=\"small\">使用問題、歷史</text>\n",
+       "  <text x=\"495\" y=\"799\" text-anchor=\"middle\" class=\"small\">與圖片特徵</text>\n",
+       "  <path d=\"M495 817V847\" class=\"edge\" marker-end=\"url(#arrow)\"/>\n",
+       "\n",
+       "  <rect x=\"300\" y=\"860\" width=\"390\" height=\"88\" rx=\"16\" fill=\"#f4f6fa\" stroke=\"#8199be\" stroke-width=\"2\"/>\n",
+       "  <text x=\"495\" y=\"915\" text-anchor=\"middle\" class=\"main\">生成文字回答</text>\n",
+       "  <text x=\"360\" y=\"993\" text-anchor=\"middle\" class=\"small\">此路線不包含語音合成</text>\n",
+       "</svg>"
+      ],
+      "text/plain": [
+       "<IPython.core.display.SVG object>"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    }
+   ],
+   "source": [
+    "# @title 本節圖解\n",
+    "from IPython.display import SVG, display\n",
+    "\n",
+    "display(SVG(filename=str(root / \"course/figures/natural_shared_chat.svg\")))"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "先用手寫的兩份訊息檢查會合點：\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 3,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:20:37.088080Z",
+     "iopub.status.busy": "2026-10-04T19:20:37.087899Z",
+     "iopub.status.idle": "2026-10-04T19:20:37.092902Z",
+     "shell.execute_reply": "2026-10-04T19:20:37.091611Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "聊天模型收到相同對話 True\n",
+      "這輪問題 請讀出照片裡的招牌。\n"
+     ]
+    }
+   ],
+   "source": [
+    "history = [{\"role\": \"user\", \"content\": \"接下來請用繁體中文回答。\"}]\n",
+    "typed_question = \"請讀出照片裡的招牌。\"\n",
+    "recognized_question = \"請讀出照片裡的招牌。\"\n",
+    "typed_chat = history + [{\"role\": \"user\", \"content\": typed_question}]\n",
+    "spoken_chat = history + [{\"role\": \"user\", \"content\": recognized_question}]\n",
+    "print(\"聊天模型收到相同對話\", typed_chat == spoken_chat)\n",
+    "print(\"這輪問題\", spoken_chat[-1][\"content\"])"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "`history`是此前的訊息清單。`+`建立新的清單，把這輪問題接在後面；`[-1]`取最後一筆。這裡兩個問題由我們寫成相同，所以第一行是True，第二行是招牌問題。程式只檢查對話格式，尚未讀圖或辨識錄音。實際提問還要使用相同照片，才能比較兩條路。\n",
+    "\n",
+    "真正說話時，辨識器可能漏字。因此介面會先顯示逐字稿，讓你看見助理將收到什麼，再送出問題。想重新開始才清除歷史與照片；想追問同一張圖，就保留同一段對話。這份成品先用文字回答，朗讀回覆需要另外的語音合成能力。\n",
+    "\n",
+    "練習把`recognized_question`改成「請介紹這張照片」。結果應變False，因為下一站已收到不同問題。記住這個會合點，下一節就可以實際打字、附圖與說話；[20.12](https://birdhackor.github.io/tiny-perceptron-vlm/20.12.html)再教你定位哪一站造成錯誤。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "20.1"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

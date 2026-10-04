@@ -1,0 +1,164 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 13.9 只優化一種偏好會失去什麼？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "如果訓練只比較「該拒絕的題哪篇拒絕更徹底」，模型可能學成任何問題都拒絕；只優化活潑風格，也可能開始忽略只回JSON。一個偏好勝率提高，不代表所有功能同時提高。本節用資料配方與並排評估，提醒我們把未關注能力也列入檢查。\n",
+    "\n",
+    "前置是[9.6過度拒絕](https://birdhackor.github.io/tiny-perceptron-vlm/9.6.html)、[8.7多項表現](https://birdhackor.github.io/tiny-perceptron-vlm/8.7.html)與[13.1偏好標準](https://birdhackor.github.io/tiny-perceptron-vlm/13.1.html)。來源比例指不同任務資料在訓練中的份量，仍應另外記錄有效回答位置，因為每對長短不同。位置是文字拆分後的一個token預測格；有效位置指有正確目標、實際參與計分的回答格，包含約定要學的結束標記，不含提問前文與補長占位格。例如正文「4」只拆成一個token，再加回答結束，共兩個有效位置，見[13.7](https://birdhackor.github.io/tiny-perceptron-vlm/13.7.html)。metrics是測量項目，一開始未測到應標未知，不能把目標比例當成結果。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:17:00.520655Z",
+     "iopub.status.busy": "2026-10-04T19:17:00.520397Z",
+     "iopub.status.idle": "2026-10-04T19:17:01.709403Z",
+     "shell.execute_reply": "2026-10-04T19:17:01.707920Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7f5060462610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:17:01.711485Z",
+     "iopub.status.busy": "2026-10-04T19:17:01.711235Z",
+     "iopub.status.idle": "2026-10-04T19:17:01.718608Z",
+     "shell.execute_reply": "2026-10-04T19:17:01.716954Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "每100對的計畫 {'風格': 30, '格式': 30, '應拒絕題': 20, '正常題完成': 20} 合計 100\n",
+      "風格 尚未量測\n",
+      "格式 尚未量測\n",
+      "誠實 尚未量測\n",
+      "安全 尚未量測\n",
+      "正常題完成 尚未量測\n",
+      "原文字任務 尚未量測\n"
+     ]
+    }
+   ],
+   "source": [
+    "recipe = {\"風格\": 30, \"格式\": 30, \"應拒絕題\": 20, \"正常題完成\": 20}\n",
+    "metrics = {key: None for key in [\"風格\", \"格式\", \"誠實\", \"安全\", \"正常題完成\", \"原文字任務\"]}\n",
+    "print(\"每100對的計畫\", recipe, \"合計\", sum(recipe.values()))\n",
+    "for key, value in metrics.items():\n",
+    "    print(key, \"尚未量測\" if value is None else value)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "輸入配方合計100對，30對風格、30對格式、20對應拒絕、20對正常完成。它只是示範分配，不是推薦所有項目固定採用這個比例。metrics每項None表示還沒有測量，輸出六行「尚未量測」。條件判斷避免把未知誤印成0分：0是測過失敗，None則還不知道。\n",
+    "\n",
+    "訓練後應用相同保留題比較前後表現，至少看原任務、誠實、安全與正常請求是否仍完成。源資料也要保留授權與出處，非商用資料不能混入後就預設全部可商用；各來源可以按比例取樣，但來源標記不應丟失。若一組分數上升、另一組下降，要直接報告取捨，不應只挑最好勝率。\n",
+    "\n",
+    "本章實跑只更新加法正誤偏好與附加句偏好，沒有重新測整套風格、安全、多輪或反附和能力，因此那些欄位仍應留為未測。兩支正誤偏好模型的最後加法都維持起點的0／7，不能稱為保住了原本已會的算術；格式支線雖有7／7相對改善，也同樣零題生成正確。教材上的機制能跑通，與這份模型達成用途，是兩種不同的結果。\n",
+    "\n",
+    "[13.2提到的自然資料支線](https://birdhackor.github.io/tiny-perceptron-vlm/13.2.html)則使用另一個寬度32、單層模型，先做80步chosen回答SFT，再做80步DPO。十道驗證中六道相對差距改善、七道較佳候選排前；十道最後檢查則八道相對改善、四道較佳排前。兩種計數再次不同，且本支線沒有評自由生成品質。原標籤套在截短片段上的限制仍然存在，不把這些分數當成自然對話或安全能力。[完整公開報告](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/course-experiments/results/dpo.json)保存每對原始分數、長度、加法生成與來源切分，操作見[T.7](https://birdhackor.github.io/tiny-perceptron-vlm/training.html#T.7)。\n",
+    "\n",
+    "混合資料並非萬能。不同目標可能衝突，標注規則還需明確優先順序；某些任務本來應拒絕，另一些應完成。模型收到兩種正例後，仍需測試是否能根據上下文分辨，而不是把訓練比例變成固定拒絕機率。\n",
+    "\n",
+    "相同100對不保證相同訓練量。假設風格對兩篇回答各含100個有效位置、格式對兩篇各含10個，30對風格共`30×2×100=6000`個位置，30對格式共`30×2×10=600`個。模型要在每個位置算下一token各候選的機率，再取目標答案的值，原理見[13.3](https://birdhackor.github.io/tiny-perceptron-vlm/13.3.html)；因此相同對數仍可能需要不同計算時間。來源筆數比例只能說明抽樣計劃，不能代表有效位置比例。可另外統計每組兩條回答的有效位置總數，配合訓練預算與測量表。新的偏好訓練會改實際回答的語言模型裡可調數字；這同一組數字也用於原本的文字任務，因此新教學可能一起改變舊任務表現。這裡所說共享語言權重，就是不同任務共用這组模型數字，所以要保留原文字任務測試，不能只測偏好對。將未知格子明確留空，是把證據邊界寫清楚；之後每項填值時都應對應固定問題、真值與可回查回答。\n",
+    "\n",
+    "練習把正常題完成20移到應拒絕題，讓配方仍合計100，先預測輸出比例變40與0，其他測量仍未知。執行核對，再說明風險：現在沒有正常請求的對照，訓練可能鼓勵過度拒絕。要知道風險是否發生，必須真的測正常題，不能從配方直接捏造一個成功或失敗數字。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "13.9"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

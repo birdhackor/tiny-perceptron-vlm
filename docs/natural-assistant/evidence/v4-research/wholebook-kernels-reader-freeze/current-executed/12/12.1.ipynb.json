@@ -1,0 +1,255 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 12.1 音訊是什麼 tensor？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "一根琴弦振動，空氣壓力隨時間上下起伏。數位音訊把這種起伏按固定時間間隔記成一串數字，叫波形waveform。一次起伏有多大是振幅，起伏重複有多快是頻率。音比較高不代表振幅一定更大；本節先認清模型最前面收到哪一串數字。\n",
+    "\n",
+    "前置是[W.3的一維tensor](https://birdhackor.github.io/tiny-perceptron-vlm/first-steps.html#W.3)。單聲道有N個時間樣本，形狀[N]；一批B段等長單聲道可為[B,N]。左右雙聲道則需要另外一條通道軸，不能把左右兩串接成一段兩倍長的錄音，否則時間意義會變。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:15:43.594859Z",
+     "iopub.status.busy": "2026-10-04T19:15:43.594615Z",
+     "iopub.status.idle": "2026-10-04T19:15:46.768768Z",
+     "shell.execute_reply": "2026-10-04T19:15:46.768082Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7f5ed4076610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:15:46.774910Z",
+     "iopub.status.busy": "2026-10-04T19:15:46.774501Z",
+     "iopub.status.idle": "2026-10-04T19:15:46.784281Z",
+     "shell.execute_reply": "2026-10-04T19:15:46.783717Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "樣本形狀 (1600,)\n",
+      "前三個值 [0.0, 0.086, 0.169]\n",
+      "最小最大 -0.5 0.5\n"
+     ]
+    }
+   ],
+   "source": [
+    "from tiny_perceptron.multimodal import tone\n",
+    "\n",
+    "wave = tone(440.0)\n",
+    "print(\"樣本形狀\", tuple(wave.shape))\n",
+    "print(\"前三個值\", [round(v, 3) for v in wave[:3].tolist()])\n",
+    "print(\"最小最大\", round(wave.min().item(), 2), round(wave.max().item(), 2))"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "輸入`tone(440.0)`生成440Hz的正弦單音，Hz表示每秒重複幾次。正弦是一種特定的平滑曲線；在這個例子裡，它規律地從0升到最高、回到0、降到最低、再回到0，這完整一輪叫一個週期。440Hz就是每秒走完440輪。工具預設長0.1秒、每秒記錄16000個樣本，振幅0.5。它不讀取檔案或播放聲音，直接算出浮點tensor。輸出形狀`(1600,)`，前三值約[0.0,0.086,0.169]，最小最大約-0.5與0.5。波形先從0向上，之後會繼續上下往復；負數不是錯誤，而是相對基準的另一方向起伏。\n",
+    "\n",
+    "每個數字本身沒有附時間，必須另外知道取樣率16000，才能說第1個索引在1/16000秒。1600是樣本數量，不是1600Hz，也不是1600個語言token。進入音訊編碼器之前還會切成短時間框，每框形成一條特徵，這個轉換會在後面逐步解釋。\n",
+    "\n",
+    "振幅是這份數字記錄的尺度，常與聲音強弱有關，但真實聽感還受設備與頻率影響；不要把0.5直接叫固定分貝。頻率440控制起伏速度，而工具裡的0.5控制上下幅度，兩者在這個生成器裡能獨立改變。\n",
+    "\n",
+    "若把波形畫成圖，橫軸是時間或樣本索引，縱軸是振幅；曲線越密集通常表示起伏越快，而不是樣本編號越大代表聲音越高。下圖只放大一個週期，用「這一輪走完多少」作橫軸：走到1/4輪時振幅是0.5，1/2輪時回到0，3/4輪時是-0.5，走完一輪又回到0，接著重複。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 3,
+   "metadata": {
+    "cellView": "form",
+    "course_figure": {
+     "alt": "振幅0.5的正弦波，一週期從0到最高、0、最低，再回到0",
+     "name": "multimodal_wave_cycle"
+    },
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:15:46.786592Z",
+     "iopub.status.busy": "2026-10-04T19:15:46.786165Z",
+     "iopub.status.idle": "2026-10-04T19:15:46.798012Z",
+     "shell.execute_reply": "2026-10-04T19:15:46.797478Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "image/svg+xml": [
+       "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"600\" height=\"460\" viewBox=\"0 0 600 460\" role=\"img\" aria-labelledby=\"title desc\">\n",
+       "  <title id=\"title\">正弦起伏的一個週期與相位</title>\n",
+       "  <desc id=\"desc\">橫向表示一週期的進度，也就是相位。振幅從起點0升到四分之一週期的0.5，半週期回到0，四分之三週期降到負0.5，一週期結束回到0，接著再重複。</desc>\n",
+       "  <defs>\n",
+       "    <marker id=\"arrow\" markerWidth=\"8\" markerHeight=\"8\" refX=\"7\" refY=\"4\" orient=\"auto\">\n",
+       "      <path d=\"M0 0L8 4L0 8\" fill=\"#64748b\"/>\n",
+       "    </marker>\n",
+       "  </defs>\n",
+       "  <style>text{font-family:\"Noto Sans CJK TC\",\"Microsoft JhengHei\",sans-serif;fill:#18354a}</style>\n",
+       "  <rect width=\"600\" height=\"460\" rx=\"12\" fill=\"#f8fafc\"/>\n",
+       "  <text x=\"300\" y=\"36\" font-size=\"28\" text-anchor=\"middle\">平滑起伏，走完一輪再重複</text>\n",
+       "  <text x=\"300\" y=\"70\" font-size=\"24\" text-anchor=\"middle\">0 → 最高 → 0 → 最低 → 0</text>\n",
+       "  <text x=\"30\" y=\"103\" font-size=\"22\" text-anchor=\"middle\">振幅</text>\n",
+       "  <g stroke=\"#cbd5e1\" stroke-width=\"1.5\" stroke-dasharray=\"5 5\">\n",
+       "    <path d=\"M80 125H540M80 295H540\"/>\n",
+       "    <path d=\"M80 210V350M195 125V350M310 210V350M425 295V350M540 210V350\"/>\n",
+       "  </g>\n",
+       "  <path d=\"M80 315V100\" fill=\"none\" stroke=\"#64748b\" stroke-width=\"2\" marker-end=\"url(#arrow)\"/>\n",
+       "  <path d=\"M80 210H561\" fill=\"none\" stroke=\"#64748b\" stroke-width=\"2\" marker-end=\"url(#arrow)\"/>\n",
+       "  <text x=\"67\" y=\"133\" font-size=\"24\" text-anchor=\"end\">0.5</text>\n",
+       "  <text x=\"67\" y=\"218\" font-size=\"24\" text-anchor=\"end\">0</text>\n",
+       "  <text x=\"67\" y=\"303\" font-size=\"24\" text-anchor=\"end\">-0.5</text>\n",
+       "  <path d=\"M80 210C122 161 147 125 195 125C243 125 268 161 310 210C352 259 377 295 425 295C473 295 498 259 540 210\" fill=\"none\" stroke=\"#2563eb\" stroke-width=\"4\"/>\n",
+       "  <g fill=\"#2563eb\" stroke=\"white\" stroke-width=\"2\">\n",
+       "    <circle cx=\"80\" cy=\"210\" r=\"6\"/>\n",
+       "    <circle cx=\"195\" cy=\"125\" r=\"6\"/>\n",
+       "    <circle cx=\"310\" cy=\"210\" r=\"6\"/>\n",
+       "    <circle cx=\"425\" cy=\"295\" r=\"6\"/>\n",
+       "    <circle cx=\"540\" cy=\"210\" r=\"6\"/>\n",
+       "  </g>\n",
+       "  <text x=\"195\" y=\"104\" font-size=\"24\" text-anchor=\"middle\">最高</text>\n",
+       "  <text x=\"425\" y=\"328\" font-size=\"24\" text-anchor=\"middle\">最低</text>\n",
+       "  <path d=\"M80 350H540\" fill=\"none\" stroke=\"#64748b\" stroke-width=\"2\"/>\n",
+       "  <g stroke=\"#64748b\" stroke-width=\"2\">\n",
+       "    <path d=\"M80 345V355M195 345V355M310 345V355M425 345V355M540 345V355\"/>\n",
+       "  </g>\n",
+       "  <g font-size=\"25\" text-anchor=\"middle\">\n",
+       "    <text x=\"80\" y=\"383\">0</text>\n",
+       "    <text x=\"195\" y=\"383\">1/4</text>\n",
+       "    <text x=\"310\" y=\"383\">1/2</text>\n",
+       "    <text x=\"425\" y=\"383\">3/4</text>\n",
+       "    <text x=\"540\" y=\"383\">1</text>\n",
+       "  </g>\n",
+       "  <text x=\"80\" y=\"411\" font-size=\"22\" text-anchor=\"middle\">起點</text>\n",
+       "  <text x=\"540\" y=\"411\" font-size=\"22\" text-anchor=\"middle\">完成</text>\n",
+       "  <text x=\"310\" y=\"438\" font-size=\"25\" text-anchor=\"middle\">週期進度（相位）</text>\n",
+       "</svg>"
+      ],
+      "text/plain": [
+       "<IPython.core.display.SVG object>"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    }
+   ],
+   "source": [
+    "# @title 本節圖解\n",
+    "from IPython.display import SVG, display\n",
+    "\n",
+    "display(SVG(filename=str(root / \"course/figures/multimodal_wave_cycle.svg\")))"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "相位指起伏目前走到週期中的哪個位置，可以先當作「這一輪的進度」。相位不是振幅：同樣振幅0，可能是在起點向上，也可能是在半輪時向下。工具從圖左的0開始，索引0是第一點；索引1是1/16000秒後的第二點，這時440Hz的波走了440/16000輪，還沒到最高點，生成器算出的振幅約0.086。要解釋的是取樣時刻在曲線上的哪裡，不需要先學正弦公式。\n",
+    "\n",
+    "這條曲線是確定生成的測試輸入，方便我們知道答案，不是從音樂中成功抽取了音高。真實錄音還可能有噪聲、靜音或多個聲源，單看前三個值無法辨識全部內容；後面才會在短框內匯整這些變化。\n",
+    "\n",
+    "練習只把440改880，先預測形狀仍1600、極值仍約±0.5，而前幾個值變得更快上升，再執行核對。它在同樣時間內起伏約兩倍次數，不會因此多出兩倍樣本。下一節將解釋樣本數量如何與真實時間聯繫。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "12.1"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

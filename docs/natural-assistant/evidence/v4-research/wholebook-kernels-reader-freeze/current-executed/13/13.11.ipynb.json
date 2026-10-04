@@ -1,0 +1,160 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 13.11 分數怎樣讓回答更常出現？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "假設模型挑出一張回答卡，評分員給了1分。光收到這個數字，下一次的選擇不會自己改變。訓練還要決定：這次選擇比平常好多少？若這個題型平常只有0.4分，1分算不錯；如果平常都能拿1分，同樣1分就沒有超出預期。\n",
+    "\n",
+    "模型依問題給各張回答卡機率，這個「怎樣選」的規則叫**policy，策略**。[1.7](https://birdhackor.github.io/tiny-perceptron-vlm/1.7.html)已讓我們把候選分數轉成機率；這裡候選是整篇預寫回答，不是下一個文字token。估計這題平常能拿多少分的數字叫**baseline，基準值**。將實際分數減去更新前的基準，就得到**advantage，優勢估計**：正值表示比預期好，負值表示比預期差。\n",
+    "\n",
+    "前置是[13.10的評分員](https://birdhackor.github.io/tiny-perceptron-vlm/13.10.html)與[1.11的參數更新](https://birdhackor.github.io/tiny-perceptron-vlm/1.11.html)。我們先不用網路，拿兩次作答和相同基準做減法。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:16:24.153888Z",
+     "iopub.status.busy": "2026-10-04T19:16:24.152053Z",
+     "iopub.status.idle": "2026-10-04T19:16:25.481946Z",
+     "shell.execute_reply": "2026-10-04T19:16:25.480856Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7f81a51d6610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:16:25.484056Z",
+     "iopub.status.busy": "2026-10-04T19:16:25.483815Z",
+     "iopub.status.idle": "2026-10-04T19:16:25.493968Z",
+     "shell.execute_reply": "2026-10-04T19:16:25.491972Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "優勢估計 [0.6, -0.4]\n",
+      "更新策略時還追蹤基準梯度嗎 False\n"
+     ]
+    }
+   ],
+   "source": [
+    "import torch\n",
+    "from tiny_perceptron.posttraining import bandit_advantage\n",
+    "\n",
+    "rewards = torch.tensor([1.0, 0.0])\n",
+    "old_values = torch.tensor([0.4, 0.4], requires_grad=True)\n",
+    "advantage = bandit_advantage(rewards, old_values)\n",
+    "print(\"優勢估計\", [round(value, 2) for value in advantage.tolist()])\n",
+    "print(\"更新策略時還追蹤基準梯度嗎\", advantage.requires_grad)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "輸入rewards是兩次作答的分數，old_values是作答時保存的舊基準。函式計算`reward−old_value`，輸出`[0.6,−0.4]`。最後是False：這一輪把優勢當作固定評語，讓策略代價用它來更新回答選擇，不同時沿這份計算去改動基準。基準網路另外用自己的分數預測代價學習，會在[13.14](https://birdhackor.github.io/tiny-perceptron-vlm/13.14.html)拆開。\n",
+    "\n",
+    "更新的直覺是：比預期好的那次選擇，應更常被選；比預期差的，應少一些。[C.7](https://birdhackor.github.io/tiny-perceptron-vlm/C.7.html)用REINFORCE展示過「分數×所選動作的log機率」如何形成梯度。這裡接著學PPO的更新方式：仍根據固定的優勢估計，但會比較更新前後的選擇機率，並處理一次改太多的問題。PPO全名是proximal policy optimization，近端策略最佳化；它是一種更新方法，不是新的語言模型架構。\n",
+    "\n",
+    "本章的任務一次只選一張卡，隨後就拿分並結束，叫**contextual bandit，依情境做一次選擇的任務**。因此基準可以直接估計這次選擇的預期分數，優勢用上面的減法。真正逐token寫回答是一串相連的選擇：早期的字還會影響後面的前文與分數。它需要另外處理多步回饋與各位置的優勢估計，不能把本節兩個數字的減法原樣當成完整LLM訓練。\n",
+    "\n",
+    "reward也不一定是答對1、答錯0。獎勵模型的數字可能為負，還可能加入偏離參考策略的代價；其定義與尺度要保存。這次1與0是人工例子，目的是讓「拿到0也會比預期差」看得清楚，不是本章實跑網路每次都剛好給這兩種分數。\n",
+    "\n",
+    "練習只把兩個舊基準都改成0.9，先預測優勢變`[0.1,−0.9]`，再執行核對。兩次回答的評分沒有改，但超出預期的程度變了；最後說明為何不能用advantage的正負直接代替答案正誤。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "13.11"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

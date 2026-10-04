@@ -1,0 +1,173 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 5.1 訓練迴圈真的正常嗎？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "你把模型接好，loss也能算，接下來是否就該找更多資料？先用一道固定題檢查它有沒有真的學習。像修好一臺影印機先印一張已知測試紙，不急著處理整箱文件。我們讓模型反覆看同一個短序列，故意允許它記住答案；如果連這題都改善不了，就先檢查對齊、梯度與更新，而不是把問題歸因於資料太少。\n",
+    "\n",
+    "[4.7](https://birdhackor.github.io/tiny-perceptron-vlm/4.7.html) 已能算完整模型的代價與梯度，本節補上優化器更新。輸入 `[1,2,3]`、答案 `[2,3,4]`，只有三道固定下一字題。AdamW是管理參數更新的工具，其步幅與衰減細節會在 [5.4](https://birdhackor.github.io/tiny-perceptron-vlm/5.4.html)、[5.5](https://birdhackor.github.io/tiny-perceptron-vlm/5.5.html) 拆解；此處先把它當作按梯度調旋鈕的現成做法，衰減設0避免多一個影響。\n",
+    "\n",
+    "`TinyLM`是專案中已組好的小型文字模型，`ModelConfig`把設定交給它：`vocab_size=5`提供編號0到4這五個候選，`width=8`表示每個位置的向量有8個數字，`max_length=8`限制一次最多處理8個位置；本例只用其中3個。優化器的`lr`是learning rate（學習率），設定更新步幅的尺度，此處用0.03；`weight_decay=0.0`則關閉衰減。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:10:36.694279Z",
+     "iopub.status.busy": "2026-10-04T19:10:36.694083Z",
+     "iopub.status.idle": "2026-10-04T19:10:38.249296Z",
+     "shell.execute_reply": "2026-10-04T19:10:38.246302Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7f2890462610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:10:38.251479Z",
+     "iopub.status.busy": "2026-10-04T19:10:38.251148Z",
+     "iopub.status.idle": "2026-10-04T19:10:39.901381Z",
+     "shell.execute_reply": "2026-10-04T19:10:39.899644Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "第一步embedding梯度大小 0.332364022731781\n",
+      "固定例子代價 2.2728936672210693 → 0.0004435513401404023\n"
+     ]
+    }
+   ],
+   "source": [
+    "import torch\n",
+    "from tiny_perceptron.model import TinyLM, ModelConfig, masked_loss\n",
+    "\n",
+    "torch.manual_seed(42)\n",
+    "model = TinyLM(ModelConfig(vocab_size=5, width=8, max_length=8))\n",
+    "x = torch.tensor([[1, 2, 3]])\n",
+    "y = torch.tensor([[2, 3, 4]])\n",
+    "optimizer = torch.optim.AdamW(model.parameters(), lr=0.03, weight_decay=0.0)\n",
+    "before = masked_loss(model(x)[\"logits\"], y).item()\n",
+    "for step in range(40):\n",
+    "    optimizer.zero_grad()\n",
+    "    loss = masked_loss(model(x)[\"logits\"], y)\n",
+    "    loss.backward()\n",
+    "    if step == 0:\n",
+    "        print(\"第一步embedding梯度大小\", model.embedding.weight.grad.norm().item())\n",
+    "    optimizer.step()\n",
+    "after = masked_loss(model(x)[\"logits\"], y).item()\n",
+    "print(\"固定例子代價\", before, \"→\", after)\n",
+    "assert after < before"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "`model.parameters()` 交給優化器模型全部可調數字。每次先清舊梯度，再前向算新預測與loss、`backward` 求導、`step` 更新，四步順序與 [1.12](https://birdhackor.github.io/tiny-perceptron-vlm/1.12.html)、[1.13](https://birdhackor.github.io/tiny-perceptron-vlm/1.13.html) 對上。最後重新算更新後代價，應明顯低於開始；精確小數依PyTorch環境而異。\n",
+    "\n",
+    "`model.embedding`是輸入編號查向量的工具，`embedding.weight`是它保存的可調數字表：本例有5列，每列8個數，詳見[2.1的查表](https://birdhackor.github.io/tiny-perceptron-vlm/2.1.html)。`.grad`保存這張表各格收到的更新訊號；`.norm()`把訊號各格平方加總再開根，得到一個大小。第一步這個大小應為正，說明答案代價已對字向量表產生影響。\n",
+    "\n",
+    "這次四十步、極小CPU模型只是診斷流程，不是正式語言訓練。loss變小表明它可以調整固定題的偏好；要知道新題表現，仍須 [1.2](https://birdhackor.github.io/tiny-perceptron-vlm/1.2.html) 的獨立資料。如果開始與結束幾乎相同，先逐步確認optimizer負責了哪些參數、step有執行、梯度沒有被提前清掉。能背一道題不證明泛化，背不了則是值得追查的線索。\n",
+    "\n",
+    "正式腳本操作可再看[訓練配方](https://birdhackor.github.io/tiny-perceptron-vlm/training.html)。要做同樣的單例診斷，資料必須真的只有那一道，而不是以為batch-size=1就永遠抽到同一題；batch大小和資料總量不同。\n",
+    "\n",
+    "通過固定題之後，才把練習擴到幾篇短文。我們已用9篇小世界短文，讓一個兩層模型在L4 GPU上更新600次：用同一批訓練位置重新計算的平均代價，由5.79243降至0.06352。這一次確實有更新，而不只是呼叫`backward()`；但同一份模型在沒教過的那篇驗證短文，代價仍有0.96282。教過的題目與新題要分開看，正是[5.8](https://birdhackor.github.io/tiny-perceptron-vlm/5.8.html)接下來要處理的事。完整設定和重做入口在[T.4](https://birdhackor.github.io/tiny-perceptron-vlm/training.html#T.4)，不用把這份600步結果套到眼前width8、40步的診斷程式。\n",
+    "\n",
+    "練習把答案y的三格都改成-100。這個工具約定-100表示忽略答案，所以三格都忽略等於沒有學習目標。先預測 `masked_loss` 會直接報錯「所有labels都被忽略」，再執行核對；這次不應顯示成功下降的報告。流程拒絕空目標，才能避免把沒有訓練假裝成訓練完成。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "5.1"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

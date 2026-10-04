@@ -1,0 +1,238 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 13.13 為什麼別一次改太多？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "模型選了一張不錯的卡，收到正向評語。若只一味提高它的機率，即使已經提高很多，這份舊評語仍會推它繼續升。PPO的一個做法是：對已沿正確方向改得夠多的樣本，暫時不再增加同一項鼓勵，先去收集新的作答。這一步叫**clipping，裁切**，但要看清它裁的是哪一項。\n",
+    "\n",
+    "前置是[13.12的ratio](https://birdhackor.github.io/tiny-perceptron-vlm/13.12.html)。這裡設裁切範圍為0.8到1.2；對每筆樣本，一邊算`ratio×advantage`，另一邊先把ratio壓到這個區間再乘advantage，最後取兩者較小的值。這個待提高的數字叫**surrogate objective，替代目標**：它用已收集的樣本近似指引策略更新，不是直接測最終成品的用途。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:16:28.895346Z",
+     "iopub.status.busy": "2026-10-04T19:16:28.895117Z",
+     "iopub.status.idle": "2026-10-04T19:16:30.126051Z",
+     "shell.execute_reply": "2026-10-04T19:16:30.124819Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7fbb8075e610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:16:30.128685Z",
+     "iopub.status.busy": "2026-10-04T19:16:30.128385Z",
+     "iopub.status.idle": "2026-10-04T19:16:30.140955Z",
+     "shell.execute_reply": "2026-10-04T19:16:30.139539Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "待提高的值 [0.7, 1.0, 1.2, -0.8, -1.0, -1.3]\n",
+      "下降代價時對ratio的梯度 [-1.0, -1.0, 0.0, 0.0, 1.0, 1.0]\n"
+     ]
+    }
+   ],
+   "source": [
+    "import torch\n",
+    "from tiny_perceptron.posttraining import ppo_clipped_objective\n",
+    "\n",
+    "ratio = torch.tensor([0.7, 1.0, 1.3, 0.7, 1.0, 1.3], requires_grad=True)\n",
+    "advantage = torch.tensor([1.0, 1.0, 1.0, -1.0, -1.0, -1.0])\n",
+    "old_log_probability = torch.full((6,), 0.5).log()\n",
+    "new_log_probability = old_log_probability + ratio.log()\n",
+    "result = ppo_clipped_objective(new_log_probability, old_log_probability, advantage, clip_range=0.2)\n",
+    "loss = -result[\"surrogate\"].sum()\n",
+    "loss.backward()\n",
+    "print(\"待提高的值\", [round(value, 2) for value in result[\"surrogate\"].tolist()])\n",
+    "print(\"下降代價時對ratio的梯度\", [round(value, 2) for value in ratio.grad.tolist()])"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "六格分成兩組：前三格優勢為正1，後三格為負1；每組都試0.7、1、1.3的ratio。舊機率0.5，因此新機率是0.35、0.5、0.65，都是合法機率。函式按兩路取較小值，輸出`[0.7,1.0,1.2,−0.8,−1.0,−1.3]`。我們把這些值取負並加總作代價，所以梯度為`[−1,−1,0,0,1,1]`；這些是相對ratio的梯度，不是完整網路每個參數的梯度。\n",
+    "\n",
+    "正優勢應提高選擇機率，ratio超過1.2後，這筆的裁切項變平，梯度為0。負優勢應降低機率，ratio低於0.8後，同方向的鼓勵也變平。但若負優勢的卡反而更常見，ratio1.3仍有梯度，讓錯方向的變化付出代價。只把ratio裁切後相乘，漏掉最後取較小值，就會弄錯這種正負不對稱。\n",
+    "\n",
+    "圖中的水平軸都是ratio，左圖是正優勢，右圖是負優勢；實線畫待提高的值，虛線是未裁切的延伸。變平的那一側表示這筆舊樣本暫停額外鼓勵，不表示新策略被鎖在區間內。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 3,
+   "metadata": {
+    "cellView": "form",
+    "course_figure": {
+     "alt": "正負優勢的PPO替代目標，只有沿有利方向超出範圍的一側變平",
+     "name": "ppo_clip"
+    },
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:16:30.143629Z",
+     "iopub.status.busy": "2026-10-04T19:16:30.143401Z",
+     "iopub.status.idle": "2026-10-04T19:16:30.154108Z",
+     "shell.execute_reply": "2026-10-04T19:16:30.153487Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "image/svg+xml": [
+       "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 820 470\" role=\"img\" aria-labelledby=\"title desc\">\n",
+       "  <title id=\"title\">PPO正負優勢在不同方向形成平台</title>\n",
+       "  <desc id=\"desc\">裁切界限為ratio0.8與1.2。正優勢加1的目標min(r,clip(r))在1.2以上變平；負優勢負1的目標min(-r,-clip(r))在0.8以下變平。此圖表達代價項平台，不是策略機率的硬限制。</desc>\n",
+       "  <rect width=\"820\" height=\"470\" rx=\"16\" fill=\"#f8fafc\"/>\n",
+       "  <g font-family=\"Noto Sans CJK TC, sans-serif\" fill=\"#0f172a\" text-anchor=\"middle\">\n",
+       "    <text x=\"410\" y=\"38\" font-size=\"24\" font-weight=\"bold\">已沿有利方向改夠：這筆舊評語暫停額外鼓勵</text>\n",
+       "    <text x=\"220\" y=\"85\" font-size=\"21\" font-weight=\"bold\">優勢 +1：鼓勵更常選</text>\n",
+       "    <text x=\"610\" y=\"85\" font-size=\"21\" font-weight=\"bold\">優勢 −1：鼓勵少選</text>\n",
+       "  </g>\n",
+       "  <g fill=\"none\" stroke=\"#94a3b8\" stroke-width=\"2\">\n",
+       "    <path d=\"M60 310H380M60 310V105M450 130H770M450 130V335\"/>\n",
+       "    <path d=\"M160 110V315M260 110V315M550 120V340M650 120V340\" stroke-dasharray=\"5 5\"/>\n",
+       "  </g>\n",
+       "  <path d=\"M60 260L360 110\" fill=\"none\" stroke=\"#94a3b8\" stroke-width=\"3\" stroke-dasharray=\"7 6\"/>\n",
+       "  <path d=\"M60 260L260 160H360\" fill=\"none\" stroke=\"#2563eb\" stroke-width=\"5\"/>\n",
+       "  <path d=\"M450 180L750 330\" fill=\"none\" stroke=\"#94a3b8\" stroke-width=\"3\" stroke-dasharray=\"7 6\"/>\n",
+       "  <path d=\"M450 230H550L750 330\" fill=\"none\" stroke=\"#c2410c\" stroke-width=\"5\"/>\n",
+       "  <g font-family=\"Noto Sans CJK TC, sans-serif\" fill=\"#0f172a\" text-anchor=\"middle\" font-size=\"18\">\n",
+       "    <text x=\"60\" y=\"338\">0.4</text><text x=\"160\" y=\"338\">0.8</text><text x=\"210\" y=\"338\">1</text><text x=\"260\" y=\"338\">1.2</text><text x=\"360\" y=\"338\">1.6</text>\n",
+       "    <text x=\"450\" y=\"365\">0.4</text><text x=\"550\" y=\"365\">0.8</text><text x=\"600\" y=\"365\">1</text><text x=\"650\" y=\"365\">1.2</text><text x=\"750\" y=\"365\">1.6</text>\n",
+       "    <text x=\"300\" y=\"149\" fill=\"#1d4ed8\">超過1.2變平</text>\n",
+       "    <text x=\"506\" y=\"219\" fill=\"#9a3412\">低於0.8變平</text>\n",
+       "    <text x=\"218\" y=\"116\">待提高的值</text>\n",
+       "    <text x=\"610\" y=\"116\">待提高的值</text>\n",
+       "    <text x=\"380\" y=\"367\">ratio</text><text x=\"763\" y=\"395\">ratio</text>\n",
+       "    <text x=\"410\" y=\"431\">實線：PPO目標　　虛線：未裁切的延伸</text>\n",
+       "    <text x=\"410\" y=\"458\">平台表示這項暫停額外鼓勵；新機率沒有被硬鎖在區間內。</text>\n",
+       "  </g>\n",
+       "</svg>"
+      ],
+      "text/plain": [
+       "<IPython.core.display.SVG object>"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    }
+   ],
+   "source": [
+    "# @title 本節圖解\n",
+    "from IPython.display import SVG, display\n",
+    "\n",
+    "display(SVG(filename=str(root / \"course/figures/ppo_clip.svg\")))"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "這就是[PPO原論文第3節公式7與圖1](https://arxiv.org/pdf/1707.06347)的機制。它沒有直接把模型機率改寫成上限0.6，也沒有保證所有ratio永遠介於0.8與1.2；其他樣本、共享參數與其他代價仍能讓機率继續改變。因此還要監看實際偏移，不能因為代價名字叫PPO就免除評估。\n",
+    "\n",
+    "練習只把clip_range改成0.1，先預測正組最後變1.1、負組第一變−0.9，其他四格不變，梯度在這六個點也維持原值，再執行核對。最後說出「裁切待提高的鼓勵」與「硬限制所有新機率」為何不同。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "13.13"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

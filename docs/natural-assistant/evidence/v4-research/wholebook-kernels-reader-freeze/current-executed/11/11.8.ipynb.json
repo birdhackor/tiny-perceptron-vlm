@@ -1,0 +1,305 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 11.8 模型有看圖還是猜答案？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "如果訓練資料十張圖有九張圓，模型不看圖、一律回答圓，就有90%正確率。這個高分對「它會看圖」的證據很弱。本節先用類別平衡的資料計算這種猜測基準，再說明如何換圖檢驗答案是否跟視覺線索變化。\n",
+    "\n",
+    "前置是[11.4答案依圖與問題](https://birdhackor.github.io/tiny-perceptron-vlm/11.4.html)與[11.1敏感不等於正確](https://birdhackor.github.io/tiny-perceptron-vlm/11.1.html)。問題都固定為「什麼形狀」，真值由圖片生成條件給定。問題-only基準指只利用文字問題、不讀取圖的預測方法；它能揭露資料分布本來就允許猜多高。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:15:37.760869Z",
+     "iopub.status.busy": "2026-10-04T19:15:37.760685Z",
+     "iopub.status.idle": "2026-10-04T19:15:39.222049Z",
+     "shell.execute_reply": "2026-10-04T19:15:39.219911Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7f24eef56610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:15:39.225279Z",
+     "iopub.status.busy": "2026-10-04T19:15:39.224951Z",
+     "iopub.status.idle": "2026-10-04T19:15:39.235164Z",
+     "shell.execute_reply": "2026-10-04T19:15:39.231230Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "平衡資料的固定猜測 0.5\n",
+      "九比一資料的固定猜測 0.9\n"
+     ]
+    }
+   ],
+   "source": [
+    "truth = [\"circle\", \"square\", \"circle\", \"square\"]\n",
+    "text_only = [\"circle\"] * len(truth)\n",
+    "accuracy = sum(a == b for a, b in zip(truth, text_only)) / len(truth)\n",
+    "print(\"平衡資料的固定猜測\", accuracy)\n",
+    "imbalanced = [\"circle\"] * 9 + [\"square\"]\n",
+    "print(\"九比一資料的固定猜測\", imbalanced.count(\"circle\") / len(imbalanced))"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "輸入第一組兩圓兩方，`text_only`產生四個圓預測。`zip`將真值與預測逐項配對，比較True計1、False計0，除4得到0.5。第二組九圓一方，`count`數圓，除10得到0.9。輸出變化來自類別比例，模型規則完全沒變；所以資料不平衡會讓固定猜測顯得很厲害。\n",
+    "\n",
+    "實際視覺模型先用原圖評正確率，再將同問題配不同圖：圓換方時，正確答案必須從圓變方。應按新圖真值重新評分，不是只看文字變了。如果新回答從圓變「紅」，雖然有變化，仍沒有完成形狀問題。會看圖的模型在換圖後仍可能全部答對，因為我們也按新圖改了正確答案；這正是期待的結果。\n",
+    "\n",
+    "另做一個遮蔽檢查：把原圖的視覺內容遮住，問題與參考答案仍保留原題的版本。例如原題答案是circle，遮蔽後仍以circle作參考。這次刻意移除作答所需的視覺線索，觀察原題成績是否下降，叫消融（ablation）。換圖並重標答案是在檢查「是否答對新圖」；遮蔽但保留原答案是在檢查「原題的表現是否依賴視覺線索」。兩種檢查的評分規則要分開記錄。\n",
+    "\n",
+    "下圖把問題固定在「什麼形狀」，左邊紅圓換成右邊藍方，箭頭表示只替換圖片資料。正確答案要從circle變square；即使顏色也變了，題目仍只問形狀，不能拿「藍」當成功回答。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 3,
+   "metadata": {
+    "cellView": "form",
+    "course_figure": {
+     "alt": "固定問題，替換圖片後答案依形狀改變",
+     "name": "multimodal_swap_image"
+    },
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:15:39.245678Z",
+     "iopub.status.busy": "2026-10-04T19:15:39.245206Z",
+     "iopub.status.idle": "2026-10-04T19:15:39.601662Z",
+     "shell.execute_reply": "2026-10-04T19:15:39.600222Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "image/svg+xml": [
+       "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 900 360\" role=\"img\" aria-labelledby=\"title desc\"><title id=\"title\">同問題換圖，答案應按規則變</title><desc id=\"desc\">固定形狀問題，紅圓換藍方，正確答案從circle變square。顏色同時改變，但題目只問形狀。</desc><defs><marker id=\"arrow\" markerWidth=\"8\" markerHeight=\"8\" refX=\"7\" refY=\"4\" orient=\"auto\"><path d=\"M0 0L8 4L0 8\" fill=\"#54768c\"/></marker></defs><style>text{font-family:\"Noto Sans CJK TC\",\"Microsoft JhengHei\",sans-serif}svg{background:white}</style><rect width=\"900\" height=\"360\" fill=\"#fff\"/><text x=\"450\" y=\"34\" text-anchor=\"middle\" font-size=\"24\" fill=\"#18354a\">同問題換圖，答案應按規則變</text><rect x=\"30\" y=\"80\" width=\"225\" height=\"55\" rx=\"8\" fill=\"#eef5ff\" stroke=\"#54768c\"/><text x=\"142.5\" y=\"113.5\" text-anchor=\"middle\" font-size=\"19\" fill=\"#18354a\">問題固定：什麼形狀？</text><text x=\"400\" y=\"90\" text-anchor=\"middle\" font-size=\"19\" fill=\"#18354a\">原圖</text><text x=\"730\" y=\"90\" text-anchor=\"middle\" font-size=\"19\" fill=\"#18354a\">替換圖</text><circle cx=\"400\" cy=\"175\" r=\"43\" fill=\"#d8564c\"/><rect x=\"687\" y=\"132\" width=\"86\" height=\"86\" fill=\"#4677d4\"/><path d=\"M465 175L650 175\" fill=\"none\" stroke=\"#54768c\" stroke-width=\"2\" marker-end=\"url(#arrow)\"/><text x=\"555\" y=\"152\" text-anchor=\"middle\" font-size=\"17\" fill=\"#18354a\">換圖片</text><text x=\"400\" y=\"272\" text-anchor=\"middle\" font-size=\"19\" fill=\"#18354a\">正確答案：circle</text><text x=\"730\" y=\"272\" text-anchor=\"middle\" font-size=\"19\" fill=\"#18354a\">正確答案：square</text><text x=\"450\" y=\"330\" text-anchor=\"middle\" font-size=\"18\" fill=\"#18354a\">只猜circle兩次都不變；利用圖片的答案應按形狀改變。</text></svg>"
+      ],
+      "text/plain": [
+       "<IPython.core.display.SVG object>"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    }
+   ],
+   "source": [
+    "# @title 本節圖解\n",
+    "from IPython.display import SVG, display\n",
+    "\n",
+    "display(SVG(filename=str(root / \"course/figures/multimodal_swap_image.svg\")))"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "若遮蔽圖後成績幾乎不變，可能模型沒有利用圖，也可能測試本來能靠問題或分布猜答案；需要回查資料與具體回答，不能單憑一個分數下結論。上方短程式只算固定猜測基準，沒有執行換圖或遮蔽的模型檢查；下方另有完成的正式實跑。保留未訓練屬性組合，例如訓練紅圓與藍方、測試紅方與藍圓，更能檢驗它是否把顏色當成形狀捷徑。\n",
+    "\n",
+    "[正式視覺介入實驗](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/course-experiments/results/vision_ablation.json)已另完成上述模型檢查。它從[11.5的全部開放版本](https://birdhackor.github.io/tiny-perceptron-vlm/11.5.html)繼續更新100次；「全部開放」表示視覺編碼器、圖片接頭與文字模型都允許更新。更新後再固定這份模型與同一批12道新位置題比較。原圖9/12，空白圖5/12，錯配圖片但仍按原答案3/12；真正把圓換方、方換圓且同步改形狀答案後，是9/12。這些數字都有逐題回答，不能只因最後一欄沒有下降就宣布替圖成功。\n",
+    "\n",
+    "拆開後才看到原因：原圖顏色6/6，遮蔽後2/6，錯配後按原顏色0/6；改按換入圖的顏色核對，又是6/6。例如原紅圖換入綠圖時生成green，對原題算錯、對新圖算對，支持它確實利用了顏色。形狀卻相反：原圖、遮蔽、錯配與真正換形狀，每組都3/6，而且全部回答circle。原本的三張圓對、三張方錯；替換後換成另外三張對、三張錯，平均仍一半。因此目前證據支持顏色使用，沒有支持正確辨圓方。這正是「回答照圖片改對」比「總分有變」更明確的地方。\n",
+    "\n",
+    "再把每道形狀題的原圖和替換圖排成一對：原圓圖應答circle，換方後應答square，模型卻兩次都答circle，連原始生成編號也完全相同。這裡的編號是模型逐格輸出的文字單位代號，按[1.1的字表查詢方式](https://birdhackor.github.io/tiny-perceptron-vlm/1.1.html)還原成顯示的文字；這次使用位元組字表，circle的六個字母各有一個代號，後面還有結束代號。因此額外核對的是完整輸出代號清單，也包含結束位置。\n",
+    "\n",
+    "六對中「原圖與新圖都答對」是0/6，雖然各自仍有3/6單題答對。這個成對計數說明哪個觀察才支持形狀線索：答案必須按該對圖片的正確形狀變化，不能用換圖前後相同的9/12總分代替。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 4,
+   "metadata": {
+    "cellView": "form",
+    "course_figure": {
+     "alt": "原圖與替圖各一半答對，六組配對卻沒有兩端都答對",
+     "name": "vision_shape_pair"
+    },
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:15:39.608744Z",
+     "iopub.status.busy": "2026-10-04T19:15:39.608515Z",
+     "iopub.status.idle": "2026-10-04T19:15:39.614409Z",
+     "shell.execute_reply": "2026-10-04T19:15:39.613818Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "image/svg+xml": [
+       "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 1120 720\" role=\"img\" aria-labelledby=\"title desc\">\n",
+       "  <title id=\"title\">一半答對，仍可能沒跟著形狀改答</title>\n",
+       "  <desc id=\"desc\">正式視覺介入實驗中，六道形狀題在原圖與形狀替換圖都回答 circle。原圓換方會由對變錯，原方換圓會由錯變對；兩邊各答對三題，但六組配對中沒有一組兩邊都正確。圖片為簡化示意，回答和計數來自實際實驗。</desc>\n",
+       "  <style>\n",
+       "    text {font-family:system-ui,\"Noto Sans TC\",sans-serif;fill:#22304a;font-size:27px;}\n",
+       "    .heading {font-size:34px;font-weight:700;}\n",
+       "    .label {font-size:30px;font-weight:650;}\n",
+       "    .correct {fill:#17643d;font-weight:650;}\n",
+       "    .wrong {fill:#a83737;font-weight:650;}\n",
+       "    .note {fill:#536174;font-size:26px;}\n",
+       "    .image {fill:#d35252;}\n",
+       "  </style>\n",
+       "  <rect width=\"1120\" height=\"720\" rx=\"22\" fill=\"#f5f7fb\"/>\n",
+       "  <text class=\"heading\" x=\"42\" y=\"55\">一半答對，仍可能沒跟著形狀改答</text>\n",
+       "  <text x=\"42\" y=\"101\">問題固定：「什麼形狀？」　六道形狀題，兩次都回答 circle。</text>\n",
+       "  <text class=\"label\" x=\"255\" y=\"160\" text-anchor=\"middle\">原圖</text>\n",
+       "  <text class=\"label\" x=\"835\" y=\"160\" text-anchor=\"middle\">換形狀，同步改真值</text>\n",
+       "  <rect x=\"42\" y=\"185\" width=\"480\" height=\"155\" rx=\"14\" fill=\"#ffffff\"/>\n",
+       "  <rect x=\"598\" y=\"185\" width=\"480\" height=\"155\" rx=\"14\" fill=\"#ffffff\"/>\n",
+       "  <circle class=\"image\" cx=\"122\" cy=\"260\" r=\"42\"/>\n",
+       "  <text x=\"195\" y=\"245\">模型答：circle</text>\n",
+       "  <text class=\"correct\" x=\"195\" y=\"289\">答對：這是圓</text>\n",
+       "  <rect class=\"image\" x=\"638\" y=\"218\" width=\"84\" height=\"84\"/>\n",
+       "  <text x=\"753\" y=\"245\">模型答：circle</text>\n",
+       "  <text class=\"wrong\" x=\"753\" y=\"289\">答錯：這是方</text>\n",
+       "  <path d=\"M535 260H581 M570 249L581 260L570 271\" fill=\"none\" stroke=\"#516988\" stroke-width=\"4\"/>\n",
+       "  <rect x=\"42\" y=\"360\" width=\"480\" height=\"155\" rx=\"14\" fill=\"#ffffff\"/>\n",
+       "  <rect x=\"598\" y=\"360\" width=\"480\" height=\"155\" rx=\"14\" fill=\"#ffffff\"/>\n",
+       "  <rect class=\"image\" x=\"80\" y=\"393\" width=\"84\" height=\"84\"/>\n",
+       "  <text x=\"195\" y=\"420\">模型答：circle</text>\n",
+       "  <text class=\"wrong\" x=\"195\" y=\"464\">答錯：這是方</text>\n",
+       "  <circle class=\"image\" cx=\"680\" cy=\"435\" r=\"42\"/>\n",
+       "  <text x=\"753\" y=\"420\">模型答：circle</text>\n",
+       "  <text class=\"correct\" x=\"753\" y=\"464\">答對：這是圓</text>\n",
+       "  <path d=\"M535 435H581 M570 424L581 435L570 446\" fill=\"none\" stroke=\"#516988\" stroke-width=\"4\"/>\n",
+       "  <rect x=\"42\" y=\"542\" width=\"1036\" height=\"106\" rx=\"14\" fill=\"#e4ecf6\"/>\n",
+       "  <text class=\"label\" x=\"68\" y=\"583\">原圖：3/6　換形狀：3/6　　但兩端都答對：0/6</text>\n",
+       "  <text x=\"68\" y=\"627\">換了哪三題答對，總分仍相同；不能據此認定模型會辨形狀。</text>\n",
+       "  <text class=\"note\" x=\"42\" y=\"690\">圖片為簡化示意；回答與計數取自固定模型、六組成對形狀題。</text>\n",
+       "</svg>"
+      ],
+      "text/plain": [
+       "<IPython.core.display.SVG object>"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    }
+   ],
+   "source": [
+    "# @title 本節圖解\n",
+    "from IPython.display import SVG, display\n",
+    "\n",
+    "display(SVG(filename=str(root / \"course/figures/vision_shape_pair.svg\")))"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "圖中兩列是圓換方、方換圓的簡化示意；實測六對都像這兩列，模型始終回答circle，只換了哪三題答對。\n",
+    "\n",
+    "替圖時應改變目標相關屬性。只把紅圓換成藍圓，形狀答案本來就該保持circle，不能因答案沒變說模型忽略圖。若問顏色，這個替換才應改變回答。先寫出每個干預下的理想變化，再執行模型，能避免在看到結果後隨意解釋。本節前面的紅圓換藍方示意同時換顏色與形狀，問題明確只選形狀，讓核對仍有唯一目標；正式形狀替換則保留顏色，只換圓方。\n",
+    "\n",
+    "練習把第一組改成九圓一方，先預測一律猜圓得0.9，再執行核對。然後在紙上為其中一張圓圖改成方圖，寫出理想模型應改變的那一個答案。這個對照不需要新術語，卻比只說「回答有變化」更明確地規定了什麼叫有用到圖片。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "11.8"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

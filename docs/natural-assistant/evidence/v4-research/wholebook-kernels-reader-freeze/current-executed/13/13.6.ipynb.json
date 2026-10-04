@@ -1,0 +1,169 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 13.6 Beta 如何影響參考約束與更新？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "把beta加大，單次更新一定更大嗎？如果相對差距已經很強，sigmoid接近1，代價趨近0，繼續推的梯度絕對值反而可能小。beta既影響分數縮放，也與DPO對偏離參考的約束有關，不能只說「越大越偏愛勝者」。本節先固定同一個差距，觀察局部梯度。\n",
+    "\n",
+    "前置是[13.5的DPO代價](https://birdhackor.github.io/tiny-perceptron-vlm/13.5.html)。策略較佳-2、較差-4，差2；參考兩者都-3，差0，因此margin2。所有輸入仍是合法的負log分數。只改變beta，就能看出縮放與sigmoid飽和共同作用；飽和指輸出接近上限後，對差距再增加已不太敏感。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:16:53.141543Z",
+     "iopub.status.busy": "2026-10-04T19:16:53.140872Z",
+     "iopub.status.idle": "2026-10-04T19:16:54.952281Z",
+     "shell.execute_reply": "2026-10-04T19:16:54.950975Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7f4b8008e610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:16:54.954141Z",
+     "iopub.status.busy": "2026-10-04T19:16:54.953888Z",
+     "iopub.status.idle": "2026-10-04T19:16:54.971739Z",
+     "shell.execute_reply": "2026-10-04T19:16:54.970785Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "0.1 代價 0.598139 梯度 -0.045017\n",
+      "1.0 代價 0.126928 梯度 -0.119203\n",
+      "5.0 代價 4.5e-05 梯度 -0.000227\n"
+     ]
+    }
+   ],
+   "source": [
+    "import torch\n",
+    "from tiny_perceptron.alignment import dpo_loss\n",
+    "\n",
+    "for beta in [0.1, 1.0, 5.0]:\n",
+    "    chosen = torch.tensor([-2.0], requires_grad=True)\n",
+    "    loss = dpo_loss(chosen, torch.tensor([-4.0]), torch.tensor([-3.0]), torch.tensor([-3.0]), beta=beta)\n",
+    "    loss.backward()\n",
+    "    print(beta, \"代價\", round(loss.item(), 6), \"梯度\", round(chosen.grad.item(), 6))"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "輸入每輪重新建立chosen，避免前輪梯度累積。輸出beta0.1時代價約0.598139、梯度-0.045017；beta1時0.126928、-0.119203；beta5時0.000045、-0.000227。這裡比較梯度的絕對值，即更新的影響幅度，不是負數本身的大小：beta從0.1到1，絕對值由0.045017增加到0.119203，再到5降為0.000227。若學習率固定，梯度下降的單次更新幅度也按這些絕對值變化。它已覺得這個正差距足夠強，所以繼續提升的訓練信號趨弱。\n",
+    "\n",
+    "這只是固定log分數附近的導數，不能預測完整訓練最終質量。DPO的理論目標可理解為讓回答得到較好的分數，同時懲罰新策略相對參考的分布偏離。「固定獎勵」指使用同一套回答好壞評分規則，例如答對加法給1、答錯給0，不隨beta改規則；「分布偏離」指同一前文下，各種回答的生成機率與固定參考機率的差異。在固定這套評分的理論目標中，beta越大，對偏離的代價越重。本程式固定的則是四個log分數，只量當前位置的導數，沒有分別訓練出各beta的最終模型。實際偏好、學習率與訓練階段會共同影響結果，因此不能從這張局部梯度表說beta5必定最保守或最好。\n",
+    "\n",
+    "選擇beta應同樣報告偏好測試、原任務能力與安全分項，固定其他訓練預算。也要保證beta>0，0會把差距抹去，負值則反轉預定方向，本專案會拒絕這種設置。\n",
+    "\n",
+    "我們也從同一加法起點真正更新兩支模型，beta分別為0.1與1，每批八對、學習率固定0.001、各250步。寬度64、兩層、141,568個參數與資料、抽樣種子都相同。表中的「較佳排前」只比較完整chosen與rejected的機率；「相對改善」則比較策略與固定參考的差距，兩者不能互換。\n",
+    "\n",
+    "| 設定 | 八題驗證：較佳排前 | 七題最後檢查：較佳排前 | 七題最後檢查：相對改善 | 七題實際生成答對 |\n",
+    "| --- | ---: | ---: | ---: | ---: |\n",
+    "| 更新前起點 | 0／8 | 1／7 | 0／7 | 0／7 |\n",
+    "| beta 0.1 | 3／8 | 1／7 | 1／7 | 0／7 |\n",
+    "| beta 1 | 0／8 | 0／7 | 0／7 | 0／7 |\n",
+    "\n",
+    "驗證題中兩支各有5／8的相對差距改善，但最後檢查的平均相對差距分別為−16.27347與−5.03428，並沒有重現驗證側的進步。兩支在八題驗證及七題最後檢查都沒生成正確答案，全部都有EOS；例如`2+2=?`都回答`8`。這次beta 0.1在驗證候選排序上較好，不能據此稱它普遍較好，更不能把這一個種子、四個留出家族的失敗解讀為DPO必然無效。它讓我們看見這份小資料和弱起點尚未達成什麼。\n",
+    "\n",
+    "學習率與beta也不可互相混名。學習率決定把算好的梯度乘多少後更新；beta在算梯度前已經進入sigmoid，可能改變飽和程度。若margin恰0，較佳導數是-beta/2，beta加倍確實讓這個局部導數加倍；本例margin2卻出現不單調變化。先分清當前位置的差距，才能理解不同實驗為什麼看起來給出相反印象。保存beta、學習率、參考版本與訓練步數，才能讓另一個人重現更新；只報告「偏好優化更強」沒有說明具體改變哪一項。\n",
+    "\n",
+    "練習只把策略chosen改-6，rejected保持-4，使margin=-2。先預測三種代價都更大，而且大beta對錯誤方向的梯度不再接近0，再執行核對。這個對照說明「已經站對方向」與「仍站錯方向」下，同一個beta會表現不同。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "13.6"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

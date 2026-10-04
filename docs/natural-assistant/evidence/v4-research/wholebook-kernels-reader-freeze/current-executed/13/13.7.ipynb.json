@@ -1,0 +1,161 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 13.7 模型是否只學到回答更長？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "資料裡每次勝者都長、敗者都短，模型可能學會「多寫一點就有獎」，而不是學貼切解釋。像食評總把份量大的餐點判好，廚師最後只會加量。本節先數偏好對兩邊的學習長度，讓這個隱藏差異有可觀察記錄。\n",
+    "\n",
+    "前置是[8.12裁判的長度偏差](https://birdhackor.github.io/tiny-perceptron-vlm/8.12.html)、[13.3整段分數採用sum](https://birdhackor.github.io/tiny-perceptron-vlm/13.3.html)與[6.7一個字不一定一個token](https://birdhackor.github.io/tiny-perceptron-vlm/6.7.html)。長短是可能影響比較的混淆因素，指和品質一起變化、讓原因難以區分的條件。把總分偷偷改平均，不會自動解決人類標籤本身總偏愛長篇的問題。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:16:56.092736Z",
+     "iopub.status.busy": "2026-10-04T19:16:56.092586Z",
+     "iopub.status.idle": "2026-10-04T19:16:57.245136Z",
+     "shell.execute_reply": "2026-10-04T19:16:57.243810Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7f1f3ea5e610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:16:57.247426Z",
+     "iopub.status.busy": "2026-10-04T19:16:57.247211Z",
+     "iopub.status.idle": "2026-10-04T19:16:57.253001Z",
+     "shell.execute_reply": "2026-10-04T19:16:57.251374Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "回答 4 正文位元組tokens 1 含結束學習位置 2\n",
+      "回答 4。4。4。4。4。4。4。4。 正文位元組tokens 32 含結束學習位置 33\n"
+     ]
+    }
+   ],
+   "source": [
+    "from tiny_perceptron.data import ByteTokenizer\n",
+    "\n",
+    "tok = ByteTokenizer()\n",
+    "answers = [\"4\", \"4。\" * 8]\n",
+    "for answer in answers:\n",
+    "    body = tok.encode(answer)\n",
+    "    print(\"回答\", answer, \"正文位元組tokens\", len(body), \"含結束學習位置\", len(body) + 1)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "輸入是在同題「2+2=?」下的兩份人工回答：短版只有4，長版把4加中文句號重複八次，事實仍只是4。預設切詞以UTF-8位元組為單位：4佔1，中文句號佔3，因此短正文1、長正文32。加一個回答結束標記後，學習位置為2和33。字元數與token數不同，這個例子讓我們具體看到差別。\n",
+    "\n",
+    "這些數字不是模型偏好成績，程式只審計資料。偏好對中的chosen是人工標為較佳的回答，rejected是較差的另一篇；DPO是把同題兩篇回答與固定參考作比較、調整模型回答傾向的方法，見[13.4](https://birdhackor.github.io/tiny-perceptron-vlm/13.4.html)。若大部分chosen都是33格、rejected都是2格，長度可能成為穩定捷徑。可以增加長短接近但質量不同的對照，也加入「長卻重複」敗給「短而完整」的例子，讓標注理由與長短分開。\n",
+    "\n",
+    "同時不能一律把長回答壓短：有用解釋可能確實需要更多字。任務若要求詳細過程，過短會漏步驟；若要求只回數字，多寫就違約。應按條件分組測試，同時報長度、內容正確與格式完成。參考差分有助於看相對變化，卻不是免除資料偏差的保證。\n",
+    "\n",
+    "長度還可能影響代價來源：正文32格加結束與正文1格加結束，在整段sum中合計的log項數量不同。如果為了消除此差別改mean，等於改變偏好訓練數學目標，不能只當成無影響的報告格式調整。原DPO用整段差距與參考差距相減，每篇自己的長度保持一致進入兩份模型，這是它的比較約定。資料審計應記錄兩邊的正文與結束計數，進一步看較長回答是否真的提供新解釋、是否漏掉格式限制；多寫無用字並不會因為代價公式存在就自動被識別出來。\n",
+    "\n",
+    "正式實驗另做一支只比較附加句的控制：同一題`2+2=?`，指定較佳為`4`、較差為`4; answer complete`，兩邊數值都正確。第一篇含EOS有兩個目標，第二篇有19個；本支線的偏好理由是不要附加句，並不是第二篇算錯。起點在七道最後檢查上，本來就給短候選較高機率。更新200次後，七道相對差距都改善，短候選仍都排前，不是從零題變成七題；但是七道自由生成仍零題答對，上面這題實際生成`3`。這讓我們把格式偏好與算術能力分開觀察，不能把7／7排序當成加法通過。\n",
+    "\n",
+    "相對差距增加，甚至不要求較佳候選自己的機率上升。在驗證題`0+3=?`上，正確短答`3`的log機率從約−13.30943降為−13.37556，卻仍有約115.77823的相對差距改善，因為附加句版本下降更多。這個數字是兩篇完整機率與參考差距的變化，不是模型算對的信心。長短、答案內容與生成結果需要一起回查；這支線沒有消除所有長度偏差，也沒有改成平均分數。\n",
+    "\n",
+    "練習只把重複次數8改2，先預測長正文變8tokens、含結束9，短版仍1和2，再執行核對。接著把長版替換成「兩組各2塊積木合起來，共有4塊。」。分別在兩個明確問題下評它：若問題是「2+2=?只回數字」，短版4合格，這份解釋違反格式；若問題是「2+2=?請用分組說明」，這份解釋提供所需資訊，單答4則少了要求的說明。先說出兩組判斷，再對照這些条件核對。選擇理由應指出符合哪個要求、增加什麼有用資訊，而不是只引用長度數字。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "13.7"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

@@ -1,0 +1,170 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 8.9 同一個基模能切換不同風格版本嗎？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "你有同一份文章底稿和兩套編輯註記：一套改得簡短，一套增加例子。要回到簡短版，就應套用整套簡短註記，而不是保留上次一半修改再補另一半。LoRA也有相同問題：同一個基礎模型可以搭配不同修正，但切換時必須知道換的是完整哪一組。\n",
+    "\n",
+    "先看[8.8的A、B修正路徑](https://birdhackor.github.io/tiny-perceptron-vlm/8.8.html)。回顧一下，基模保留原矩陣W，adapter（適配器）保存補充路徑的A與B及其設定。有效矩陣是W加上指定adapter的ΔW。本節不用已訓練風格，而是手設兩組不同數字，先驗證切換有沒有正確；數字能換回，不代表它們已經具有文風。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:13:06.046847Z",
+     "iopub.status.busy": "2026-10-04T19:13:06.046685Z",
+     "iopub.status.idle": "2026-10-04T19:13:07.284635Z",
+     "shell.execute_reply": "2026-10-04T19:13:07.283703Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7fe038152610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:13:07.288522Z",
+     "iopub.status.busy": "2026-10-04T19:13:07.288269Z",
+     "iopub.status.idle": "2026-10-04T19:13:07.300017Z",
+     "shell.execute_reply": "2026-10-04T19:13:07.299255Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "切回A的B平均 0.1\n",
+      "A兩個矩陣都恢復 True\n"
+     ]
+    }
+   ],
+   "source": [
+    "import torch\n",
+    "from torch import nn\n",
+    "from tiny_perceptron.alignment import LoRALinear\n",
+    "\n",
+    "torch.manual_seed(0)\n",
+    "layer = LoRALinear(nn.Linear(4, 3), rank=2, alpha=2)\n",
+    "with torch.no_grad():\n",
+    "    layer.b.fill_(0.1)\n",
+    "    adapter_a = {\"a\": layer.a.clone(), \"b\": layer.b.clone()}\n",
+    "    layer.a.fill_(0.2)\n",
+    "    layer.b.fill_(-0.1)\n",
+    "    adapter_b = {\"a\": layer.a.clone(), \"b\": layer.b.clone()}\n",
+    "    layer.a.copy_(adapter_a[\"a\"])\n",
+    "    layer.b.copy_(adapter_a[\"b\"])\n",
+    "print(\"切回A的B平均\", round(layer.b.mean().item(), 2))\n",
+    "print(\"A兩個矩陣都恢復\", torch.equal(layer.a, adapter_a[\"a\"]) and torch.equal(layer.b, adapter_a[\"b\"]))"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "輸入是一個4進3出的線性層，rank為2。`no_grad`讓這段手動設定不被記成訓練計算；`fill_`將矩陣每個元素設成指定數字。`clone()`複製當下內容，否則只是拿同一份可變數字作參照，後面再修改時容易連「備份」一起改了。第一組B全為0.1；第二組A改為0.2，B全為-0.1，確保兩組真的不同。\n",
+    "\n",
+    "兩個`copy_`是完整切回的關鍵：分別恢復A與B。輸出第一行平均0.1，第二行`True`，表示逐元素比對都相同。這不是把A的ΔW和B的ΔW相加，也不是訓練了第三種混合風格。手動資料存在記憶體中，程式沒有寫出權重檔；實際保存時也需把兩個矩陣一起存下。\n",
+    "\n",
+    "除了數字，還要記錄基模版本、要套用的層名、rank、alpha及縮放公式。同樣的形狀只能說矩陣算得過去，不能保證同一個修正對另一版本的基模有原本意義。例如原基模已改變某個特徵的解讀方式，舊adapter修正的位置也可能不再恰當。\n",
+    "\n",
+    "切換還需要恢復縮放設定。例如A、B完全相同，但上次alpha為4，這次訓練時為2，若只載矩陣不恢復alpha，就會把修正放大兩倍。這像拿了正確食譜卻用錯量匙。程式的兩組設定刻意相同，所以只示範矩陣備份與替換；正式檔案需把設定一併保存。也應先核對每個層名都有對應矩陣，漏一層不能只因其他層成功載入就說完整切換。遇到不相容版本，應明確報出差異，讓使用者知道現在套的是哪份基模與註記。\n",
+    "\n",
+    "上一節兩套真訓練的adapter也做了「短答→比喻→短答」檢查。在同一個`1+1=?`對話前文上，比較所有位置的候選分數，切回短答前後的最大差為0；短答與比喻版的分數本身則確實不同。這確認了這一次整套切換能恢復，並沒有測到模型對所有新題都有好文風。\n",
+    "\n",
+    "若不需要繼續切換，也能把指定修正合進原矩陣，另存一份完整模型：W變成W＋ΔW，推論時就不用再載那套adapter。在同一前文上，比喻adapter與合併模型的候選分數最大差約0.00000668，落在這次設定的0.0001容許值內；浮點計算改了加總順序，通常不保證逐位完全相等。合併檔已含修正，不能再把同一adapter加上一次。實際載入與合併檔的用法見[T.5](https://birdhackor.github.io/tiny-perceptron-vlm/training.html#T.5)。\n",
+    "\n",
+    "練習刪掉恢復A的那一行，先預測B平均仍是0.1，但「兩個矩陣都恢復」會變`False`，再執行核對。只看B平均，會漏掉一半切換錯誤。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "8.9"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

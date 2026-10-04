@@ -1,0 +1,160 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 9.2 不知道時怎麼回答？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "盒子裡真的有3顆球，但助手看不到盒內，也沒收到數量。它剛好猜3，即使撞中答案，仍不能把猜測當成有根據的回答；反過來，使用者已明說「盒中有3顆」，助手卻一直說不知道，也沒有善用資訊。本節教的是看可見資料是否足夠，決定回答或指出缺項。\n",
+    "\n",
+    "前置是[9.1的誠實標準](https://birdhackor.github.io/tiny-perceptron-vlm/9.1.html)與[8.6缺資訊時澄清](https://birdhackor.github.io/tiny-perceptron-vlm/8.6.html)。我們建立一個小世界：問題只有球數，能見的球數存在`visible_count`，看不到時用`None`。真實球數可以另外存在作者手中，但不能偷偷放進模型答案，否則訓練會獎勵沒有依據的猜測。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:13:12.995542Z",
+     "iopub.status.busy": "2026-10-04T19:13:12.995342Z",
+     "iopub.status.idle": "2026-10-04T19:13:14.153145Z",
+     "shell.execute_reply": "2026-10-04T19:13:14.152302Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7f0464452610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:13:14.157143Z",
+     "iopub.status.busy": "2026-10-04T19:13:14.156893Z",
+     "iopub.status.idle": "2026-10-04T19:13:14.162218Z",
+     "shell.execute_reply": "2026-10-04T19:13:14.160749Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "可見 3 → 3\n",
+      "可見 None → 看不到球數，請提供數量或圖片。\n"
+     ]
+    }
+   ],
+   "source": [
+    "examples = [\n",
+    "    {\"visible_count\": 3, \"hidden_count\": 3},\n",
+    "    {\"visible_count\": None, \"hidden_count\": 3},\n",
+    "]\n",
+    "for row in examples:\n",
+    "    visible = row[\"visible_count\"]\n",
+    "    target = str(visible) if visible is not None else \"看不到球數，請提供數量或圖片。\"\n",
+    "    print(\"可見\", visible, \"→\", target)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "輸入兩筆的隱藏真值都為3，只有可見資訊不同。`visible`只取可見欄位，`is not None`檢查是否有值。這裡把分支縮成一行：`A if 條件 else B`表示條件成立就取A，不成立就取B。因此有值時`str`把整數轉成回答文字，無值時給出說明缺項的目標句。輸出第一行`可見 3 → 3`，第二行`可見 None → 看不到球數，請提供數量或圖片。`。關鍵是產生回答的那行從未讀取`hidden_count`。\n",
+    "\n",
+    "這是人工規則產生訓練目標，不是模型已具備自我覺察的展示。真正訓練可以把「盒中有3顆球，問幾顆」與「一個未開的盒子，問幾顆」做成對話，讓模型學兩種回答情況。測試時再換球數與問法，查看它是否把缺資訊的題一律猜最常見數字，或把資訊完整的題也過度澄清。\n",
+    "\n",
+    "誠實回答還應說清楚缺的是什麼，而不是只加一句「我可能錯」。在這個例子，欠缺球數或可看清球的圖片；知道盒子是紅色，通常不能推出裡面有幾顆。若任務範圍另有「每個紅盒固定裝3顆」的明確規則，那才是可以使用的新依據，必須讓模型看見。\n",
+    "\n",
+    "隱藏真值的用途是讓出題者核對世界本身，不是給回答者一條祕密捷徑。資料作者可以知道盒內有3球，卻仍應將不可見例標成資訊不足。反過來，模型若已收到清楚照片或明確數量，就應使用它，不能靠每題都說不知道取得誠實標籤。評估因此需同時保存「可回答」與「欠資訊」兩組，分別看答對與適當澄清。若只看碰巧猜中多少，會把運氣當成依據；若只看澄清句出現多少，則會獎勵不必要的停頓。\n",
+    "\n",
+    "人工規則也要用來檢查訓練後的模型。[9.8的混合版](https://birdhackor.github.io/tiny-perceptron-vlm/9.8.html)在原問句`count=?；有幾顆？`會回答`資訊不足，請提供數量。`；保持盒子與缺資訊條件不變，改問`盒子1；count=?；能確定球數嗎？`，卻回答`6`。這個對照提醒我們：學會在某句後面接澄清句，尚不等於能判斷不同問法中的資訊是否足夠。共同訓練設定與整組改問法結果會在9.8一起閱讀。\n",
+    "\n",
+    "練習替第二筆加`\"box_color\": \"紅\"`，保持產生目標的判斷不變。先預測第二行仍要求球數，然後重跑核對。若你想讓顏色影響答案，就先寫出並提供顏色到數量的規則；單純增加無關欄位不應讓猜測突然變成確定知識。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "9.2"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

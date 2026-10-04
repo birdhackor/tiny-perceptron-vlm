@@ -1,0 +1,159 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 3.3 查詢與被查詢為什麼分開？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "圖書館裡的讀者用「我想學做菜」表達需求，書目則記「烹飪、家常菜、食材」。兩邊參與同一次搜尋，卻不必原先就用同一套描述。模型也可以把每個位置的資訊轉換成兩種向量：query表示現在要找什麼，key表示這個位置可以被什麼需求找到。分開不是因為它們來自不同世界，而是讓「提出需求」與「提供匹配線索」各有可學的配方。\n",
+    "\n",
+    "延續 [3.2](https://birdhackor.github.io/tiny-perceptron-vlm/3.2.html) 的點積，現在同時有兩個查詢、三個候選。把所有query排成矩陣Q，所有key排成K；每個query分別與每個key比較，形成兩列三欄的分數表。列是查詢，欄是被查詢的位置，不能把這兩個軸都籠統叫文字長度就忘掉角色。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:10:00.441386Z",
+     "iopub.status.busy": "2026-10-04T19:10:00.440939Z",
+     "iopub.status.idle": "2026-10-04T19:10:01.955167Z",
+     "shell.execute_reply": "2026-10-04T19:10:01.954272Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7fa804266610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:10:01.957822Z",
+     "iopub.status.busy": "2026-10-04T19:10:01.957547Z",
+     "iopub.status.idle": "2026-10-04T19:10:01.968189Z",
+     "shell.execute_reply": "2026-10-04T19:10:01.966200Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Q torch.Size([2, 2]) K轉置 torch.Size([2, 3])\n",
+      "tensor([[1., 0., 1.],\n",
+      "        [0., 1., 1.]])\n"
+     ]
+    }
+   ],
+   "source": [
+    "import torch\n",
+    "\n",
+    "q = torch.tensor([[1.0, 0.0], [0.0, 1.0]])\n",
+    "k = torch.tensor([[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]])\n",
+    "scores = q @ k.T\n",
+    "print(\"Q\", q.shape, \"K轉置\", k.T.shape)\n",
+    "print(scores)\n",
+    "assert scores.shape == (2, 3)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "輸入Q有兩列、每列兩特徵，K有三列、每列兩特徵。第一query的分數是 `[1,0,1]`，第二是 `[0,1,1]`；第三key同時帶有兩條線索，所以兩種需求都能找到它。`k.T` 只把表的列欄互換，好讓矩陣乘法遍歷三候選，不會把key變成query。形狀 `[2,2] @ [2,3] → [2,3]` 的內側2是兩邊共同的匹配特徵數。\n",
+    "\n",
+    "若用符號寫，Q形狀 `[Tq,Dk]`，K形狀 `[Tk,Dk]`，分數形狀 `[Tq,Tk]`。Tq是查詢數，Tk是候選數，Dk是每向量用來比對的特徵數。兩邊Dk必須一致，查詢與候選數卻可以不同；這就是例子故意用非方表的原因。自注意力（self attention）通常兩者來自同一組文字位置，因此Tq與Tk相同，但仍是兩個角色。\n",
+    "\n",
+    "真實模型先有位置表示X，再用 [2.3](https://birdhackor.github.io/tiny-perceptron-vlm/2.3.html) 的Linear各算一次，得到Q與K。這種加權轉換常叫投影（projection）；這裡先把它理解為兩套不同的特徵配方，不要求幾何投影的先備知識。配方權重可以隨任務訓練，讓某個位置提出的需求不必與它作為候選時的線索完全一樣。\n",
+    "\n",
+    "這裡只印分數，沒有softmax。做讀取比例時要沿候選欄換算，使每列查詢各自加總為1；跨查詢列一起換算則會讓不同問題互相搶比例，算錯了角色。對於軸不確定時，先寫「每列是一個問的人，每欄是一個可找的位置」。\n",
+    "\n",
+    "練習在K最後加 `[2,0]`，先預測形狀變 `[2,4]`，新欄分數依序2、0，再執行並把檢查改成新形狀。查詢仍兩個，所以列數不變。這讓矩陣的大小不再只是要背的式子，而是數清楚有幾個問題、每題比幾個候選。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "3.3"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

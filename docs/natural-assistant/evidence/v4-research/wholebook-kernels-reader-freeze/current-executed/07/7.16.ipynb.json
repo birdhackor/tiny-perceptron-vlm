@@ -1,0 +1,175 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 7.16 舊例子混回去有用嗎？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "只練新任務B時，舊任務A參數可能被改得不再合用。一個直接辦法是在新訓練中保留一些舊題，讓模型仍收到A的更新意見；這叫replay（回放）。它不是播放舊的梯度檔，而是再把舊資料放進當前訓練，重新用新參數計算預測、代價與梯度。\n",
+    "\n",
+    "[7.15](https://birdhackor.github.io/tiny-perceptron-vlm/7.15.html) 已定義A/B前後評估，[5.16](https://birdhackor.github.io/tiny-perceptron-vlm/5.16.html) 又說明筆數比例與有效token比例不同。比較B-only與replay時，應該固定總更新或總有效答案預算，否則A+B組如果多訓練一倍，改善可能來自額外計算。還要報告兩任務各自表現，避免保住A但B幾乎不學也被稱總成功。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:12:09.284833Z",
+     "iopub.status.busy": "2026-10-04T19:12:09.284646Z",
+     "iopub.status.idle": "2026-10-04T19:12:10.565771Z",
+     "shell.execute_reply": "2026-10-04T19:12:10.564503Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7f5008466610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:12:10.568542Z",
+     "iopub.status.busy": "2026-10-04T19:12:10.568276Z",
+     "iopub.status.idle": "2026-10-04T19:12:10.575540Z",
+     "shell.execute_reply": "2026-10-04T19:12:10.573970Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "每批來源 ['A', 'A', 'B', 'B']\n",
+      "有效答案預算 8\n",
+      "待測B-only與replay各自的A/B成績\n"
+     ]
+    }
+   ],
+   "source": [
+    "a = [\n",
+    "    {\"source\": \"A\", \"text\": \"舊題一\", \"answer_tokens\": 2},\n",
+    "    {\"source\": \"A\", \"text\": \"舊題二\", \"answer_tokens\": 2},\n",
+    "]\n",
+    "b = [\n",
+    "    {\"source\": \"B\", \"text\": \"新題一\", \"answer_tokens\": 2},\n",
+    "    {\"source\": \"B\", \"text\": \"新題二\", \"answer_tokens\": 2},\n",
+    "]\n",
+    "recipe = a + b\n",
+    "print(\"每批來源\", [record[\"source\"] for record in recipe])\n",
+    "print(\"有效答案預算\", sum(record[\"answer_tokens\"] for record in recipe))\n",
+    "print(\"待測B-only與replay各自的A/B成績\")"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "輸入兩筆A與兩筆B，每筆假設兩個有效答案token，合成四筆batch，所以來源A、A、B、B，token總數8，兩邊各半。text是來源示意名，不是完整訓練對話；真正數據應使用實際問答與測得答案長度。這段只計配方與預算，未訓練，不輸出虛構保留能力曲線。\n",
+    "\n",
+    "固定batch四筆時，B-only可用四筆B共八token，replay用兩筆A兩筆B同樣八token；總預算一致，但replay新任務資料份額少一些。這是方法真實的取捨，不能一邊讓B兩筆再加A兩筆額外跑一輪、另一邊只給B原兩筆，然後說都是同樣成本。\n",
+    "\n",
+    "舊資料也要有足夠覆蓋，不應把同一例複製很多次就當廣泛提醒。高品質、代表舊任務關鍵規則的樣本，可能比重複空泛句有用；選擇需用留出A題驗證，而非只看回放訓練題loss。B同樣要測新組合，防止為了保A只記住少量新題。\n",
+    "\n",
+    "回放不是保證任何遺忘都被解決。A、B目標可能衝突，參數容量有限，比例或步幅也可能不合適；應保留不同配方、種子與預算的實際結果。它提供一份重新平衡共享參數的訓練信號，效果取決於資料與整個流程。\n",
+    "\n",
+    "把[7.15的實跑](https://birdhackor.github.io/tiny-perceptron-vlm/7.15.html)加上回放支線，兩支都從同一份屬性基模開始、更新500次，每批16題、學習率0.003。B-only只抽49筆加法訓練題；replay則從45筆舊屬性題加49筆加法題一起抽。下面比較完整答案ID，兩個任務與生成上限始終相同：\n",
+    "\n",
+    "| 模型狀態 | 舊A驗證／最後檢查答對 | 新B驗證／最後檢查答對 | 這段訓練的有效目標 |\n",
+    "| --- | --- | --- | ---: |\n",
+    "| 尚未繼續訓練 | 1／5、5／10 | 0／8、0／7 | — |\n",
+    "| 只練B，500次 | 0／5、0／10 | 0／8、0／7 | 18,453 |\n",
+    "| 混回A，500次 | 4／5、6／10 | 0／8、0／7 | 36,384 |\n",
+    "\n",
+    "回放支線保住了這批舊題的表現，最後檢查還多答對一題；但是B兩支都沒有通過留出加法，所以不能說回放已讓兩種能力一起學好。兩支與起點在全部這些題都會生成EOS，內容成績的差異並非漏掉結束標記。A的驗證／最後檢查分母是36／69個有效答案目標，B是16／14個，各支完整計分，沒有挑掉錯題。\n",
+    "\n",
+    "還要讀右欄：相同步數與筆數，不代表相同的監督總量。舊屬性答案比加法數字長，混回A後這次有效目標接近翻倍；輸入也較長，運算成本不能視為已完全匹配。這個實驗支持「此配方下舊任務保留較好」，沒有隔離成同token預算下的純回放效應。[完整報告](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/course-experiments/results/sft_ablation.json)保留各支訓練與留出生成，重跑方式見[T.4](https://birdhackor.github.io/tiny-perceptron-vlm/training.html#T.4)。\n",
+    "\n",
+    "練習把recipe改成 `[a[0],b[0],b[1],b[0]]`，先預測來源25:75、有效token仍8，再執行核對。這份小練習為保持四筆而重複一B例，實際實驗應換不同B資料；它不增加資料覆蓋。若把B答案長度改4，重算token比例後就不再是25:75，這能把回放配方接回本章的有效監督統計。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "7.16"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

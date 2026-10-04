@@ -1,0 +1,225 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 8.8 只更新少量參數能改風格嗎？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "想替模型增加一種寫法，未必有足夠記憶體重新訓練所有數字。像替一張原本可用的食譜加上少量調味註記，我們可以保留原有變換，只訓練一條補充路徑。本節介紹LoRA：Low-Rank Adaptation，意思是用低秩的矩陣修正來適應新任務。它節省的是需要訓練的參數量，能否學到目標風格仍要拿資料驗證。\n",
+    "\n",
+    "前置是[W.5矩陣與加權配方](https://birdhackor.github.io/tiny-perceptron-vlm/first-steps.html#W.5)、[W.6梯度](https://birdhackor.github.io/tiny-perceptron-vlm/first-steps.html#W.6)與[8.3風格訓練目標](https://birdhackor.github.io/tiny-perceptron-vlm/8.3.html)。線性層用一個矩陣W把16個輸入數字轉成12個輸出數字，原矩陣有16×12=192個權重。LoRA另外放A與B：A先把16個數壓到2個，B再從2個轉到12個。中間寬度2叫rank，這條路徑因此只需要2×16+12×2=56個數字。\n",
+    "\n",
+    "原W被凍結，表示訓練不更新它；A、B則可以更新。補充矩陣寫成ΔW=(alpha/rank)BA，Δ表示「改變量」。alpha是縮放設定，本例alpha=rank=2，所以倍率是1。原本輸出與補充輸出相加，才得到最後結果；把所有192個原權重丟掉並不能重建這個模型。\n",
+    "\n",
+    "下圖讓輸入分成兩條路：上路通過凍結的W，下路先經A壓到2維、再經B轉成12維，兩路在「相加」處合流。它不是先做W再做A、B；圖中的56說的是補充路徑參數量，原路徑仍存在。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:13:03.662444Z",
+     "iopub.status.busy": "2026-10-04T19:13:03.662200Z",
+     "iopub.status.idle": "2026-10-04T19:13:04.845974Z",
+     "shell.execute_reply": "2026-10-04T19:13:04.845082Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7efe34b66610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "cellView": "form",
+    "course_figure": {
+     "alt": "原線性路徑與LoRA修正路徑相加",
+     "name": "multimodal_lora_branches"
+    },
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:13:04.848017Z",
+     "iopub.status.busy": "2026-10-04T19:13:04.847766Z",
+     "iopub.status.idle": "2026-10-04T19:13:04.857955Z",
+     "shell.execute_reply": "2026-10-04T19:13:04.857106Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "image/svg+xml": [
+       "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 900 390\" role=\"img\" aria-labelledby=\"title desc\"><title id=\"title\">原路徑加上少量修正</title><desc id=\"desc\">輸入分兩路，原W凍結；A將16維轉2維，B將2維轉12維，縮放後與原輸出相加。</desc><defs><marker id=\"arrow\" markerWidth=\"8\" markerHeight=\"8\" refX=\"7\" refY=\"4\" orient=\"auto\"><path d=\"M0 0L8 4L0 8\" fill=\"#54768c\"/></marker></defs><style>text{font-family:\"Noto Sans CJK TC\",\"Microsoft JhengHei\",sans-serif}svg{background:white}</style><rect width=\"900\" height=\"390\" fill=\"#fff\"/><text x=\"450\" y=\"34\" text-anchor=\"middle\" font-size=\"24\" fill=\"#18354a\">原路徑加上少量修正</text><rect x=\"20\" y=\"145\" width=\"125\" height=\"60\" rx=\"8\" fill=\"#eef5ff\" stroke=\"#54768c\"/><text x=\"82.5\" y=\"181.0\" text-anchor=\"middle\" font-size=\"19\" fill=\"#18354a\">輸入x</text><rect x=\"235\" y=\"75\" width=\"220\" height=\"60\" rx=\"8\" fill=\"#eef5ff\" stroke=\"#54768c\"/><text x=\"345.0\" y=\"111.0\" text-anchor=\"middle\" font-size=\"19\" fill=\"#18354a\">原線性層W：凍結</text><rect x=\"210\" y=\"220\" width=\"150\" height=\"60\" rx=\"8\" fill=\"#eef5ff\" stroke=\"#54768c\"/><text x=\"285.0\" y=\"256.0\" text-anchor=\"middle\" font-size=\"19\" fill=\"#18354a\">A：16 → 2</text><rect x=\"415\" y=\"220\" width=\"150\" height=\"60\" rx=\"8\" fill=\"#eef5ff\" stroke=\"#54768c\"/><text x=\"490.0\" y=\"256.0\" text-anchor=\"middle\" font-size=\"19\" fill=\"#18354a\">B：2 → 12</text><rect x=\"635\" y=\"135\" width=\"80\" height=\"80\" rx=\"8\" fill=\"#eef5ff\" stroke=\"#54768c\"/><text x=\"675.0\" y=\"181.0\" text-anchor=\"middle\" font-size=\"19\" fill=\"#18354a\">相加</text><rect x=\"760\" y=\"145\" width=\"120\" height=\"60\" rx=\"8\" fill=\"#eef5ff\" stroke=\"#54768c\"/><text x=\"820.0\" y=\"181.0\" text-anchor=\"middle\" font-size=\"19\" fill=\"#18354a\">輸出</text><path d=\"M145 175L185 175\" fill=\"none\" stroke=\"#54768c\" stroke-width=\"2\" marker-end=\"url(#arrow)\"/><path d=\"M185 175L185 105\" fill=\"none\" stroke=\"#54768c\" stroke-width=\"2\" marker-end=\"url(#arrow)\"/><path d=\"M185 105L235 105\" fill=\"none\" stroke=\"#54768c\" stroke-width=\"2\" marker-end=\"url(#arrow)\"/><path d=\"M185 175L185 250\" fill=\"none\" stroke=\"#54768c\" stroke-width=\"2\" marker-end=\"url(#arrow)\"/><path d=\"M185 250L210 250\" fill=\"none\" stroke=\"#54768c\" stroke-width=\"2\" marker-end=\"url(#arrow)\"/><path d=\"M360 250L415 250\" fill=\"none\" stroke=\"#54768c\" stroke-width=\"2\" marker-end=\"url(#arrow)\"/><path d=\"M455 105L675 105\" fill=\"none\" stroke=\"#54768c\" stroke-width=\"2\" marker-end=\"url(#arrow)\"/><path d=\"M675 105L675 135\" fill=\"none\" stroke=\"#54768c\" stroke-width=\"2\" marker-end=\"url(#arrow)\"/><path d=\"M565 250L675 250\" fill=\"none\" stroke=\"#54768c\" stroke-width=\"2\" marker-end=\"url(#arrow)\"/><path d=\"M675 250L675 215\" fill=\"none\" stroke=\"#54768c\" stroke-width=\"2\" marker-end=\"url(#arrow)\"/><path d=\"M715 175L760 175\" fill=\"none\" stroke=\"#54768c\" stroke-width=\"2\" marker-end=\"url(#arrow)\"/><text x=\"490\" y=\"315\" text-anchor=\"middle\" font-size=\"18\" fill=\"#18354a\">補充路徑縮放 alpha / rank；本例2 / 2 = 1</text><text x=\"450\" y=\"355\" text-anchor=\"middle\" font-size=\"18\" fill=\"#18354a\">原W仍保留；只有A與B的56個數字參與訓練。</text></svg>"
+      ],
+      "text/plain": [
+       "<IPython.core.display.SVG object>"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    }
+   ],
+   "source": [
+    "# @title 本節圖解\n",
+    "from IPython.display import SVG, display\n",
+    "\n",
+    "display(SVG(filename=str(root / \"course/figures/multimodal_lora_branches.svg\")))"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 3,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:13:04.859994Z",
+     "iopub.status.busy": "2026-10-04T19:13:04.859812Z",
+     "iopub.status.idle": "2026-10-04T19:13:04.876599Z",
+     "shell.execute_reply": "2026-10-04T19:13:04.875619Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "可訓練參數 56\n",
+      "初始相同 True\n",
+      "A梯度為零 True\n",
+      "B梯度非零 True\n"
+     ]
+    }
+   ],
+   "source": [
+    "import torch\n",
+    "from torch import nn\n",
+    "from tiny_perceptron.alignment import LoRALinear\n",
+    "\n",
+    "torch.manual_seed(0)\n",
+    "layer = LoRALinear(nn.Linear(16, 12), rank=2, alpha=2)\n",
+    "x = torch.randn(3, 16)\n",
+    "print(\"可訓練參數\", sum(p.numel() for p in layer.parameters() if p.requires_grad))\n",
+    "print(\"初始相同\", torch.equal(layer(x), layer.base(x)))\n",
+    "layer(x).sum().backward()\n",
+    "print(\"A梯度為零\", layer.a.grad.abs().max().item() == 0)\n",
+    "print(\"B梯度非零\", layer.b.grad.abs().max().item() > 0)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "輸入`x`是3筆、每筆16個數字的測試資料，固定亂數種子讓它能重現。專案的`LoRALinear`包住普通線性層；`base`就是保留的原層。`numel()`數參數元素，`requires_grad`篩出可訓練部分，所以第一行是56。`torch.equal`逐項比較初始輸出，會印`True`：B初始化全0，補充路徑此時完全沒有影響。\n",
+    "\n",
+    "`sum().backward()`不是風格訓練，只是用輸出加總建立一個能查梯度的短測試。反向計算後，`layer.a.grad`保存A每個數字的梯度，也就是輸出加總對它的敏感程度；B同理。`abs()`先取絕對值，使負梯度也變成正的大小；`max()`找其中最大大小，`item()`再取出這個單一數字。因此最大大小等於0才代表全部為零，大於0則代表至少一項非零。\n",
+    "\n",
+    "後兩行都是`True`。第一次A梯度為零，是因為A的影響要經過仍為零的B；B本身則已有非零梯度，更新之後A才可能開始收到訊號。這個初始現象不代表訓練壞掉。\n",
+    "\n",
+    "把這條補充路徑放進完整模型後，我們也真的訓練了兩套adapter，也就是各自為某種寫法訓練的一組A、B修正參數。起點是[8.3的加法基模](https://birdhackor.github.io/tiny-perceptron-vlm/8.3.html)，最後七道新題原本就零題答對。兩套各讀相同的49道訓練題，一套學短答、一套學固定積木句，各更新450次；模型兩層的Query、Value、注意力輸出、前饋兩個線性層，以及最後輸出層，共11處加上rank 4、alpha 4的修正。\n",
+    "\n",
+    "這些插入位置都是像前面W一樣的線性變換。Query把當前內容轉成「想找什麼」的特徵，Value把各位置內容轉成「取回什麼」的特徵，分別可回看[3.3的查詢](https://birdhackor.github.io/tiny-perceptron-vlm/3.3.html)與[3.4的取回內容](https://birdhackor.github.io/tiny-perceptron-vlm/3.4.html)；注意力輸出再混合取回的結果。[4.4的前饋層](https://birdhackor.github.io/tiny-perceptron-vlm/4.4.html)對每個位置先擴展、再收回特徵，而[最後輸出層](https://birdhackor.github.io/tiny-perceptron-vlm/4.6.html)把特徵轉成下一個文字片段的候選分數。每層有五處，兩層共十處，再加最後輸出層便是十一處。原本141,568個參數全部凍結，只更新9,504個新參數，約為原模型參數量的6.7%。第一步也出現上述A梯度全零、B已有非零梯度的現象，訓練前後的原模型數字則完全相同。\n",
+    "\n",
+    "少更新數字，是否仍能學到寫法？我們再從同一起點完整更新全部參數，使用與比喻adapter相同的資料、450步和318,991個有效回答目標，作為對照。以下都看沒有放進訓練的題目；「風格符合」只檢查短答是否為數字，或回答是否含本次指定的積木句。\n",
+    "\n",
+    "| 更新方式 | 可訓練參數 | 八題驗證的風格符合 | 七題最後檢查的風格符合 | 七題算術答對 |\n",
+    "| --- | ---: | ---: | ---: | ---: |\n",
+    "| LoRA短答 | 9,504 | 8／8 | 7／7 | 0／7 |\n",
+    "| LoRA固定比喻 | 9,504 | 5／8 | 6／7 | 0／7 |\n",
+    "| 全部參數學固定比喻 | 141,568 | 8／8 | 7／7 | 0／7 |\n",
+    "\n",
+    "全部回答都有EOS，也就是回答結束標記，表示模型有生成停止訊號。能停下來，不保證答案正確或中間文字都能正常顯示；比喻adapter仍有一題生成`1�，像�兩組積木合在一起再數。`，其中`�`代替無法正常顯示的文字，這一題未通過固定句檢查。這次LoRA用較少更新參數學到了部分寫法，效果沒有完全追上完整微調；兩種方式也都沒有補上新加法的正確性。基模、前向計算與中間資料仍要留在記憶體，6.7%不等於整個訓練只花6.7%的記憶體，更不是模型總大小變成6.7%。[完整生成與比較報告](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/course-experiments/results/lora.json)保留這些失敗，不把較少參數直接換算成同等能力。\n",
+    "\n",
+    "所謂低秩，是修正先經過只有2個數字的窄通道，能自由表達的方向受到限制。它像只準用兩種基本調味組合修食譜，未必能模仿任意複雜改動，卻可能足以完成某些風格變化。把rank加大會放寬這個限制，也增加訓練數量；是否值得應看保留題成績，而不是認為數字越少或越多就必然較好。此處原線性層還有12個偏置數字，也一起凍結；192指的是權重矩陣，沒有把偏置算進去。\n",
+    "\n",
+    "練習只把rank改成4、alpha也改成4以維持倍率1，先算4×(16+12)=112，再跑程式核對。比較參數數量時，不要把原模型的總大小也誤說成減半。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "8.8"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

@@ -1,0 +1,215 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 13.5 偏好怎麼產生梯度？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "有了兩篇答案的分數與固定參考，怎樣告訴模型「朝較佳答案偏一點」？DPO直接偏好優化把相對差距變成一個猜錯代價，不需要先訓練另一個獎勵評分網路。本節用四個數字算一次梯度，看到下降代價會提高哪邊、降低哪邊。\n",
+    "\n",
+    "前置是[13.3回答log分數](https://birdhackor.github.io/tiny-perceptron-vlm/13.3.html)、[13.4相對差距](https://birdhackor.github.io/tiny-perceptron-vlm/13.4.html)與[1.11梯度下降](https://birdhackor.github.io/tiny-perceptron-vlm/1.11.html)。代價L=-log sigmoid(beta×margin)，sigmoid把任意差距映成0到1：差距0映成0.5，較大正值更接近1。beta為正的縮放設置；負log使更偏向chosen的差距得到較小代價。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:16:50.242879Z",
+     "iopub.status.busy": "2026-10-04T19:16:50.242704Z",
+     "iopub.status.idle": "2026-10-04T19:16:51.628350Z",
+     "shell.execute_reply": "2026-10-04T19:16:51.627518Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7f6de4566610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:16:51.631418Z",
+     "iopub.status.busy": "2026-10-04T19:16:51.631150Z",
+     "iopub.status.idle": "2026-10-04T19:16:51.643915Z",
+     "shell.execute_reply": "2026-10-04T19:16:51.643009Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "代價 0.6931\n",
+      "較佳梯度 -0.05\n",
+      "較差梯度 0.05\n"
+     ]
+    }
+   ],
+   "source": [
+    "import torch\n",
+    "from tiny_perceptron.alignment import dpo_loss\n",
+    "\n",
+    "chosen = torch.tensor([-4.0], requires_grad=True)\n",
+    "rejected = torch.tensor([-3.0], requires_grad=True)\n",
+    "loss = dpo_loss(chosen, rejected, torch.tensor([-4.0]), torch.tensor([-3.0]), beta=0.1)\n",
+    "loss.backward()\n",
+    "print(\"代價\", round(loss.item(), 4))\n",
+    "print(\"較佳梯度\", round(chosen.grad.item(), 4))\n",
+    "print(\"較差梯度\", round(rejected.grad.item(), 4))"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "輸入chosen與rejected是策略分數，後兩項是固定參考分數；都用log機率，所以為負。兩份原差距都是-1，相減得到margin0，sigmoid0=0.5，代價約0.6931。`backward`求各可變輸入對代價的敏感程度，輸出chosen梯度-0.05、rejected梯度+0.05。\n",
+    "\n",
+    "梯度下降是舊值減學習率乘梯度。如果學習率0.1，chosen會從-4到-3.995，rejected從-3到-3.005，差距從-1變成-0.99，相對參考進步0.01。數值不大，但方向明確。\n",
+    "\n",
+    "下圖把這次更新逐項畫出：上方兩個原始差距同為-1，相減為0；中間較佳負梯度、較差正梯度，往下箭頭套用同一個0.1步長。最下方差距-0.99相對原本-1進步0.01，固定參考沒有跟著動。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 3,
+   "metadata": {
+    "cellView": "form",
+    "course_figure": {
+     "alt": "DPO較佳與較差分數的梯度及一次下降更新",
+     "name": "multimodal_dpo_direction"
+    },
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:16:51.652961Z",
+     "iopub.status.busy": "2026-10-04T19:16:51.652447Z",
+     "iopub.status.idle": "2026-10-04T19:16:51.663526Z",
+     "shell.execute_reply": "2026-10-04T19:16:51.662881Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "image/svg+xml": [
+       "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 900 400\" role=\"img\" aria-labelledby=\"title desc\"><title id=\"title\">偏好梯度推動哪一個方向？</title><desc id=\"desc\">參考與策略起點一樣，DPO beta0.1得較佳梯度-0.05、較差梯度+0.05。梯度下降提高較佳分數，降低較差分數。</desc><defs><marker id=\"arrow\" markerWidth=\"8\" markerHeight=\"8\" refX=\"7\" refY=\"4\" orient=\"auto\"><path d=\"M0 0L8 4L0 8\" fill=\"#54768c\"/></marker></defs><style>text{font-family:\"Noto Sans CJK TC\",\"Microsoft JhengHei\",sans-serif}svg{background:white}</style><rect width=\"900\" height=\"400\" fill=\"#fff\"/><text x=\"450\" y=\"34\" text-anchor=\"middle\" font-size=\"24\" fill=\"#18354a\">偏好梯度推動哪一個方向？</text><text x=\"235\" y=\"80\" text-anchor=\"middle\" font-size=\"18\" fill=\"#18354a\">固定參考：較佳-4，較差-3，差距-1</text><text x=\"665\" y=\"80\" text-anchor=\"middle\" font-size=\"18\" fill=\"#18354a\">策略起點：較佳-4，較差-3，差距-1</text><text x=\"450\" y=\"130\" text-anchor=\"middle\" font-size=\"20\" fill=\"#18354a\">相對差距 = -1 - (-1) = 0 → 代價約0.6931</text><rect x=\"45\" y=\"180\" width=\"340\" height=\"60\" rx=\"8\" fill=\"#eef5ff\" stroke=\"#54768c\"/><text x=\"215.0\" y=\"216.0\" text-anchor=\"middle\" font-size=\"19\" fill=\"#18354a\">較佳梯度 -0.05</text><rect x=\"515\" y=\"180\" width=\"340\" height=\"60\" rx=\"8\" fill=\"#eef5ff\" stroke=\"#54768c\"/><text x=\"685.0\" y=\"216.0\" text-anchor=\"middle\" font-size=\"19\" fill=\"#18354a\">較差梯度 +0.05</text><path d=\"M215 240L215 290\" fill=\"none\" stroke=\"#54768c\" stroke-width=\"2\" marker-end=\"url(#arrow)\"/><path d=\"M685 240L685 290\" fill=\"none\" stroke=\"#54768c\" stroke-width=\"2\" marker-end=\"url(#arrow)\"/><text x=\"215\" y=\"321\" text-anchor=\"middle\" font-size=\"19\" fill=\"#18354a\">步長0.1：-4 → -3.995</text><text x=\"685\" y=\"321\" text-anchor=\"middle\" font-size=\"19\" fill=\"#18354a\">步長0.1：-3 → -3.005</text><text x=\"450\" y=\"370\" text-anchor=\"middle\" font-size=\"18\" fill=\"#18354a\">策略差距變-0.99，相對固定參考進步0.01。</text></svg>"
+      ],
+      "text/plain": [
+       "<IPython.core.display.SVG object>"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    }
+   ],
+   "source": [
+    "# @title 本節圖解\n",
+    "from IPython.display import SVG, display\n",
+    "\n",
+    "display(SVG(filename=str(root / \"course/figures/multimodal_dpo_direction.svg\")))"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "真實模型不能獨立隨意調每段log分數；它通過共同權重改變每步機率，梯度必須經過[13.3](https://birdhackor.github.io/tiny-perceptron-vlm/13.3.html)的有效答案位置計算返回。\n",
+    "\n",
+    "這裡沒有訓練網路，僅用標量檢查方向。DPO不需要額外獎勵網路，仍需要可靠偏好對與固定參考，也不保證所有訓練以外行為都改善。偏好理由若錯，梯度一樣會忠實地推向錯目標。\n",
+    "\n",
+    "真正訓練後，候選比較與自由生成也要各測一次。beta 0.1版本對最後檢查題`4+2=?`，完整正確候選`6`的log分數約−24.88083，比錯誤候選`7`的−28.11597高；但是讓它自行選字時，實際回答是`8`，接著正常EOS結束。模型沒有被限制只能二選一，候選排序也不是自由生成答案的驗證。這一題可以同時記為「6比7更受偏好」及「實際加法答錯」，兩項都是真的。\n",
+    "\n",
+    "sigmoid(x)可寫成1/(1+exp(-x))，這裡x是beta乘相對差距。x=0時分母2，得0.5；x為正時exp(-x)變小，比例靠近1。再取負log後，比例越接近1，代價越接近0。四個原始分數不是評分者給的星等，而是策略模型與固定參考模型，各自對同一前文下兩篇完整答案的log機率；人工只提供哪篇較佳。DPO把這件比較轉換成可微分目標，真正學習仍須經答案機率返回模型權重。所謂不需獎勵網路，是省去另一份評分模型訓練，不是省去人類標準或資料審核。\n",
+    "\n",
+    "練習把較佳的初始分數改-5，參考保持不變。先預測margin=-1、代價高於0.6931、chosen梯度仍負，再執行核對。不是負分越大越壞這麼簡單，而是相對兩個答案和固定參考的差距共同決定代價。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "13.5"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

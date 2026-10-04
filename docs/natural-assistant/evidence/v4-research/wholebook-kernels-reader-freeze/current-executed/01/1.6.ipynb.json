@@ -1,0 +1,178 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 1.6 如何用參數列示預測偏好？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "[1.5](https://birdhackor.github.io/tiny-perceptron-vlm/1.5.html) 的表靠次數決定機率。現在想換一種方式：不手動計數，而是讓每格存一個可調分數，之後依據答案好壞逐步調整。像評審先為候選人記分，再依得分決定推薦比例，分數可以為正、為負，也不必加總為 1。我們把這些可調的數字叫參數（parameter）；學習將改它們，文字 ID 的對照則仍固定。\n",
+    "\n",
+    "用三個字「貓、看、狗」建立三列三欄的分數表。第 0 列代表目前字是貓，第 1 列是看，第 2 列是狗；每欄分別評下一字為貓、看、狗的偏好。若第 0 列是 `[0,2,0]`，表示看到貓時比較偏好看。它還不是機率；下一節會把分數轉成合法比例。本節只核對查表是否取對了列。\n",
+    "\n",
+    "PyTorch 的 `nn.Embedding` 是可學習的查表工具，Embedding 常譯為嵌入層。`nn.Embedding(3,3)` 建立三列，每列三個數。這裡故意直接拿三個數當三個候選字的分數；第 2 章會用同一工具取得少量特徵，再交給後續計算，功能相同、用途不同。tensor 與軸見 [W.3](https://birdhackor.github.io/tiny-perceptron-vlm/first-steps.html#W.3)。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:09:33.228348Z",
+     "iopub.status.busy": "2026-10-04T19:09:33.228134Z",
+     "iopub.status.idle": "2026-10-04T19:09:34.484783Z",
+     "shell.execute_reply": "2026-10-04T19:09:34.483852Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7f39b4166610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:09:34.488238Z",
+     "iopub.status.busy": "2026-10-04T19:09:34.487910Z",
+     "iopub.status.idle": "2026-10-04T19:09:34.497604Z",
+     "shell.execute_reply": "2026-10-04T19:09:34.496940Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Parameter containing:\n",
+      "tensor([[0., 2., 0.],\n",
+      "        [0., 0., 0.],\n",
+      "        [0., 0., 0.]], requires_grad=True)\n",
+      "tensor([[0., 2., 0.],\n",
+      "        [0., 0., 0.]], grad_fn=<EmbeddingBackward0>)\n"
+     ]
+    }
+   ],
+   "source": [
+    "import torch\n",
+    "from torch import nn\n",
+    "\n",
+    "scores = nn.Embedding(3, 3)\n",
+    "with torch.no_grad():\n",
+    "    scores.weight.zero_()\n",
+    "    scores.weight[0, 1] = 2.0\n",
+    "inputs = torch.tensor([0, 2])\n",
+    "output = scores(inputs)\n",
+    "print(scores.weight)\n",
+    "print(output)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "輸入 `[0,2]` 要求分別查「目前是貓」與「目前是狗」兩列。`scores.weight` 是層儲存的那張參數列，`zero_()` 把每格設為 0，再手動把第 0 列第 1 欄設為 2。結尾底線提醒這個方法直接修改原物件。`torch.no_grad()` 表示這次手動設定不用記錄求導關係，後面的學習會在 [1.9](https://birdhackor.github.io/tiny-perceptron-vlm/1.9.html) 開始介紹求導。\n",
+    "\n",
+    "實際輸出會接近下面這樣，小數點後的零可能因版本而略有差異：\n",
+    "\n",
+    "```text\n",
+    "Parameter containing:\n",
+    "tensor([[0., 2., 0.],\n",
+    "        [0., 0., 0.],\n",
+    "        [0., 0., 0.]], requires_grad=True)\n",
+    "tensor([[0., 2., 0.],\n",
+    "        [0., 0., 0.]], grad_fn=<EmbeddingBackward0>)\n",
+    "```\n",
+    "\n",
+    "`Parameter containing` 表示第一份 tensor 是層保管的可調參數；`requires_grad=True` 表示它保留日後求導的能力，並不表示這裡已經開始學習。`no_grad()` 只涵蓋縮排在 `with` 下面的兩行手動設定，不會把參數永久改成不能求導。後面的 `output = scores(inputs)` 已經離開那個區塊，所以查表計算會留下記錄；`grad_fn` 是這份計算記錄的標記，`EmbeddingBackward0` 指向查表的求導規則。本節先不用操作它們，只核對數字；求導的用途會在 [1.9](https://birdhackor.github.io/tiny-perceptron-vlm/1.9.html) 說明。\n",
+    "\n",
+    "第一份輸出的整表數值是 `[[0,2,0],[0,0,0],[0,0,0]]`。第二份只有 `[[0,2,0],[0,0,0]]`，形狀 `[2,3]`：兩個輸入各取一列，每列仍有三個候選分數。第 1 列因為沒有被輸入查詢，就不在第二份輸出裡。這些標記不會改變表中的數字；這裡尚未執行任何學習更新，數字都是我們指定的。\n",
+    "\n",
+    "若字表有 V 個字，這種方法需要 V×V 個參數；每個目前字都有一整排下一字候選分數。比如一百個字便有一萬格。這是一個很小的語言模型：根據輸入產生候選分數、數字可以改進，但目前仍只看前一字，無法知道更遠的內容。ID 之間的距離沒有拿來計算，查第 0 列或第 2 列只是選不同的規則。\n",
+    "\n",
+    "練習在設定區加入 `scores.weight[2, 0] = 3.0`。執行前預測查表結果 `output` 的第0列是否改變；核對 `output[0]` 應仍是 `[0,2,0]`，`output[1]` 變成 `[3,0,0]`。你只調了狗那列，不會影響貓那列。這讓「參數在哪裡」和「哪個輸入用到它」變成可以直接追蹤的事。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "1.6"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

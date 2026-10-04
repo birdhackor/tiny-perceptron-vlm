@@ -1,0 +1,36 @@
+"""Preserve actual completed kernels byte-for-byte; do not execute or grade."""
+import hashlib
+import json
+from datetime import UTC, datetime
+from pathlib import Path
+
+root = Path.cwd()
+original = root / 'outputs/natural-v4/wholebook-kernel'
+destination = root / 'docs/natural-assistant/evidence/v4-research/wholebook-kernels-reader-freeze'
+assert not destination.exists(), 'Choose a new preservation directory; never overwrite original evidence.'
+closure = json.loads((original / 'current-kernel-closure.json').read_bytes())
+assert closure['status'] == 'passed' and closure['current_notebooks_verified'] == 266
+records = closure['current_verified_notebooks'] if 'current_verified_notebooks' in closure else closure.get('current_notebooks', [])
+if not records:
+    matches = [v for v in closure.values() if isinstance(v, list) and len(v) == 266]
+    assert len(matches) == 1
+    records = matches[0]
+for item in records:
+    for path_key, hash_key in [('source', 'source_sha256'), ('executed', 'executed_sha256')]:
+        assert hashlib.sha256((root / item[path_key]).read_bytes()).hexdigest() == item[hash_key]
+source_files = sorted(p for p in original.rglob('*') if p.is_file() and '__pycache__' not in p.parts)
+source_files += sorted(root.glob('outputs/notebooks/*/*.ipynb'))
+assert len(list(root.glob('outputs/notebooks/*/*.ipynb'))) == 266
+copied = []
+for source in source_files:
+    relative = source.relative_to(original) if source.is_relative_to(original) else Path('current-executed') / source.relative_to(root / 'outputs/notebooks')
+    target = destination / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    content = source.read_bytes()
+    target.write_bytes(content)
+    assert target.read_bytes() == content
+    copied.append({'original_path':source.relative_to(root).as_posix(),'preserved_path':target.relative_to(root).as_posix(),'bytes':len(content),'sha256':hashlib.sha256(content).hexdigest()})
+index = {'record_kind':'byte_exact_actual_kernel_preservation_not_new_execution_or_review','created_at':datetime.now(UTC).isoformat(),'scope':'Actual native 266-kernel aggregate, initial source/executed digests, 7 actual correction receipts, and all 266 current executed notebooks. Original aggregate is not rewritten to impersonate a second 266-kernel run. Initial pre-correction notebooks replaced at outputs/notebooks are not claimed as preserved beyond their recorded hashes. Original command paths in receipts identify runtime locations; this index maps the copied proof bytes.','files':copied}
+(destination / 'preservation-index.json').write_text(json.dumps(index,ensure_ascii=False,indent=2)+'\n')
+(destination / 'README.md').write_text('# Actual CPU-kernel evidence at the reader source freeze\n\nThis archive preserves existing completed execution evidence byte for byte; it does not run notebooks or confer a review verdict. The native initial aggregate reports 266 successes. Seven changed notebooks were subsequently executed in fresh kernels. The current closure verifies all 266 sources against the included current executed notebooks. Original command paths remain untouched and map to the copies through `preservation-index.json`. Future source corrections need new execution receipts.\n\nThe two pytest records explicitly describe root observations of actual terminal-tool results, not native pytest report files. No model weights, training media, third-party papers or execution workspaces are copied.\n')
+print(json.dumps({'files':len(copied),'bytes':sum(x['bytes'] for x in copied),'directory':str(destination.relative_to(root))}))

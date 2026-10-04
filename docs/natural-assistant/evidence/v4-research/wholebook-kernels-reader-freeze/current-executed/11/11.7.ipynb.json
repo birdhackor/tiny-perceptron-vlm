@@ -1,0 +1,281 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 11.7 怎麼維持文字能力？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "假如圖文訓練後模型更會認顏色，卻開始把原本會答的純文字屬性題答錯，這就不是圖片入口的形狀問題，而是新任務改變了共享語言參數，使舊技能退步。本節把舊文字例混進訓練，同時把兩類成績並排看，避免只看圖文代價下降。\n",
+    "\n",
+    "前置是[7.15舊技能遺忘](https://birdhackor.github.io/tiny-perceptron-vlm/7.15.html)、[7.16舊資料回放](https://birdhackor.github.io/tiny-perceptron-vlm/7.16.html)與[10.8純文字入口一致性](https://birdhackor.github.io/tiny-perceptron-vlm/10.8.html)。10.8確認訓練前包裝沒有改變計算；這裡稱為retention的能力保留，檢查訓練後的行為是否仍會做原任務。兩件事發生在不同階段，不能用前者通過代替後者。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:15:34.567292Z",
+     "iopub.status.busy": "2026-10-04T19:15:34.566803Z",
+     "iopub.status.idle": "2026-10-04T19:15:36.344200Z",
+     "shell.execute_reply": "2026-10-04T19:15:36.341919Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7f23aaa5e610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:15:36.351293Z",
+     "iopub.status.busy": "2026-10-04T19:15:36.351025Z",
+     "iopub.status.idle": "2026-10-04T19:15:36.362731Z",
+     "shell.execute_reply": "2026-10-04T19:15:36.359438Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "示例訓練比例 {'文字有效位置': 0.75, '圖文有效位置': 0.25}\n",
+      "訓練前 文字 0.8 圖文 0.2\n",
+      "訓練後 文字 0.6 圖文 0.7\n"
+     ]
+    }
+   ],
+   "source": [
+    "recipe = {\"文字有效位置\": 750, \"圖文有效位置\": 250}\n",
+    "recorded = {\n",
+    "    \"訓練前\": {\"文字答對\": 8, \"圖文答對\": 2},\n",
+    "    \"訓練後\": {\"文字答對\": 6, \"圖文答對\": 7},\n",
+    "}\n",
+    "total_positions = sum(recipe.values())\n",
+    "ratios = {}\n",
+    "for category, positions in recipe.items():\n",
+    "    ratios[category] = positions / total_positions\n",
+    "print(\"示例訓練比例\", ratios)\n",
+    "for phase, scores in recorded.items():\n",
+    "    print(phase, \"文字\", scores[\"文字答對\"] / 10, \"圖文\", scores[\"圖文答對\"] / 10)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "recipe是用名稱查數字的字典，冒號左邊是名稱、右邊是數量，例如`recipe[\"文字有效位置\"]`取出750。這張表分配計劃中1000個有效回答位置，不是同樣數量的完整對話。`recipe.values()`取出750與250，`sum()`相加為1000；`recipe.items()`則逐次提供「名稱、數量」一對，分別交給category與positions。`ratios = {}`先建立空字典，再把每項數量除以總數、按原名稱填回去，得到文字0.75、圖文0.25。\n",
+    "\n",
+    "recorded是人工構造的成績示例，每個階段名稱又對應一張成績字典。`for phase, scores in recorded.items()`第一輪把`\"訓練前\"`交給phase，把`{\"文字答對\": 8, \"圖文答對\": 2}`交給scores；`scores[\"文字答對\"]`就取出8。兩類各有10道固定測試題，所以再除10得到答對率。輸出前後文字0.8到0.6，圖文0.2到0.7。這樣並排就看見新任務進步與舊任務退步同時存在。\n",
+    "\n",
+    "這不是宣稱75%文字回放仍必定遺忘：程式沒有訓練，數字用來演示報告方法。實際要建立不進入訓練的文字測試，固定題目與評分規則，在基模和多模態權重上各跑一遍。還可以按算術、格式、一般文字等子任務拆開，看退步集中在哪裡。訓練時用目標答案衡量預測的猜錯代價，稱為loss；通常越低表示對訓練目標的預測越吻合，具體計算可看[1.8](https://birdhackor.github.io/tiny-perceptron-vlm/1.8.html)。固定測試的答對率則是答對題數除以總題數，例如8/10。本段程式只整理人工成績，沒有計算loss。混合後的總loss較低，也可能只是較容易的那組佔比增加，並不保證所有技能都改善。\n",
+    "\n",
+    "正式問答實驗另外固定[7.12的十道SFT留出題](https://birdhackor.github.io/tiny-perceptron-vlm/7.12.html)，各版本開始前都答對5/10。只訓圖片接頭後仍5/10，開最後文字區塊後2/10，全部開放後1/10，全部開放加文字回放後4/10。回放只從原SFT訓練45題抽，不把這十道測試題或五道驗證題送進去。回放版本每次抽樣有0.5機率選文字，仍更新160次；其最後圖片問答9/12，與無回放全部版本同分，但文字少掉的能力較少，仍沒有完全回到5/10。\n",
+    "\n",
+    "下圖每個方案有兩條：藍色是十二道新圖片問答，紫色是十道原文字留出題；條長用共同的0到100%尺度，右邊仍保存不同分母的答對數。第二組藍條最長、紫條卻很短，表示最後文字區塊版本這批新題全對，原文字題只剩2/10。像練好新曲子時忘掉舊曲的幾段，不能只看新曲成績就說整個曲庫都進步。這裡的舊題只是固定屬性問答，也不是所有文字能力的總分。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 3,
+   "metadata": {
+    "cellView": "form",
+    "course_figure": {
+     "alt": "四種更新範圍下，新圖片問答與原文字留出題的並列成績",
+     "name": "vqa_text_retention"
+    },
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:15:36.371987Z",
+     "iopub.status.busy": "2026-10-04T19:15:36.371798Z",
+     "iopub.status.idle": "2026-10-04T19:15:36.392241Z",
+     "shell.execute_reply": "2026-10-04T19:15:36.389304Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "image/svg+xml": [
+       "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 1120 690\" role=\"img\" aria-labelledby=\"title desc\">\n",
+       "  <title id=\"title\">學會看圖回答，也可能忘掉原本的文字題</title>\n",
+       "  <desc id=\"desc\">同一起點的四個版本。只訓接頭：圖片問答3/12、文字5/10；最後文字區塊加接頭：12/12、2/10；全模型：9/12、1/10；全模型加舊題回放：9/12、4/10。比例分母不同，題目少且只有一個種子，回放版本的訓練目標數較多。</desc>\n",
+       "  <style>\n",
+       "    text { font-family: system-ui, \"Noto Sans TC\", sans-serif; fill: #22304a; font-size: 26px; }\n",
+       "    .heading { font-size: 34px; font-weight: 700; }\n",
+       "    .label { font-size: 28px; font-weight: 650; }\n",
+       "    .count { font-size: 28px; font-weight: 650; }\n",
+       "    .axis { fill: #526278; }\n",
+       "    .grid { stroke: #bdc8d8; stroke-width: 1.5; stroke-dasharray: 5 6; }\n",
+       "    .track { fill: #e2e9f1; }\n",
+       "    .vision { fill: #2d80a5; }\n",
+       "    .text-task { fill: #8763b5; }\n",
+       "  </style>\n",
+       "  <rect width=\"1120\" height=\"690\" rx=\"22\" fill=\"#f5f7fb\"/>\n",
+       "  <text class=\"heading\" x=\"44\" y=\"55\">學會看圖回答，也可能忘掉原本的文字題</text>\n",
+       "  <rect class=\"vision\" x=\"44\" y=\"84\" width=\"24\" height=\"24\" rx=\"4\"/>\n",
+       "  <text x=\"80\" y=\"106\">圖片問答：12 題</text>\n",
+       "  <rect class=\"text-task\" x=\"490\" y=\"84\" width=\"24\" height=\"24\" rx=\"4\"/>\n",
+       "  <text x=\"526\" y=\"106\">原本的文字留出題：10 題</text>\n",
+       "  <text class=\"axis\" x=\"320\" y=\"157\">0%</text>\n",
+       "  <text class=\"axis\" x=\"610\" y=\"157\" text-anchor=\"middle\">50%</text>\n",
+       "  <text class=\"axis\" x=\"900\" y=\"157\" text-anchor=\"end\">100%</text>\n",
+       "  <text class=\"axis\" x=\"956\" y=\"157\">答對幾題</text>\n",
+       "  <path class=\"grid\" d=\"M320 172V553 M610 172V553 M900 172V553\"/>\n",
+       "\n",
+       "  <text class=\"label\" x=\"44\" y=\"212\">只訓練接頭</text>\n",
+       "  <rect class=\"track\" x=\"320\" y=\"188\" width=\"580\" height=\"26\" rx=\"5\"/>\n",
+       "  <rect class=\"vision\" x=\"320\" y=\"188\" width=\"145\" height=\"26\" rx=\"5\"/>\n",
+       "  <text class=\"count\" x=\"956\" y=\"212\">3/12</text>\n",
+       "  <rect class=\"track\" x=\"320\" y=\"228\" width=\"580\" height=\"26\" rx=\"5\"/>\n",
+       "  <rect class=\"text-task\" x=\"320\" y=\"228\" width=\"290\" height=\"26\" rx=\"5\"/>\n",
+       "  <text class=\"count\" x=\"956\" y=\"252\">5/10</text>\n",
+       "\n",
+       "  <text class=\"label\" x=\"44\" y=\"311\">最後文字區塊</text>\n",
+       "  <text class=\"label\" x=\"44\" y=\"350\">＋接頭</text>\n",
+       "  <rect class=\"track\" x=\"320\" y=\"286\" width=\"580\" height=\"26\" rx=\"5\"/>\n",
+       "  <rect class=\"vision\" x=\"320\" y=\"286\" width=\"580\" height=\"26\" rx=\"5\"/>\n",
+       "  <text class=\"count\" x=\"956\" y=\"310\">12/12</text>\n",
+       "  <rect class=\"track\" x=\"320\" y=\"326\" width=\"580\" height=\"26\" rx=\"5\"/>\n",
+       "  <rect class=\"text-task\" x=\"320\" y=\"326\" width=\"116\" height=\"26\" rx=\"5\"/>\n",
+       "  <text class=\"count\" x=\"956\" y=\"350\">2/10</text>\n",
+       "\n",
+       "  <text class=\"label\" x=\"44\" y=\"408\">全模型</text>\n",
+       "  <rect class=\"track\" x=\"320\" y=\"384\" width=\"580\" height=\"26\" rx=\"5\"/>\n",
+       "  <rect class=\"vision\" x=\"320\" y=\"384\" width=\"435\" height=\"26\" rx=\"5\"/>\n",
+       "  <text class=\"count\" x=\"956\" y=\"408\">9/12</text>\n",
+       "  <rect class=\"track\" x=\"320\" y=\"424\" width=\"580\" height=\"26\" rx=\"5\"/>\n",
+       "  <rect class=\"text-task\" x=\"320\" y=\"424\" width=\"58\" height=\"26\" rx=\"5\"/>\n",
+       "  <text class=\"count\" x=\"956\" y=\"448\">1/10</text>\n",
+       "\n",
+       "  <text class=\"label\" x=\"44\" y=\"507\">全模型</text>\n",
+       "  <text class=\"label\" x=\"44\" y=\"546\">＋舊題回放</text>\n",
+       "  <rect class=\"track\" x=\"320\" y=\"482\" width=\"580\" height=\"26\" rx=\"5\"/>\n",
+       "  <rect class=\"vision\" x=\"320\" y=\"482\" width=\"435\" height=\"26\" rx=\"5\"/>\n",
+       "  <text class=\"count\" x=\"956\" y=\"506\">9/12</text>\n",
+       "  <rect class=\"track\" x=\"320\" y=\"522\" width=\"580\" height=\"26\" rx=\"5\"/>\n",
+       "  <rect class=\"text-task\" x=\"320\" y=\"522\" width=\"232\" height=\"26\" rx=\"5\"/>\n",
+       "  <text class=\"count\" x=\"956\" y=\"546\">4/10</text>\n",
+       "\n",
+       "  <text x=\"44\" y=\"603\">同一接頭起點；答案需與標準答案完全相同，是否自行結束另計。</text>\n",
+       "  <text x=\"44\" y=\"642\">題目少、只有一個種子；回放多看了舊題，不代表等量計算。</text>\n",
+       "</svg>"
+      ],
+      "text/plain": [
+       "<IPython.core.display.SVG object>"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    }
+   ],
+   "source": [
+    "# @title 本節圖解\n",
+    "from IPython.display import SVG, display\n",
+    "\n",
+    "display(SVG(filename=str(root / \"course/figures/vqa_text_retention.svg\")))"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "這個比較沒有固定總有效回答目標：回放版累計4,214個，其他三版各3,830個，而且4,214中含文字與圖文，不是全給圖片。0.5是選完整題目的機率，不是兩類目標數量或時間各佔一半；答案長短不同就會改變比例。因此可以報告「此配方下文字從1/10改善到4/10」，不能把改善全部歸因於一個已嚴格控制的回放比例。原底座也只會部分屬性題，這次沒有測算術或開放對話，更不能把文字保留欄讀成所有語言能力。\n",
+    "\n",
+    "選擇回放比例時，要保持總有效位置預算不變，否則加文字同時延長訓練，會把比例與總資源混在一起。[接頭（projector）](https://birdhackor.github.io/tiny-perceptron-vlm/10.6.html)是圖片與文字模型之間的轉換層，把圖片特徵轉成文字模型要求的特徵個數。[語言權重凍結](https://birdhackor.github.io/tiny-perceptron-vlm/11.2.html)指訓練時固定這些參數的數值、不更新它們，仍讓它們照常參與計算。若只有圖片接頭更新，純文字輸入使用的語言參數維持原值，文字路徑按理應更容易保持；仍需核對完整應用的提示或前處理是否也維持一致。開放更多語言層更新則提供更多調整空間，也增加檢查舊能力的必要。\n",
+    "\n",
+    "示例中的文字下降是8/10到6/10，不一定有足夠樣本判斷每次訓練都真的退步。recorded只保存答對總數，沒有逐題回答；淨少答對兩題，可能同時有些題改對、更多題改錯，不能推出恰好新增兩道錯題。實測時把前後逐題回答並排，找出原先答對、後來答錯的題目，再確認失誤類型。若兩份模型生成有隨機性，應固定選擇方式或重複測量，避免把一次抽樣差異當遺忘。圖文7/10也有三道失敗，仍需查圖像前處理與題目類別。並排表的價值是讓這些問題有入口，而不是用一個較漂亮的新任務平均分結束討論。\n",
+    "\n",
+    "練習只把recipe改成文字500、圖文500，先預測比例各0.5而總數仍1000，再執行核對。不要改recorded成績：比例計劃改變不能憑空產生測量結果。要知道新比例是否改善保留，必須訓練後重新填入真實測試成績，未量測的格子應標為未知。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "11.7"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}
