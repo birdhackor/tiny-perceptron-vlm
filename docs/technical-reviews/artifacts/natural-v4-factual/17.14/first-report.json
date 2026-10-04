@@ -1,0 +1,840 @@
+{
+  "schema_version": 1,
+  "review_stage": "technical",
+  "lesson_id": "17.14",
+  "source": "course/chapters/17.md#17.14",
+  "reviewer_task": "/root/v4_review_coordinator/factual_v4_17_14",
+  "reviewer_context": "fresh",
+  "source_sha256": "bebcac0880cf6714e055868a181043e62f71ddbfd843d8ae91adf39cc9f03e61",
+  "figure_sha256": {
+    "course/figures/qat_training_deployment.svg": "4809ed99448a94903c26ae0565852bc5fe8f0a38b2aab40e270e064d7de94b03",
+    "course/figures/architecture_quantize_grid.svg": "14927d2523dd2b3ca4473502a2f7a4bd148ac4bc6f4a2d691890b25421230e2e"
+  },
+  "verdict": "pass",
+  "claims": [
+    {
+      "id": "c1",
+      "kind": "concept",
+      "statement": "QAT simulates quantization during floating training so weights can adapt; PTQ converts already-trained fixed weights. A real inference representation/engine is a separate conversion and evaluation step.",
+      "location": "Opening paragraphs; PTQ definition; full-flow and Jacob reference paragraphs",
+      "status": "verified",
+      "evidence": [
+        {
+          "source_id": "jacob",
+          "locator": "Fig.1.1 p.2; §3 p.4, Eq.(12), Algorithm1; §§2.4/3.2",
+          "supports": "Floating master weights and simulated rounding; train/quantized inference graph distinction and matching future quantization placement."
+        }
+      ],
+      "artifact_ids": [
+        "analysis"
+      ],
+      "scope": "General QAT/PTQ principle; this project is explicitly weight-only4-bit and FP32 reference inference. The paper uses8-bit weights/activations and an actual integer engine, whose quality/speed results are not inherited."
+    },
+    {
+      "id": "c2",
+      "kind": "concept",
+      "statement": "An identity straight-through gradient through a discrete operation is a biased surrogate, while direct round is locally constant and its PyTorch backward is zero; nonzero gradient does not guarantee improved task quality.",
+      "location": "Opening and STE explanation; Bengio reference and quality caveats",
+      "status": "verified",
+      "evidence": [
+        {
+          "source_id": "bengio",
+          "locator": "§4 p.7, Eq.(13)",
+          "supports": "Identity backward estimator explicitly biased; single-layer sign statement does not promise deep-model quality."
+        },
+        {
+          "source_id": "torch_autograd",
+          "locator": "derivatives.yaml lines1508–1514",
+          "supports": "Both round variants use zeros_like(grad)."
+        }
+      ],
+      "artifact_ids": [
+        "analysis",
+        "probe"
+      ],
+      "scope": "STE idea applied to rounding; not its mathematical derivative, and no general optimization/quality guarantee."
+    },
+    {
+      "id": "c3",
+      "kind": "numeric",
+      "statement": "The 4-bit toy example uses maximum7, scale0.9/7, codes[1,3,7], and approximately[0.1286,0.3857,0.9] reconstructed forward values.",
+      "location": "Second paragraph, Python example and direct figure middle box",
+      "status": "verified",
+      "evidence": [
+        {
+          "source_id": "quant",
+          "locator": "quantize_symmetric8–18 and fake_quantize77–81",
+          "supports": "Exact implemented symmetric rule."
+        },
+        {
+          "source_id": "math",
+          "locator": "Scale=9/70; ratios7/9,28/9,7; restored9/70,27/70,63/70",
+          "supports": "Independent exact-decimal derivation."
+        }
+      ],
+      "artifact_ids": [
+        "probe",
+        "analysis",
+        "figure"
+      ],
+      "scope": "One shared-scale FP32 vector; formal model later uses separate output-row scales.",
+      "verification": {
+        "method": "executed",
+        "expected": "Codes[1,3,7]; reconstructed[0.1285714286,0.3857142857,0.9].",
+        "observed": "Codes[1,3,7]; FP32 forward[0.12857142090797424,0.38571426272392273,0.8999999761581421].",
+        "details": "Actual fake_quantize execution on the literal3-vector; direct constant-scale round differs only by FP32 rounding.",
+        "tolerance": "Absolute1e-7 for exact-decimal reconstructed values; stated4dp values agree."
+      }
+    },
+    {
+      "id": "c4",
+      "kind": "software",
+      "statement": "fake_quantize uses x+(reconstruction-x).detach(), so sum loss gives[1,1,1]; detach().clone().requires_grad_() creates an independent leaf whose direct-round sum path has[0,0,0] and does not reconnect the original x.",
+      "location": "Python block and following autograd explanation",
+      "status": "verified",
+      "evidence": [
+        {
+          "source_id": "quant",
+          "locator": "fake_quantize77–81",
+          "supports": "Actual detached correction implementation."
+        },
+        {
+          "source_id": "torch_detach",
+          "locator": "Tensor.detach API",
+          "supports": "Graph disconnected; original storage shared until clone."
+        },
+        {
+          "source_id": "torch_clone",
+          "locator": "torch.clone API; upstream derivatives451–453",
+          "supports": "Copy is ordinarily differentiable; here its input was detached."
+        },
+        {
+          "source_id": "torch_requires",
+          "locator": "Tensor.requires_grad_ API",
+          "supports": "Begins recording subsequent operations."
+        }
+      ],
+      "artifact_ids": [
+        "probe",
+        "analysis"
+      ],
+      "scope": "Fresh leaf inputs; the sum-loss derivative is1; repeated backward would accumulate unless cleared, which the lesson avoids.",
+      "verification": {
+        "method": "executed",
+        "expected": "STE[1,1,1], direct round[0,0,0], independent data storage and no connection to original leaf.",
+        "observed": "All expected gradients and independent leaf/storage checks passed.",
+        "details": "Fresh requires-grad3-vector; actual hard input has grad_fnNone, is_leafTrue and distinct data_ptr."
+      }
+    },
+    {
+      "id": "c5",
+      "kind": "software",
+      "statement": "Formal QAT simulates only Linear weights with per-output-row maxabs/7 and -7..7 codes, retains floating masters, updates via STE each forward, and matches the final QuantizedLinear quantization/packing rule.",
+      "location": "Figure explanatory paragraph and formal350-update protocol paragraph",
+      "status": "verified",
+      "evidence": [
+        {
+          "source_id": "compression",
+          "locator": "_QATLinear420–433; _qat_layers436–446; run_qat498–570",
+          "supports": "Wrappers share float parameters and recreate per-row reconstructed weights every forward."
+        },
+        {
+          "source_id": "quant",
+          "locator": "quantize_symmetric8–18; pack/unpack29–44; QuantizedLinear47–63",
+          "supports": "Same row quantizer, real4-bit storage and dequantized Linear reference."
+        }
+      ],
+      "artifact_ids": [
+        "probe",
+        "analysis",
+        "figure"
+      ],
+      "scope": "Weight-only example; zero rows have a tiny scale floor; bias/embedding/norm remain floating; QAT does not by itself shrink training weights or create low-bit kernels.",
+      "verification": {
+        "method": "executed",
+        "expected": "Current wrapper and packed module use the same row quantization rule; reloaded packed outputs agree numerically.",
+        "observed": "Read matching implementations; all six existing formats loaded and inferred correctly; fake/packed CPU max-logit difference5.7220458984375e-06.",
+        "details": "Original-run relevant implementations were additionally retrieved and matched current AST definitions. Runtime inference corroborates correspondence within1e-4, not universal bitwise equality."
+      }
+    },
+    {
+      "id": "c6",
+      "kind": "empirical",
+      "statement": "Both formal continuations start from the same direct SFT state and seed42 sampler plan, use350 actual recorded updates/batch16/lr0.003, and each sees39,348 answer/EOS targets.",
+      "location": "Formal matched-training paragraph",
+      "status": "verified",
+      "evidence": [
+        {
+          "source_id": "record",
+          "locator": "results.teacher_provenance/data/initialization_sha256/training",
+          "supports": "Original L4 complete-run record and matching initialization/plan/update counts."
+        },
+        {
+          "source_id": "original_compression",
+          "locator": "_fit_text350–417; run_qat498–570",
+          "supports": "350-step optimizer loop, same seeded16-sample plan and copied source."
+        },
+        {
+          "source_id": "prepare",
+          "locator": "attributes-sft30–43; common split_records50–70",
+          "supports": "Original dataset generation and family order used for independent recreation."
+        }
+      ],
+      "artifact_ids": [
+        "probe",
+        "analysis"
+      ],
+      "scope": "Original L4 run records validated, with final existing export state hashes matching original training final hashes; no optimizer/training replication here.",
+      "verification": {
+        "method": "executed",
+        "expected": "Same initial/sampler hashes and350 updates;39,348 supervised targets per branch.",
+        "observed": "DatasetSHA6c93499fc2550d2f6ac221a320f1c7b2646a6bd6b7f77a0e14be7e4d2d8d590a and planSHAa90f3e30a2a86160e0860ef5b089519d358a8f3394a0d38492ff9fbe3742d262 match exactly;39,348 recomputed; branch final weight hashes match.",
+        "details": "Independently built all60 rows and9/1/2-family split, replayed Python seed42 indexing without training, counted answer-byte+EOS targets, read full original training records.",
+        "denominators": {
+          "seed": 42,
+          "train_records": 45,
+          "train_families": 9,
+          "unique_train_targets": 315,
+          "updates_each": 350,
+          "batch_records": 16,
+          "sampled_answers_each": 5600,
+          "sampled_targets_each": 39348,
+          "branches": 2
+        }
+      }
+    },
+    {
+      "id": "c7",
+      "kind": "empirical",
+      "statement": "The six test table rows report correct/10 as5,4,6,6,4,4 and answer/EOS NLL/69 as0.5058,0.5262,0.4896,0.4066,0.5398,0.5979; NLL is target-average reference prediction cost rather than generated-answer accuracy.",
+      "location": "Six-row test table and preceding NLL definition",
+      "status": "verified",
+      "evidence": [
+        {
+          "source_id": "record",
+          "locator": "results.runs.{initial_fp32,initial_ptq4,fp_finetuned,matched_ptq4,qat_float,qat_packed4}.test",
+          "supports": "Recorded sums, counts and complete raw generated answers."
+        },
+        {
+          "source_id": "model",
+          "locator": "loss_sum92–100; masked_loss103–105",
+          "supports": "Sum CE/nonignored target count."
+        },
+        {
+          "source_id": "data",
+          "locator": "render_chat54–68",
+          "supports": "Assistant answer bytes and EOS are the supervised positions."
+        }
+      ],
+      "artifact_ids": [
+        "probe",
+        "analysis"
+      ],
+      "scope": "One fixed synthetic test split with2 held-out families. CPU checks reuse existing weights, not independent training; none of these NLL values implies free-generation correctness.",
+      "verification": {
+        "method": "executed",
+        "expected": "Six exact table counts and4dp NLLs.",
+        "observed": "Every table value matches stored sum/69 and raw-ID comparisons; CPU exports reproduce every generated ID and NLL within4.5e-7.",
+        "details": "Own log-softmax gather on answer labels and independent greedy loop; no exclusions or skipped rows.",
+        "denominators": {
+          "test_examples_each": 10,
+          "test_families": 2,
+          "answer_and_eos_targets_each": 69,
+          "versions": 6,
+          "seed": 42
+        }
+      }
+    },
+    {
+      "id": "c8",
+      "kind": "empirical",
+      "statement": "Matched QAT packed4 and ordinary-finetune PTQ4 both score2/5 validation, with NLL0.5273 versus1.1811 over36 targets; test reverses the NLL ranking and QAT scores4/10 versus6/10. All six test versions endEOS10/10 with no illegal control IDs.",
+      "location": "Validation/test reversal and EOS paragraph",
+      "status": "verified",
+      "evidence": [
+        {
+          "source_id": "record",
+          "locator": "results.runs.qat_packed4/matched_ptq4.{validation,test}; every runs.*.test.generated_samples",
+          "supports": "Fixed-split sums, exact answers, termination and raw control-ID checks."
+        }
+      ],
+      "artifact_ids": [
+        "probe",
+        "analysis"
+      ],
+      "scope": "Same350-update packed branches are the matched comparison; one validation family/two test families and one seed do not establish general QAT improvement or harm. Correct stopping is separate from correct content.",
+      "verification": {
+        "method": "executed",
+        "expected": "Validation2/5 each, NLL0.5273 vs1.1811; test4/10 vs6/10, NLL0.5979 vs0.4066; sixEOS10/10 and no illegal controls.",
+        "observed": "All stated counts, sums/denominators, rounded costs and generation-control outcomes exactly match record recomputation and bounded CPU inference.",
+        "details": "All5+10 records per version included; EOS identified by rawID2 and any non-EOS ID<8 treated as illegal. Dataset/split SHA fixed.",
+        "denominators": {
+          "validation_examples_each": 5,
+          "validation_families": 1,
+          "validation_targets_each": 36,
+          "test_examples_each": 10,
+          "test_families": 2,
+          "test_targets_each": 69,
+          "versions_eos_checked": 6,
+          "updates_each_matched_branch": 350,
+          "seed": 42
+        }
+      }
+    },
+    {
+      "id": "c9",
+      "kind": "empirical",
+      "statement": "The original formal run reports zero maximum-logit difference between QAT simulated and reloaded packed4 forward on one complete test input including gold-answer context; this checks representation correspondence rather than answer correctness.",
+      "location": "Paragraph beginning 在一筆完整带標準答案前文",
+      "status": "verified",
+      "evidence": [
+        {
+          "source_id": "record",
+          "locator": "results.fake_deployed_max_logit_difference=0.0",
+          "supports": "Exact original-run recorded observation."
+        },
+        {
+          "source_id": "original_compression",
+          "locator": "run_qat520–526 and _example",
+          "supports": "Uses the first full test example and compares all logits, with1e-4 rejection threshold."
+        }
+      ],
+      "artifact_ids": [
+        "probe",
+        "analysis"
+      ],
+      "scope": "Exact zero is the recorded L4 result only. CPU existing-export recomputation gives5.7220458984375e-06 and is not an exact-equality replication; same rule can differ by floating rounding. One teacher-forced input cannot prove quality.",
+      "verification": {
+        "method": "executed",
+        "expected": "Recorded L4 maximum0; numerical CPU agreement within implementation tolerance1e-4.",
+        "observed": "Original record0.0; actual CPU comparison5.7220458984375e-06 on52 input positions.",
+        "details": "Recreated first test input blue/circle/low describe with its gold circle answer prefix, restored QAT wrappers on existing float export, compared to existing loaded packed export.",
+        "denominators": {
+          "inputs": 1,
+          "input_positions": 52,
+          "batch_size": 1,
+          "vocabulary_logits_per_position": 264,
+          "original_seed": 42
+        }
+      }
+    },
+    {
+      "id": "c10",
+      "kind": "software",
+      "statement": "qat_float.pt contains floating master weights and native loading uses ordinary FP32 Linear; model.pt is the real packed deployment representation and still dequantizes for floating reference operations. The given CPU rerun CLI dispatches the matched full QAT flow when the stated SFT model.pt/dataset.json dependencies exist.",
+      "location": "Memory/kernel caveat; float versus packed save paragraph; two command lines",
+      "status": "verified",
+      "evidence": [
+        {
+          "source_id": "training",
+          "locator": "load_checkpoint79–106",
+          "supports": "Native/quantized dispatch and strict state reconstruction."
+        },
+        {
+          "source_id": "quant",
+          "locator": "QuantizedLinear47–63",
+          "supports": "Packed buffers unpack to floating weights for F.linear."
+        },
+        {
+          "source_id": "compression",
+          "locator": "_packed188–212; _qat_layers436–446; run_qat498–570",
+          "supports": "Remove wrappers to save float master, then explicitly packed conversion."
+        },
+        {
+          "source_id": "runner",
+          "locator": "main parser/execute dispatch; plan qat549–566; common Context.dependency26–30",
+          "supports": "Commands, default paths, seed and existing dependency conditions."
+        },
+        {
+          "source_id": "infer",
+          "locator": "main checkpoint/chat/tokens/JSON handling",
+          "supports": "Actual inference entry flags and greedy default."
+        }
+      ],
+      "artifact_ids": [
+        "probe",
+        "cli",
+        "analysis"
+      ],
+      "scope": "Parser, source and bounded inference checked; no full350-update CPU training performed. Its duration cannot inherit original L4 timing. Saves/RAM and low-bit execution are distinct.",
+      "verification": {
+        "method": "executed",
+        "expected": "Native QAT float loads as normal Linear; packed format loads quantized-v1; CPU CLI flags accepted, QAT needs only stated local SFT dependencies.",
+        "observed": "All existing checkpoints loaded with correct format and tensor sizes; --help and --list-assets qat exit0; both real inference commands exit0.",
+        "details": "Full training command behavior inspected through actual current dispatch and original matching run implementation; original output directory was not manufactured and training was not rerun."
+      }
+    },
+    {
+      "id": "c11",
+      "kind": "empirical",
+      "statement": "For red/square/high describe, ideal answer is square but formal QAT packed4 returns circle while matched PTQ4 returns square. Packed tensor bytes are equal, so serialized file-size differences include overhead rather than fewer parameters.",
+      "location": "Last sample-answer/storage paragraph",
+      "status": "verified",
+      "evidence": [
+        {
+          "source_id": "record",
+          "locator": "results.runs.qat_packed4/matched_ptq4.test.generated_samples and storage",
+          "supports": "Original prompt answers,168,736 tensor bytes each and original file sizes183,045/185,877."
+        },
+        {
+          "source_id": "prepare",
+          "locator": "attributes-sft describe mapping30–43",
+          "supports": "Correct target is shape square."
+        },
+        {
+          "source_id": "compression",
+          "locator": "_storage126–172; _packed188–212",
+          "supports": "Modeled parameter count and separate tensor/serialization accounting."
+        }
+      ],
+      "artifact_ids": [
+        "probe",
+        "cli",
+        "analysis"
+      ],
+      "scope": "One example demonstrates differing learned decisions, not aggregate superiority; actual public exports differ in file bytes from original training outputs but have identical tensor byte counts and the same141,568 modeled elements.",
+      "verification": {
+        "method": "executed",
+        "expected": "QAT circle versus matched PTQ square, EOS/no invalid controls; equal stored tensor bytes.",
+        "observed": "Actual CLI outputs circle and square withEOS and empty invalid controls; both reloaded tensor bytes168,736 and original parameter_count141,568.",
+        "details": "Original file bytes183,045 vs185,877; metadata/serialization overhead14,309 vs17,141. Existing inference exports181,381 vs184,341 because export metadata differs.",
+        "denominators": {
+          "prompt_examples": 1,
+          "compared_versions": 2,
+          "tensor_bytes_each": 168736,
+          "modeled_parameter_elements_each": 141568,
+          "seed": 42
+        }
+      }
+    },
+    {
+      "id": "c12",
+      "kind": "numeric",
+      "statement": "Changing only STE loss to y.square().sum() gives approximate gradient[0.2571,0.7714,1.8], while the unchanged direct-round sum loss still yields zeros.",
+      "location": "Final exercise",
+      "status": "verified",
+      "evidence": [
+        {
+          "source_id": "math",
+          "locator": "d(sum(y²))/dx=2y under identity surrogate",
+          "supports": "Exact-decimal[9/35,27/35,9/5]."
+        },
+        {
+          "source_id": "quant",
+          "locator": "fake_quantize77–81",
+          "supports": "Identity gradient from the detached correction."
+        }
+      ],
+      "artifact_ids": [
+        "probe",
+        "analysis"
+      ],
+      "scope": "Error-function derivative supplies the learning signal, and STE supplies the chosen transfer rule. Inputs are fresh to avoid accumulated gradients.",
+      "verification": {
+        "method": "executed",
+        "expected": "STE approximately[0.2571,0.7714,1.8]; direct-round sum zeros.",
+        "observed": "Actual STE[0.2571428418159485,0.7714285254478455,1.7999999523162842]; direct round[0,0,0].",
+        "details": "Executed the explicitly requested single loss substitution, keeping the hard branch as sum.",
+        "tolerance": "Exact equality to2*y in executed FP32;1e-7 absolute to exact-decimal gradient and agreement at stated4dp."
+      }
+    }
+  ],
+  "sources": [
+    {
+      "id": "jacob",
+      "kind": "paper",
+      "title": "Quantization and Training of Neural Networks for Efficient Integer-Arithmetic-Only Inference",
+      "url": "https://arxiv.org/pdf/1712.05877v1",
+      "version": "arXiv:1712.05877v1, 2017-12-15",
+      "verified": true,
+      "checked_original": true,
+      "accessed_on": "2026-10-04",
+      "authority_reason": "Original author/publisher document or implementation defining the method/API.",
+      "inspection_note": "Read Fig.1.1 caption p.2; §3 p.4 including Eq.(12), §3.1 and Algorithm1; correspondence in §§2.4/3.2. Floating training/master weights and simulated rounding are distinct from an actual integer inference graph. Its 8-bit activation/integer engine is not claimed for this project."
+    },
+    {
+      "id": "bengio",
+      "kind": "paper",
+      "title": "Estimating or Propagating Gradients Through Stochastic Neurons for Conditional Computation",
+      "url": "https://arxiv.org/pdf/1308.3432v1",
+      "version": "arXiv:1308.3432v1",
+      "verified": true,
+      "checked_original": true,
+      "accessed_on": "2026-10-04",
+      "authority_reason": "Original author/publisher document or implementation defining the method/API.",
+      "inspection_note": "Read §4, p.7, Eq.(13): identity backward path through a hard threshold, explicitly biased; author attributes the proposal to Hinton2012. Applying it to round is a surrogate, not the true derivative."
+    },
+    {
+      "id": "torch_autograd",
+      "kind": "official_source",
+      "title": "PyTorch round and clone autograd formulas",
+      "url": "https://github.com/pytorch/pytorch/blob/5c4886908584029761b579af026dcfb627c84070/tools/autograd/derivatives.yaml",
+      "version": "runtime git_version 5c4886908584029761b579af026dcfb627c84070; torch2.14.1+cpu",
+      "verified": true,
+      "checked_original": true,
+      "accessed_on": "2026-10-04",
+      "authority_reason": "Original author/publisher document or implementation defining the method/API.",
+      "inspection_note": "Read upstream original file at runtime commit: lines451–453 clone=self grad; lines1508–1514 round and round.decimals=zeros_like(grad). Retrieval SHA is in own authority receipt."
+    },
+    {
+      "id": "torch_detach",
+      "kind": "official_docs",
+      "title": "PyTorch torch.Tensor.detach",
+      "url": "https://docs.pytorch.org/docs/2.14/generated/torch.Tensor.detach.html",
+      "version": "PyTorch2.14 official API docs, retrieved2026-10-04; execution torch2.14.1+cpu",
+      "verified": true,
+      "checked_original": true,
+      "accessed_on": "2026-10-04",
+      "authority_reason": "Original author/publisher document or implementation defining the method/API.",
+      "inspection_note": "Read Tensor.detach: detached from current graph; never requires gradient; shares original storage. Stable HTML redirects were followed to and read at the explicit2.14 target."
+    },
+    {
+      "id": "torch_clone",
+      "kind": "official_docs",
+      "title": "PyTorch torch.clone",
+      "url": "https://docs.pytorch.org/docs/2.14/generated/torch.clone.html",
+      "version": "PyTorch2.14 official API docs, retrieved2026-10-04; execution torch2.14.1+cpu",
+      "verified": true,
+      "checked_original": true,
+      "accessed_on": "2026-10-04",
+      "authority_reason": "Original author/publisher document or implementation defining the method/API.",
+      "inspection_note": "Read torch.clone: a copy, ordinarily differentiable; use detach to remove the original autograd relation. Stable HTML redirects were followed to and read at the explicit2.14 target."
+    },
+    {
+      "id": "torch_requires",
+      "kind": "official_docs",
+      "title": "PyTorch torch.Tensor.requires_grad_",
+      "url": "https://docs.pytorch.org/docs/2.14/generated/torch.Tensor.requires_grad_.html",
+      "version": "PyTorch2.14 official API docs, retrieved2026-10-04; execution torch2.14.1+cpu",
+      "verified": true,
+      "checked_original": true,
+      "accessed_on": "2026-10-04",
+      "authority_reason": "Original author/publisher document or implementation defining the method/API.",
+      "inspection_note": "Read Tensor.requires_grad_: set requires_grad in place and begin recording subsequent operations; does not reconstruct an earlier graph. Stable HTML redirects were followed to and read at the explicit2.14 target."
+    },
+    {
+      "id": "original_compression",
+      "kind": "official_source",
+      "title": "Original QAT experiment implementation",
+      "url": "https://github.com/birdhackor/tiny-perceptron-vlm/blob/5af615e5d7c9642afee800390fa072257f895d0c/scripts/course_experiments/compression.py",
+      "version": "experiment revision5af615e5d7c9642afee800390fa072257f895d0c",
+      "verified": true,
+      "checked_original": true,
+      "accessed_on": "2026-10-04",
+      "authority_reason": "Original author/publisher document or implementation defining the method/API.",
+      "inspection_note": "Retrieved original raw file; fullSHA28d8ce258369672d71a24f7efbcbf68f3e5e8114e073620aba91c4d807043a44 matches run code_sha256. Inspected _fit_text350–417, _QATLinear420–433, _qat_layers436–446, run_qat498–570, _evaluate216–284 and _packed188–212; their ASTs are identical to the read current definitions."
+    },
+    {
+      "id": "quant",
+      "kind": "repository_code",
+      "title": "tiny_perceptron/quantization.py",
+      "path": "tiny_perceptron/quantization.py",
+      "sha256": "fb3afbb775d25e3d19a2843171e228e3342422c6fd9056fe0a0af1d057dce206",
+      "version": "current checked file on2026-10-04; fullSHAfb3afbb775d25e3d19a2843171e228e3342422c6fd9056fe0a0af1d057dce206",
+      "verified": true,
+      "inspection_note": "Read entire file: quantize_symmetric8–18; pack/unpack29–44; QuantizedLinear47–66; fake_quantize77–81. Symmetric -7..7, per-channel rows for Linear, real nibble packing, floating reconstruction and detached identity STE."
+    },
+    {
+      "id": "compression",
+      "kind": "repository_code",
+      "title": "scripts/course_experiments/compression.py",
+      "path": "scripts/course_experiments/compression.py",
+      "sha256": "ede22f6c4b9c01d2dc5be149f20cf84b01b9591c925c270d510a81678ce0d444",
+      "version": "current checked file on2026-10-04; fullSHAede22f6c4b9c01d2dc5be149f20cf84b01b9591c925c270d510a81678ce0d444",
+      "verified": true,
+      "inspection_note": "Read _example/_dataset/_prompt/_storage; _packed188–212; _evaluate216–284; _fit_text350–417; _QATLinear420–433; _qat_layers436–446; run_qat498–570. Same initialization, sampler and 350 updates; six separately evaluated variants; fake versus reloaded packed test input."
+    },
+    {
+      "id": "data",
+      "kind": "repository_code",
+      "title": "tiny_perceptron/data.py",
+      "path": "tiny_perceptron/data.py",
+      "sha256": "6b40ba4bccc4a1ce169a90df8ce71f40e7c9e33e3d7633a36fdd8348d9536321",
+      "version": "current checked file on2026-10-04; fullSHA6b40ba4bccc4a1ce169a90df8ce71f40e7c9e33e3d7633a36fdd8348d9536321",
+      "verified": true,
+      "inspection_note": "Read ByteTokenizer14–27, render_chat54–68 and pad_batch71–87. Byte IDs offset8; assistant bytes plus EOS only are supervised; padding remains ignored."
+    },
+    {
+      "id": "model",
+      "kind": "repository_code",
+      "title": "tiny_perceptron/model.py",
+      "path": "tiny_perceptron/model.py",
+      "sha256": "176e3a2c305f3ec509934abe41a1e8e48c5a76de8e9b0cea5c41eefd5a9adf69",
+      "version": "current checked file on2026-10-04; fullSHA176e3a2c305f3ec509934abe41a1e8e48c5a76de8e9b0cea5c41eefd5a9adf69",
+      "verified": true,
+      "inspection_note": "Read loss_sum92–100/masked_loss103–105, forward logits and generate. Summed CE over nonignored labels divided by actual count; own CPU evaluation independently gathers log-softmax and generates greedy tokens."
+    },
+    {
+      "id": "training",
+      "kind": "repository_code",
+      "title": "tiny_perceptron/training.py",
+      "path": "tiny_perceptron/training.py",
+      "sha256": "6aefd29750e468a61ea8e0984087fd9f691e37a055313903cbdac746e5649a6a",
+      "version": "current checked file on2026-10-04; fullSHA6aefd29750e468a61ea8e0984087fd9f691e37a055313903cbdac746e5649a6a",
+      "verified": true,
+      "inspection_note": "Read load_checkpoint79–106 and its native/quantized dispatch. Native restores ordinary TinyLM; quantized-v1 replaces Linear before strict buffer load. No automatic fake-quant wrapping of qat_float."
+    },
+    {
+      "id": "common",
+      "kind": "repository_code",
+      "title": "scripts/course_experiments/common.py",
+      "path": "scripts/course_experiments/common.py",
+      "sha256": "df08fb4d378170e930bb5deb50b97749c33e5d97d0fbd3ce77ba916b12b07206",
+      "version": "current checked file on2026-10-04; fullSHAdf08fb4d378170e930bb5deb50b97749c33e5d97d0fbd3ce77ba916b12b07206",
+      "verified": true,
+      "inspection_note": "Read Context.dependency26–30 and split_records50–70, write_json33–39. Dependencies must already exist; families grouped before seed42 shuffle and9/1/2 split."
+    },
+    {
+      "id": "prepare",
+      "kind": "repository_code",
+      "title": "scripts/prepare_data.py",
+      "path": "scripts/prepare_data.py",
+      "sha256": "d5cfe23d628e81a31d7d2030a4f6349dcff7bc95ad2c4c4b627fb417e961a429",
+      "version": "current checked file on2026-10-04; fullSHAd5cfe23d628e81a31d7d2030a4f6349dcff7bc95ad2c4c4b627fb417e961a429",
+      "verified": true,
+      "inspection_note": "Read full file; attributes-sft generator30–43 enumerates12 families times5 questions, describe maps to shape."
+    },
+    {
+      "id": "text",
+      "kind": "repository_code",
+      "title": "scripts/course_experiments/text.py",
+      "path": "scripts/course_experiments/text.py",
+      "sha256": "04b0a75d151b6920dd8c28b5f7b6cadf94d27a71776a7ca7952be39ae05a0b59",
+      "version": "current checked file on2026-10-04; fullSHA04b0a75d151b6920dd8c28b5f7b6cadf94d27a71776a7ca7952be39ae05a0b59",
+      "verified": true,
+      "inspection_note": "Read imports and split-save code, plus run_sft556–590. Direct SFT saves900-update untied width64/two-layer model.pt and exact dataset.json used by QAT."
+    },
+    {
+      "id": "runner",
+      "kind": "repository_code",
+      "title": "scripts/course_experiments/run.py",
+      "path": "scripts/course_experiments/run.py",
+      "sha256": "e805ef129d535c85cb6c53114bf48c6766d5de7e7865b9b90da84523f06676b3",
+      "version": "current checked file on2026-10-04; fullSHAe805ef129d535c85cb6c53114bf48c6766d5de7e7865b9b90da84523f06676b3",
+      "verified": true,
+      "inspection_note": "Read complete runner: spec lookup, Context seed42, dispatch, default output/dependency directories, CPU/CUDA handling, step-scale and parser. QAT command dispatches run_qat; full training was not rerun."
+    },
+    {
+      "id": "infer",
+      "kind": "repository_code",
+      "title": "scripts/infer.py",
+      "path": "scripts/infer.py",
+      "sha256": "58bdc7140661b5bdd54fb352089b1392a2b23be8ff5281bda052e9b596ad5817",
+      "version": "current checked file on2026-10-04; fullSHA58bdc7140661b5bdd54fb352089b1392a2b23be8ff5281bda052e9b596ad5817",
+      "verified": true,
+      "inspection_note": "Read entire file: native/quantized loading, chat role prompt, token cap, default greedy generation and JSON report. CLI executed on existing exported QAT/matched PTQ checkpoints."
+    },
+    {
+      "id": "plan",
+      "kind": "repository_code",
+      "title": "docs/course-experiments/plan.json",
+      "path": "docs/course-experiments/plan.json",
+      "sha256": "d6021ce60c0797cf4fd48698a43ba3335f7273456ad53da3f6155e5ca4052e38",
+      "version": "current checked file on2026-10-04; fullSHAd6021ce60c0797cf4fd48698a43ba3335f7273456ad53da3f6155e5ca4052e38",
+      "verified": true,
+      "inspection_note": "Inspected qat entry549–566: compression.run_qat, sft dependency, no assets, original report path."
+    },
+    {
+      "id": "record",
+      "kind": "repository_code",
+      "title": "docs/course-experiments/results/qat.json",
+      "path": "docs/course-experiments/results/qat.json",
+      "sha256": "13743f0d4c072f8eebe00aee9194e96f14e6800d77dfe740bb11d4fb66137bb7",
+      "version": "current checked file on2026-10-04; fullSHA13743f0d4c072f8eebe00aee9194e96f14e6800d77dfe740bb11d4fb66137bb7",
+      "verified": true,
+      "inspection_note": "Directly read completed original L4 run metadata, teacher/data provenance, both training records, six full validation/test/storage results and generated IDs, fake/deployed maximum difference and original artifacts. Independently recomputed arithmetic and verified existing exports. This is record validation and inference, not a new GPU-training run."
+    },
+    {
+      "id": "math",
+      "kind": "derivation",
+      "title": "Scale and identity-surrogate derivative calculation",
+      "verified": true,
+      "details": "Scale=0.9/7=9/70; ratios=[7/9,28/9,7] round to[1,3,7], reconstruct[9/70,27/70,63/70]. y=x+stop_gradient(Q(x)-x) gives identity surrogate; sum gives ones, squared sum gives2Q(x)=[9/35,27/35,9/5]. Direct constant-scale round is locally constant except discontinuities. Full worked FP32/record calculations are in analysis.md and verify.stdout.json."
+    },
+    {
+      "id": "execution",
+      "kind": "execution",
+      "title": "Actual independent bounded CPU verification",
+      "verified": true,
+      "artifact_id": "probe"
+    }
+  ],
+  "artifacts": [
+    {
+      "id": "probe_code",
+      "kind": "code",
+      "path": "docs/technical-reviews/artifacts/natural-v4-factual/17.14/verify.py",
+      "sha256": "eb1a71fa63521bf8574ef39bcc34d29f9687acf58fd7721b91c3ca612a7ffd14",
+      "description": "Own bounded numeric, dataset/sampler, original-record and existing-export CPU verification program."
+    },
+    {
+      "id": "probe",
+      "kind": "execution",
+      "path": "docs/technical-reviews/artifacts/natural-v4-factual/17.14/verify.stdout.json",
+      "sha256": "4aa7d71640f3df489ef1e0808122c52dada935ea45c6acd4d58611237aa25395",
+      "description": "Actual stdout from independent numerical and original-result/export checks.",
+      "command": ".venv/bin/python docs/technical-reviews/artifacts/natural-v4-factual/17.14/verify.py > docs/technical-reviews/artifacts/natural-v4-factual/17.14/verify.stdout.json 2> docs/technical-reviews/artifacts/natural-v4-factual/17.14/verify.stderr.txt",
+      "result": "Exit 0; all assertions passed. No training. Two toy losses, six versions each on five validation and ten test questions, regenerated dataset and seed42 batch plan; CPU logit comparison 5.7220458984375e-06.",
+      "environment": {
+        "python": "3.13.5",
+        "torch": "2.14.1+cpu",
+        "torch_git_version": "5c4886908584029761b579af026dcfb627c84070",
+        "device": "cpu"
+      }
+    },
+    {
+      "id": "probe_stderr",
+      "kind": "source_snapshot",
+      "path": "docs/technical-reviews/artifacts/natural-v4-factual/17.14/verify.stderr.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "description": "Genuine empty stderr for the completed bounded CPU probe."
+    },
+    {
+      "id": "environment",
+      "kind": "source_snapshot",
+      "path": "docs/technical-reviews/artifacts/natural-v4-factual/17.14/environment.json",
+      "sha256": "adf57cdb6fef8998eda754e5975b388521ed12e86ee1304a4a11fb0ddafbaf5f",
+      "description": "Actual repository Python and torch runtime inspection."
+    },
+    {
+      "id": "analysis",
+      "kind": "derivation",
+      "path": "docs/technical-reviews/artifacts/natural-v4-factual/17.14/analysis.md",
+      "sha256": "f94802231cd3626fa0f967c10e4fbb35c2a809a483c427ea3bd74ba4f7057387",
+      "description": "Own authority reading locators, derivations, original-run limits and personal figure inspection."
+    },
+    {
+      "id": "figure",
+      "kind": "figure_render",
+      "path": "docs/technical-reviews/artifacts/natural-v4-factual/17.14/qat_training_deployment.render.png",
+      "sha256": "9943216815d9748f32fd3241f03b68a0cceafcfa8566ae053afd407dd5fbfe33",
+      "description": "Personally viewed Inkscape render of the current directly referenced QAT SVG."
+    },
+    {
+      "id": "prereq_figure",
+      "kind": "figure_render",
+      "path": "docs/technical-reviews/artifacts/natural-v4-factual/17.14/architecture_quantize_grid.render.png",
+      "sha256": "43571d33defa2eb651471f9e165e9649e14148aaf8caa08eb7cb7204f132a6ab",
+      "description": "Personally viewed necessary 17.2 scale/round/reconstruct prerequisite SVG."
+    },
+    {
+      "id": "reads",
+      "kind": "source_snapshot",
+      "path": "docs/technical-reviews/artifacts/natural-v4-factual/17.14/source-read-receipts.json",
+      "sha256": "22d3ceb777404567b46596324236711215b313136a82b1d469f5b07270d038cb",
+      "description": "Own section/full-file/figure SHA and prerequisite reading receipt."
+    },
+    {
+      "id": "authorities",
+      "kind": "source_snapshot",
+      "path": "docs/technical-reviews/artifacts/natural-v4-factual/17.14/authority-retrieval-receipts.json",
+      "sha256": "3c8b95c9bea675490682cb0c2b52f1b1caab87a16568324f6f408ffd6e8f2168",
+      "description": "Original HTTPS URL/version/retrieval hashes; full originals remain ignored."
+    },
+    {
+      "id": "section",
+      "kind": "source_snapshot",
+      "path": "docs/technical-reviews/artifacts/natural-v4-factual/17.14/reviewed-section.raw.md",
+      "sha256": "bebcac0880cf6714e055868a181043e62f71ddbfd843d8ae91adf39cc9f03e61",
+      "description": "Complete personally read raw UTF-8 assigned section, including blank lines."
+    },
+    {
+      "id": "cli",
+      "kind": "execution",
+      "path": "docs/technical-reviews/artifacts/natural-v4-factual/17.14/cli-receipts.json",
+      "sha256": "180191fb43b32191b76e256c0cd540f63c4d9a02da3cdf241710c02147cec28d",
+      "description": "Actual command argv, exit codes, stdout and stderr for parser/assets and two existing-export inference checks.",
+      "command": ".venv/bin/python -m scripts.course_experiments.run --help\n.venv/bin/python -m scripts.course_experiments.run --list-assets qat\n.venv/bin/python scripts/infer.py checkpoints/course/qat/model.pt --chat --prompt 'color=red;shape=square;pitch=high;describe' --tokens 24 --device cpu --json\n.venv/bin/python scripts/infer.py checkpoints/course/qat/matched_ptq4.pt --chat --prompt 'color=red;shape=square;pitch=high;describe' --tokens 24 --device cpu --json",
+      "result": "All four commands exited 0. QAT packed4 returns circle and matched PTQ4 square, each with EOS and no invalid special tokens. Full training entry was inspected but not executed.",
+      "environment": {
+        "python": "3.13.5",
+        "torch": "2.14.1+cpu",
+        "torch_git_version": "5c4886908584029761b579af026dcfb627c84070",
+        "device": "cpu"
+      }
+    }
+  ],
+  "issues": [],
+  "checks": {
+    "factual_accuracy": {
+      "status": "pass",
+      "details": "All substantive concepts/software/empirical statements verified against the read originals, actual implementation, original L4 record and bounded CPU checks. No unresolved contradiction.",
+      "claim_ids": [
+        "c1",
+        "c2",
+        "c3",
+        "c4",
+        "c5",
+        "c6",
+        "c7",
+        "c8",
+        "c9",
+        "c10",
+        "c11",
+        "c12"
+      ]
+    },
+    "numeric_verification": {
+      "status": "pass",
+      "details": "Executed both toy losses; regenerated exact dataset/sampler hashes and39,348 targets; recomputed all stored sums/counts and reevaluated90 version/example pairs. Table rounding matches; CPU/GPU NLL differences below4.5e-7.",
+      "claim_ids": [
+        "c3",
+        "c4",
+        "c6",
+        "c7",
+        "c8",
+        "c9",
+        "c11",
+        "c12"
+      ]
+    },
+    "figure_consistency": {
+      "status": "pass",
+      "details": "Personally rendered/viewed direct QAT SVG and17.2 prerequisite SVG. Scale/codes/reconstruction correct; return arrow updates floating master; training-end arrow packs deployment; FP32/kernel and memory/speed caveats match code. Original/read/render hashes saved.",
+      "claim_ids": [
+        "c1",
+        "c3",
+        "c5",
+        "c10"
+      ]
+    },
+    "source_verification": {
+      "status": "pass",
+      "details": "Personally read Jacob/Bengio exactv1 sections/equations and official torch2.14 docs/runtime-commit autograd source; saved URL/version/retrieval hashes. Current repo full-file hashes/inspection locators and original-run exact-codeSHA/AST correspondence recorded.",
+      "claim_ids": [
+        "c1",
+        "c2",
+        "c3",
+        "c4",
+        "c5",
+        "c6",
+        "c7",
+        "c8",
+        "c9",
+        "c10",
+        "c11",
+        "c12"
+      ]
+    },
+    "limitations": {
+      "status": "pass",
+      "details": "No general quality/speed/training-memory promise; small fixed families/one seed, weight-only FP32 reference compute and matched350-update comparison explicit. Original GPU training/timing not replicated. Exactzero logit difference is confined to original L4 observation; CPU difference5.72e-6 documented. Full rerun inspected, not performed.",
+      "claim_ids": [
+        "c1",
+        "c2",
+        "c5",
+        "c6",
+        "c7",
+        "c8",
+        "c9",
+        "c10",
+        "c11"
+      ]
+    }
+  },
+  "preservation": {
+    "prior_assigned_report": "docs/technical-reviews/artifacts/natural-v4-factual/17.14/assigned-report.pre-review.unread.json",
+    "content_inspected": false
+  },
+  "review_limits": "No owned introduction. Full originals only in ignored research. No source/checker/Git/environment/time edits or training/download/install; existing small exported checkpoints only."
+}
