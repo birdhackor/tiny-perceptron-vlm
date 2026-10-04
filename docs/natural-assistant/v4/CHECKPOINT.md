@@ -1,6 +1,6 @@
 # Natural-input v4 execution handoff
 
-This file records engineering state, not a student lesson or a completed release.
+This file records engineering state, not a student lesson or an assertion that all course publication gates passed.
 
 ## Frozen and verified
 
@@ -12,7 +12,7 @@ This file records engineering state, not a student lesson or a completed release
 - ASR was selected on the same 16 validation recordings before test: small normalized CER 117/510, turbo 50/510; raw CER also improved. All LM candidates use the same turbo transcripts. No ASR training occurred.
 - Validation protocol is committed before LM outputs. It compares base and archives at updates 1,039 and 2,077, with blinded semantic grades, exact row normalization, raw EOS completion guards, integer macro scoring and explicit nonregression gates. The scorer has export/score commands and generates an immutable pre-test selection.
 - Actual prepare/train/validation execution source is `9a61ecf524c9518f33f1501c28aa72997d4a82d0`; the feature branch also contains subsequent independent final-test scorer fixes. Its three archive paths contain exact 133-byte Git LFS pointer blobs matching the frozen manifest. Native Actions upload and independent LFS download verified all three objects; the exact receipt is preserved in [data-publication evidence](../evidence/v4-research/data-publication/lfs-transfer-receipt.json).
-- Canonical chapter 20 has 13 coherent sections, four additional SVGs, three v4 operation guides and migrated links. CPU examples and static links passed. Final test/release information is still pending. Fresh readability review has started; factual, continuity and final reading-time review must follow in that order.
+- Canonical chapter 20 has 13 coherent sections, four additional SVGs, three v4 operation guides and migrated links. CPU examples and static links passed. Final test information is integrated; the student instructions still await the actual selected browser/resource trial. Fresh readability review has started; factual, continuity and final reading-time review must follow in that order.
 - Optional research-proof base and supplement are packaged and verified twice; small indices/notices are committed. Raw proof is outside ordinary Git. Publication has not been verified.
 
 ## Current execution state
@@ -35,16 +35,19 @@ The [lower-learning-rate validation run 37219466611](https://github.com/birdhack
 
 The final active [selection](selection.json) is **base**, SHA-256 `8570755345e08c55ab77c165b405f41f6e5012b4c37a93909472b7f17334c42f`. It was committed and pushed at Git `1e71b8abffb34eccd297747d39827135a627107a` before the sole selected-only final test. This choice retains Qwen3-VL-2B-Instruct with the already selected Whisper-large-v3-turbo. It is not a claim that base answers are all correct or complete.
 
-The [selected-only final test 37221188153](https://github.com/birdhackor/tiny-perceptron-vlm/actions/runs/37221188153) was dispatched once at 2026-10-04 17:36:59 UTC against that exact Git source, with all adapter/checkpoint arguments empty. It is currently running. Its expected scope is 178 LM generations and 22 ASR recordings, followed by 147 fresh independent manual grades. These are requested counts, not recorded completed results. No final scores or public v4 release exist yet.
+The [selected-only final test 37221188153](https://github.com/birdhackor/tiny-perceptron-vlm/actions/runs/37221188153) was dispatched once at 2026-10-04 17:36:59 UTC against that exact Git source, with all adapter/checkpoint arguments empty. It completed successfully at 17:52:28 UTC and actually generated all 178 LM responses and 22 ASR transcriptions. Raw EOS confirms 171 LM completions; seven text-chat responses were truncated and remain failures. All 22 ASR transcriptions completed. Source/model/selection pins, original records and counts are in [execution audit](../evidence/v4-runtime/evaluate-37221188153/selected-final-test-audit-summary.json).
 
-The last fully audited durable reservation before final test was US$33.83/40.00. Final-test preflight permits at most another US$1.79; the actual live ledger must be retrieved after completion. These are conservative reservations, not an invoice. No reset occurred.
+Four new actual independent reviewers completed all 147 blind semantic cases, personally inspecting all 42 original photos. The fixed committed helper then scored the unchanged judgments: photo summaries 25/42, visible facts 58/84, text presence 18/18, natural single OCR 8/10, ordered OCR 1/3, text chat 2/13, typed-reference voice chat 2/4, actual-ASR voice chat 2/4. ASR raw CER is 112/674; NFKC then whitespace-removal CER is 96/661. These are limited teaching-sample results, not general reliability. Final [scores](../evidence/v4-runtime/evaluate-37221188153/blind-review/scored/scores.json) SHA-256 is `a3804bcd91290355ae8fff871ab9909bdc9b1d037aea72668d8468513080e58f`; pre-test selection remains unchanged.
+
+The independent concrete [release audit](../evidence/v4-research/public-release-audit/REPORT.md) passed. Approval SHA-256 is `05229a7132e7c4045c5ffe4996135d27282218093ba998f0b3c48011878b7a38`. The sole CPU [release run 37223955247](https://github.com/birdhackor/tiny-perceptron-vlm/actions/runs/37223955247), source Git `42c2516362340a140b68619bcb0f3025a0215f9a`, published the selected BASE configuration at public HF commit `d3954d6900b3cf81e593d99d9b8b1a91e6f9741d`. Its prefix contains only the reviewed README and release-provenance documents; official model weights remain at their immutable upstream pins. A separate independent anonymous readback verified both actual file fingerprints and provenance. See [release evidence](../evidence/v4-runtime/release-37223955247/public-base-release-audit-summary.json).
+
+The actual durable ledger after release is US$36.20/40.00. These are conservative reservations, not an invoice. No reset occurred. The [public student manifest](public-release.json), SHA-256 `1758ceb9f8859108fa3ad315fb8f6a61e0c8cef40ec49b0bc41361d9c70e5ccf`, is committed at student source Git `59a1eda4ed7b6e8609892ec2b9013c821ac93e69`. The actual selected student browser/resource trial is in progress; its completion and measurements are not yet claimed.
 
 The six actual independent whole-book scans cover all 279 pre-existing numbered sections; their preserved records are [public review evidence](../evidence/v4-research/wholebook-independent-scan/). They do not replace fresh ordered review of changed text or the new chapter. Seven corrected conceptual sections have completed fresh readability checks; remaining cleanup/new-chapter readability work is ongoing. Do not claim the factual/continuity/reading-time gates have passed yet.
 
 ## Continue
 
-1. Finish the sole selected-only test, verify actual source/output/HF/budget receipts, and export its 147 semantic cases with the unchanged committed helper and follow-up protocol.
-2. Assign four new independent blind graders, preserve every actual judgment/source-image inspection and owner independence attestation, then apply the fixed test scorer. Do not change the committed pre-test selection or tune on test results.
-3. Independently review a concrete base-only release approval and model card, publish the selected configuration, construct the actual pinned public manifest, and verify anonymous student download and actual browser use.
-4. Fill the canonical book with only current measured results. Keep useful explanations, remove incidental failure histories from student prose.
-5. Run fresh readability, then factual correctness, then continuity review; fix and recheck each finding. Update reading times only afterward, rebuild the whole course, commit/push and verify Pages.
+1. Preserve the completed selected-only test, its actual four independent owners and unchanged pre-test selection; do not tune on these results.
+2. Finish the actual selected-public anonymous student download and real browser/resource trial using the committed public manifest and upstream model pins.
+3. Fill the canonical book with only current measured results. Keep useful explanations, remove incidental failure histories from student prose.
+4. Run fresh readability, then factual correctness, then continuity review; fix and recheck each finding. Update reading times only afterward, rebuild the whole course, commit/push and verify Pages.

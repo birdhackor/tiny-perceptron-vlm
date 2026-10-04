@@ -1,0 +1,151 @@
+"""Audit the one real public base-only release; no inference or writes to HF."""
+
+import ast
+import hashlib
+import json
+import pathlib
+import re
+import subprocess
+import time
+from datetime import datetime, timezone
+from decimal import Decimal, ROUND_CEILING
+
+from huggingface_hub import HfApi, hf_hub_download
+from huggingface_hub.hf_api import RepoFile
+
+ROOT = pathlib.Path(__file__).resolve().parents[3]
+REVISION = "42c2516362340a140b68619bcb0f3025a0215f9a"
+RUN_ID = "gha-37223955247-1"
+
+
+def read(path):
+    return json.loads(path.read_bytes())
+
+
+def sha(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def pure_guard(source):
+    names = {
+        "STAGES", "SPEC", "AUXILIARY_SECONDS", "BUILD_AND_RETAINED_STORAGE_ALLOWANCE_USD",
+        "MAX_EGRESS_GIB", "MAX_JOB_USD",
+    }
+    nodes = []
+    for node in ast.parse(source.read_text()).body:
+        if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id in names for target in node.targets):
+            nodes.append(node)
+        if isinstance(node, ast.FunctionDef) and node.name == "reservation_guard":
+            nodes.append(node)
+    namespace = {"Decimal": Decimal, "ROUND_CEILING": ROUND_CEILING}
+    exec(compile(ast.Module(body=nodes, type_ignores=[]), str(source), "exec"), namespace)
+    return namespace["reservation_guard"]
+
+
+def audit():
+    started = time.monotonic()
+    run_root = ROOT / "outputs/natural-v4/modal-runs/release-37223955247"
+    artifact = run_root / "natural-natural-v4-release-37223955247-1"
+    wrapper_path = artifact / "result.json"
+    wrapper = read(wrapper_path)
+    assert wrapper["status"] == "completed" and wrapper["stage"] == "release"
+    assert wrapper["revision"] == REVISION and wrapper["run_id"] == RUN_ID
+    files = {}
+    for name in (
+        ".github/workflows/natural-assistant.yml", "scripts/modal_natural.py",
+        "scripts/natural_assistant.py", "tiny_perceptron/natural_assistant.py",
+        "docs/natural-assistant/v4/manifest.json", "docs/natural-assistant/v4/selection.json",
+        "docs/natural-assistant/v4/asr-selection.json", "docs/natural-assistant/releases/assistant-2b-v4.json",
+    ):
+        path = ROOT / name
+        assert path.read_bytes() == subprocess.check_output(["git", "show", REVISION + ":" + name], cwd=ROOT), name
+        files[name] = {"bytes": path.stat().st_size, "sha256": sha(path)}
+    approval_path = ROOT / "docs/natural-assistant/releases/assistant-2b-v4.json"
+    approval = read(approval_path)
+    assert sha(approval_path) == "05229a7132e7c4045c5ffe4996135d27282218093ba998f0b3c48011878b7a38"
+    selection_path = ROOT / "docs/natural-assistant/v4/selection.json"
+    assert sha(selection_path) == "8570755345e08c55ab77c165b405f41f6e5012b4c37a93909472b7f17334c42f"
+    assert read(selection_path)["selected_variant"] == approval["selected_variant"] == "base"
+    assert approval["approved"] is True and approval["reviewed"] is True
+    assert approval["source"] is None and approval["files"] == [] and approval["adapter_parameters"] == 0
+    receipt = wrapper["release"]
+    assert receipt["repo"] == "birdhackor/tiny-perceptron-course-models"
+    assert re.fullmatch(r"[a-f0-9]{40}", receipt["revision"])
+    assert receipt["selected_variant"] == "base" and receipt["anonymous_download_verified"] is True
+    prefix = "natural-v3/assistant-2b-v4"
+    expected = {prefix + "/README.md", prefix + "/release-provenance.json"}
+    assert len(receipt["files"]) == 2 and {row["path"] for row in receipt["files"]} == expected
+    api = HfApi(endpoint="https://huggingface.co", token=False)
+    model = api.model_info(receipt["repo"], revision=receipt["revision"])
+    assert model.private is False and model.sha == receipt["revision"]
+    tree = list(api.list_repo_tree(receipt["repo"], path_in_repo=prefix, recursive=True, revision=receipt["revision"], repo_type="model", token=False))
+    assert {row.path for row in tree if isinstance(row, RepoFile)} == expected
+    assert len(tree) == 2
+    readbacks = []
+    for row in receipt["files"]:
+        assert 0 < row["bytes"] < 1024 * 1024
+        downloaded = pathlib.Path(hf_hub_download(
+            repo_id=receipt["repo"], filename=row["path"], revision=receipt["revision"],
+            token=False, endpoint="https://huggingface.co", local_dir=run_root / "anonymous-readback",
+        ))
+        assert downloaded.stat().st_size == row["bytes"] and sha(downloaded) == row["sha256"]
+        readbacks.append({**row, "anonymous_local_path": str(downloaded.relative_to(ROOT)), "exact_match": True})
+    card = run_root / "anonymous-readback" / prefix / "README.md"
+    assert card.read_bytes() == approval["model_card"].encode("utf-8")
+    provenance_path = run_root / "anonymous-readback" / prefix / "release-provenance.json"
+    provenance = read(provenance_path)
+    expected_provenance = {
+        "approval_sha256": sha(approval_path), "git_revision": REVISION,
+        "manifest_sha256": sha(ROOT / "docs/natural-assistant/v4/manifest.json"),
+        "source": None, "base_model": approval["base_model"], "asr_model": approval["asr_model"],
+        "selected_variant": "base",
+    }
+    assert provenance == expected_provenance
+    upstream = {}
+    for key in ("base_model", "asr_model"):
+        pin = approval[key]
+        info = api.model_info(pin["repo"], revision=pin["revision"])
+        assert info.private is False and info.sha == pin["revision"]
+        upstream[key] = {**pin, "anonymous_pinned_access_verified": True}
+    budget = wrapper["budget"]
+    entry = budget["entry"]
+    assert entry["stage"] == "release" and entry["status"] == "completed"
+    assert entry["run_id"] == RUN_ID and entry["revision"] == REVISION
+    prep = read(ROOT / "outputs/natural-v4/modal-runs/release-preflight/prepare-only.json")
+    assert entry["runtime_options"] == prep["runtime_settings"]
+    assert entry["runtime_options_sha256"] == prep["runtime_settings_sha256"]
+    assert entry["compute_guard"]["resource_spec"] == {"cpu": 1, "memory_gib": 4, "seconds": 1800, "gpu": False}
+    guard = pure_guard(ROOT / "scripts/modal_natural.py")("release", entry["billing_before"]["rates"])
+    assert guard == entry["compute_guard"]
+    assert guard["reserved_usd"] == entry["reserved_usd"]
+    retained = Decimal(budget["reserved_total_usd"])
+    assert retained - Decimal(entry["reserved_usd"]) == Decimal("35.62")
+    assert retained <= Decimal(budget["budget_usd"]) == Decimal("40.00")
+    return {
+        "schema_version": 1, "verified_at_utc": datetime.now(timezone.utc).isoformat(),
+        "verification_passed": True,
+        "scope": "One actual CPU-only base release: exact committed approval/source, actual HF target/commit, anonymous immutable readback of the two own files and official model pins, preserved live-rate reservation ledger. No inference, selection changes, HF/Git writes, or new Modal jobs.",
+        "run_id": RUN_ID, "source_git_revision": REVISION,
+        "actual_wrapper_path": str(wrapper_path.relative_to(ROOT)), "actual_wrapper_sha256": sha(wrapper_path),
+        "frozen_source_files": files, "public_release": receipt,
+        "independent_anonymous_readback": readbacks,
+        "own_public_prefix_contains_exactly_two_files": True,
+        "public_card_matches_approved_utf8_bytes": True,
+        "public_provenance_matches_approved_source_pins": True,
+        "public_provenance": provenance, "official_upstream_pins": upstream,
+        "selection_unchanged": True, "adapter_loaded_or_published": False,
+        "runtime_settings": entry["runtime_options"],
+        "budget": {
+            "prior_cumulative_reserved_usd": "35.62", "this_release_reserved_usd": entry["reserved_usd"],
+            "cumulative_reserved_usd": budget["reserved_total_usd"], "cap_usd": budget["budget_usd"],
+            "actual_live_rate_snapshot_before": entry["billing_before"]["observed_at"],
+            "actual_live_rate_snapshot_after": entry["billing_after"]["observed_at"],
+            "guard_recomputed_from_actual_live_before_rates": guard,
+            "scope": "Existing durable shared conservative reservation ledger; not an invoice or actual project billing delta.",
+        },
+        "local_audit_seconds": time.monotonic() - started,
+    }
+
+
+if __name__ == "__main__":
+    print(json.dumps(audit(), ensure_ascii=False, indent=2))
