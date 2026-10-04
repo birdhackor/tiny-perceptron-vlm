@@ -6,7 +6,7 @@ How does a computer choose the next character after a short phrase? This from-sc
 
 **[Online course](https://birdhackor.github.io/tiny-perceptron-vlm/) · [Reading routes](course/README.md) · [First steps](course/first-steps.md) · [266 lessons](course/lessons.md) · [Training recipes](course/training.md)** — the main course is in Traditional Chinese.
 
-This preview provides lesson text, SVG diagrams and actual CPU outputs. Each lesson has an Open in Colab button for the same complete notebook, with repository and package setup in its first cell. Small exercises need no GPU. Notebook downloads are also available for local practice. Execution in a real Colab runtime has not been verified.
+This preview provides lesson text, SVG diagrams and actual CPU outputs. Each lesson has an Open in Colab button for the same complete notebook. In notebooks with code, the first code cell prepares the repository and packages. Small exercises need no GPU. Notebook downloads are also available for local practice. Execution in a real Colab runtime has not been verified.
 
 The course has 20 chapters, three optional branches and 266 lesson notebooks, with original SVG diagrams and progressive highlights. Including 26 numbered reading, warmup, training and glossary sections, there are 292 numbered sections. Begin with small matrices, bigrams, MLPs and manual attention; introduce modern architecture, Dense/MoE, cache/SDPA, quantization and distillation later. Readers can switch models and revisit earlier examples.
 
