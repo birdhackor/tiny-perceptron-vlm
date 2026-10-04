@@ -15,6 +15,7 @@ from pathlib import Path
 import torch
 
 from tiny_perceptron.capstone import (
+    DATA_VERSION,
     DEFAULT_STEPS,
     STAGES,
     CapstoneModel,
@@ -150,6 +151,7 @@ def train_stage(
             reference.load_state_dict(previous["reference"], strict=True)
         step = previous["step"]
     metadata = {
+        "data_version": DATA_VERSION,
         "seed": seed,
         "data_manifest": manifest,
         "requested_steps": steps,
@@ -241,6 +243,7 @@ def train_stage(
         validation_result = evaluate_rows(model, splits["validation"])
         write_json(output / "validation.json", validation_result)
     report = {
+        "data_version": DATA_VERSION,
         "stage": stage,
         "requested_steps": steps,
         "steps": step,
