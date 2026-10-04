@@ -17,7 +17,7 @@
 
 正文位於`course/chapters/`，操作與附錄則保留在各自的Markdown檔。`scripts/build_course.py`產生Notebook與小節索引，`zensical.toml`提供導覽；`scripts/export_course.py`整理網頁Markdown、圖解與已執行結果，再呼叫真正的Zensical嚴格建置。
 
-先依[W.1](../course/first-steps.md#W.1)取得專案並安裝Git與uv，再到有`pyproject.toml`的專案根目錄安裝工具、啟用環境：
+在專案根目錄安裝工具，並啟用環境：
 
 ```bash
 uv sync --frozen --extra cpu --group dev --group notebook --group site
