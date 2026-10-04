@@ -48,6 +48,9 @@ DOCUMENTS = {
     "validation": "docs/validation.md",
     "training-assets": "assets/training/README.md",
     "publishing": "docs/publishing.md",
+    "natural-v4-student": "docs/natural-assistant/v4/STUDENT.md",
+    "natural-v4-data": "docs/natural-assistant/v4/DATA.md",
+    "natural-v4-training": "docs/natural-assistant/v4/TRAINING.md",
 }
 
 
