@@ -442,6 +442,8 @@ def student_release_fixture(source, tmp_path, monkeypatch):
     teacher_sha = file_sha256(tmp_path / "parents/dpo/model.pt")
     quantize_capstone(tmp_path / "parents/dpo/model.pt", main_sources / "dpo-int4.pt", 4)
     quantize_capstone(tmp_path / "parents/dpo/model.pt", main_sources / "dpo-int8.pt", 8)
+    quantize_capstone(tmp_path / "parents/joint/model.pt", main_sources / "joint-int4.pt", 4)
+    quantize_capstone(tmp_path / "parents/joint/model.pt", main_sources / "joint-int8.pt", 8)
     (main_sources / "data.json").write_text(
         json.dumps({"schema_version": 1, "license": "MIT", "manifest": manifest, "splits": splits}), encoding="utf-8"
     )
@@ -462,7 +464,7 @@ def student_release_fixture(source, tmp_path, monkeypatch):
     specifications = {
         "main": (
             main_sources,
-            {stage: f"{stage}.pt" for stage in (*STAGES, "dpo-int4", "dpo-int8")},
+            {stage: f"{stage}.pt" for stage in (*STAGES, "joint-int4", "joint-int8", "dpo-int4", "dpo-int8")},
             "capstone_deployment",
             "c" * 40,
         ),
@@ -517,18 +519,22 @@ def test_main_and_student_aliases_export_merge_and_download_without_collapsing(s
     assert approvals["student"]["model_card"]["training_data"][0]["source"] == f"{DATA_VERSION} synthetic data"
     calls.clear()
     combined = merge_public_manifests(manifests["main"], manifests["student"], revision="d" * 40)
-    assert len(combined["models"]) == 9 and combined["revision"] == "d" * 40
+    assert len(combined["models"]) == 11 and combined["revision"] == "d" * 40
     assert all(options == {"revision": "d" * 40, "token": False} for _, _, options in calls)
     assert set(name for _, name, _ in calls) == set(remote) - {
         name for name in remote if name.endswith("/export-manifest.json")
     }
-    for identity in ("student-ce", "student-kd", "student-kd-int4"):
+    for identity in ("joint-int4", "joint-int8", "student-ce", "student-kd", "student-kd-int4"):
         folder = fetch_capstone(combined, identity, tmp_path / "downloads")
         payload = torch.load(folder / "model.pt", weights_only=True)
-        assert payload["stage"] == "joint" and payload["config"]["experts"] == 0
+        assert payload["stage"] == "joint"
         assert public_stage_id(payload) == identity
-        assert payload["metadata"]["student_branch"] == ("student-ce" if identity == "student-ce" else "student-kd")
-        assert payload["metadata"]["teacher_checkpoint_sha256"]
+        if identity.startswith("student-"):
+            assert payload["config"]["experts"] == 0
+            assert payload["metadata"]["student_branch"] == ("student-ce" if identity == "student-ce" else "student-kd")
+            assert payload["metadata"]["teacher_checkpoint_sha256"]
+        else:
+            assert payload["config"]["experts"] == 4 and "student_branch" not in payload["metadata"]
         assert payload["metadata"]["dataset_manifest_sha256"]
         assert (folder / "data.json").is_file()
     with pytest.raises(ValueError, match="collapse"):
@@ -570,3 +576,35 @@ def test_student_alias_rejects_conflicting_or_incomplete_provenance(source, chan
         saved.update(format_version="capstone-ptq-v1", quantization={"bits": 4})
     with pytest.raises(ValueError):
         public_stage_id(saved)
+
+
+def test_generation_benchmark_records_actual_full_and_cache_tokens_without_updates(source):
+    from scripts.course_experiments.capstone_deployment import benchmark_generation
+    from tiny_perceptron.capstone import build_dataset
+
+    row = next(row for row in build_dataset()[0]["validation"] if row["task"] == "style")
+    model = source[1]
+    before = {name: value.detach().clone() for name, value in model.state_dict().items()}
+    was_training = model.training
+    result = benchmark_generation(model, row, warmup=1, measured=2, max_new_tokens=4)
+    assert result["row_id"] == row["id"] and result["row"] == row
+    assert result["optimizer_updates"] == 0 and result["weights_unchanged"] is True
+    assert result["all_generated_ids_equal"] is True
+    assert result["generated_ids_equal_by_iteration"] == [True, True, True]
+    assert model.training == was_training
+    assert all(torch.equal(value, model.state_dict()[name]) for name, value in before.items())
+    for mode, expected_cache in (("full", False), ("cache", True)):
+        measurement = result["modes"][mode]
+        assert measurement["use_cache"] == expected_cache
+        assert len(measurement["seconds"]) == 2 and all(value > 0 for value in measurement["seconds"])
+        assert len(measurement["iterations"]) == 3
+        assert [iteration["phase"] for iteration in measurement["iterations"]] == ["warmup", "measured", "measured"]
+        for iteration in measurement["iterations"]:
+            trace = iteration["trace"]
+            assert iteration["generated_token_count_including_eos"] == len(trace["generated_ids"])
+            assert 0 < len(trace["generated_ids"]) <= 4
+            assert iteration["eos"] == trace["eos"] and iteration["stop_reason"] == trace["stop_reason"]
+            assert trace["use_cache"] == expected_cache
+    from scripts.download_capstone_review import DEPLOYMENT_FILES
+
+    assert "generation-benchmark.json" in DEPLOYMENT_FILES
