@@ -49,12 +49,13 @@ def validate_repo_url(url, allow_query=False):
     if not isinstance(url, str) or any(ord(c) <= 32 or ord(c) >= 127 for c in url):
         raise ValueError("Invalid repository verification endpoint")
     parsed = urlsplit(url)
+    github_repo_path = parsed.netloc == "github.com" and parsed.path.startswith("/" + REPO + ".git/info/lfs/")
+    lfs_verify_path = parsed.netloc == "lfs.github.com" and parsed.path in {"/" + REPO + "/objects/" + item["oid"] + "/verify" for item in objects}
     if (
-        parsed.scheme != "https" or parsed.netloc != "github.com"
+        parsed.scheme != "https" or not (github_repo_path or lfs_verify_path)
         or parsed.fragment or "#" in url
         or (not allow_query and (parsed.query or "?" in url))
         or token in parsed.path or auth in parsed.path or auth.removeprefix("Basic ") in parsed.path
-        or not parsed.path.startswith("/" + REPO + ".git/info/lfs/")
         or "%" in parsed.path or "\\" in parsed.path
         or any(segment in (".", "..", "") for segment in parsed.path.split("/")[1:])
     ):
