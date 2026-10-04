@@ -302,11 +302,17 @@ def test_registered_workflow_routes_batch_and_single_calls_exclusively():
     workflow = (root / ".github/workflows/course-experiments.yml").read_text()
     steps = {part.splitlines()[0]: part for part in workflow.split("      - name: ")[1:]}
     batch_condition = "if: inputs.mode == 'release' && (inputs.release_experiment_ids || '') != ''"
-    single_condition = "if: inputs.mode != 'release' || (inputs.release_experiment_ids || '') == ''"
+    single_condition = (
+        "if: inputs.experiment_id != 'safety-existing-audit' && "
+        "(inputs.mode != 'release' || (inputs.release_experiment_ids || '') == '')"
+    )
     assert batch_condition in steps["Validate all committed batch approvals before paid calls"]
     assert "--validate-only" in steps["Validate all committed batch approvals before paid calls"]
     assert batch_condition in steps["Release approved models one at a time"]
     assert single_condition in steps["Execute one bounded course experiment"]
+    audit = steps["Read and audit existing safety weights without starting Modal compute"]
+    assert "if: inputs.experiment_id == 'safety-existing-audit' && inputs.mode == 'preflight'" in audit
+    assert "scripts/read_existing_private_audit.py" in audit and "modal run" not in audit
     assert (
         "if: inputs.mode == 'release' && (inputs.release_experiment_ids || '') == ''"
         in steps["Validate the committed public release approval before paid calls"]
