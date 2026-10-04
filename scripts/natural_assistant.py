@@ -34,7 +34,7 @@ def parser():
     result.add_argument("--seed", type=int, default=42)
     result.add_argument("--adapter", type=Path)
     result.add_argument("--steps", type=int, default=100)
-    result.add_argument("--learning-rate", type=float, default=1e-4)
+    result.add_argument("--learning-rate", type=float, default=3e-5)
     result.add_argument("--lora-rank", type=int, default=8)
     result.add_argument("--gradient-accumulation", type=int, default=2)
     result.add_argument("--checkpoint-every", type=int, default=25)
