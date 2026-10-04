@@ -1,49 +1,61 @@
 # 教材發布
 
-網站使用 [Zensical](https://zensical.org/) 建置，部署在 GitHub Pages。讀者可用全文搜尋、章節導覽與頁內目錄找內容，切換深淺色模式，並直接複製程式碼。小節頁附實際 CPU 輸出、Colab 入口與 `.ipynb` 下載，需要圖解的地方加入SVG。正文仍是 `course/chapters/` 的單一來源，Notebook 由 `scripts/build_course.py` 產生。30組正式訓練與Flash Attention補充探針已實跑，120份公開權重完成CPU操作驗收；各組結果與限制見[實驗紀錄](course-experiments/README.md)。Colab 自動設定已加入，尚未在 Google 執行環境實機驗證。
+本課的正文是一份來源，網頁與Notebook是兩種使用方式。網頁適合順著說明讀圖與結果；Notebook讓你改一個數字、再看結果怎樣變。兩者由同一份正文產生，讀者不必在兩本內容不同的教材之間來回找。
 
-## 讀者怎麼使用
+網站以[Zensical](https://zensical.org/)建置，發布到[GitHub Pages](https://birdhackor.github.io/tiny-perceptron-vlm/)。如果你只想學習，直接從[閱讀指南](../course/README.md)選路線即可；下面的建置步驟給想修改或維護教材的人使用。
 
-1. 開啟 <https://birdhackor.github.io/tiny-perceptron-vlm/>，從第一節開始或選閱讀路線。
-2. 在網頁讀說明、看 SVG 與程式輸出。
-3. 想改程式時，按本節「在 Colab 動手做」，登入 Google 並執行全部 cell。小實驗使用 CPU 即可。
-4. 偏好本機 Jupyter，可下載 notebook，依暖身指南準備 repo 與套件。
+## 1. 讀者怎麼使用？
 
-Colab 第一個程式格使用最新 `main` 的共用程式；網站與 Colab notebook 連結則指向本次發布的 commit。重新跑舊版實驗時，請改成對應 commit 的共用程式。Colab 執行使用其 Python 與 pip 環境；本機與網站 CI 使用 `uv.lock` 的固定 CPU 環境。
+1. 在網頁讀正文、看SVG圖解與已核對的CPU輸出。
+2. 想修改短程式時，按本節的Colab入口，或下載`.ipynb`在本機Jupyter開啟。
+3. 有程式的Notebook在第一個程式格準備工具，再按順序執行後面的程式格。沒有程式的小節則以閱讀為主。
+4. 想重做完整訓練時，再走對應訓練指引，取得那項任務的資料與權重。
 
-## 建置與驗證
+網站的Colab連結指向發布commit中的Notebook。其準備程式在Colab首次使用時會clone專案的預設分支；這與Notebook連結固定版本是兩回事。要重做舊版實驗，應先在Colab取得對應commit的專案再繼續準備工具，或在本機checkout那個版本。Colab使用其Python與pip環境；本機網站建置使用專案的`uv.lock`。本課沒有把本機kernel成功寫成Colab實機驗證。
 
-在 repo 根目錄安裝 Notebook 與網站套件，並啟用 `.venv`：
+## 2. 從正文產生網站
+
+正文位於`course/chapters/`，操作與附錄則保留在各自的Markdown檔。`scripts/build_course.py`產生Notebook與小節索引，`zensical.toml`提供導覽；`scripts/export_course.py`整理網頁Markdown、圖解與已執行結果，再呼叫真正的Zensical嚴格建置。
+
+在專案根目錄安裝工具，並啟用環境：
 
 ```bash
-uv sync --frozen --extra cpu --group notebook --group site
+uv sync --frozen --extra cpu --group dev --group notebook --group site
 source .venv/bin/activate
+```
+
+Windows PowerShell改用`.venv\Scripts\Activate.ps1`啟用。`notebook`群組提供執行工具，`site`群組提供網站建置，`dev`群組提供檢查與測試；只讀網頁的學生無須安裝它們。
+
+核對教材與執行結果：
+
+```bash
 python scripts/build_course.py --check
 python scripts/check_course_reviews.py
 python scripts/check_technical_reviews.py
 python docs/review-tools/check_review_round.py
 python -m ipykernel install --sys-prefix --name tiny-perceptron --display-name "Tiny Perceptron"
 python scripts/check_notebooks.py --mode kernel --workers 1
-python scripts/export_course.py --executed outputs/notebooks --revision main
-python scripts/check_site.py
+python scripts/reading_time.py validate --executed
 ```
 
-Windows PowerShell 使用 `.venv\Scripts\Activate.ps1` 啟用環境。`site` 群組固定 Zensical 版本；只跑訓練或 Notebook 時不需要它。
+這些檢查要求目錄、正文、圖解、審閱資料、Notebook與閱讀時間對上目前來源。若修改正文，先重審、重估受影響的頁面，不能用舊結果替新內容背書。檢查的支持範圍見[實作驗證](validation.md)。
 
-`export_course.py` 先把教材整理成 `outputs/zensical/docs/` 的 Markdown，附上核對過的輸出與圖解，再執行真正的 `zensical build --clean --strict`。Markdown 解析、頁面版型、搜尋索引與導覽都由 Zensical 負責。`zensical.toml` 收錄全部小節的導覽；建置會拒絕缺頁或重複項目。新增小節時，需同步更新 `course/lesson-index.json` 與導覽。
+全部通過後，以目前Git commit作為網站版本：
 
-匯出後可執行 `python -m zensical serve` 在本機閱讀與測試搜尋。不要以雙擊 HTML 檔案的方式測試全文搜尋：瀏覽器會限制 `file://` 頁面的搜尋 worker。修改教材來源後重新執行匯出指令，便會重建供 Zensical 使用的 Markdown。若沒有網路，正文、SVG 與本機搜尋仍可透過這個伺服器閱讀，公式暫時保留 TeX，連網後由 MathJax 排版。
+```bash
+python scripts/export_course.py --executed outputs/notebooks --require-reading-times --revision "$(git rev-parse HEAD)"
+python scripts/check_site.py
+python -m http.server 8000 --directory outputs/site
+```
 
-`use_directory_urls = false` 保留既有的 `1.1.html` 等網址；暖身的 `#W.2` 等錨點也保留。前置連結、舊書籤與 Notebook 中的閱讀連結不必更換。教材的額外 CSS／JavaScript 位於 `course/web/`，只處理圖解放大、公式與閱讀間距；導覽與搜尋使用 Zensical 原生功能。
+先把這次要發布的教材與核對資料commit，再執行上面的匯出。`--revision`是網站入口的版本標記，不會替你保存尚未commit的修改。`--executed`核對每個程式格與輸出，`--require-reading-times`要求每頁估時仍符合來源；網站檢查再核對內部連結、圖檔、Notebook下載與Colab入口。
 
-`--executed` 會核對每個 cell 的原始碼、執行次數與錯誤，拒絕舊教材的結果或未執行副本。發布CI也逐節核對讀者與另一批技術審閱的來源、圖解及證據雜湊，並核對本輪新審閱身分與25份導言；缺少審閱、要求修改或版本已變更而未重審時，發布會停止。只要有一節程式失敗，發布流程也會停止。讀取模式可省略 `--executed`，但不會填入假輸出。
+開啟`http://127.0.0.1:8000/`查看產物。用HTTP伺服器測試，才能讓搜尋正常使用瀏覽器的網頁機制；直接雙擊HTML檔案會受到不同限制。網址中的`127.0.0.1`指向執行伺服器的那臺電腦。
 
-網站產物與已執行 Notebook 留在被 Git 忽略的 `outputs/`；發布時透過 Pages artifact 傳送，不把生成網頁或執行輸出提交到普通 Git。
+## 3. 發布到GitHub Pages
 
-## GitHub Pages
+專案的Settings → Pages → Build and deployment → Source選擇GitHub Actions。`.github/workflows/pages.yml`在`main`更新或手動觸發時，取得必要資料、核對審閱、逐份啟動獨立CPU kernel、嚴格建置網站並檢查連結，再由Pages部署工作發布。
 
-repo 的 Settings → Pages → Build and deployment → Source 選 **GitHub Actions**。之後 `.github/workflows/pages.yml` 在 `main` 更新或手動觸發時，會重新執行目錄中的全部 Notebook（本輪整合專題完成後共248份）、核對輸出與網站連結，再部署到 Pages。核心 Linux／macOS／Windows CI 保留原本的流程。
+Notebook數量由當前小節目錄決定，新增小節時也要同步來源、索引與導覽。網站產物與已執行Notebook放在被Git忽略的`outputs/`，透過Pages artifact傳送；正文與核對證據留在Git中。
 
-網站 CI 使用一個 worker 逐份啟動獨立 kernel。GitHub runner 曾在並行啟動時發生 TCP 連接埠被占用、kernel 未開始執行就退出的情況；順序啟動避免多個 Notebook 同時爭用啟動資源。
-
-若 Pages 已透過 API 設為 `build_type: workflow`，就不必再手動設定。網站的 `build-info.json` 留下發布 commit、節數、是否包含已核對的 CPU 輸出，以及 Zensical 版本。
+發布後查看`build-info.json`，核對實際commit、頁面與小節數、CPU輸出狀態及Zensical版本，再實際點開新增頁面與下載入口。工作顯示成功和讀者拿到正確版本都需要確認。資料包、模型配套與網站是三條不同的發布路線，前兩者的規則見[教材資產存放](asset-storage.md)。

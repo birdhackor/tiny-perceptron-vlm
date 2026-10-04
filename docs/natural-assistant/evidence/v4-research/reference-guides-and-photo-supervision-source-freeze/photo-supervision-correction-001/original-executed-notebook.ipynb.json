@@ -1,0 +1,221 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 11.14 看見物件，和看懂整張圖，有什麼距離？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "一張照片裡有「人、杯子、桌子」，還不足以說明發生什麼事。那個人是在端起杯子，還是杯子只是放在桌上？杯子在誰的左邊？描述整張圖，要把物件、動作與彼此關係一起說清楚。這也不表示模型知道照片之前或之後發生的故事；沒有拍到的部分仍可能不知道。\n",
+    "\n",
+    "前置是[11.4圖片問答](https://birdhackor.github.io/tiny-perceptron-vlm/11.4.html)與[10.2圖片序列](https://birdhackor.github.io/tiny-perceptron-vlm/10.2.html)。先用最小的左右例子：紅條在藍條左邊與右邊，兩張圖的顏色總量完全相同。若先把同一小區的像素平均，這個差別就可能消失。像把兩張座位表攪成「各有一個紅色座位、一個藍色座位」，再聰明的人也不能從這份摘要還原誰坐哪邊。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:15:09.587340Z",
+     "iopub.status.busy": "2026-10-04T19:15:09.587081Z",
+     "iopub.status.idle": "2026-10-04T19:15:11.231060Z",
+     "shell.execute_reply": "2026-10-04T19:15:11.229729Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7f3882a5a610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "cellView": "form",
+    "course_figure": {
+     "alt": "紅藍在同一格內交換位置，平均摘要相同，左右關係卻不同",
+     "name": "practical_order"
+    },
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:15:11.240364Z",
+     "iopub.status.busy": "2026-10-04T19:15:11.240017Z",
+     "iopub.status.idle": "2026-10-04T19:15:11.250272Z",
+     "shell.execute_reply": "2026-10-04T19:15:11.249901Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "image/svg+xml": [
+       "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"720\" height=\"1120\" viewBox=\"0 0 720 1120\" role=\"img\" aria-labelledby=\"title desc\">\n",
+       "  <title id=\"title\">交換紅藍順序，平均摘要仍相同</title>\n",
+       "  <desc id=\"desc\">原圖甲紅條在左、藍條在右；原圖乙相反。交換只發生在同一個平均格內，紅藍份量相同，所以兩圖的區域平均相同。完整像素序列仍能保留左右差別。</desc>\n",
+       "  <rect width=\"720\" height=\"1120\" rx=\"18\" fill=\"#f8fafc\"/>\n",
+       "  <g font-family=\"sans-serif\" fill=\"#172554\" font-size=\"32\">\n",
+       "    <text x=\"36\" y=\"60\" font-size=\"36\" font-weight=\"bold\">平均顏色相同，左右卻不同</text>\n",
+       "    <text x=\"36\" y=\"115\">兩張圖，只交換同一格內的紅藍條。</text>\n",
+       "    <text x=\"56\" y=\"190\" font-weight=\"bold\">甲：紅在藍左邊</text>\n",
+       "    <rect x=\"56\" y=\"214\" width=\"608\" height=\"190\" fill=\"#fff\" stroke=\"#64748b\" stroke-width=\"3\"/>\n",
+       "    <rect x=\"84\" y=\"258\" width=\"64\" height=\"98\" fill=\"#dc2626\"/>\n",
+       "    <rect x=\"148\" y=\"258\" width=\"64\" height=\"98\" fill=\"#2563eb\"/>\n",
+       "    <rect x=\"70\" y=\"236\" width=\"156\" height=\"142\" fill=\"none\" stroke=\"#9333ea\" stroke-width=\"4\" stroke-dasharray=\"8 6\"/>\n",
+       "    <text x=\"270\" y=\"297\">虛線框是</text><text x=\"270\" y=\"345\">同一個平均格。</text>\n",
+       "    <text x=\"56\" y=\"470\" font-weight=\"bold\">乙：藍在紅左邊</text>\n",
+       "    <rect x=\"56\" y=\"494\" width=\"608\" height=\"190\" fill=\"#fff\" stroke=\"#64748b\" stroke-width=\"3\"/>\n",
+       "    <rect x=\"84\" y=\"538\" width=\"64\" height=\"98\" fill=\"#2563eb\"/>\n",
+       "    <rect x=\"148\" y=\"538\" width=\"64\" height=\"98\" fill=\"#dc2626\"/>\n",
+       "    <rect x=\"70\" y=\"516\" width=\"156\" height=\"142\" fill=\"none\" stroke=\"#9333ea\" stroke-width=\"4\" stroke-dasharray=\"8 6\"/>\n",
+       "    <text x=\"270\" y=\"577\">紅藍各自的份量</text><text x=\"270\" y=\"625\">都沒有改變。</text>\n",
+       "    <path d=\"M360 704v62\" stroke=\"#475569\" stroke-width=\"4\"/><path d=\"M360 770l-12 -20h24Z\" fill=\"#475569\"/>\n",
+       "    <rect x=\"56\" y=\"792\" width=\"608\" height=\"134\" rx=\"12\" fill=\"#ede9fe\" stroke=\"#7c3aed\" stroke-width=\"3\"/>\n",
+       "    <text x=\"84\" y=\"842\" font-weight=\"bold\">兩張圖得到同一份平均摘要</text><text x=\"84\" y=\"890\">摘要無法告訴我們誰在左邊。</text>\n",
+       "    <text x=\"36\" y=\"989\">示意只畫局部，放大紅藍條供觀察。</text>\n",
+       "    <text x=\"36\" y=\"1040\">程式在32×32圖的同一個8×8格內交換。</text>\n",
+       "  </g>\n",
+       "</svg>"
+      ],
+      "text/plain": [
+       "<IPython.core.display.SVG object>"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    }
+   ],
+   "source": [
+    "# @title 本節圖解\n",
+    "from IPython.display import SVG, display\n",
+    "\n",
+    "display(SVG(filename=str(root / \"course/figures/practical_order.svg\")))"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 3,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:15:11.254306Z",
+     "iopub.status.busy": "2026-10-04T19:15:11.254040Z",
+     "iopub.status.idle": "2026-10-04T19:15:11.273343Z",
+     "shell.execute_reply": "2026-10-04T19:15:11.271971Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "不同的像素數 128\n",
+      "4乘4平均摘要相同 True\n",
+      "完整像素序列相同 False\n"
+     ]
+    }
+   ],
+   "source": [
+    "from tiny_perceptron.natural_concepts import picture_order_report\n",
+    "\n",
+    "report = picture_order_report()\n",
+    "print(\"不同的像素數\", report[\"different_pixels\"])\n",
+    "print(\"4乘4平均摘要相同\", report[\"same_4_by_4_summary\"])\n",
+    "print(\"完整像素序列相同\", report[\"same_pixel_sequence\"])"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "程式建立兩張32乘32的合成圖片，只交换第一個8像素寬區域裡的紅、藍順序。輸出是128、True、False。不同像素數是把RGB各通道的數字也分開數；不是128個彩色位置。4乘4摘要的每格平均8乘8原始像素，所以這次交換恰好留在同一格內，平均完全相同。這只是輸入會丟資訊的反例，沒有載模型，也沒有證明保留序列便能理解自然照片。\n",
+    "\n",
+    "自然照片還有光線、遮擋、姿勢與多個物件。需要含整圖描述或關係問答的示範，才能教到「拿著」「左邊」「正在做什麼」；只增加顏色標籤不會自動教會這些關係。[20.9](https://birdhackor.github.io/tiny-perceptron-vlm/20.9.html)介紹自然照片的逐項判準，實際場景、動作與關係題成績見[20.13](https://birdhackor.github.io/tiny-perceptron-vlm/20.13.html)。有些系統先用長方形框標出人、杯子等物件的位置，這叫物件偵測；框的位置可以提供線索。整圖問答也可以直接接收圖片區塊的序列，學習利用其中的物件與位置關係。\n",
+    "\n",
+    "練習在紙上畫兩個8乘8平均格：原本紅、藍都在第一格，接著把紅條移到第二格。想一想各格的顏色平均是否仍相同。再為「有人拿著杯子」寫一題需要觀察整張照片的問題，以及一個照片不能支持的猜測。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "11.14"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

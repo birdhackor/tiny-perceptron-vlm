@@ -1,100 +1,66 @@
-# 教材資產存放：Git、LFS 與外部下載
+# 教材資產存放：Git、LFS與Hugging Face
 
-更新日期：2026-10-02。repo 已啟用 `/assets/training/*.tar.gz` 的 LFS 追蹤，首批8個分來源資料快照與普通 Git 的來源／授權／雜湊清單在[訓練資料入口](../assets/training/README.md)。原始 `data/` 快取、權重與執行輸出維持忽略。
+一份程式、一批練習題與一個訓練好的模型，是三種不同的東西。程式說明怎麼做；資料提供要學的例子；權重保存學習後的數字。把它們分清楚，才能知道自己現在需要下載什麼，也能把某次實驗完整交給另一位讀者。
 
-8個資料物件已上傳，共30,854,837 bytes；新的LFS快取重新下載與逐檔解包驗證均通過。固定快照與來源／授權清單隨main發布；讀者可依單元按需取得，不需要提供額外的上傳認證。
+可以把它們想成食譜、食材和做好的菜。食譜適合逐行比較；食材常是一整包圖片或聲音；做好的菜則要附上用了哪份食譜與食材，才能知道如何重做。
 
-## 已驗證的能力
+## 1. 哪些檔案放在哪裡？
 
-- 本環境已有 `git-lfs/3.6.1`，執行檔為 `/usr/bin/git-lfs`。
-- 在 `/tmp` 的獨立測試 repo 執行 local install／track／add：4096 bytes 的 binary 在 Git index 中成為 129 bytes 的 LFS pointer；smudge 還原後逐 byte 相同，SHA-256 一致。
-- 原 repo 的 `git ls-remote origin HEAD` 成功。
-- 使用原 repo 的 GitHub remote 與原生 LFS client，只讀查詢一個刻意不存在的 object；服務回應 `Object does not exist on the server: [404]`。這證明 LFS 物件查詢端點可通，沒有本輪先前其他網站的 CONNECT 403。
-- 前四項是首次調查的結果，當時未上傳物件。不把repo擁有者的方案或剩餘額度當成已知條件。
-- 2026-10-02已確認8個包在Git中都是LFS pointer，大小與SHA-256符合manifest。GitHub runner從固定公開來源重建所有包，逐檔與壓縮包雜湊皆符合原快照，LFS上傳8/8成功；[執行紀錄](https://github.com/birdhackor/tiny-perceptron-vlm/actions/runs/36946663981)。
-- 本環境以全新LFS storage、不使用額外secret或credential helper重新下載全部8個物件，再解包核對全部檔案；結果均通過。報告在ignored的`outputs/lfs-remote-validation.json`。
-- 雲端原生上傳仍有傳輸限制：提供有效認證後，LFS batch API回應200，但代理轉送到S3時得到501，指出不支援`Transfer-Encoding`；Release附件上傳同樣回報400 `Bad Content-Length`。本輪由GitHub runner完成物件上傳，普通Git推送與資料下載可用。
-
-初次調查時 `.gitattributes` 只有換行設定。現在固定資料包使用 LFS pointer；來源、授權、manifest 與生成器用普通 Git。`.gitignore` 仍忽略 `/data/`、`/checkpoints/`、實驗輸出及 `*.pt`／`*.safetensors` 等權重，沒有把整個下載快取目錄改為追蹤。
-
-## 建議分工
-
-| 內容 | 存放方式 | 理由 |
+| 內容 | 本課的保存方式 | 讀者怎麼使用？ |
 | --- | --- | --- |
-| Python、Markdown、Notebook、配置、tokenizer、資產 manifest | 普通 Git | 易 diff、review，能與程式一起版本化；大型 tokenizer 另依實際大小選擇。 |
-| 少量微小圖像／音訊 fixture | 普通 Git | 離線 smoke 與第一個例子可立即執行；為整批檔案設小預算，不因 binary 就一律放 LFS。 |
-| 可重現的合成圖片／音訊／小世界資料 | Git 保存生成器、seed、配置；本機生成 | 避免每個資料版本都存一份，且方便改一個變數做教學。 |
-| 課程專用、固定版本的圖像／音訊／混合訓練資料包 | Git LFS，按單元發布 | 讓教學與訓練實驗使用相同資料快照；生成器、seed、split 與 manifest 仍留普通 Git。 |
-| 少量必須隨原始碼版本維護的中型 binary | 選擇性 Git LFS | Pointer 跟 commit 一起走，使用方便；限制追蹤目錄及發布版本數量。 |
-| 完整資料集、教材 checkpoint、教師／學生權重 | Hugging Face model／dataset repo；以固定 revision 下載 | 按單元取檔，避免 clone 教材時下載所有權重；現有 `huggingface-hub`／`datasets` 可使用。 |
-| 已定版的課程資產包 | GitHub Releases 可作替代或備援 | 不增加普通 Git 的 binary 歷史；固定版本、檔名與 checksum，程式自行下載。 |
-| 每次訓練 checkpoint、logs、曲線中間檔 | 本機忽略目錄 | 只發布挑選過的教材成果。 |
+| Python、正文、Notebook來源、設定與檔案清單 | 普通Git | 與專案一起取得，可逐行查看修改。 |
+| 可重建的小世界資料 | Git保存生成器、seed與設定 | 在本機生成，不必下載每一筆合成樣本。 |
+| 固定版本的照片、文字與音訊資料包 | Git LFS | 按實驗下載指定包，再核對內容。 |
+| 已選定的教材推論權重 | Hugging Face模型庫 | 依清單取得需要的模型與配套版本。 |
+| 自己的下載快取、訓練中間檔與輸出 | 本機忽略目錄 | 保存自己的工作；需要分享時再挑選完整實驗。 |
 
-Notebook 保留教學需要的少量結果；大型 base64 圖像、音訊、互動狀態或完整 logs 改放獨立資產。大量小 binary 可以依單元打包或分 shard，避免把每個樣本都做成獨立遠端物件。
+第20章成品使用指定版本的官方圖文底座與語音辨識器。本專案的公開模型庫提供配對說明與來源記錄，下載程式再取得官方模型；沒有把兩份官方權重另外複製成自製權重。用到LoRA時，修正權重也必須與正確底座配對。
 
-## 教學訓練資料可能多大？
+## 2. LFS保存的是檔案，不是縮小檔案
 
-已收集的小型 pilot 原始資料約35.3 MiB，共1,447筆整理好的 training 紀錄。這8包固定快照已供[30組正式實驗](course-experiments/README.md)按需使用，範圍是小型自然資料測試，不是完整自然語言或多模態語料庫。首批快照保留來源與授權，按資料來源分包，精確壓縮 bytes 見 `assets/training/manifest.json`。主線合成資料由生成器重建，不需要為每節各自複製一份。
+普通Git保存資料包的一張小卡片，叫pointer；真正的壓縮包由LFS另行保存。卡片包含實體內容的指紋與大小。收到卡片只表示知道要找哪個包，還沒有收到包裡的圖片與錄音。
 
-下列是明確假設下的 payload 計算，非實測檔案大小：
+本專案以`/assets/training/*.tar.gz`追蹤固定資料包；`data/`仍是本機解包與快取位置。可先跳過資料下載，取得程式：
 
-| 示範規模 | 大小 |
-| --- | --- |
-| 10,000 筆文字，每筆 1 KiB | 約 9.8 MiB。 |
-| 10,000 張 64×64 RGB、uint8 圖片 | 原始像素約 117 MiB；簡單合成圖以 PNG 儲存通常較小，需實測。 |
-| 10,000 段 1 秒、16 kHz、單聲道 PCM16 音訊 | 樣本約 305 MiB，另加容器／標註成本。 |
+```bash
+GIT_LFS_SKIP_SMUDGE=1 git clone https://github.com/birdhackor/tiny-perceptron-vlm.git
+cd tiny-perceptron-vlm
+```
 
-目前首批壓縮包已定為30,854,837 bytes；以後擴充再按實際大小與讀者數規劃。小型文字與評估樣例仍適合普通 Git；固定較大的多模態資料包適合 LFS。由於學生下載計入擁有者流量，300 MiB 資料包下載 100 次約為 29.3 GiB，已超過本次查閱的 GitHub Free／Pro 10 GiB 月流量；人數增加時可另發布 HF dataset 副本，或把資料改為按需生成／下載。
+接著依[訓練資料入口](../assets/training/README.md)或[第20章資料說明](natural-assistant/v4/DATA.md)，只取得該項實驗的包。清單會指定版本、大小、SHA-256及解包後的逐檔資訊；SHA-256是完整內容的指紋，能核對檔案是否與指定快照一致。
 
-自然圖片、完整語音與較大文字 corpus 是獨立延伸，可能達 GB 至數十 GB。原有候選的大小見 [環境研究的候選資料集](environment.md#候選資料集)，那些是概略數字；正式選用時再查精確版本、所需 subset 和授權。大型外部資料保留來源與版本，直接從原發布處取得，不把整份 corpus 搬進 GitHub LFS。
+LFS不會讓檔案本身變小。保存不同內容的版本需要更多儲存空間，讀者下載也會使用擁有者的流量。因此不適合把每一步訓練結果或完整模型快取都放進LFS。方案與額度可能改變，規劃大量下載時查[GitHub官方計費說明](https://docs.github.com/en/billing/concepts/product-billing/git-lfs)。
 
-## 權重建議放 Hugging Face
+## 3. 本課資料包有多大？
 
-已使用私有HF model repo保存完整實驗備份，並在[公開課程模型庫](https://huggingface.co/birdhackor/tiny-perceptron-course-models)發布30組、120份推論權重，包含文字、對話、模態、MoE、量化與蒸餾。它們是本專案自己寫的 PyTorch 模型，不要求先改成 Transformers 架構；下載後由配對的模型類別與載入程式使用。
+| 資料範圍 | 壓縮後大小 | 用途 |
+| --- | ---: | --- |
+| 基礎自然資料，8個分來源包 | 30,854,837 bytes，約30.85 MB | [30組正式小型實驗](course-experiments/README.md)。 |
+| 第20章照片、中文讀字與語音，3個包 | 146,543,309 bytes，約146.54 MB | [自然助理的微調與驗收](natural-assistant/v4/DATA.md)。 |
 
-每份可用權重附模型配置、匹配的 tokenizer、程式碼 commit、訓練資料版本、評估結果與 model card。目前公開檔採配對載入器的`.pt`格式，下載核對固定版本、大小與SHA-256，再以`weights_only=True`讀取；匯出檔剔除更新器、隨機狀態與訓練參照模型。[公開清單](course-experiments/public-models.json)只發布已審閱的推論檔，不把每一步 checkpoint 都公開。原生續訓需要含更新器／步數／隨機狀態的另一種存檔，讀者可依[5.7](../course/chapters/05.md#5.7)自行產生；完整訓練備份保持私有，是否能精確恢復仍須逐格式檢查。
+兩列是不同資料範圍，不能只看`--asset all`就以為會取得第20章。第20章另有自己的清單與下載入口。其語音錄音用來驗證聽寫與聊天，沒有進入本課的LoRA更新。
 
-純 FP32 權重約為參數數量 × 4 bytes：10M 參數約 40 MB，100M 約 400 MB；resume checkpoint 會更大。這些是估算，不代表課程已決定模型大小。
+這些數字是壓縮包的實際大小；解包後另有檔案與容器成本。模型權重、Python套件及運算記憶體不包含在表中。完整外部資料集可能更大，本課只發布有明確用途、來源與授權的固定子集。
 
-GitHub manifest 固定 HF commit revision、檔名與 SHA-256；讀者按單元下載所需權重。使用現有 `huggingface-hub` 的 API／`hf` CLI 處理大檔，無須把模型掛在本專案的 GitHub LFS 內。
+## 4. 權重和續訓檔為什麼要分開？
 
-HF 官方目前將免費公開儲存列為 best-effort，並要求大型內容具有社群用途；不是無限免費備份承諾。教材公開里程碑符合其 model／dataset 分享方向，實際容量仍按帳戶方案與最新政策確認。[實際發布紀錄](course-experiments/public-releases)保留固定HF版本與核准來源；正式模型的CPU載入／執行驗收則另存於[操作證據](course-experiments/student-checks/all-models-validation.json)。
+推論像拿做好的模型回答問題，只需要配對的模型設定、權重與輸入處理工具。續訓則像從上次下課的地方繼續學習，還要保存更新器、步數、隨機狀態與資料進度；只拿到推論權重，不足以保證接著更新的每一步相同。
 
-## Git LFS 的成本與界線
+[公開課程模型庫](https://huggingface.co/birdhackor/tiny-perceptron-course-models)中的小模型由[推論清單](course-experiments/public-models.json)指定版本與載入方式；[第19章整合權重](course-experiments/capstone-public.json)另有配套清單。它們由本課模型類別讀取，不是每份都能直接交給通用聊天介面。[5.7](../course/chapters/05.md#5.7)介紹如何接續小模型，第20章的實際續訓步驟在[LoRA訓練指引](natural-assistant/v4/TRAINING.md)。
 
-檔案數量本身不是唯一判準：總 bytes、修改頻率、需要保留多少版本、每位讀者下載多少，都會影響選擇。
+完整訓練備份可以保存到自己的私有模型庫；公開時選定需要的推論里程碑，附上能力與限制。Hugging Face的儲存政策與帳戶方案見[官方說明](https://huggingface.co/docs/hub/storage-limits)，不要把公開模型庫當成無限制的私人備份。
 
-LFS 在 Git 裡存 pointer，實體檔案另外存放；不會讓檔案本身變小。新增 binary 版本會計入完整新物件的儲存量，讀者和 CI 的下載會計入 repo 擁有者的下載流量。公開 repo 也適用，因此教材廣泛被使用後應按需下載，而不是 clone 時拿完所有模型。
+## 5. 一張清單要能回答哪些問題？
 
-截至本次查閱，GitHub 官方資料列出普通 Git 超過 50 MiB 警告、超過 100 MiB 阻擋；Free／Pro 的 LFS 包含 10 GiB 儲存與每月 10 GiB 下載流量，Team／Enterprise 為 250 GiB。單一 LFS 檔案上限依方案為 2／4／5 GB。這些是官方方案值，不代表已確認本 repo 擁有者的方案、剩餘額度或付費設定；使用前以帳戶頁面及最新文件為準。
+分享資料或模型時，至少讓接收者知道：
 
-GitHub Releases 的附件獨立於普通 Git 歷史，官方文件目前表示不限制總附件大小與下載頻寬，單檔仍受方案上限限制。適合已發布的資產，頻繁訓練中間檔不必逐版上傳。
+- 這份檔案做什麼，對應哪個單元。
+- 來源、作者、授權與做過的修改。
+- 固定版本、檔名、大小與內容指紋。
+- 配對的程式、模型設定、tokenizer或處理器。
+- 用了哪些訓練題，以及哪些題只留給驗證與最後測試。
+- 能力結果支持什麼，尚未測過什麼。
 
-## 可重現與按需取得
+下載核對成功只證明取得相同檔案。答案是否正確、資料是否合適、模型是否真的使用圖片或前文，要另做相應的檢查，方法見[教材實作驗證](validation.md)。
 
-建議 Git 中的資產清單至少記錄：
-
-- 資產 ID、對應單元、用途與依賴。
-- 檔案大小、來源 repo／URL、不可變 revision、SHA-256 與授權。
-- 資料生成器／seed／split，以及模型架構、tokenizer、配置與訓練入口。
-- 能力檢查、預期輸出、離線替代方式及本機快取路徑。
-
-下載入口按單元選取檔案，驗證 checksum 後存入目前已忽略的資料／權重目錄。HF 使用固定 commit revision，避免以 `main` 代表教材版本；Release 附件用 checksum 保證取得的是教材指定內容。
-
-目前 `.gitattributes` 僅追蹤 `/assets/training/*.tar.gz`；LFS 追蹤不會覆蓋 `.gitignore`，`data/` 仍是本機快取。可用 `GIT_LFS_SKIP_SMUDGE=1` 先 clone 程式，再由各單元按需取 LFS 物件；不能把僅有 pointer 的狀態當作資產已下載。
-
-發布需要能供Git LFS使用、對本repo有寫入權限的GitHub HTTPS認證與可用的實體檔案傳輸路徑；普通Git或API認證成功不保證LFS上傳可用。先上傳物件，再推送commit，最後以新的LFS cache下載核對SHA-256。禁止略過LFS pre-push hook而發布無法下載的pointer。認證只能透過安全的環境設定輸入，不放進repo、指令參數或對話。
-
-此雲端實例的上傳代理有上述傳輸限制；新增資料版本可由正常開發機或GitHub runner上傳。這次runner只保存重建程式與凍結的來源／授權metadata於暫存分支，從公開的固定revision取回原資料，核對原始逐檔與壓縮包SHA-256後才寫入LFS；沒有把實體訓練資料塞入普通Git。runner使用本repo的`GITHUB_TOKEN`與`contents: write`，沒有把雲端Secret複製到GitHub Actions。
-
-## 官方來源
-
-- [GitHub：Git LFS 與單檔上限](https://docs.github.com/en/repositories/working-with-files/managing-large-files/about-git-large-file-storage)
-- [GitHub：LFS 儲存／流量計費](https://docs.github.com/en/billing/concepts/product-billing/git-lfs)
-- [GitHub：普通 Git 大檔與 Release 分發](https://docs.github.com/en/repositories/working-with-files/managing-large-files/about-large-files-on-github)
-- [GitHub 官方文件的限制／額度變數](https://github.com/github/docs/blob/main/data/variables/large_files.yml)
-- [Hugging Face：Model Hub](https://huggingface.co/docs/hub/models-the-hub)
-- [Hugging Face：儲存政策](https://huggingface.co/docs/hub/storage-limits)
-- [Hugging Face：repo 與上傳方式](https://huggingface.co/docs/hub/repositories-getting-started)
-
-本次讀取官方 `github/docs` repo 的原文與額度變數，以及 `huggingface/hub-docs` 的原文；政策可能更新，以上記錄查閱日期。
+想發布自己的資料包時，先保存來源與授權、建立清單，再上傳LFS實體物件和Git中的pointer，最後從新的快取重新下載核對。想發布權重時，固定Hugging Face revision，再把配套清單放回Git。這樣讀者拿到的是可核對的一組材料，後面的[網站發布](publishing.md)就只負責把教材與入口整理出來。
