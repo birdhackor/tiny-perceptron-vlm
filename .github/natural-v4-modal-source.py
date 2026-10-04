@@ -173,6 +173,30 @@ def source_gate(root, revision, run_id, expected_runtime_sha):
     return control
 
 
+def public_source_diagnostics(stdout, stderr, actions):
+    def decode(value):
+        return value.decode("utf-8", errors="replace") if isinstance(value, bytes) else value or ""
+    text = decode(stdout) + "\n" + decode(stderr)
+    private_values = []
+    for item in actions:
+        for kind in ("upload", "verify"):
+            action = item.get(kind)
+            if action:
+                private_values.append(action["href"])
+                private_values.extend(action.get("header", {}).values())
+    for value in sorted(set(private_values), key=len, reverse=True):
+        if isinstance(value, str) and len(value) >= 8:
+            text = text.replace(value, "[redacted-object-capability]")
+    text = re.sub(r"(?i)(authorization\s*[:=]\s*)[^\r\n]+", r"\1[redacted]", text)
+    text = re.sub(r"(https?://[^\s\"'<>?#]+)[?#][^\s\"'<>]+", r"\1?[redacted-query]", text)
+    text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", text)
+    return text.encode("utf-8")[-8192:].decode("utf-8", errors="ignore")
+
+
+def rebuild_failure(run_id, revision, expected_runtime_sha, stdout, stderr, actions, exit_code):
+    return {"operation": OPERATION, "status": "failed", "phase": "source-reconstruct", "run_id": run_id, "source_git_revision": revision, "manifest_sha256": MANIFEST_SHA, "runtime_options_sha256": expected_runtime_sha, "gpu_started": False, "ordinary_model_prepare_completed": False, "rebuild_exit_code": exit_code, "public_source_diagnostics": public_source_diagnostics(stdout, stderr, actions)}
+
+
 def source_worker(run_id, revision, expected_runtime_sha):
     root = Path("/app")
     source_gate(root, revision, run_id, expected_runtime_sha)
@@ -187,7 +211,12 @@ def source_worker(run_id, revision, expected_runtime_sha):
     with tempfile.TemporaryDirectory(prefix="natural-v4-source-") as temporary:
         work = Path(temporary)
         command = [sys.executable, str(root / "scripts/build_natural_v4_assets.py"), "--reconstruct", "--verify-manifest", str(root / MANIFEST), "--manifest", str(work / "manifest.json"), "--data-root", str(work / "data"), "--assets", str(work / "assets")]
-        subprocess.run(command, check=True, timeout=max(1, deadline - time.monotonic()), cwd=root)
+        try:
+            rebuilt = subprocess.run(command, check=False, capture_output=True, text=True, timeout=max(1, deadline - time.monotonic()), cwd=root)
+        except subprocess.TimeoutExpired as error:
+            return rebuild_failure(run_id, revision, expected_runtime_sha, error.stdout, error.stderr, actions, "timeout")
+        if rebuilt.returncode:
+            return rebuild_failure(run_id, revision, expected_runtime_sha, rebuilt.stdout, rebuilt.stderr, actions, rebuilt.returncode)
         if digest(work / "manifest.json") != MANIFEST_SHA:
             raise ValueError("Fresh source reconstruction changed the frozen manifest")
         receipts = []
@@ -282,9 +311,13 @@ def main():
     image = image.add_local_file(lock_path, "/app/source-lock.json", copy=True)
     app = modal.App("tiny-perceptron-natural-v4-source-bootstrap")
     remote = app.function(image=image, cpu=(2, 2), memory=(8192, 8192), timeout=1800, retries=0, max_containers=1, scaledown_window=2, volumes={"/course": volume}, secrets=[secret], serialized=True)(source_worker)
-    with app.run():
-        receipt = remote.remote(run_id, revision, runtime_sha())
+    with modal.enable_output():
+        with app.run():
+            receipt = remote.remote(run_id, revision, runtime_sha())
     (output / "modal-source-receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
+    if receipt.get("status") != "completed":
+        print(json.dumps(receipt), flush=True)
+        raise RuntimeError("Fresh source rebuild failed; see retained public source diagnostics")
     downloads = verify_downloads(objects, token)
     receipt.update(lfs_upload_completed_and_download_verified=True, gha_lfs_downloads=downloads)
     (output / "upload-receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
