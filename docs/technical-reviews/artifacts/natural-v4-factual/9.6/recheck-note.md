@@ -1,0 +1,1 @@
+Own initial report and source preserved unchanged. Supplement executed and personally inspected; c23 arithmetic denominator now explicitly recorded, c26 EOS stop traced to inspected generate implementation and actual CPU probe. Current lesson bytes unchanged, no author revision, no unresolved/contradicted claim. Full current report written by same original owner.
