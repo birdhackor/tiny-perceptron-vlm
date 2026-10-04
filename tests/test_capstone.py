@@ -8,6 +8,7 @@ import torch
 
 from scripts.course_experiments.capstone import train_stage
 from tiny_perceptron.capstone import (
+    DATA_VERSION,
     TOK,
     CapstoneModel,
     build_dataset,
@@ -59,6 +60,42 @@ def test_family_split_and_actual_prompt_modal_content_do_not_leak():
         assert not families[left] & families[right]
         assert not inputs[left] & inputs[right]
     assert all(any(row["task"] == "joint" for row in rows) for rows in splits.values())
+
+
+@pytest.mark.parametrize("seed", [0, 1, 7, 42, 99])
+def test_audio_family_labels_cover_both_classes_and_have_meaningful_baselines(seed):
+    splits, manifest = build_dataset(seed)
+    assert manifest["version"] == DATA_VERSION == "capstone-small-world-v2"
+    assert manifest["counts"] == {"train": 552, "validation": 84, "test": 90}
+    assert manifest["split_policy"]["scores_used_to_design_split"] is False
+    for split, families_per_label in (("train", 8), ("validation", 1), ("test", 1)):
+        audio = [row for row in splits[split] if row["task"] == "audio"]
+        assert {row["audio"]["pitch"] for row in audio} == {"low", "high"}
+        assert manifest["task_label_counts"][split]["audio"] == {
+            "low": families_per_label * 3,
+            "high": families_per_label * 3,
+        }
+        assert manifest["task_majority_baselines"][split]["audio"]["accuracy"] == 0.5
+        assert all(
+            sum(row["family"] == family for row in audio) == 3 for family in manifest["families"][split]["audio"]
+        )
+
+
+def test_one_plus_two_and_reverse_all_descendants_are_reserved_test_only():
+    splits, manifest = build_dataset()
+    assert "numbers:1:2" in manifest["families"]["test"]["numbers"]
+    assert all(row["family"] != "numbers:1:2" for split in ("train", "validation") for row in splits[split])
+    heldout = [row for row in splits["test"] if row["family"] == "numbers:1:2"]
+    assert len(heldout) == 6
+    tools = [row for row in heldout if row["task"] == "calculator"]
+    assert {row["answer"] for row in tools} == {"TOOL:calculator:1+2", "TOOL:calculator:2+1"}
+    assert {row["task"] for row in heldout} == {"calculator", "unavailable", "concept", "tool_return"}
+    assert manifest["task_label_counts"]["test"]["calculator"]["calculator:1+2"] == 1
+    assert manifest["task_label_counts"]["test"]["calculator"]["calculator:2+1"] == 1
+    for split, rows in splits.items():
+        for task, labels in manifest["task_label_counts"][split].items():
+            actual = [row["answer"].split(":", 1)[1] for row in rows if row["task"] == task]
+            assert labels == {label: actual.count(label) for label in set(actual)}
 
 
 def test_sft_labels_ignore_entire_prompt_but_include_every_answer_byte_and_eos():
@@ -198,6 +235,47 @@ def test_checkpoint_strips_training_state_and_preserves_model_provenance(tmp_pat
         torch.testing.assert_close(value, loaded.state_dict()[key])
 
 
+def test_student_export_preserves_validated_branch_teacher_and_reexports_public_checkpoint(tmp_path):
+    model = CapstoneModel(ModelConfig(width=16, layers=1, heads=2, max_length=192, experts=0))
+    source, public, second = tmp_path / "training.pt", tmp_path / "model.pt", tmp_path / "second.pt"
+    save_capstone(
+        source,
+        model,
+        stage="joint",
+        step=3,
+        metadata={"student_mode": "kd", "teacher_checkpoint_sha256": "a" * 64, "secret": "never-publish"},
+    )
+    export_inference(source, public)
+    _, payload = load_capstone(public)
+    assert payload["metadata"]["student_branch"] == "student-kd"
+    assert payload["metadata"]["teacher_checkpoint_sha256"] == "a" * 64
+    assert "student_mode" not in payload["metadata"] and "secret" not in payload["metadata"]
+    export_inference(public, second)
+    _, reexported = load_capstone(second)
+    assert reexported["metadata"]["student_branch"] == "student-kd"
+    assert reexported["metadata"]["teacher_checkpoint_sha256"] == "a" * 64
+
+
+@pytest.mark.parametrize(
+    "provenance",
+    [
+        {"student_mode": "unknown", "teacher_checkpoint_sha256": "a" * 64},
+        {"student_mode": "kd", "teacher_checkpoint_sha256": "secret"},
+        {"student_mode": "ce", "teacher_checkpoint_sha256": "A" * 64},
+        {"student_mode": "kd"},
+        {"teacher_checkpoint_sha256": "a" * 64},
+        {"student_mode": "ce", "student_branch": "student-kd", "teacher_checkpoint_sha256": "a" * 64},
+    ],
+)
+def test_student_export_rejects_ambiguous_branch_or_invalid_teacher_before_writing(tmp_path, provenance):
+    model = CapstoneModel(ModelConfig(width=16, layers=1, heads=2, max_length=192, experts=0))
+    source, public = tmp_path / "training.pt", tmp_path / "model.pt"
+    save_capstone(source, model, stage="joint", step=0, metadata=provenance)
+    with pytest.raises(ValueError):
+        export_inference(source, public)
+    assert not public.exists()
+
+
 def test_cpu_three_update_stage_smoke_and_dependency_guards(tmp_path):
     # Three optimizer updates in total; this validates plumbing, not capability.
     pre = train_stage("pretrain", tmp_path / "pre", steps=1, batch_size=2, validation=False)
@@ -218,3 +296,40 @@ def test_cpu_three_update_stage_smoke_and_dependency_guards(tmp_path):
         train_stage("joint", tmp_path / "wrong", input_checkpoint=tmp_path / "pre/model.pt", steps=1, validation=False)
     with pytest.raises(ValueError, match="training checkpoint"):
         train_stage("joint", tmp_path / "resume", resume=tmp_path / "joint/model.pt", steps=1, validation=False)
+
+
+def test_optional_student_budget_pause_resume_preserves_provenance_without_updates(tmp_path, monkeypatch):
+    from scripts.course_experiments.capstone_student import _train_student
+
+    initial = CapstoneModel(ModelConfig(width=16, layers=1, heads=2, max_length=192, experts=0))
+    teacher = frozen_reference(small_model())
+    splits, manifest = build_dataset()
+
+    def pause_run(teacher_sha):
+        clock = iter((0.0, 1.0, 2.0))
+        monkeypatch.setattr("scripts.course_experiments.capstone_student.time.perf_counter", lambda: next(clock))
+        return _train_student(
+            initial,
+            teacher,
+            splits["train"][:2],
+            tmp_path / "student",
+            mode="kd",
+            steps=1,
+            device="cpu",
+            seed=42,
+            seconds=0.001,
+            manifest=manifest,
+            teacher_sha=teacher_sha,
+        )
+
+    _, first = pause_run("a" * 64)
+    _, resumed = pause_run("a" * 64)
+    assert first["steps"] == resumed["steps"] == 0
+    assert resumed["budget_exhausted"] and not resumed["schedule_completed"]
+    model, checkpoint = load_capstone(tmp_path / "student/model-training.pt")
+    assert checkpoint["metadata"]["teacher_checkpoint_sha256"] == "a" * 64
+    assert checkpoint["training_state"]["elapsed_training_seconds"] == 4.0
+    for key, value in initial.state_dict().items():
+        torch.testing.assert_close(model.state_dict()[key], value)
+    with pytest.raises(ValueError, match="provenance"):
+        pause_run("b" * 64)

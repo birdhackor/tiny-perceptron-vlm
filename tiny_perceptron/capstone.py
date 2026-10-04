@@ -24,7 +24,7 @@ from tiny_perceptron.multimodal import log_mel, scene, tone
 STAGES = ("pretrain", "sft", "joint", "dpo")
 DEFAULT_STEPS = {"pretrain": 300, "sft": 1400, "joint": 600, "dpo": 100}
 TOK = ByteTokenizer()
-DATA_VERSION = "capstone-small-world-v1"
+DATA_VERSION = "capstone-small-world-v2"
 
 
 def digest(value):
@@ -148,10 +148,10 @@ def build_dataset(seed=42):
         for b in range(a, 10):
             family = f"numbers:{a}:{b}"
             rows = []
-            for question in (f"{a}+{b}等於多少？", f"請算{a}加{b}。"):
+            for left, right, question in ((a, b, f"{a}+{b}等於多少？"), (b, a, f"請算{b}加{a}。")):
                 rows.extend(
                     [
-                        _row(family, "calculator", question, f"TOOL:calculator:{a}+{b}"),
+                        _row(family, "calculator", question, f"TOOL:calculator:{left}+{right}"),
                         _row(family, "unavailable", question, "ASK:計算器未開", available=False),
                     ]
                 )
@@ -215,6 +215,24 @@ def build_dataset(seed=42):
         rng.shuffle(keys)
         a, b = int(len(keys) * 0.8), int(len(keys) * 0.9)
         selections = (keys[:a], keys[a:b], keys[b:])
+        if category == "numbers":
+            # Keep the explanatory 1+2 example genuinely held out, together with
+            # 2+1, both availability settings, concept and tool-return turns.
+            # This reservation is a design choice before any model evaluation.
+            reserved = "numbers:1:2"
+            if reserved not in selections[2]:
+                source = next(selected for selected in selections[:2] if reserved in selected)
+                source[source.index(reserved)], selections[2][-1] = selections[2][-1], reserved
+        if category == "audio":
+            # Preserve the seeded split as much as possible. The 2-family held-
+            # out splits need one low and one high family each. Move the last
+            # suitable training family deterministically, never based on scores.
+            for selected in selections[1:]:
+                for pitch in ("low", "high"):
+                    if not any(key.split(":")[1] == pitch for key in selected):
+                        donor = next(key for key in reversed(selections[0]) if key.split(":")[1] == pitch)
+                        location = selections[0].index(donor)
+                        selections[0][location], selected[-1] = selected[-1], donor
         if category == "modalities":
             validation = ["modalities:blue:circle"]
             test = ["modalities:green:square"]
@@ -225,6 +243,23 @@ def build_dataset(seed=42):
     # Duplicate prompts with different descendants are legitimate. Exact repeated
     # records are removed *within* their family, never split as independent rows.
     splits = {name: list({row["id"]: row for row in rows}.values()) for name, rows in splits.items()}
+    task_labels, task_baselines, action_labels = {}, {}, {}
+    for name, rows in splits.items():
+        task_labels[name], task_baselines[name], action_labels[name] = {}, {}, {}
+        for row in rows:
+            action, label = row["answer"].split(":", 1)
+            labels = task_labels[name].setdefault(row["task"], {})
+            labels[label] = labels.get(label, 0) + 1
+            action_labels[name][action] = action_labels[name].get(action, 0) + 1
+        for task, labels in task_labels[name].items():
+            count = sum(labels.values())
+            label = min(labels, key=lambda value: (-labels[value], value))
+            task_baselines[name][task] = {
+                "count": count,
+                "correct": labels[label],
+                "accuracy": labels[label] / count,
+                "majority_label": label,
+            }
     manifest = {
         "version": DATA_VERSION,
         "seed": seed,
@@ -232,6 +267,16 @@ def build_dataset(seed=42):
         "families": split_families,
         "sha256": {name: digest(rows) for name, rows in splits.items()},
         "counts": {name: len(rows) for name, rows in splits.items()},
+        "task_label_counts": task_labels,
+        "task_majority_baselines": task_baselines,
+        "action_label_counts": action_labels,
+        "label_definition": "full expected payload after DIRECT/ASK/TOOL colon; calculator label includes calculator name and exact ordered arguments, joint includes color and pitch",
+        "majority_baseline_scope": "per-task constant payload baseline, before runtime final-answer generation; constant-answer concept/missing/safety tasks can reach 100% without task understanding",
+        "split_policy": {
+            "audio": "seeded family split with minimal deterministic swaps; low/high each 8 train, 1 validation, 1 test families; all three frequency variants stay together",
+            "numbers": "canonical unordered operand families; both question orientations and all task descendants stay together; reserve (1,2) for test before training",
+            "scores_used_to_design_split": False,
+        },
         "limitations": "synthetic RGB shapes/tones and narrow Chinese templates, not natural multimodal understanding",
     }
     return splits, manifest
@@ -619,6 +664,25 @@ def export_inference(source, destination):
         "effective_tokens",
     )
     metadata = {key: payload["metadata"][key] for key in allowed if key in payload["metadata"]}
+    provenance = payload["metadata"]
+    if "student_mode" in provenance or "student_branch" in provenance or "teacher_checkpoint_sha256" in provenance:
+        if "student_mode" in provenance:
+            if provenance["student_mode"] not in ("ce", "kd"):
+                raise ValueError("Invalid student_mode; cannot infer a publication alias")
+            branch = "student-" + provenance["student_mode"]
+            if "student_branch" in provenance and provenance["student_branch"] != branch:
+                raise ValueError("Student mode and publication branch disagree")
+        else:
+            branch = provenance.get("student_branch")
+            if branch not in ("student-ce", "student-kd"):
+                raise ValueError("Teacher provenance requires an explicit valid student branch")
+        teacher = provenance.get("teacher_checkpoint_sha256")
+        if not isinstance(teacher, str) or re.fullmatch(r"[0-9a-f]{64}", teacher) is None:
+            raise ValueError("Student teacher checkpoint SHA must be 64 lowercase hexadecimal characters")
+        if payload["stage"] != "joint" or model.config.experts:
+            raise ValueError("Student publication branches require a Dense joint-stage checkpoint")
+        metadata["student_branch"] = branch
+        metadata["teacher_checkpoint_sha256"] = teacher
     metadata["source_checkpoint_sha256"] = _file_hash(source)
     save_capstone(
         destination, model, stage=payload["stage"], step=payload["step"], metadata=metadata, inference_only=True
