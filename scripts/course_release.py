@@ -132,7 +132,10 @@ def validate_approval(approval, experiment_id, batch_id, checkpoint_repo):
             raise ValueError("未知公開檔案 kind")
         if "task" in item and (item["kind"] != "checkpoint" or item["task"] not in ("vision", "audio", "joint")):
             raise ValueError("核准的多模態 task 必須是 vision/audio/joint")
-        if path.suffix in (".pt", ".pth", ".ckpt", ".safetensors") and item["kind"] != "checkpoint":
+        if (
+            path.suffix in (".pt", ".pth", ".ckpt", ".safetensors")
+            or output.suffix in (".pt", ".pth", ".ckpt", ".safetensors")
+        ) and item["kind"] != "checkpoint":
             raise ValueError("權重必須經 checkpoint 推論匯出器")
         if item.get("base_checkpoint"):
             validate_base(item["base_checkpoint"])
@@ -171,6 +174,10 @@ def inference_payload(saved, provenance, specification=None, companion_hashes=No
     architecture = specification.get("architecture", {})
     architecture_type = architecture.get("type") if isinstance(architecture, dict) else architecture
     version = saved.get("format_version")
+    if version in ("capstone-v1", "capstone-ptq-v1"):
+        from scripts.capstone_release import clean_capstone_payload
+
+        return clean_capstone_payload(saved, provenance, specification)
     if version in (1, "quantized-v1", "multimodal-v1"):
         fields = ("format_version", "config", "model", "modal_config", "tokenizer", "bits", "task")
     elif version == "simple-v1" or (version is None and "kind" in saved and "vocabulary" in saved):
@@ -262,6 +269,10 @@ def validate_export(path):
 
     saved = torch.load(path, map_location="cpu", weights_only=True)
     version = saved["format_version"]
+    if version in ("capstone-v1", "capstone-ptq-v1"):
+        from scripts.capstone_release import validate_capstone_payload
+
+        return validate_capstone_payload(saved)
     if version == "multimodal-v1":
         multimodal_task(saved)
     if version in (1, "quantized-v1", "multimodal-v1"):
