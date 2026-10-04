@@ -81,6 +81,8 @@
 | 7.14 少量錯誤答案會被學走嗎？ | [閱讀](../course/chapters/07.md#7.14) | [開啟](../notebooks/07/7.14.ipynb) |
 | 7.15 學會新任務會忘記舊任務嗎？ | [閱讀](../course/chapters/07.md#7.15) | [開啟](../notebooks/07/7.15.ipynb) |
 | 7.16 舊例子混回去有用嗎？ | [閱讀](../course/chapters/07.md#7.16) | [開啟](../notebooks/07/7.16.ipynb) |
+| 7.17 為什麼先大量讀文章，再練習當助理？ | [閱讀](../course/chapters/07.md#7.17) | [開啟](../notebooks/07/7.17.ipynb) |
+| 7.18 後訓練有哪些不同教法？ | [閱讀](../course/chapters/07.md#7.18) | [開啟](../notebooks/07/7.18.ipynb) |
 | 8.1 「有靈性」如何觀察？ | [閱讀](../course/chapters/08.md#8.1) | [開啟](../notebooks/08/8.1.ipynb) |
 | 8.2 換 prompt 能改變什麼？ | [閱讀](../course/chapters/08.md#8.2) | [開啟](../notebooks/08/8.2.ipynb) |
 | 8.3 權重能學到穩定風格嗎？ | [閱讀](../course/chapters/08.md#8.3) | [開啟](../notebooks/08/8.3.ipynb) |
@@ -149,6 +151,14 @@
 | 13.7 模型是否只學到回答更長？ | [閱讀](../course/chapters/13.md#13.7) | [開啟](../notebooks/13/13.7.ipynb) |
 | 13.8 討喜會不會變成附和？ | [閱讀](../course/chapters/13.md#13.8) | [開啟](../notebooks/13/13.8.ipynb) |
 | 13.9 只優化一種偏好會失去什麼？ | [閱讀](../course/chapters/13.md#13.9) | [開啟](../notebooks/13/13.9.ipynb) |
+| 13.10 比較能不能教一位評分員？ | [閱讀](../course/chapters/13.md#13.10) | [開啟](../notebooks/13/13.10.ipynb) |
+| 13.11 分數怎樣讓回答更常出現？ | [閱讀](../course/chapters/13.md#13.11) | [開啟](../notebooks/13/13.11.ipynb) |
+| 13.12 更新前後回答機率差多少？ | [閱讀](../course/chapters/13.md#13.12) | [開啟](../notebooks/13/13.12.ipynb) |
+| 13.13 為什麼別一次改太多？ | [閱讀](../course/chapters/13.md#13.13) | [開啟](../notebooks/13/13.13.ipynb) |
+| 13.14 誰在估計這題平常能拿多少分？ | [閱讀](../course/chapters/13.md#13.14) | [開啟](../notebooks/13/13.14.ipynb) |
+| 13.15 選擇、評分、更新，可以串起來嗎？ | [閱讀](../course/chapters/13.md#13.15) | [開啟](../notebooks/13/13.15.ipynb) |
+| 13.16 拿高分也可能學壞嗎？ | [閱讀](../course/chapters/13.md#13.16) | [開啟](../notebooks/13/13.16.ipynb) |
+| 13.17 為什麼DPO不用另外教評分員？ | [閱讀](../course/chapters/13.md#13.17) | [開啟](../notebooks/13/13.17.ipynb) |
 | 14.1 怎麼表示相對位置？ | [閱讀](../course/chapters/14.md#14.1) | [開啟](../notebooks/14/14.1.ipynb) |
 | 14.2 正規化能否簡化？ | [閱讀](../course/chapters/14.md#14.2) | [開啟](../notebooks/14/14.2.ipynb) |
 | 14.3 Q／K 的尺度怎麼影響注意力？ | [閱讀](../course/chapters/14.md#14.3) | [開啟](../notebooks/14/14.3.ipynb) |
@@ -208,6 +218,18 @@
 | 18.12 MoE 教師能教 Dense 學生嗎？ | [閱讀](../course/chapters/18.md#18.12) | [開啟](../notebooks/18/18.12.ipynb) |
 | 18.13 圖片／音訊能力能如何蒸餾？ | [閱讀](../course/chapters/18.md#18.13) | [開啟](../notebooks/18/18.13.ipynb) |
 | 18.14 蒸餾後再量化能省多少？ | [閱讀](../course/chapters/18.md#18.14) | [開啟](../notebooks/18/18.14.ipynb) |
+| 19.1 一個成品，為什麼要試好幾種問題？ | [閱讀](../course/chapters/19.md#19.1) | [開啟](../notebooks/19/19.1.ipynb) |
+| 19.2 為什麼成品選 MoE，卻仍保留 Dense 路線？ | [閱讀](../course/chapters/19.md#19.2) | [開啟](../notebooks/19/19.2.ipynb) |
+| 19.3 同一題的不同版本，怎麼避免跑進兩份考卷？ | [閱讀](../course/chapters/19.md#19.3) | [開啟](../notebooks/19/19.3.ipynb) |
+| 19.4 怎麼確認下一階段真的接著上一階段學？ | [閱讀](../course/chapters/19.md#19.4) | [開啟](../notebooks/19/19.4.ipynb) |
+| 19.5 讓助理簡短、誠實與守規則，要教哪種示範？ | [閱讀](../course/chapters/19.md#19.5) | [開啟](../notebooks/19/19.5.ipynb) |
+| 19.6 圖片與聲音怎麼交給同一位助理？ | [閱讀](../course/chapters/19.md#19.6) | [開啟](../notebooks/19/19.6.ipynb) |
+| 19.7 計算器算對，為什麼助理還可能答錯？ | [閱讀](../course/chapters/19.md#19.7) | [開啟](../notebooks/19/19.7.ipynb) |
+| 19.8 後訓練方法很多，成品需要全部依序跑嗎？ | [閱讀](../course/chapters/19.md#19.8) | [開啟](../notebooks/19/19.8.ipynb) |
+| 19.9 接上較快的做法，先檢查什麼？ | [閱讀](../course/chapters/19.md#19.9) | [開啟](../notebooks/19/19.9.ipynb) |
+| 19.10 如何把成品帶到較小的電腦？ | [閱讀](../course/chapters/19.md#19.10) | [開啟](../notebooks/19/19.10.ipynb) |
+| 19.11 下載一份權重，就能從中斷處繼續訓練嗎？ | [閱讀](../course/chapters/19.md#19.11) | [開啟](../notebooks/19/19.11.ipynb) |
+| 19.12 完成整合後，怎樣回答「這個模型會什麼」？ | [閱讀](../course/chapters/19.md#19.12) | [開啟](../notebooks/19/19.12.ipynb) |
 | A.1 給幾個例子能改變回答嗎？ | [閱讀](../course/chapters/0A.md#A.1) | [開啟](../notebooks/0A/A.1.ipynb) |
 | A.2 不在訓練資料裡的資訊怎麼使用？ | [閱讀](../course/chapters/0A.md#A.2) | [開啟](../notebooks/0A/A.2.ipynb) |
 | A.3 文件多了怎麼找相關段落？ | [閱讀](../course/chapters/0A.md#A.3) | [開啟](../notebooks/0A/A.3.ipynb) |

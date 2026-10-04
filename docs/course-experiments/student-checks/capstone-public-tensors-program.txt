@@ -1,0 +1,33 @@
+import hashlib,json,sys
+from pathlib import Path
+import torch
+from huggingface_hub import hf_hub_download
+ROOT=Path.cwd();sys.path.insert(0,str(ROOT))
+from scripts.capstone_release import public_stage_id
+m=json.load(open('docs/course-experiments/capstone-public.json'))
+def same(a,b):
+    if isinstance(a,torch.Tensor):return isinstance(b,torch.Tensor) and a.dtype==b.dtype and a.shape==b.shape and torch.equal(a,b)
+    if isinstance(a,dict):return isinstance(b,dict) and a.keys()==b.keys() and all(same(a[k],b[k]) for k in a)
+    if isinstance(a,(list,tuple)):return type(a)==type(b) and len(a)==len(b) and all(same(x,y) for x,y in zip(a,b))
+    return a==b
+raw={}
+for name,base in [('capstone_deployment','outputs/integration-runs/v2-deployment/capstone-review/capstone_deployment/gha-37169529991-1'),('capstone_student','outputs/integration-runs/v2-student/capstone-review/capstone_student/gha-37170200956-1')]:
+    approval=json.load(open(f'docs/course-experiments/releases/{name}.json'))
+    for f in approval['files']:
+        if f['kind']!='checkpoint':continue
+        p=Path(base)/f['path'];assert hashlib.sha256(p.read_bytes()).hexdigest()==f['sha256']
+        s=torch.load(p,map_location='cpu',weights_only=True);raw[Path(f['output']).parts[0]]=(p,s)
+records=[]
+for model in m['models']:
+    f=next(x for x in model['files'] if x['output']==model['checkpoint'])
+    p=Path(hf_hub_download(m['repo'],f['path'],revision=m['revision'],token=False))
+    assert hashlib.sha256(p.read_bytes()).hexdigest()==f['sha256']
+    pub=torch.load(p,map_location='cpu',weights_only=True);rp,source=raw[model['id']]
+    keys=['config','model','stage','step','tokenizer','data_version']
+    if pub.get('quantized'):keys+=['quantized','quantization']
+    for key in keys:assert same(pub[key],source[key]),(model['id'],key)
+    assert pub['inference_only'] is True
+    assert all(k not in pub for k in ['optimizer','rng','reference_model','data_manifest','history'])
+    records.append({'stage':model['id'],'public_sha256':f['sha256'],'approved_source_sha256':hashlib.sha256(rp.read_bytes()).hexdigest(),'exact_tensor_and_config_fields':keys,'passed':True})
+r={'schema_version':1,'public_repo':m['repo'],'public_revision':m['revision'],'verification':'Actual anonymous pinned public exports compared field by field with the previously approved raw inference source. Tensor dtype/shape/value comparison uses torch.equal, not generated-answer similarity.','records':records,'command':'.venv/bin/python outputs/integration-runs/verify_public_tensors.py','environment':{'python':sys.version.split()[0],'torch':str(torch.__version__),'device':'cpu'}}
+Path('docs/course-experiments/student-checks/capstone-public-tensors.json').write_text(json.dumps(r,ensure_ascii=False,indent=2)+'\n');print(json.dumps({'models':len(records),'all_public_tensors_identical':True,'revision':m['revision']}))
