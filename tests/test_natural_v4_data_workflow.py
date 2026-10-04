@@ -89,7 +89,6 @@ def assert_no_upload_or_success_receipt(fixture):
 def test_workflow_trigger_cpu_dependencies_and_commands_stay_in_authorized_scope():
     assert DOCUMENT["on"] == {
         "workflow_dispatch": "",
-        "push": {"branches": ["natural-assistant-v4"], "paths": ["docs/natural-assistant/v4/manifest.json"]},
     }
     assert DOCUMENT["jobs"]["publish-data"]["runs-on"] == "ubuntu-latest"
     assert int(DOCUMENT["jobs"]["publish-data"]["timeout-minutes"]) == 40
