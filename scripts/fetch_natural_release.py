@@ -26,6 +26,8 @@ MAX_RELEASE_BYTES = 128 * 1024 * 1024
 MAX_HEADER_BYTES = 1024 * 1024
 REQUIRED_FILES = {"adapter_model.safetensors", "adapter_config.json", "README.md", "release-provenance.json"}
 ALLOWED_FILES = REQUIRED_FILES | {"runtime-versions.json", "LICENSE.md", "THIRD_PARTY_NOTICES.md"}
+BASE_REQUIRED_FILES = {"README.md", "release-provenance.json"}
+BASE_ALLOWED_FILES = ALLOWED_FILES - {"adapter_model.safetensors", "adapter_config.json"}
 CODE_FILES = {"tiny_perceptron/natural_assistant.py", "tiny_perceptron/natural_ui.py"}
 DEPENDENCIES = {
     "torch",
@@ -88,6 +90,12 @@ def validate_manifest(manifest):
         raise ValueError("Public natural release needs schema_version=1")
     if manifest.get("reviewed") is not True or manifest.get("anonymous_download_verified") is not True:
         raise ValueError("The release must be reviewed and its anonymous downloads verified")
+    variant = manifest.get("selected_variant", "adapter")
+    if not isinstance(variant, str) or (
+        variant not in {"base", "adapter"} and not re.fullmatch(r"adapter-step-[0-9]{6}", variant)
+    ):
+        raise ValueError("Public release must identify base or one reviewed adapter variant")
+    base_only = variant == "base"
     if not isinstance(manifest.get("release_id"), str) or not re.fullmatch(
         r"[A-Za-z0-9_-]{1,80}", manifest["release_id"]
     ):
@@ -137,8 +145,9 @@ def validate_manifest(manifest):
         or type(runtime["seed"]) is not int
     ):
         raise ValueError("Inference limits are inconsistent or outside the student route")
-    if type(manifest.get("adapter_parameters")) is not int or not 0 < manifest["adapter_parameters"] < 50_000_000:
-        raise ValueError("Release must state a bounded adapter parameter count")
+    parameters = manifest.get("adapter_parameters")
+    if type(parameters) is not int or not (parameters == 0 if base_only else 0 < parameters < 50_000_000):
+        raise ValueError("Base release requires zero adapter parameters; adapters need a bounded positive count")
     code = manifest.get("code_files")
     if not isinstance(code, dict) or set(code) != CODE_FILES:
         raise ValueError("Release must bind the tested chat core and interface bytes")
@@ -146,7 +155,9 @@ def validate_manifest(manifest):
         safe_relative(path)
         exact_digest(digest, 64, "Student source file")
     files = manifest.get("files")
-    if not isinstance(files, list) or not 4 <= len(files) <= len(ALLOWED_FILES):
+    required = BASE_REQUIRED_FILES if base_only else REQUIRED_FILES
+    allowed = BASE_ALLOWED_FILES if base_only else ALLOWED_FILES
+    if not isinstance(files, list) or not len(required) <= len(files) <= len(allowed):
         raise ValueError("Release needs a bounded inference-only file allowlist")
     remote, local, total = set(), set(), 0
     for item in files:
@@ -155,7 +166,7 @@ def validate_manifest(manifest):
         path, output = safe_relative(item.get("path")), safe_relative(item.get("output"))
         if path.parts[: len(prefix.parts)] != prefix.parts or len(path.parts) <= len(prefix.parts):
             raise ValueError("Public file is outside the approved release prefix")
-        if output.as_posix() not in ALLOWED_FILES or path.name != output.name:
+        if output.as_posix() not in allowed or path.name != output.name:
             raise ValueError("Only explicitly named inference adapter, config, card and version files may be fetched")
         if path.as_posix() in remote or output.as_posix() in local:
             raise ValueError("Release paths must be unique")
@@ -171,7 +182,7 @@ def validate_manifest(manifest):
             or not item["license"].strip()
         ):
             raise ValueError("Every public file needs its reviewed redistribution license")
-    if not REQUIRED_FILES <= local or total > MAX_RELEASE_BYTES:
+    if not required <= local or total > MAX_RELEASE_BYTES:
         raise ValueError("Release is incomplete or too large for the inference-only student route")
     return manifest
 
@@ -261,20 +272,37 @@ def verify_adapter(directory, manifest):
         partner = name.replace(".lora_A.", ".lora_B.") if is_a else name.replace(".lora_B.", ".lora_A.")
         if partner not in shapes or shape[0 if is_a else 1] != rank:
             raise ValueError("Every LoRA projection requires a compatible A/B rank pair")
+    verify_provenance(directory, manifest)
+
+
+def verify_provenance(directory, manifest):
+    """Verify the release card and pins, including genuine adapter absence."""
     provenance = read_json(directory / "release-provenance.json")
-    if not isinstance(provenance, dict) or set(provenance) != {
+    required = {
         "approval_sha256",
         "git_revision",
         "manifest_sha256",
         "source",
         "base_model",
         "asr_model",
-    }:
+    }
+    if "selected_variant" in manifest:
+        required.add("selected_variant")
+    if not isinstance(provenance, dict) or set(provenance) != required:
         raise ValueError("Public provenance must contain only the declared source/model pins")
+    if "selected_variant" in manifest and provenance["selected_variant"] != manifest["selected_variant"]:
+        raise ValueError("Public provenance differs from the selected student variant")
     source = provenance["source"]
-    model_pin(source, "Reviewed adapter source")
-    if set(source) != {"repo", "revision", "prefix"} or safe_relative(source.get("prefix")).parts[0] != "natural-v3":
-        raise ValueError("Public provenance cannot include private training state")
+    if manifest.get("selected_variant", "adapter") == "base":
+        if source is not None:
+            raise ValueError("Base-only provenance cannot claim a private adapter source")
+    else:
+        model_pin(source, "Reviewed adapter source")
+        if (
+            set(source) != {"repo", "revision", "prefix"}
+            or safe_relative(source.get("prefix")).parts[0] != "natural-v3"
+        ):
+            raise ValueError("Public provenance cannot include private training state")
     for key in ("approval_sha256", "git_revision", "manifest_sha256", "base_model", "asr_model"):
         if provenance.get(key) != manifest[key]:
             raise ValueError("Public source/model provenance differs from the committed student manifest")
@@ -312,7 +340,10 @@ def verify_release(manifest, directory, *, receipt=True):
         file = directory / item["output"]
         if file.stat().st_size != item["bytes"] or sha256(file) != item["sha256"]:
             raise ValueError(f"Public file does not match its exact SHA/size: {item['output']}")
-    verify_adapter(directory, manifest)
+    if manifest.get("selected_variant", "adapter") == "base":
+        verify_provenance(directory, manifest)
+    else:
+        verify_adapter(directory, manifest)
     if receipt and read_json(directory / "verified-release.json") != manifest:
         raise ValueError("Local download receipt differs from the committed public manifest")
     return directory
@@ -386,7 +417,7 @@ def student_options(manifest, directory, *, device="cuda", dtype=None, cache_dir
         model_revision=manifest["base_model"]["revision"],
         asr_model=manifest["asr_model"]["repo"],
         asr_revision=manifest["asr_model"]["revision"],
-        adapter=Path(directory),
+        adapter=None if manifest.get("selected_variant", "adapter") == "base" else Path(directory),
         device=device,
         dtype=dtype,
         cache_dir=cache_dir,
@@ -418,13 +449,14 @@ def main():
     parser.add_argument("--port", type=int, default=8766)
     args = parser.parse_args()
     if not args.manifest.is_file():
-        parser.error("此完整版尚未發布可驗證的公開權重；不會改抓 main 或私人訓練檔。")
+        parser.error("此完整版尚未發布可驗證的公開成品；不會改抓 main 或私人訓練檔。")
     try:
         manifest = validate_manifest(read_json(args.manifest))
         if args.list:
             print(
                 json.dumps(
-                    {key: manifest[key] for key in ("release_id", "repo", "revision", "base_model", "asr_model")},
+                    {key: manifest[key] for key in ("release_id", "repo", "revision", "base_model", "asr_model")}
+                    | {"selected_variant": manifest.get("selected_variant", "adapter")},
                     ensure_ascii=False,
                     indent=2,
                 )
