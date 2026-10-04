@@ -1,0 +1,233 @@
+"""CPU publication dependency review; no model loading or GPU execution."""
+
+import ast
+import contextlib
+import hashlib
+import importlib.metadata
+import io
+import json
+import os
+import platform
+import re
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from xml.etree import ElementTree
+
+import pytest
+import soundfile
+
+ROOT = Path(__file__).resolve().parents[4]
+sys.path.insert(0, str(ROOT))
+OUT = Path(__file__).resolve().parent
+REPORT = ROOT / "docs/technical-reviews/20.1.json"
+TEST = ROOT / "tests/test_natural_ui.py"
+FUNCTION = "test_invalid_or_long_upload_does_not_write_assets"
+IDS = ["svg", "path-traversal", "invalid-image", "invalid-audio", "overlong-audio", "audio-extension"]
+REVIEWER = "/root/publication_factual_20_1_ui_ids"
+
+
+def digest(content):
+    return hashlib.sha256(content).hexdigest()
+
+
+def save(name, content):
+    path = OUT / name
+    path.write_bytes(content if isinstance(content, bytes) else content.encode("utf-8"))
+    return str(path.relative_to(ROOT))
+
+
+def section(path, identifier):
+    raw = (ROOT / path).read_bytes()
+    headings = list(re.finditer(rb"^## .+$", raw, re.M))
+    for index, heading in enumerate(headings):
+        if heading[0].startswith(b"## " + identifier.encode() + b" "):
+            end = headings[index + 1].start() if index + 1 < len(headings) else len(raw)
+            return raw[heading.start():end]
+    raise AssertionError(identifier)
+
+
+prior_bytes = REPORT.read_bytes()
+prior_sha = digest(prior_bytes)
+history_name = "history/original-report-" + prior_sha + ".json"
+(OUT / "history").mkdir(exist_ok=True)
+history_path = OUT / history_name
+if history_path.exists():
+    assert history_path.read_bytes() == prior_bytes
+else:
+    save(history_name, prior_bytes)
+prior = json.loads(prior_bytes)
+baseline = subprocess.run(
+    ["git", "show", "HEAD:tests/test_natural_ui.py"], cwd=ROOT, capture_output=True, check=True
+).stdout
+baseline_sha = digest(baseline)
+current = TEST.read_bytes()
+current_sha = digest(current)
+old_source = next(item for item in prior["sources"] if item["id"] == "s_http")
+assert baseline_sha == old_source["sha256"]
+save("baseline-test.py.source.txt", baseline)
+save("current-test.py.source.txt", current)
+diff = subprocess.run(["git", "diff", "--", "tests/test_natural_ui.py"], cwd=ROOT, capture_output=True, check=True)
+save("test-diff.txt", diff.stdout)
+ids_line = ('    ids=' + json.dumps(IDS, ensure_ascii=False) + ',\n').encode()
+assert current.count(ids_line) == 1
+assert current.replace(ids_line, b"", 1) == baseline
+old_tree, new_tree = ast.parse(baseline), ast.parse(current)
+old_function = next(node for node in old_tree.body if isinstance(node, ast.FunctionDef) and node.name == FUNCTION)
+new_function = next(node for node in new_tree.body if isinstance(node, ast.FunctionDef) and node.name == FUNCTION)
+assert len(new_function.decorator_list) == 1
+decorator = new_function.decorator_list[0]
+assert isinstance(decorator, ast.Call)
+assert [item.arg for item in decorator.keywords] == ["ids"]
+assert ast.literal_eval(decorator.keywords[0].value) == IDS
+decorator.keywords = []
+assert ast.dump(old_tree, include_attributes=False) == ast.dump(new_tree, include_attributes=False)
+assert ast.dump(ast.Module(body=old_function.body, type_ignores=[])) == ast.dump(
+    ast.Module(body=new_function.body, type_ignores=[])
+)
+assertion_count = sum(isinstance(node, ast.Assert) for node in ast.walk(old_function))
+assert assertion_count == 4
+
+namespaces = []
+for source, name in [(baseline, "baseline"), (current, "current")]:
+    namespace = {"__name__": "publication_20_1_" + name, "__file__": str(TEST)}
+    exec(compile(source, str(TEST), "exec"), namespace)
+    namespaces.append(namespace)
+marks = [namespace[FUNCTION].pytestmark[0] for namespace in namespaces]
+assert marks[0].args == marks[1].args
+assert marks[0].kwargs == {}
+assert marks[1].kwargs == {"ids": IDS}
+cases = []
+for name, (kind, filename, content) in zip(IDS, marks[1].args[1], strict=True):
+    record = {"id": name, "kind": kind, "filename": filename, "content_bytes": len(content), "content_sha256": digest(content)}
+    if name == "overlong-audio":
+        info = soundfile.info(io.BytesIO(content))
+        assert info.frames == 240080
+        assert info.samplerate == 8000
+        assert info.frames / info.samplerate == 30.01
+        record.update(frames=info.frames, sample_rate=info.samplerate, seconds=info.frames / info.samplerate)
+    cases.append(record)
+
+hash_checks = []
+for group in ["artifacts", "primary_sources", "sources"]:
+    for item in prior[group]:
+        path = item.get("path", item.get("snapshot_path"))
+        expected = item.get("sha256", item.get("snapshot_sha256"))
+        if path and expected:
+            actual = digest((ROOT / path).read_bytes())
+            authorized_ids_change = path == "tests/test_natural_ui.py"
+            assert actual == current_sha if authorized_ids_change else actual == expected
+            hash_checks.append({"group": group, "path": path, "expected": expected, "actual": actual,
+                                "matches_prior": actual == expected, "authorized_ids_change": authorized_ids_change})
+for path, expected in prior["figure_sha256"].items():
+    actual = digest((ROOT / path).read_bytes())
+    assert actual == expected
+    hash_checks.append({"group": "figure_sha256", "path": path, "expected": expected, "actual": actual,
+                        "matches_prior": True, "authorized_ids_change": False})
+
+read_sections = []
+for path, identifier in [("course/chapters/20.md", "20.1"), ("course/chapters/11.md", "11.4"),
+                         ("course/chapters/12.md", "12.11"), ("course/chapters/07.md", "7.1")]:
+    content = section(path, identifier)
+    snapshot = save("read-" + identifier + ".md", content)
+    read_sections.append({"source": path + "#" + identifier, "snapshot_path": snapshot, "sha256": digest(content)})
+lesson = section("course/chapters/20.md", "20.1")
+assert digest(lesson) == prior["source_sha256"]
+chapter = (ROOT / "course/chapters/20.md").read_bytes()
+intro = chapter[:re.search(rb"^## ", chapter, re.M).start()]
+assert digest(intro) == prior["intro_sha256"]
+save("read-chapter-intro.md", intro)
+code = re.findall(r"```python\n(.*?)\n```", lesson.decode(), re.S)
+assert len(code) == 1
+concept_runs = []
+for mode, source in [("original", code[0]), ("exercise", code[0].replace(
+    'recognized_question = "請讀出照片裡的招牌。"', 'recognized_question = "請介紹這張照片。"', 1))]:
+    namespace = {}
+    stdout = io.StringIO()
+    with contextlib.redirect_stdout(stdout):
+        exec(compile(source, "20.1-" + mode, "exec"), namespace)
+    assert namespace["history"] == [{"role": "user", "content": "接下來請用繁體中文回答。"}]
+    assert len(namespace["typed_chat"]) == len(namespace["spoken_chat"]) == 2
+    equal = namespace["typed_chat"] == namespace["spoken_chat"]
+    assert equal == (mode == "original")
+    concept_runs.append({"mode": mode, "stdout": stdout.getvalue(), "equal": equal, "history_unchanged": True})
+
+collection_args = [sys.executable, "-m", "pytest", "--collect-only", "-q", "tests/test_natural_ui.py::" + FUNCTION]
+collection = subprocess.run(collection_args, cwd=ROOT, capture_output=True, text=True)
+save("collect.stdout.txt", collection.stdout)
+save("collect.stderr.txt", collection.stderr)
+assert collection.returncode == 0
+nodeids = [line for line in collection.stdout.splitlines() if line.startswith("tests/test_natural_ui.py::")]
+expected_nodeids = ["tests/test_natural_ui.py::" + FUNCTION + "[" + name + "]" for name in IDS]
+assert nodeids == expected_nodeids
+assert max(map(len, nodeids)) < 200
+
+
+class CaptureCurrentTest:
+    def __init__(self):
+        self.current_tests = []
+        self.call_reports = []
+
+    def pytest_runtest_call(self, item):
+        if item.originalname == FUNCTION:
+            value = os.environ["PYTEST_CURRENT_TEST"]
+            assert value == item.nodeid + " (call)"
+            assert len(value) < 200
+            self.current_tests.append({"nodeid": item.nodeid, "current_test": value, "characters": len(value)})
+
+    def pytest_runtest_logreport(self, report):
+        if report.when == "call":
+            self.call_reports.append({"nodeid": report.nodeid, "outcome": report.outcome})
+
+
+plugin = CaptureCurrentTest()
+pytest_args = ["-q", "tests/test_natural_ui.py", "--junitxml=" + str(OUT / "pytest.junit.xml")]
+stdout, stderr = io.StringIO(), io.StringIO()
+with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+    pytest_exit = int(pytest.main(pytest_args, plugins=[plugin]))
+save("pytest.stdout.txt", stdout.getvalue())
+save("pytest.stderr.txt", stderr.getvalue())
+assert pytest_exit == 0
+assert [item["nodeid"] for item in plugin.current_tests] == expected_nodeids
+assert all(item["outcome"] == "passed" for item in plugin.call_reports)
+for required in ["test_upload_and_chat_preserve_actual_image_and_every_turn",
+                 "test_speech_is_two_explicit_stations_and_correction_reaches_same_core"]:
+    assert any(item["nodeid"] == "tests/test_natural_ui.py::" + required for item in plugin.call_reports)
+junit = ElementTree.parse(OUT / "pytest.junit.xml")
+suites = junit.findall(".//testsuite")
+assert sum(int(suite.attrib["tests"]) for suite in suites) == len(plugin.call_reports)
+assert sum(int(suite.attrib["failures"]) + int(suite.attrib["errors"]) + int(suite.attrib["skipped"]) for suite in suites) == 0
+
+environment = {"python": platform.python_version(), "system": platform.system(), "device": "cpu"}
+for package in ["torch", "numpy", "pytest", "pillow", "soundfile"]:
+    environment[package] = importlib.metadata.version(package)
+receipt = {
+    "reviewer_task": REVIEWER,
+    "executed_at": datetime.now(timezone.utc).isoformat(),
+    "command": ".venv/bin/python docs/technical-reviews/artifacts/publication-20.1-ui-ids/reinspect.py.source.txt",
+    "environment": environment,
+    "scope": "已完整親讀20.1、導言與三個必要前置；本次只重核參數ids發布依賴、HTTP介面與來源/證據SHA，未重新GPU訓練、模型推論或全篇盲審。原完整事實審閱仍由原reviewer負責。",
+    "prior_report": {"path": str(history_path.relative_to(ROOT)), "sha256": prior_sha, "byte_exact": True,
+                     "reviewer_task": prior["reviewer_task"]},
+    "test_change": {"baseline_revision": subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True, check=True).stdout.strip(),
+                    "baseline_sha256": baseline_sha, "current_sha256": current_sha,
+                    "only_ids_line_added": True, "whole_file_ast_equal_after_removing_ids": True,
+                    "all_six_runtime_parameter_values_equal": True, "test_body_assertions_unchanged": True,
+                    "test_body_assertion_count": assertion_count, "cases": cases},
+    "read_sections": read_sections, "intro_sha256": digest(intro), "hash_checks": hash_checks,
+    "concept_runs": concept_runs,
+    "collection": {"argv": collection_args, "exit_code": collection.returncode, "nodeids": nodeids},
+    "http_regression": {"runner": "pytest.main with an observation-only plugin", "pytest_args": pytest_args,
+                        "exit_code": pytest_exit, "passed": len(plugin.call_reports), "failed": 0, "skipped": 0,
+                        "call_reports": plugin.call_reports, "upload_current_test_values": plugin.current_tests},
+    "limits": ["實跑環境為Linux CPU；短名稱與PYTEST_CURRENT_TEST長度已核對，但本次未在Windows runner重跑。",
+               "HTTP是真實本機server/upload/history，ASR與generate仍採原fixture；不構成模型能力成績。",
+               "既有證據bytes與SHA逐檔核對；原官方下載、圖形render/view及原模型紀錄不冒稱本次重新產生。",
+               "原20.1報告的執行artifact均為CPU；課程另存GPU訓練證據未更動、未重跑。"],
+    "result": "pass"
+}
+save("reinspection.json", json.dumps(receipt, ensure_ascii=False, indent=2) + "\n")
+print(json.dumps({"result": "pass", "passed_http_tests": len(plugin.call_reports),
+                  "upload_caseids": IDS, "largest_current_test_characters": max(item["characters"] for item in plugin.current_tests),
+                  "prior_report_sha256": prior_sha, "source_sha256": current_sha, "hash_checks": len(hash_checks)}, ensure_ascii=False, indent=2))

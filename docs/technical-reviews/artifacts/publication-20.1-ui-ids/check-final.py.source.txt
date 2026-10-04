@@ -1,0 +1,57 @@
+"""Run the real final lesson checker and bind its receipt to the final report."""
+
+import hashlib
+import json
+import platform
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[4]
+OUT = Path(__file__).resolve().parent
+REPORT = ROOT / "docs/technical-reviews/20.1.json"
+report_bytes = REPORT.read_bytes()
+report = json.loads(report_bytes)
+proof = json.loads((OUT / "reinspection.json").read_text())
+original_path = ROOT / proof["prior_report"]["path"]
+assert hashlib.sha256(original_path.read_bytes()).hexdigest() == proof["prior_report"]["sha256"]
+original = json.loads(original_path.read_bytes())
+assert report["claims"] == original["claims"]
+hash_checks = []
+for group in ["artifacts", "primary_sources", "sources"]:
+    for item in report[group]:
+        path = item.get("path", item.get("snapshot_path"))
+        expected = item.get("sha256", item.get("snapshot_sha256"))
+        if path and expected:
+            actual = hashlib.sha256((ROOT / path).read_bytes()).hexdigest()
+            assert actual == expected, (group, path)
+            hash_checks.append({"group": group, "path": path, "sha256": actual, "match": True})
+command = [sys.executable, "scripts/check_technical_reviews.py", "--lesson", "20.1"]
+run = subprocess.run(command, cwd=ROOT, capture_output=True, text=True)
+(OUT / "checker.stdout.txt").write_text(run.stdout)
+(OUT / "checker.stderr.txt").write_text(run.stderr)
+assert run.returncode == 0
+assert REPORT.read_bytes() == report_bytes
+receipt = {
+    "reviewer_task": "/root/publication_factual_20_1_ui_ids",
+    "executed_at": datetime.now(timezone.utc).isoformat(),
+    "command": ".venv/bin/python scripts/check_technical_reviews.py --lesson 20.1",
+    "argv": command,
+    "exit_code": run.returncode,
+    "stdout": run.stdout,
+    "stderr": run.stderr,
+    "environment": {"python": platform.python_version(), "system": platform.system(), "device": "cpu"},
+    "report_path": "docs/technical-reviews/20.1.json",
+    "report_sha256": hashlib.sha256(report_bytes).hexdigest(),
+    "checker_source_sha256": hashlib.sha256((ROOT / "scripts/check_technical_reviews.py").read_bytes()).hexdigest(),
+    "capture_source_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+    "original_report_byte_exact": True,
+    "original_claims_unchanged": True,
+    "registered_source_and_artifact_sha_checks": hash_checks,
+    "result": "pass",
+    "limit": "只驗證當前20.1報告的登記與來源版本；全篇原事實判斷仍屬原owner，本次真實測試為CPU發布依賴複查。"
+}
+(OUT / "checker.json").write_text(json.dumps(receipt, ensure_ascii=False, indent=2) + "\n")
+print(json.dumps({"exit_code": run.returncode, "report_sha256": receipt["report_sha256"],
+                  "registered_hash_checks": len(hash_checks), "stdout": run.stdout}, ensure_ascii=False, indent=2))

@@ -1,0 +1,310 @@
+"""CPU publication dependency reinspection; does not replace the original review."""
+
+import ast
+import difflib
+import hashlib
+import importlib.metadata
+import io
+import json
+import os
+import platform
+import re
+import subprocess
+import sys
+import tempfile
+from datetime import datetime, timezone
+from pathlib import Path
+
+ROOT = Path.cwd()
+OUT = ROOT / "docs/technical-reviews/artifacts/publication-20.7-ui-ids-supplement"
+TEST = "tests/test_natural_ui.py"
+TARGET = "test_invalid_or_long_upload_does_not_write_assets"
+IDS = ["svg", "path-traversal", "invalid-image", "invalid-audio", "overlong-audio", "audio-extension"]
+
+
+def digest(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def save(name, value):
+    (OUT / name).write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def section(path, identifier):
+    text = path.read_text(encoding="utf-8")
+    headings = list(re.finditer(r"^## .+$", text, re.M))
+    for number, heading in enumerate(headings):
+        if heading[0].startswith("## " + identifier + " "):
+            end = headings[number + 1].start() if number + 1 < len(headings) else len(text)
+            return text[heading.start():end].encode("utf-8")
+    raise AssertionError(identifier)
+
+
+class Capture:
+    def __init__(self, baseline=False):
+        self.baseline = baseline
+        self.cases = []
+        self.calls = []
+        self.results = []
+
+    def pytest_collection_modifyitems(self, items):
+        import soundfile as sf
+
+        for item in items:
+            if item.originalname != TARGET:
+                continue
+            params = item.callspec.params
+            content = params["content"]
+            case = {
+                "kind": params["kind"],
+                "filename": params["filename"],
+                "content_bytes": len(content),
+                "content_sha256": digest(content),
+                "id_sha256": digest(item.callspec.id.encode("utf-8")),
+                "id_characters": len(item.callspec.id),
+                "nodeid_characters": len(item.nodeid),
+                "setup_current_test_characters": len(item.nodeid + " (setup)"),
+            }
+            if not self.baseline:
+                case["id"] = item.callspec.id
+                case["nodeid"] = item.nodeid
+            try:
+                info = sf.info(io.BytesIO(content))
+            except (RuntimeError, OSError, ValueError):
+                pass
+            else:
+                case["audio"] = {
+                    "frames": info.frames,
+                    "samplerate": info.samplerate,
+                    "channels": info.channels,
+                    "seconds": info.frames / info.samplerate,
+                }
+            self.cases.append(case)
+
+    def pytest_runtest_call(self, item):
+        value = os.environ.get("PYTEST_CURRENT_TEST", "")
+        self.calls.append({
+            "nodeid": item.nodeid,
+            "current_test": value,
+            "current_test_characters": len(value),
+        })
+
+    def pytest_runtest_logreport(self, report):
+        self.results.append({
+            "nodeid": report.nodeid,
+            "phase": report.when,
+            "outcome": report.outcome,
+            "seconds": report.duration,
+        })
+
+
+def pytest_mode(mode, target=None):
+    import pytest
+
+    capture = Capture(baseline=mode == "--baseline")
+    if mode == "--baseline":
+        arguments = ["-p", "no:cacheprovider", "-p", "no:terminal", "--collect-only", target + "::" + TARGET]
+        name = "baseline-collection.json"
+    else:
+        arguments = [
+            "-p", "no:cacheprovider", "-q", "tests/test_natural_ui.py",
+            "tests/test_natural_assistant.py::test_masking_keeps_only_final_assistant_answer_and_end_marker",
+            "tests/test_natural_assistant.py::test_asr_reports_raw_and_normalized_cer_without_script_correction",
+            "tests/test_natural_assistant.py::test_asr_preserves_raw_generation_ids_eos_and_truncation",
+            "tests/test_natural_assistant.py::test_speech_chat_uses_actual_asr_hypothesis_and_separate_typed_control",
+            "tests/test_natural_assistant.py::test_inference_retains_history_image_instead_of_only_latest_text",
+        ]
+        name = "cpu-regression.json"
+    status = int(pytest.main(arguments, plugins=[capture]))
+    save(name, {
+        "arguments": arguments,
+        "exit_code": status,
+        "upload_cases": capture.cases,
+        "actual_call_phase_environment": capture.calls,
+        "phase_results": capture.results,
+    })
+    return status
+
+
+def command(name, arguments):
+    started = datetime.now(timezone.utc).isoformat()
+    environment = dict(os.environ, PYTHONPATH=str(ROOT))
+    run = subprocess.run(arguments, cwd=ROOT, env=environment, capture_output=True)
+    (OUT / (name + ".stdout.txt")).write_bytes(run.stdout)
+    (OUT / (name + ".stderr.txt")).write_bytes(run.stderr)
+    receipt = {
+        "arguments": arguments,
+        "cwd": str(ROOT),
+        "started_at": started,
+        "finished_at": datetime.now(timezone.utc).isoformat(),
+        "exit_code": run.returncode,
+        "environment_override": {"PYTHONPATH": str(ROOT)},
+        "stdout": {"path": str((OUT / (name + ".stdout.txt")).relative_to(ROOT)), "sha256": digest(run.stdout)},
+        "stderr": {"path": str((OUT / (name + ".stderr.txt")).relative_to(ROOT)), "sha256": digest(run.stderr)},
+    }
+    save(name + ".execution.json", receipt)
+    assert run.returncode == 0, receipt
+    return receipt
+
+
+def inspect():
+    OUT.mkdir(parents=True, exist_ok=True)
+    report_path = ROOT / "docs/technical-reviews/20.7.json"
+    report_bytes = report_path.read_bytes()
+    report = json.loads(report_bytes)
+    (OUT / "prior-main-report.json").write_bytes(report_bytes)
+    revision = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+    previous = subprocess.check_output(["git", "show", revision + ":" + TEST])
+    current = (ROOT / TEST).read_bytes()
+    (OUT / "baseline-test_natural_ui.py.source.txt").write_bytes(previous)
+    (OUT / "current-test_natural_ui.py.source.txt").write_bytes(current)
+    old_tree, new_tree = ast.parse(previous), ast.parse(current)
+    changed = 0
+    for node in ast.walk(new_tree):
+        if isinstance(node, ast.FunctionDef) and node.name == TARGET:
+            for decorator in node.decorator_list:
+                if isinstance(decorator, ast.Call):
+                    for keyword in list(decorator.keywords):
+                        if keyword.arg == "ids":
+                            assert ast.literal_eval(keyword.value) == IDS
+                            decorator.keywords.remove(keyword)
+                            changed += 1
+    assert changed == 1
+    assert ast.dump(old_tree, include_attributes=False) == ast.dump(new_tree, include_attributes=False)
+    added_line = b'    ids=["svg", "path-traversal", "invalid-image", "invalid-audio", "overlong-audio", "audio-extension"],\n'
+    assert current.count(added_line) == 1 and current.replace(added_line, b"", 1) == previous
+    (OUT / "test-ids-only.diff.txt").write_text("".join(difflib.unified_diff(
+        previous.decode().splitlines(keepends=True), current.decode().splitlines(keepends=True),
+        fromfile=revision + ":" + TEST, tofile="working-tree:" + TEST)), encoding="utf-8")
+    old_ui = json.loads((ROOT / "docs/technical-reviews/artifacts/natural-final-fact-20.7-ui-execution.json").read_bytes())
+    assert digest(previous) == old_ui["test_source_sha256"]
+
+    registered = []
+    for category in ("sources", "artifacts"):
+        for item in report[category]:
+            if "path" not in item or "sha256" not in item:
+                continue
+            actual = digest((ROOT / item["path"]).read_bytes())
+            registered.append({"category": category, "id": item["id"], "path": item["path"],
+                               "expected_sha256": item["sha256"], "actual_sha256": actual,
+                               "matches": actual == item["sha256"]})
+    for path, expected in report["figure_sha256"].items():
+        actual = digest((ROOT / path).read_bytes())
+        registered.append({"category": "figures", "path": path, "expected_sha256": expected,
+                           "actual_sha256": actual, "matches": actual == expected})
+    assert all(item["matches"] for item in registered)
+    assert not any(item["path"] == TEST for item in registered)
+    readings = []
+    for chapter, identifier in (("20", "20.7"), ("12", "12.11"), ("20", "20.1"), ("19", "19.7")):
+        path = Path("course/chapters/" + chapter + ".md")
+        body = section(ROOT / path, identifier)
+        (OUT / ("read-" + identifier + ".md")).write_bytes(body)
+        readings.append({"source": str(path) + "#" + identifier, "sha256": digest(body), "bytes": len(body)})
+    assert readings[0]["sha256"] == report["source_sha256"]
+    unchanged = []
+    for path in ("tiny_perceptron/natural_ui.py", "tiny_perceptron/natural_assistant.py", "tests/test_natural_assistant.py"):
+        data = (ROOT / path).read_bytes()
+        original = subprocess.check_output(["git", "show", revision + ":" + path])
+        assert data == original
+        unchanged.append({"path": path, "sha256": digest(data), "matches_baseline_revision": True})
+    save("source-and-evidence-audit.json", {
+        "baseline_revision": revision,
+        "main_report_sha256": digest(report_bytes),
+        "main_report_reviewer_task": report["reviewer_task"],
+        "lesson_source_sha256": report["source_sha256"],
+        "read_sections": readings,
+        "registered_hash_checks": registered,
+        "registered_hash_check_count": len(registered),
+        "changed_test_is_registered_path": False,
+        "historical_ui_execution_test_source_sha256": old_ui["test_source_sha256"],
+        "baseline_test_sha256": digest(previous),
+        "current_test_sha256": digest(current),
+        "only_added_ids_line": True,
+        "whole_module_AST_equal_after_removing_only_target_ids_keyword": True,
+        "all_inputs_fixtures_assertions_and_test_bodies_unchanged": True,
+        "unchanged_runtime_and_other_test_sources": unchanged,
+    })
+
+    from tiny_perceptron import natural_assistant as assistant
+
+    manifest = json.loads((ROOT / "docs/natural-assistant/manifest.json").read_bytes())
+    transcripts = json.loads((ROOT / "docs/natural-assistant/evidence/final/transcripts.json").read_bytes())
+    by_id = {item["id"]: item for item in transcripts}
+    contexts = []
+    for row in manifest["audio_rows"]:
+        if row["split"] != "test":
+            continue
+        typed = assistant.messages_for(row, ROOT)
+        spoken = assistant.messages_for(dict(row, user=by_id[row["id"]]["transcript"]), ROOT)
+        assert typed[:-1] == spoken[:-1]
+        assert [item["role"] for item in typed[:-1]] == ["system"]
+        assert not row.get("image")
+        assert typed[-1]["content"] == [{"type": "text", "text": row["user"]}]
+        assert spoken[-1]["content"] == [{"type": "text", "text": by_id[row["id"]]["transcript"]}]
+        contexts.append({"id": row["id"], "prior_messages_equal": True, "prior_roles": ["system"],
+                         "prior_user_turns": 0, "image_count": 0,
+                         "typed_uses_reference": True, "spoken_uses_original_actual_ASR": True})
+    assert len(contexts) == 12
+    save("paired-context-cpu.json", {"count": len(contexts), "cases": contexts,
+         "scope": "Current messages_for with frozen manifest and saved original transcripts; no original serialized prompt replay or inference."})
+
+    source = str(Path(__file__).resolve())
+    with tempfile.TemporaryDirectory(prefix="publication-20-7-baseline-") as directory:
+        baseline = Path(directory) / "test_natural_ui_baseline.py"
+        baseline.write_bytes(previous)
+        command("baseline-collection", [sys.executable, source, "--baseline", str(baseline)])
+    command("cpu-regression", [sys.executable, source, "--regression"])
+    old_cases = json.loads((OUT / "baseline-collection.json").read_bytes())["upload_cases"]
+    current_run = json.loads((OUT / "cpu-regression.json").read_bytes())
+    new_cases = current_run["upload_cases"]
+    assert len(old_cases) == len(new_cases) == 6
+    assert [case["id"] for case in new_cases] == IDS
+    values = ("kind", "filename", "content_bytes", "content_sha256")
+    assert [tuple(case[key] for key in values) for case in old_cases] == [tuple(case[key] for key in values) for case in new_cases]
+    assert old_cases[4]["setup_current_test_characters"] > 32767
+    assert new_cases[4]["audio"]["seconds"] == 30.01
+    assert all(case["setup_current_test_characters"] < 32767 for case in new_cases)
+    call_reports = [item for item in current_run["phase_results"] if item["phase"] == "call"]
+    assert len(call_reports) > 0 and all(item["outcome"] == "passed" for item in call_reports)
+    assert len(current_run["actual_call_phase_environment"]) == len(call_reports)
+    assert all(0 < item["current_test_characters"] < 32767 for item in current_run["actual_call_phase_environment"])
+    save("case-comparison.json", {
+        "case_count": 6,
+        "current_ids": IDS,
+        "collected_input_values_equal": True,
+        "original_overlong_audio_setup_current_test_characters": old_cases[4]["setup_current_test_characters"],
+        "current_overlong_audio_setup_current_test_characters": new_cases[4]["setup_current_test_characters"],
+        "overlong_audio_seconds": new_cases[4]["audio"]["seconds"],
+        "all_collected_ids_fit_windows_single_variable_limit": True,
+        "actual_cpu_call_phases_passed": len(call_reports),
+        "actual_cpu_failed_or_skipped_phases": [item for item in current_run["phase_results"] if item["outcome"] != "passed"],
+        "windows_execution_performed": False,
+        "scope": "Actual pytest collection of original and current parameters plus Linux CPU execution; Windows CI outcome belongs to its separate runner."})
+    command("technical-checker", [sys.executable, "scripts/check_technical_reviews.py", "--lesson", "20.7"])
+    assert report_path.read_bytes() == report_bytes
+    versions = {name: importlib.metadata.version(name) for name in ("pytest", "numpy", "soundfile", "Pillow", "torch")}
+    save("reinspection-execution.json", {
+        "reviewer_task": "/root/publication_factual_20_7_ui_ids",
+        "completed_at": datetime.now(timezone.utc).isoformat(),
+        "main_report_unchanged_byte_exact": True,
+        "main_report_sha256": digest(report_bytes),
+        "main_report_original_owner": report["reviewer_task"],
+        "command": "PYTHONPATH=. .venv/bin/python docs/technical-reviews/artifacts/publication-20.7-ui-ids-supplement/reinspection.py.source.txt",
+        "exit_code": 0,
+        "environment": {"python": platform.python_version(), "platform": platform.platform(), **versions, "device": "CPU"},
+        "new_training_or_ASR_chat_inference": False,
+        "GPU_used": False,
+        "paid_or_remote_compute_invoked": False,
+        "original_full_factual_review_replaced": False,
+        "independent_blind_whole_claims_review_claimed": False,
+        "scope": "Publication dependency supplement only: short pytest IDs, unchanged cases/assertions/runtime, CPU speech/correction/history/upload regressions, original registered evidence integrity, and independent --lesson 20.7 checker."})
+    print(json.dumps({"exit_code": 0, "cpu_tests_passed": len(call_reports), "registered_hash_checks": len(registered),
+                      "old_overlong_setup_characters": old_cases[4]["setup_current_test_characters"],
+                      "new_overlong_setup_characters": new_cases[4]["setup_current_test_characters"],
+                      "main_report_unchanged": True}, ensure_ascii=False))
+
+
+if __name__ == "__main__":
+    if len(sys.argv) > 1:
+        raise SystemExit(pytest_mode(sys.argv[1], sys.argv[2] if len(sys.argv) > 2 else None))
+    inspect()
