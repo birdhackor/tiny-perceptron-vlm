@@ -1,217 +1,60 @@
-name: Course GPU experiments
+name: Publish fixed natural teaching data to LFS
 
-# 訓練維持單項執行；已提交核准清單可逐項發布，第一個錯誤立即停止。
 on:
   workflow_dispatch:
-    inputs:
-      experiment_id:
-        description: Experiment ID, or preflight for CPU-only access and billing checks
-        type: string
-        required: true
-        default: preflight
-      batch_id:
-        description: Persistent course batch ID (budget remains shared across batches)
-        type: string
-        required: true
-        default: course-v1
-      mode:
-        description: Run privately, check access, or publish already-reviewed files without retraining
-        type: choice
-        options: [run, run-cpu, preflight, release]
-        default: run
-      hf_secret_name:
-        description: Modal Secret containing HF_TOKEN (leave blank to discover)
-        type: string
-        required: false
-        default: ''
-      approval_file:
-        description: Committed reviewed manifest path (blank selects docs/course-experiments/releases/ID.json)
-        type: string
-        required: false
-        default: ''
-      release_experiment_ids:
-        description: Optional JSON array or comma-separated IDs for serial reviewed release; mode must be release
-        type: string
-        required: false
-        default: ''
 
 permissions:
-  contents: read
-
-concurrency:
-  group: tiny-perceptron-course-gpu
-  cancel-in-progress: false
+  contents: write
 
 jobs:
-  experiment:
+  publish:
     runs-on: ubuntu-latest
-    timeout-minutes: ${{ inputs.mode == 'release' && (inputs.release_experiment_ids || '') != '' && 180 || 35 }}
-    env:
-      MODAL_TOKEN_ID: ${{ vars.MODAL_TOKEN_ID || secrets.MODAL_TOKEN_ID }}
-      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
-      MODAL_ENVIRONMENT: ${{ vars.MODAL_ENVIRONMENT || 'main' }}
-      HF_CHECKPOINT_REPO: ${{ vars.HF_CHECKPOINT_REPO }}
-      HF_RELEASE_REPO: ${{ vars.HF_RELEASE_REPO }}
-      HF_MODAL_SECRET: ${{ inputs.hf_secret_name || vars.HF_MODAL_SECRET }}
-      EXPERIMENT_ID: ${{ inputs.experiment_id }}
-      BATCH_ID: ${{ inputs.batch_id }}
-      EXPERIMENT_MODE: ${{ inputs.mode }}
-      APPROVAL_FILE: ${{ inputs.approval_file }}
-      RELEASE_EXPERIMENT_IDS: ${{ inputs.release_experiment_ids || '' }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
         with:
           lfs: false
-      - name: Initialize serial release evidence
-        if: inputs.mode == 'release' && (inputs.release_experiment_ids || '') != ''
-        run: |
-          python - <<'PY'
-          import json
-          import os
-          from pathlib import Path
-          path = Path('outputs/course-release-batch/validation.json')
-          path.parent.mkdir(parents=True, exist_ok=True)
-          path.write_text(json.dumps({'status': 'not_started', 'revision': os.environ['GITHUB_SHA'], 'items': []}) + '\n')
-          PY
-      - name: Check settings without revealing credentials
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ -n "$RELEASE_EXPERIMENT_IDS" ] && [ "$EXPERIMENT_MODE" != "release" ]; then
-            echo "::error::release_experiment_ids is only valid for mode=release"
-            exit 1
-          fi
-          if [ "$EXPERIMENT_ID" = 'safety-existing-audit' ] && [ "$EXPERIMENT_MODE" != 'preflight' ]; then
-            echo "::error::safety-existing-audit only supports read-only preflight mode"
-            exit 1
-          fi
-          missing=0
-          for name in MODAL_TOKEN_ID MODAL_TOKEN_SECRET HF_CHECKPOINT_REPO HF_RELEASE_REPO; do
-            if [ -z "${!name}" ]; then
-              echo "::error::Missing repository secret or variable: $name"
-              missing=1
-            fi
-          done
-          exit "$missing"
       - uses: actions/setup-python@v6
         with:
           python-version: '3.13'
-      - name: Validate entrypoint syntax without importing training dependencies
-        run: python -m py_compile scripts/modal_course.py scripts/course_release.py scripts/release_course_batch.py
-      - name: Validate the committed public release approval before paid calls
-        if: inputs.mode == 'release' && (inputs.release_experiment_ids || '') == ''
+      - name: Install only data preparation dependencies
+        run: python -m pip install pillow==12.3.0 soundfile==0.14.0
+      - name: Reconstruct exact committed snapshots from fixed public sources
         run: |
-          python - <<'PY'
-          import json
-          import os
-          import subprocess
-          from pathlib import Path
-          from scripts.course_release import validate_approval
-          experiment = os.environ['EXPERIMENT_ID']
-          relative = Path(os.environ.get('APPROVAL_FILE') or f'docs/course-experiments/releases/{experiment}.json')
-          if relative.is_absolute() or '..' in relative.parts or not relative.as_posix().startswith('docs/course-experiments/releases/'):
-              raise ValueError('Approval must be a committed release manifest inside the repository')
-          content = subprocess.run(['git', 'show', f"{os.environ['GITHUB_SHA']}:{relative.as_posix()}"], check=True, capture_output=True).stdout
-          if relative.read_bytes() != content:
-              raise ValueError('Working file differs from the committed approval')
-          validate_approval(json.loads(content), experiment, os.environ['BATCH_ID'], os.environ['HF_CHECKPOINT_REPO'])
-          PY
-      - name: Validate all committed batch approvals before paid calls
-        if: inputs.mode == 'release' && (inputs.release_experiment_ids || '') != ''
-        run: |
-          mkdir -p outputs/course-release-batch
-          python scripts/release_course_batch.py \
-            --experiments "$RELEASE_EXPERIMENT_IDS" \
-            --validate-only > outputs/course-release-batch/validation.json
-      - name: Download only the selected experiment's LFS training assets
-        if: (inputs.mode == 'run' || inputs.mode == 'run-cpu') && inputs.experiment_id != 'preflight'
+          mkdir -p outputs/natural-data
+          python scripts/build_natural_assets.py --prepare \
+            --manifest outputs/natural-data/reconstructed-manifest.json \
+            --verify-manifest docs/natural-assistant/manifest.json
+      - name: Upload only the three verified LFS objects
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p outputs/modal-course
-          python scripts/course_experiments/run.py --list-assets "$EXPERIMENT_ID" > outputs/modal-course/assets.txt
-          if [ -s outputs/modal-course/assets.txt ]; then
-            include=$(paste -sd, outputs/modal-course/assets.txt)
-            git lfs install --local
-            git lfs pull --include="$include" --exclude=''
-          fi
-          python - <<'PY'
-          import os
-          from pathlib import Path
-          assets = Path('outputs/modal-course/assets.txt').read_text().splitlines()
-          for name in assets:
-              path = Path(name)
-              if path.is_absolute() or '..' in path.parts or not name.startswith('assets/training/'):
-                  raise ValueError('Invalid training asset path')
-              with path.open('rb') as stream:
-                  if stream.read(128).startswith(b'version https://git-lfs.github.com/spec/v1'):
-                      raise ValueError(f'Training asset is still an LFS pointer: {name}')
-          with open(os.environ['GITHUB_ENV'], 'a') as stream:
-              stream.write('COURSE_ASSET_PATHS<<COURSE_ASSETS_EOF\n' + '\n'.join(assets) + '\nCOURSE_ASSETS_EOF\n')
-          PY
-      - name: Install only Modal client
-        run: python -m pip install modal==1.6.0
-      - name: Select the existing Hugging Face Secret without reading its value
-        if: inputs.experiment_id != 'safety-existing-audit'
-        run: python scripts/select_modal_hf_secret.py
-      - name: Execute one bounded course experiment
-        if: inputs.experiment_id != 'safety-existing-audit' && (inputs.mode != 'release' || (inputs.release_experiment_ids || '') == '')
-        run: |
-          modal run scripts/modal_course.py \
-            --experiment-id "$EXPERIMENT_ID" \
-            --batch-id "$BATCH_ID" \
-            --mode "$EXPERIMENT_MODE" \
-            --approval-file "$APPROVAL_FILE" \
-            --checkpoint-repo "$HF_CHECKPOINT_REPO" \
-            --release-repo "$HF_RELEASE_REPO" \
-            --run-id "gha-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
-            --revision "$GITHUB_SHA"
-      - name: Read and audit existing safety weights without starting Modal compute
-        if: inputs.experiment_id == 'safety-existing-audit' && inputs.mode == 'preflight'
-        run: |
-          python -m pip install uv==0.12.22
-          uv sync --frozen --extra cpu
-          python scripts/read_existing_private_audit.py
-      - name: Release approved models one at a time
-        if: inputs.mode == 'release' && (inputs.release_experiment_ids || '') != ''
-        run: python scripts/release_course_batch.py --experiments "$RELEASE_EXPERIMENT_IDS"
-      - name: Read completed capstone inference files for review
-        if: inputs.mode == 'run' && startsWith(inputs.experiment_id, 'capstone_')
-        run: |
-          python scripts/download_capstone_review.py \
-            --result outputs/modal-course/result.json \
-            --experiment "$EXPERIMENT_ID" \
-            --batch-id "$BATCH_ID" \
-            --output outputs/modal-course/capstone-review
-      - name: Save experiment evidence and account-wide billing observations
-        if: always()
-        uses: actions/upload-artifact@v6
-        with:
-          name: ${{ inputs.mode == 'release' && (inputs.release_experiment_ids || '') != '' && format('course-release-batch-{0}-{1}', github.run_id, github.run_attempt) || format('course-{0}-{1}-{2}', inputs.batch_id, inputs.experiment_id, github.run_attempt) }}
-          path: ${{ inputs.mode == 'release' && (inputs.release_experiment_ids || '') != '' && 'outputs/course-release-batch/' || 'outputs/modal-course/' }}
-          if-no-files-found: ignore
-      - name: Show experiment evidence
-        if: always()
-        run: |
+          git lfs install --local
           python - <<'PY'
           import json
-          import os
+          import subprocess
           from pathlib import Path
-          if os.environ.get('RELEASE_EXPERIMENT_IDS'):
-              path = Path('outputs/course-release-batch/summary.json')
-              if not path.is_file():
-                  path = Path('outputs/course-release-batch/validation.json')
-              if path.is_file() and path.stat().st_size:
-                  evidence = json.loads(path.read_text())
-                  with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
-                      summary.write('## Serial model release\n\n')
-                      summary.write(f"Status: {evidence['status']}\n\n")
-                      for item in evidence.get('items', []):
-                          summary.write(f"- {item['experiment_id']}: {item.get('status', 'approval validated')}\n")
-                      summary.write('\nFull receipts and account-wide billing observations are in the batch artifact.\n')
-          else:
-              path = Path('outputs/modal-course/result.json')
-              if path.exists():
-                  with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
-                      summary.write('## Course experiment evidence\n\n```json\n' + path.read_text() + '\n```\n')
+          manifest = json.loads(Path('docs/natural-assistant/manifest.json').read_text())
+          ids = []
+          for archive in manifest['archives']:
+              expected = f"version https://git-lfs.github.com/spec/v1\noid sha256:{archive['sha256']}\nsize {archive['bytes']}\n"
+              prior = subprocess.run(['git', 'show', f"HEAD:{archive['path']}"], capture_output=True, text=True)
+              if prior.returncode == 0 and prior.stdout != expected:
+                  raise RuntimeError('Committed LFS pointer differs from reconstructed archive')
+              subprocess.run(['git', 'add', '--', archive['path']], check=True)
+              pointer = subprocess.check_output(['git', 'show', f":{archive['path']}"], text=True)
+              if pointer != expected:
+                  raise RuntimeError('Reconstructed index pointer differs from frozen manifest')
+              ids.append(archive['sha256'])
+          subprocess.run(['git', 'lfs', 'push', '--object-id', 'origin', *ids], check=True)
+          changed = set(subprocess.check_output(['git','diff','--cached','--name-only'],text=True).splitlines())
+          if not changed.issubset({item['path'] for item in manifest['archives']}):
+              raise RuntimeError('Reconstruction changed files outside the three expected archives')
+          Path('outputs/natural-data/receipt.json').write_text(json.dumps({'revision': subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(), 'archive_sha256': ids, 'reconstructed_and_uploaded': True},indent=2)+'\n')
           PY
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: natural-data-${{ github.run_id }}-${{ github.run_attempt }}
+          path: outputs/natural-data/
+          if-no-files-found: ignore
