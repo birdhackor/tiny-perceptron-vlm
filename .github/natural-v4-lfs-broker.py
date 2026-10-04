@@ -103,6 +103,9 @@ def exact_batch(batch):
 def validate_upload(action, expected):
     if not isinstance(action, dict):
         raise RuntimeError("Malformed upload action")
+    exported = json.dumps(action)
+    if token in exported or auth in exported or base64.b64encode(("x-access-token:" + token).encode()).decode() in exported:
+        raise RuntimeError("Refusing to export the GitHub token in an upload action")
     href = action.get("href")
     if not isinstance(href, str) or any(ord(c) <= 32 or ord(c) >= 127 for c in href):
         raise RuntimeError("Malformed upload URL")
@@ -119,9 +122,6 @@ def validate_upload(action, expected):
     headers = action.get("header", {})
     if not isinstance(headers, dict):
         raise RuntimeError("Malformed upload headers")
-    exported = json.dumps(action)
-    if token in exported or auth in exported or base64.b64encode(("x-access-token:" + token).encode()).decode() in exported:
-        raise RuntimeError("Refusing to export the GitHub token in an upload action")
     for name, value in headers.items():
         if not isinstance(name, str) or not re.fullmatch(r"[!#$%&'()*+.^_`|~0-9A-Za-z-]+", name) or not isinstance(value, str) or "\r" in value or "\n" in value:
             raise RuntimeError("Malformed upload header")
