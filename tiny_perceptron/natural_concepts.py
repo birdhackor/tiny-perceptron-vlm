@@ -92,5 +92,5 @@ def speech_stages(reference, recognized, typed_answer, spoken_answer):
         "typed_answer": typed_answer,
         "spoken_answer": spoken_answer,
         "answers_identical": typed_answer == spoken_answer,
-        "answers_correct": "needs a task-specific reference; equality is insufficient",
+        "answers_correct": None,
     }

@@ -1,0 +1,65 @@
+name: Read natural assistant progress
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: Exact active natural-assistant attempt; reports no log or credential contents
+        type: string
+        required: true
+        default: gha-37187947478-1
+      batch_id:
+        description: Existing natural-assistant batch; the probe never resets the ledger
+        type: string
+        required: true
+        default: natural-v3
+
+permissions:
+  contents: read
+
+# Independent from GPU training so a read-only probe can observe an active job.
+concurrency:
+  group: tiny-perceptron-natural-status
+  cancel-in-progress: false
+
+jobs:
+  status:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      MODAL_TOKEN_ID: ${{ vars.MODAL_TOKEN_ID || secrets.MODAL_TOKEN_ID }}
+      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+      MODAL_ENVIRONMENT: ${{ vars.MODAL_ENVIRONMENT || 'main' }}
+      NATURAL_STATUS_RUN: ${{ inputs.run_id }}
+      NATURAL_STATUS_BATCH: ${{ inputs.batch_id }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          lfs: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Check existing Modal settings without exposing values
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in MODAL_TOKEN_ID MODAL_TOKEN_SECRET; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Missing existing Repository setting: $name"
+              exit 1
+            fi
+          done
+          python -m py_compile scripts/modal_natural_status.py
+      - name: Install only the existing Modal client
+        run: python -m pip install modal==1.6.0
+      - name: Read bounded progress metadata without GPU or HF writes
+        run: |
+          modal run scripts/modal_natural_status.py \
+            --run-id "$NATURAL_STATUS_RUN" --batch-id "$NATURAL_STATUS_BATCH"
+      - name: Save read-only status evidence
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: natural-status-${{ github.run_id }}-${{ github.run_attempt }}
+          path: outputs/natural-status/result.json
+          if-no-files-found: ignore
