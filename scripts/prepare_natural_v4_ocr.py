@@ -41,9 +41,7 @@ def safe_path(root: Path, relative: str) -> Path:
 
 
 def download(url: str, expected_sha: str, expected_bytes: int) -> bytes:
-    request = urllib.request.Request(
-        url, headers={"User-Agent": "tiny-perceptron-vlm-frozen-ocr-rebuild/1.0"}
-    )
+    request = urllib.request.Request(url, headers={"User-Agent": "tiny-perceptron-vlm-frozen-ocr-rebuild/1.0"})
     for attempt in range(4):
         try:
             with urllib.request.urlopen(request, timeout=45) as response:
@@ -55,11 +53,11 @@ def download(url: str, expected_sha: str, expected_bytes: int) -> bytes:
         except urllib.error.HTTPError as error:
             if error.code not in {429, 500, 502, 503, 504} or attempt == 3:
                 raise RuntimeError(f"Public image download failed: {url}: HTTP {error.code}") from error
-            time.sleep(2 ** attempt)
+            time.sleep(2**attempt)
         except (urllib.error.URLError, http.client.RemoteDisconnected, TimeoutError, ConnectionError) as error:
             if attempt == 3:
                 raise RuntimeError(f"Public image download failed: {url}: {error}") from error
-            time.sleep(2 ** attempt)
+            time.sleep(2**attempt)
     raise AssertionError("Unreachable")
 
 
@@ -107,7 +105,10 @@ class RangeFile(io.RawIOBase):
                 size = end - start + 1
                 request = urllib.request.Request(
                     self.url + f"?download=true&range_probe={start}-{end}",
-                    headers={"Range": f"bytes={start}-{end}", "User-Agent": "tiny-perceptron-vlm-frozen-ocr-rebuild/1.0"},
+                    headers={
+                        "Range": f"bytes={start}-{end}",
+                        "User-Agent": "tiny-perceptron-vlm-frozen-ocr-rebuild/1.0",
+                    },
                 )
                 # Charge every attempt conservatively, including failed reads,
                 # so retrying a partial response cannot escape the byte limit.
@@ -118,7 +119,10 @@ class RangeFile(io.RawIOBase):
                     self.reserved_transfer += size
                     try:
                         with urllib.request.urlopen(request, timeout=45) as response:
-                            if response.status != 206 or response.headers.get("Content-Range") != f"bytes {start}-{end}/{self.size}":
+                            if (
+                                response.status != 206
+                                or response.headers.get("Content-Range") != f"bytes {start}-{end}/{self.size}"
+                            ):
                                 raise ValueError("Server did not honor exact bounded HTTP range")
                             data = response.read(size + 1)
                         if len(data) < size:
@@ -128,24 +132,33 @@ class RangeFile(io.RawIOBase):
                         break
                     except urllib.error.HTTPError as error:
                         if error.code not in {429, 500, 502, 503, 504} or attempt == 3:
-                            raise RuntimeError(f"Pinned NVIDIA range failed: {start}-{end}: HTTP {error.code}") from error
-                        time.sleep(2 ** attempt)
-                    except (urllib.error.URLError, http.client.RemoteDisconnected, TimeoutError, ConnectionError) as error:
+                            raise RuntimeError(
+                                f"Pinned NVIDIA range failed: {start}-{end}: HTTP {error.code}"
+                            ) from error
+                        time.sleep(2**attempt)
+                    except (
+                        urllib.error.URLError,
+                        http.client.RemoteDisconnected,
+                        TimeoutError,
+                        ConnectionError,
+                    ) as error:
                         if attempt == 3:
                             raise RuntimeError(f"Pinned NVIDIA range failed: {start}-{end}: {error}") from error
-                        time.sleep(2 ** attempt)
+                        time.sleep(2**attempt)
                 self.transferred += size
                 self.cache[number] = data
-                self.receipts.append({"start": start, "end": end, "bytes": size, "sha256": digest(data), "attempts": attempt + 1})
+                self.receipts.append(
+                    {"start": start, "end": end, "bytes": size, "sha256": digest(data), "attempts": attempt + 1}
+                )
             take = min(stop_position - self.position, end - self.position + 1)
             offset = self.position - start
-            chunks.append(self.cache[number][offset:offset + take])
+            chunks.append(self.cache[number][offset : offset + take])
             self.position += take
         return b"".join(chunks)
 
     def readinto(self, buffer):
         data = self.read(len(buffer))
-        buffer[:len(data)] = data
+        buffer[: len(data)] = data
         return len(data)
 
 
@@ -181,16 +194,22 @@ def rebuild(sources_file: Path, output: Path, local_sources: Path | None = None)
                 page = Path(cache) / (sid.replace(":", "_") + ".jpg")
                 page.write_bytes(data)
                 cached[sid] = page
-        nvidia_sources = [s for s in spec["sources"] if s["dataset"] == "nvidia/OCR-Synthetic-Multilingual-v1" and s["source_id"] in needed]
+        nvidia_sources = [
+            s
+            for s in spec["sources"]
+            if s["dataset"] == "nvidia/OCR-Synthetic-Multilingual-v1" and s["source_id"] in needed
+        ]
         # Fetch smaller independent photos first. A transient Commons error then
         # fails before repeating the larger bounded NVIDIA acquisition.
         photo_ids = sorted(needed - cached.keys() - {s["source_id"] for s in nvidia_sources})
+
         def fetch_photo(sid):
             source = sources[sid]
             data = download(source["download_url"], source["image_sha256"], source["image_bytes"])
             page = Path(cache) / (sid.replace(":", "_") + ".jpg")
             page.write_bytes(data)
             return sid, page, len(data)
+
         with ThreadPoolExecutor(max_workers=4) as pool:
             for sid, page, size in pool.map(fetch_photo, photo_ids):
                 cached[sid] = page
@@ -199,6 +218,7 @@ def rebuild(sources_file: Path, output: Path, local_sources: Path | None = None)
         if nvidia_sources and local_sources is None:
             import h5py
             import numpy
+
             if h5py.__version__ != spec["encoding"]["h5py"] or numpy.__version__ != spec["encoding"]["numpy"]:
                 raise ValueError("h5py/numpy versions differ from the frozen acquisition environment")
             upstream = spec["nvidia"]
@@ -217,7 +237,10 @@ def rebuild(sources_file: Path, output: Path, local_sources: Path | None = None)
                     page.write_bytes(data)
                     cached[source["source_id"]] = page
                     if len(cached) % 40 == 0:
-                        print(f"Verified {len(cached) - len(photo_ids)}/{len(nvidia_sources)} NVIDIA pages; {range_reader.transferred} range bytes", flush=True)
+                        print(
+                            f"Verified {len(cached) - len(photo_ids)}/{len(nvidia_sources)} NVIDIA pages; {range_reader.transferred} range bytes",
+                            flush=True,
+                        )
             http_bytes += range_reader.transferred
         for artifact in artifacts:
             source = sources[artifact["source_id"]]
@@ -231,7 +254,9 @@ def rebuild(sources_file: Path, output: Path, local_sources: Path | None = None)
                     if list(image.size) != source.get("dimensions", source.get("size")):
                         raise ValueError("Frozen image dimensions changed")
                     box = artifact["crop_xyxy"]
-                    if not (len(box) == 4 and 0 <= box[0] < box[2] <= image.width and 0 <= box[1] < box[3] <= image.height):
+                    if not (
+                        len(box) == 4 and 0 <= box[0] < box[2] <= image.width and 0 <= box[1] < box[3] <= image.height
+                    ):
                         raise ValueError("Frozen crop outside source image")
                     buffer = io.BytesIO()
                     image.crop(box).save(buffer, format="PNG", **spec["encoding"]["png_save_kwargs"])
@@ -257,7 +282,9 @@ def rebuild(sources_file: Path, output: Path, local_sources: Path | None = None)
         "nvidia_ranges": range_reader.receipts if range_reader else [],
         "pillow": PIL.__version__,
         "selection_or_label_changes": False,
-        "source_method": "verified original local photographs/pages" if local_sources else "public HTTP URLs and pinned bounded HDF5 ranges",
+        "source_method": "verified original local photographs/pages"
+        if local_sources
+        else "public HTTP URLs and pinned bounded HDF5 ranges",
     }
     return receipt
 
@@ -265,9 +292,15 @@ def rebuild(sources_file: Path, output: Path, local_sources: Path | None = None)
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--sources", type=Path, required=True)
-    parser.add_argument("--output", type=Path, required=True, help="Data root; artifacts preserve ocr/ and shared vision/ paths")
+    parser.add_argument(
+        "--output", type=Path, required=True, help="Data root; artifacts preserve ocr/ and shared vision/ paths"
+    )
     parser.add_argument("--receipt", type=Path, help="Optional proof JSON outside image archives")
-    parser.add_argument("--local-sources", type=Path, help="Optional repository root holding previously downloaded original photographs/pages; never uses existing crop PNGs")
+    parser.add_argument(
+        "--local-sources",
+        type=Path,
+        help="Optional repository root holding previously downloaded original photographs/pages; never uses existing crop PNGs",
+    )
     args = parser.parse_args()
     receipt = rebuild(args.sources, args.output, args.local_sources)
     if args.receipt:
