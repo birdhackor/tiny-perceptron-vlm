@@ -1,0 +1,127 @@
+"""Read only the natural-assistant reservation and known model-cache sizes.
+
+No GPU, HF Secret, cache contents, runner log contents, ledger write or Volume
+commit. This 30-second CPU diagnostic fits the active prepare auxiliary envelope.
+"""
+
+import json
+import re
+from datetime import UTC, datetime
+from pathlib import Path
+
+import modal
+
+ROOT = Path(__file__).resolve().parents[1]
+COURSE = Path("/course")
+STAGES = ("prepare", "baseline", "train", "validation", "evaluate", "external_prepare", "external_ocr", "release")
+FILENAMES = (
+    "execution.json",
+    "result.json",
+    "failure.json",
+    "upload-manifest.json",
+    "hf-receipt.json",
+    "training.json",
+    "runner.log",
+)
+KNOWN_MODELS = ("models--Qwen--Qwen3-VL-2B-Instruct", "models--openai--whisper-small")
+app = modal.App("tiny-perceptron-natural-status")
+volume = modal.Volume.from_name("tiny-perceptron-course", create_if_missing=False).with_mount_options(read_only=True)
+image = modal.Image.debian_slim(python_version="3.12")
+
+
+def safe_name(value):
+    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,99}", value) or ".." in value:
+        raise ValueError("Expected a plain run or batch name without path traversal")
+    return value
+
+
+def inspect_files(root, batch_id, run_id):
+    safe_name(batch_id)
+    safe_name(run_id)
+    natural = root / "natural-v3"
+    report = {
+        "observed_at": datetime.now(UTC).isoformat(),
+        "scope": "Read-only natural-assistant Volume metadata; no logs, secrets, model tensors or unrelated project data",
+        "run_id": run_id,
+        "batch_id": batch_id,
+        "gpu_used": False,
+        "volume_read_only": True,
+        "ledger": {},
+        "stage_files": [],
+        "known_model_cache": [],
+        "limits": {"cpu_physical_cores": 0.25, "memory_mib": 512, "timeout_seconds": 30, "retries": 0},
+        "billing_scope": "Covered by active prepare auxiliary reservation; a CPU diagnostic is not free or new GPU work",
+        "reference_compute_bound": {
+            "usd": "0.000141",
+            "scope": "32 seconds including idle at observed CPU $0.04730/core-hour and memory $0.00800/GiB-hour; excludes client/image startup, not an invoice",
+        },
+        "interpretation": "reserved with no execution record suggests heavy deployment has not reached its runner; running means runner was entered. Cache sizes show committed snapshots only and can lag an active download.",
+    }
+    ledger_path = root / "budget.json"
+    if ledger_path.is_file():
+        ledger = json.loads(ledger_path.read_text())
+        entries = [
+            {key: item.get(key) for key in ("run_id", "batch_id", "stage", "status", "reserved_usd")}
+            for item in ledger.get("reservations", [])
+            if item.get("run_id") == run_id and item.get("batch_id") == batch_id
+        ]
+        report["ledger"] = {
+            "budget_usd": ledger.get("budget_usd"),
+            "reserved_total_usd": ledger.get("reserved_total_usd"),
+            "requested_run": entries,
+        }
+    for stage in STAGES:
+        directory = natural / batch_id / stage / run_id
+        if not directory.is_dir():
+            continue
+        entry = {"stage": stage, "run_directory_present": True, "files": []}
+        for name in FILENAMES:
+            path = directory / name
+            if path.is_file() and not path.is_symlink():
+                entry["files"].append({"name": name, "bytes": path.stat().st_size})
+        report["stage_files"].append(entry)
+    for cache_relative in ("cache/models", "cache/hf/hub"):
+        for model in KNOWN_MODELS:
+            model_path = natural / cache_relative / model
+            if not model_path.is_dir() or model_path.is_symlink():
+                continue
+            entry = {"cache": cache_relative, "model": model, "files": [], "listing_limited": False}
+            paths = sorted(set(model_path.rglob("*.safetensors")) | set(model_path.rglob("*.incomplete")))
+            for path in paths[:100]:
+                if path.is_file():
+                    # Public HF cache symlinks point from snapshots to blobs in
+                    # the same known model cache; never follow an outside link.
+                    if not path.resolve().is_relative_to(model_path.resolve()):
+                        continue
+                    entry["files"].append(
+                        {"path": path.relative_to(model_path).as_posix(), "bytes": path.stat().st_size}
+                    )
+            entry["listing_limited"] = len(paths) > 100
+            report["known_model_cache"].append(entry)
+    return report
+
+
+@app.function(
+    image=image,
+    cpu=(0.25, 0.25),
+    memory=(512, 512),
+    volumes={"/course": volume},
+    timeout=30,
+    retries=0,
+    max_containers=1,
+    scaledown_window=2,
+)
+def status_remote(batch_id, run_id):
+    volume.reload()
+    return inspect_files(COURSE, batch_id, run_id)
+
+
+@app.local_entrypoint()
+def main(run_id: str, batch_id: str = "natural-v3"):
+    safe_name(run_id)
+    safe_name(batch_id)
+    result = status_remote.remote(batch_id, run_id)
+    output = ROOT / "outputs" / "natural-status" / "result.json"
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    print(json.dumps(result, ensure_ascii=False, indent=2))
