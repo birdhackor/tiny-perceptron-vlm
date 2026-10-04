@@ -1,0 +1,26 @@
+# Own derivations for 11.3
+
+For a differentiable scalar objective, a local parameter perturbation is `L(theta+d) = L(theta) + grad(L)·d + o(||d||)`. This is local sensitivity, not a parameter update or a promise about a large step. With frozen visual encoder E and language computation F, the trainable interface is `h_j = W E(x)_j + b`. The chain rule computes `dL/dW = sum_j (dL/dh_j) E(x)_j^T`. Freezing F's parameters leaves its derivative with respect to h available in grad mode. Thus a fixed F can still propagate sensitivity to W. Autograd's documentation and the actual finite-difference probe both support this distinction.
+
+If E(x1)=E(x2), then W E(x1)+b=W E(x2)+b for any W,b. With identical text context and a fixed deterministic language model, its logits are identical. The interface therefore cannot recover a distinction completely removed by E, although fixed features may encode distinctions indirectly and a classifier score alone cannot prove all information content. Existing relevant knowledge is a condition for this limited connector strategy, not a proof that either small endpoint is capable.
+
+For nonignored target indices I, `L = (sum_(i in I) [log(sum_v exp(logit_i,v)) - logit_i,y_i]) / |I|`. Here class weights and label smoothing are absent. Numerically stable `logsumexp` yields the same mathematical quantity as negative log softmax. Correct-class probability p gives `-ln p`, which rises when p falls. The code's ignored locations exclude loss terms; visual-context locations can still affect later logits and gradients.
+
+`red square` consists of byte values `[114,101,100,32,115,113,117,97,114,101]`, all below 128: ten ASCII bytes, including the space. Adding 8 reserved IDs maps them to `[122,109,108,40,123,121,125,105,122,109]`; EOS 2 adds one target. The small example has 5 prefix IDs and 11 answer targets. Replacing one image marker by 16 visual vectors adds 15 positions: 16 full original positions -> 31 expanded -> 30 shifted inputs. The first answer target is at shifted index 19, preceded by the assistant input. The first 19 labels are ignored and the final 11 are exact answer+EOS. In the formal `describe` example the prefix has 13 IDs; red-circle/red-square full length 24 becomes 39 then 38; all other description lengths similarly expand once and shift once.
+
+The default real-valued matrix norm is `sqrt(sum_(r,c) grad[r,c]^2)`. For finite values it is positive exactly when some entry is nonzero, apart from ordinary floating underflow/rounding caveats. Observed norm 0.03713160753 and direct square-sum norm 0.03713161126 agree within floating tolerance. A missing gradient `None` is a different state from an allocated zero tensor. CPU double-precision central difference at projector index (3,4), epsilon 1e-5, gives 0.0180630446600 versus autograd 0.0180630446417.
+
+Parameter counts:
+
+- Small image interface: 8×16 weights + 8 bias = 136.
+- Formal image interface: 64×16 + 64 = 1,088.
+- Language width 64, vocabulary 264, positions 128, two dense blocks: `264×64 + 128×64 + 2×[4×64² + (64×256+256) + (256×64+64) + 2×(2×64)] + 2×64 + 64×264 = 141,568`.
+- Visual encoder: `(48×16+16) + 16×16 + 2×16 + (16×16+16) = 1,344`.
+- Audio encoder: `(16×16+16) + 2×16 + (16×16+16) = 576`.
+- Wrapper also contains an unused frozen audio interface with 1,088 parameters. `141,568 + 1,344 + 576 + 1,088 + 1,088 = 145,664`. This total counts all registered parameters, not just active image computation.
+
+Formal data: 3 colors × 2 shapes × 3 training offsets = 18 images; one validation offset and one test offset each give 6. Per-offset description target counts are `11,11,13,13,12,12`, totaling 72; the training set totals 216. The fixed four-image probe contains blue-circle −2, green-square −1, green-circle −1, and red-square 0: `12+13+13+11 = 49` targets. The 300 batches of size 4 sample with replacement, totaling 1,200 sample uses, and independent seed reconstruction sums the actual answer+EOS counts to 14,408. These are neither 1,200 distinct images nor image-patch targets.
+
+CPU independent fixed-probe means are 4.1479893542 and 1.2093078199, rounding to 4.1480 and 1.2093. Test total NLL is 294.9514492612 before and 95.0039819550 after; dividing each by 72 targets gives 4.0965479064 and 1.3194997494, rounding to 4.0965 and 1.3195. Original CUDA values differ only below the displayed precision. Validation and test each have zero exact byte sequences out of six; test EOS appears in five of six, while blue-circle produces all 16 allowed new IDs without EOS. The two red outputs are `red`; green-circle outputs `reeeeeeeeen`. These fixed results support a lower teacher-forced objective while generated full descriptions still fail.
+
+Teacher forcing evaluates `p(y_t | image, question, y_<t)` with true previous targets. Greedy generation instead evaluates `p(hat_y_t | image, question, hat_y_<t)` and chooses its own prior symbols. These contexts differ after an error. A lower mean NLL need not cross the argmax boundary at each correct position, and even improved local argmax choices under true prefixes need not hold under erroneous generated prefixes. Thus NLL, EOS rate, and full byte-sequence match are different measures. This single seed's six-image result cannot quantify general projector ability or natural-image caption quality.
