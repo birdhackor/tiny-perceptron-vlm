@@ -1,0 +1,11 @@
+from tiny_perceptron.data import ByteTokenizer, render_chat
+
+messages = [
+    {"role": "user", "content": "1+1=?"},
+    {"role": "assistant", "content": "2"},
+]
+tok = ByteTokenizer()
+x, y = render_chat(messages, tok)
+print("模型輸入X", x.tolist())
+print("答案標籤Y", y.tolist())
+print("有效目標", y[y != -100].tolist())

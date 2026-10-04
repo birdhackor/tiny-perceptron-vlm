@@ -1,0 +1,14 @@
+import torch
+from tiny_perceptron.alignment import distillation_kl
+
+teacher_prefix, student_prefix, answer_tokens = 16, 4, 3
+t_rows = list(range(teacher_prefix - 1, teacher_prefix + answer_tokens - 1))
+s_rows = list(range(student_prefix - 1, student_prefix + answer_tokens - 1))
+t_logits = torch.zeros(1, teacher_prefix + answer_tokens, 2)
+s_logits = torch.zeros(1, student_prefix + answer_tokens, 2)
+t_logits[:, t_rows] = torch.tensor([0.8, 0.2]).log()
+t_answer, s_answer = t_logits[:, t_rows], s_logits[:, s_rows]
+labels = torch.zeros(1, answer_tokens, dtype=torch.long)
+print("預測位置", t_rows, s_rows)
+print("對齊形狀", tuple(t_answer.shape), tuple(s_answer.shape))
+print("答案KL", round(distillation_kl(s_answer, t_answer, labels, temperature=1).item(), 4))
