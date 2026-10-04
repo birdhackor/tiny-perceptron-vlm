@@ -30,6 +30,8 @@ DEPLOYMENT_FILES = frozenset(
         "dpo.pt",
         "dpo-int4.pt",
         "dpo-int8.pt",
+        "joint-int4.pt",
+        "joint-int8.pt",
         "data.json",
         "test-untrained.json",
         "test-pretrain.json",
@@ -41,8 +43,15 @@ DEPLOYMENT_FILES = frozenset(
         "test-audio-swaps.json",
         "test-image-swaps.json",
         "test-image-pairs.json",
+        "test-dpo-audio-swaps.json",
+        "test-joint-audio-swaps.json",
+        "test-joint-image-swaps.json",
+        "test-joint-image-pairs.json",
+        "test-joint-ptq4.json",
+        "test-joint-ptq8.json",
         "cache-consistency.json",
         "mechanism-benchmark.json",
+        "generation-benchmark.json",
         "deployment-report.json",
     }
 )
@@ -80,6 +89,8 @@ REQUIRED = {
             "dpo.pt",
             "dpo-int4.pt",
             "dpo-int8.pt",
+            "joint-int4.pt",
+            "joint-int8.pt",
             "data.json",
             "deployment-report.json",
         }

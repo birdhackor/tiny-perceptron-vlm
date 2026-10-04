@@ -39,7 +39,7 @@ from tiny_perceptron.model import ModelConfig  # noqa: E402
 
 PUBLIC_REPO = "birdhackor/tiny-perceptron-course-models"
 MANIFEST = ROOT / "docs/course-experiments/capstone-public.json"
-STAGE_IDS = (*STAGES, "dpo-int4", "dpo-int8", "student-ce", "student-kd", "student-kd-int4")
+STAGE_IDS = (*STAGES, "joint-int4", "joint-int8", "dpo-int4", "dpo-int8", "student-ce", "student-kd", "student-kd-int4")
 FORMATS = ("capstone-v1", PTQ_FORMAT)
 PROVENANCE_KEYS = {
     "revision",

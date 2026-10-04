@@ -14,6 +14,7 @@ if str(ROOT) not in sys.path:
 from scripts.capstone_release import (  # noqa: E402
     MANIFEST,
     file_sha256,
+    public_stage_id,
     safe_relative,
     validate_capstone_payload,
     validate_manifest,
@@ -50,8 +51,7 @@ def fetch_capstone(manifest, stage, output):
         saved = torch.load(checkpoint, map_location="cpu", weights_only=True)
         if saved.get("format_version") != specification["format_version"]:
             raise ValueError("Downloaded capstone format disagrees with its public manifest")
-        bits = saved.get("quantization", {}).get("bits")
-        actual_stage = f"{saved['stage']}-int{bits}" if bits else saved["stage"]
+        actual_stage = public_stage_id(saved)
         if actual_stage != stage:
             raise ValueError("Downloaded checkpoint stage disagrees with its public manifest")
         validate_capstone_payload(saved)
@@ -63,7 +63,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path, default=MANIFEST)
     parser.add_argument("--list", action="store_true")
-    parser.add_argument("--stage", help="Download one published stage shown by --list")
+    parser.add_argument(
+        "--stage",
+        default="joint",
+        help="Download one published stage shown by --list; default joint was selected on validation before the official test",
+    )
     parser.add_argument("--output", type=Path, default=ROOT / "checkpoints/capstone")
     args = parser.parse_args()
     if not args.manifest.is_file():
