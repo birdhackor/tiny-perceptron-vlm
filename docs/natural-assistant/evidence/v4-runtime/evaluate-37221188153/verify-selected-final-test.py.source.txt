@@ -1,0 +1,223 @@
+"""Audit actual selected-only test provenance/counts; never grade or select."""
+
+import argparse
+import collections
+import hashlib
+import importlib.util
+import json
+import pathlib
+import subprocess
+import sys
+from datetime import datetime, timezone
+from decimal import Decimal
+
+ROOT = pathlib.Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(ROOT))
+spec = importlib.util.spec_from_file_location("frozen_test_scorer", ROOT / "scripts/score_natural_v4_test.py")
+scorer = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(scorer)
+
+
+def read(path):
+    return json.loads(path.read_bytes())
+
+
+def sha(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def audit(*, verify_blind=True):
+    revision = "1e71b8abffb34eccd297747d39827135a627107a"
+    run_root = ROOT / "outputs/natural-v4/modal-runs/evaluate-37221188153"
+    artifact = run_root / "natural-natural-v4-evaluate-37221188153-1"
+    review = artifact / "review"
+    blind_root = ROOT / "outputs/natural-v4/test-review/gha-37221188153-1"
+    wrapper, report = read(artifact / "result.json"), read(review / "result.json")
+    names = (
+        "scripts/score_natural_v4_test.py",
+        "scripts/score_natural_v4_validation.py",
+        "docs/natural-assistant/v4/validation-protocol-lower-lr.json",
+        "docs/natural-assistant/v4/manifest.json",
+        "docs/natural-assistant/v4/selection.json",
+        "docs/natural-assistant/v4/asr-selection.json",
+        "tiny_perceptron/natural_assistant.py",
+        "scripts/natural_assistant.py",
+        "scripts/modal_natural.py",
+    )
+    frozen_sources = {}
+    for name in names:
+        source = ROOT / name
+        assert source.read_bytes() == subprocess.check_output(["git", "show", revision + ":" + name], cwd=ROOT), name
+        frozen_sources[name] = {"bytes": source.stat().st_size, "sha256": sha(source)}
+    selection_path = ROOT / "docs/natural-assistant/v4/selection.json"
+    selection = read(selection_path)
+    assert sha(selection_path) == "8570755345e08c55ab77c165b405f41f6e5012b4c37a93909472b7f17334c42f"
+    assert selection["selected_variant"] == "base"
+    assert selection["validation_run_id"] == "gha-37219466611-1"
+    prior_report = ROOT / "outputs/natural-v4/modal-runs/validation-37219466611/natural-natural-v4-validation-37219466611-1/review/result.json"
+    assert selection["validation_result_sha256"] == sha(prior_report)
+    assert wrapper["stage"] == "evaluate" and wrapper["status"] == "completed"
+    assert wrapper["revision"] == revision == report["execution"]["revision"]
+    assert wrapper["run_id"] == "gha-37221188153-1" == report["execution"]["run_id"]
+    artifacts = scorer.load_artifacts(
+        ROOT / "docs/natural-assistant/v4/manifest.json",
+        ROOT / "docs/natural-assistant/v4/validation-protocol-lower-lr.json",
+        review,
+        ROOT / "outputs/natural-v4/data",
+        selection_path,
+    )
+    assert report["selected_only"] is True
+    execution = report["execution"]
+    expected_options = {
+        "steps": 100,
+        "seed": 42,
+        "max_seconds": 3300,
+        "max_pixels": 524288,
+        "learning_rate": 0.00003,
+        "asr_variant": "turbo",
+        "asr_model": "openai/whisper-large-v3-turbo",
+        "asr_revision": "41f01f3fe87f28c78e2fbf8b568835947dd65ed9",
+        "checkpoint_steps": [],
+        "adapter_checkpoint": "",
+        "adapter_checkpoints": [],
+    }
+    assert execution["runtime_options"] == expected_options
+    assert execution["adapters"] == []
+    assert not execution["volume_commit_errors"]
+    assert not any(execution.get(key) for key in ("adapter_run_id", "adapter_sha256", "adapter_checkpoint"))
+    runner_args = read(review / "execution.json")["runner_arguments"]
+    assert "--selected-only" in runner_args
+    assert not any(key in runner_args for key in ("--adapter", "--comparison-adapter"))
+    assert runner_args[runner_args.index("--split") + 1] == "test"
+    assert runner_args[runner_args.index("--max-new-tokens") + 1] == "384"
+    records, cases = artifacts["records"], artifacts["cases"]
+    assert len(records) == len(cases) == 178
+    actual_groups = collections.Counter(case["group"] for case in cases.values())
+    assert actual_groups == scorer.COUNTS
+    combined = read(review / "generations.json")
+    assert combined == read(review / "generations-base.json") and len(combined) == 178
+    by_group = {}
+    for group in actual_groups:
+        rows = [records[key] for key, case in cases.items() if case["group"] == group]
+        by_group[group] = {
+            "count": len(rows),
+            "confirmed_raw_eos_records": sum(scorer.eos_complete(row, 384) for row in rows),
+            "reported_truncated_records": sum(row.get("truncated") is True for row in rows),
+            "reported_completion_unknown_records": sum(row.get("completion_unknown") is True for row in rows),
+        }
+    generation_summary = {
+        "actual_records": len(records),
+        "task_counts": dict(collections.Counter(row["task"] for row in records.values())),
+        "confirmed_raw_eos_records": sum(scorer.eos_complete(row, 384) for row in records.values()),
+        "reported_truncated_records": sum(row.get("truncated") is True for row in records.values()),
+        "reported_completion_unknown_records": sum(row.get("completion_unknown") is True for row in records.values()),
+        "generated_token_count_sum": sum(row["generated_tokens"] for row in records.values()),
+        "generation_seconds_sum": sum(row["generation_seconds"] for row in records.values()),
+        "by_group": by_group,
+    }
+    transcripts = read(review / "transcripts.json")
+    assert len(transcripts) == 22
+    totals = collections.Counter()
+    by_task = collections.defaultdict(collections.Counter)
+    by_source = collections.defaultdict(collections.Counter)
+    for row in transcripts:
+        reference, prediction = row["reference_transcript"], row["transcript"]
+        normalized_reference = scorer.normalized(reference, True)
+        normalized_prediction = scorer.normalized(prediction, True)
+        metrics = {
+            "raw_errors": scorer.distance(reference, prediction),
+            "raw_reference_characters": len(reference),
+            "errors": scorer.distance(normalized_reference, normalized_prediction),
+            "reference_characters": len(normalized_reference),
+        }
+        for key, value in metrics.items():
+            assert row[key] == value, (row["id"], key)
+        for group in (totals, by_task[row["task"]], by_source[row["source"]]):
+            group["count"] += 1
+            for key, value in metrics.items():
+                group[key] += value
+    for key, value in totals.items():
+        assert report["asr"][key] == value
+    for field, groups in (("by_task", by_task), ("by_source", by_source)):
+        assert set(report["asr"][field]) == set(groups)
+        for name, counts in groups.items():
+            for key, value in counts.items():
+                assert report["asr"][field][name][key] == value
+    receipt = wrapper["hf"]
+    assert receipt["private"] is True and receipt["verified_weight_files"] == []
+    assert receipt["prefix"] == "natural-v3/natural-v4/evaluate/gha-37221188153-1"
+    assert receipt["repo"] == "birdhackor/tiny-perceptron-checkpoints"
+    for item in receipt["files"]:
+        path = review / item["path"]
+        assert path.stat().st_size == item["bytes"] and sha(path) == item["sha256"]
+    assert {item["path"] for item in receipt["files"]} >= {
+        "result.json", "execution.json", "generations.json", "generations-base.json", "transcripts.json", "runner.log"
+    }
+    assert not any(path.suffix in (".safetensors", ".pt", ".pth") for path in review.rglob("*"))
+    budget = wrapper["budget"]
+    assert Decimal(budget["reserved_total_usd"]) <= Decimal(budget["budget_usd"]) == Decimal("40")
+    assert budget["entry"]["status"] == "completed"
+    assert budget["entry"]["run_id"] == wrapper["run_id"]
+    assert budget["entry"]["revision"] == revision
+    assert budget["entry"]["selection_sha256"] == sha(selection_path)
+    assert budget["entry"]["runtime_options"] == expected_options
+    blind_export = {"status": "Not exported; pre-export actual artifact audit only"}
+    if verify_blind:
+        packet, template = read(blind_root / "blind-packet.json"), read(blind_root / "grades-template.json")
+        assert len(packet["cases"]) == len(template["grades"]) == 147
+        assert template["blind_packet_sha256"] == sha(blind_root / "blind-packet.json")
+        assert all(row["passed"] is None and row["reason"] == "" for row in template["grades"])
+        # Deliberately do not open, parse, hash, or disclose the private mapping.
+        assert (blind_root / "private-map.json").is_file()
+        blind_export = {
+            "packet": str((blind_root / "blind-packet.json").relative_to(ROOT)), "packet_sha256": sha(blind_root / "blind-packet.json"),
+            "template": str((blind_root / "grades-template.json").relative_to(ROOT)), "template_sha256": sha(blind_root / "grades-template.json"),
+            "actual_images_root": str(artifacts["root"]), "manual_cases": 147,
+            "private_mapping_read_or_disclosed_by_auditor": False,
+            "semantic_grade_status": "Not graded by this auditor; original template contains null grades.",
+        }
+    return {
+        "schema_version": 1,
+        "verified_at_utc": datetime.now(timezone.utc).isoformat(),
+        "verification_passed": True,
+        "scope": "One actual selected-only heldout test provenance/count/ASR audit; blind export status reported separately. No semantic grading, post-test selection, retuning, new inference, or release.",
+        "run_id": wrapper["run_id"],
+        "source_git_revision": revision,
+        "frozen_source_files": frozen_sources,
+        "artifact_binding": artifacts["binding"],
+        "pretest_selection": {"path": str(selection_path.relative_to(ROOT)), "sha256": sha(selection_path), "selected_variant": "base", "unchanged_after_test": True},
+        "counts": {"visual_text_rows": 170, "audio_recordings": 22, "asr_only_recordings": 18, "speech_chat_recordings": 4, "lm_generations_total": 178, "manual_blind_cases_total": 147},
+        "generation_summary": generation_summary,
+        "asr_metrics_independently_recomputed_from_genuine_reference_and_hypothesis": dict(totals),
+        "asr_confirmed_raw_eos_records": sum(scorer.asr_eos_complete(row) for row in transcripts),
+        "asr_report": report["asr"],
+        "runtime_options": expected_options,
+        "model": report["model"],
+        "model_revision": report["model_revision"],
+        "resources": {
+            "device": report["device"], "gpu_name": report["gpu_name"], "dtype": report["dtype"], "asr_device": report["asr"]["device"],
+            "evaluation_elapsed_seconds": report["elapsed_seconds"],
+            "evaluation_elapsed_scope": "Core evaluation timer starts before manifest/asset verification and includes LM/ASR load, genuine ASR, one selected candidate's generations, and review-file writes; excludes later HF backup and workflow setup.",
+            "runner_subprocess_seconds": execution["seconds"],
+            "runner_elapsed_scope": "Python runner subprocess includes imports and stage execution; excludes later private HF backup and workflow setup.",
+        },
+        "private_hf_backup": {
+            "repo": receipt["repo"], "immutable_commit": receipt["revision"], "prefix": receipt["prefix"], "file_count": len(receipt["files"]),
+            "local_files_match_uploaded_receipt_bytes_and_sha256": True,
+            "remote_readback_scope": "Authenticated HfApi.upload_folder returned the immutable commit; local review files match the upload receipt. Base-only inference has no weight files, so backup_remote's weight-only remote readback loop verified zero files. This auditor does not independently download these private remote JSON files.",
+        },
+        "budget": {
+            "cumulative_reserved_usd": budget["reserved_total_usd"], "budget_usd": budget["budget_usd"], "this_final_test_reserved_usd": budget["entry"]["reserved_usd"],
+            "scope": "Preserved shared conservative live-rate reservation ledger, not an invoice.",
+        },
+        "blind_export": blind_export,
+        "original_raw_report_sha256": sha(review / "result.json"),
+        "original_wrapper_receipt_sha256": sha(artifact / "result.json"),
+    }
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--before-export", action="store_true")
+    args = parser.parse_args()
+    print(json.dumps(audit(verify_blind=not args.before_export), indent=2, ensure_ascii=False))
