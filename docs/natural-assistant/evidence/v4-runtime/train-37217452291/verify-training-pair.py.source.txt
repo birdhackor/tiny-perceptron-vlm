@@ -1,0 +1,88 @@
+"""Check the lower-LR run genuinely changes only LR in the declared recipe."""
+
+import argparse
+import hashlib
+import json
+from pathlib import Path
+import subprocess
+
+ROOT = Path(__file__).resolve().parents[3]
+OLD_HEAD = "9a61ecf524c9518f33f1501c28aa72997d4a82d0"
+NEW_HEAD = "a008cec6fd447ca977503dbfd1130cd59a7c7a49"
+
+
+def read(path):
+    return json.loads(path.read_bytes())
+
+
+def audit(old_dir, new_dir):
+    old, new = read(old_dir / "review/result.json"), read(new_dir / "review/result.json")
+    assert old["status"] == new["status"] == "completed"
+    assert old["learning_rate"] == 0.0001 and new["learning_rate"] == 0.00003
+    assert old["execution"]["revision"] == OLD_HEAD and new["execution"]["revision"] == NEW_HEAD
+    assert old["execution"]["run_id"] != new["execution"]["run_id"]
+    for value in (old, new):
+        assert not value.get("resumed_from")
+        assert not value["execution"].get("adapter_run_id")
+        assert value["execution"].get("adapters") == []
+    unchanged_fields = [
+        "architecture", "model", "model_revision", "asr_model", "asr_revision", "versions", "device", "dtype", "gpu_name",
+        "attention_implementation", "max_pixels", "min_pixels", "max_tokens", "seed", "dataset_version", "manifest_sha256",
+        "asset_sha256", "lora_rank", "lora_targets", "requested_steps", "completed_steps", "gradient_accumulation",
+        "trained_rows", "optimizer_parameter_names", "trainable_parameter_names", "optimizer_only_lora", "checkpoint_steps",
+        "initial_adapter_tensors", "frozen_parameter_samples_initial",
+    ]
+    for field in unchanged_fields:
+        assert old[field] == new[field], field
+    assert len(old["history"]) == len(new["history"]) == 2077
+    for left, right in zip(old["history"], new["history"], strict=True):
+        assert left["step"] == right["step"]
+        assert left["row_ids"] == right["row_ids"]
+        assert left["supervised_tokens"] == right["supervised_tokens"]
+    source_files = {}
+    for name in ("scripts/modal_natural.py", "scripts/natural_assistant.py", "tiny_perceptron/natural_assistant.py", "scripts/score_natural_v4_validation.py"):
+        old_bytes = subprocess.check_output(["git", "show", OLD_HEAD + ":" + name], cwd=ROOT)
+        new_bytes = subprocess.check_output(["git", "show", NEW_HEAD + ":" + name], cwd=ROOT)
+        assert old_bytes == new_bytes
+        source_files[name] = hashlib.sha256(new_bytes).hexdigest()
+    old_arguments = read(old_dir / "review/execution.json")["runner_arguments"]
+    new_arguments = read(new_dir / "review/execution.json")["runner_arguments"]
+    for args, expected_lr in ((old_arguments, "0.0001"), (new_arguments, "3e-05")):
+        assert "--adapter" not in args
+        assert float(args[args.index("--learning-rate") + 1]) == float(expected_lr)
+    def invariant_args(args):
+        result = list(args)
+        for flag in ("--learning-rate", "--output"):
+            index = result.index(flag)
+            result[index + 1] = "<declared run-specific value>"
+        return result
+    assert invariant_args(old_arguments) == invariant_args(new_arguments)
+    return {
+        "verified_single_declared_training_variable": "learning_rate",
+        "original_train_run_id": old["execution"]["run_id"],
+        "lower_lr_train_run_id": new["execution"]["run_id"],
+        "old_learning_rate": old["learning_rate"],
+        "new_learning_rate": new["learning_rate"],
+        "fresh_without_resume_adapter": True,
+        "identical_initial_lora_tensor_hashes": True,
+        "initial_lora_tensor_count": len(new["initial_adapter_tensors"]),
+        "frozen_sample_scope": new["frozen_check_scope"],
+        "identical_declared_fields": unchanged_fields,
+        "identical_2077_update_row_order_and_supervised_token_counts": True,
+        "runtime_source_sha256_unchanged_between_heads": source_files,
+        "first_batch_loss_before_any_optimizer_update": {
+            "old": old["history"][0]["answer_token_loss_before_update"],
+            "new": new["history"][0]["answer_token_loss_before_update"],
+            "absolute_difference": abs(old["history"][0]["answer_token_loss_before_update"] - new["history"][0]["answer_token_loss_before_update"]),
+            "scope": "A diagnostic, not an equality assertion; GPU numerical variation is possible even with identical declared recipe and initial hashes.",
+        },
+        "scope": "Source/recipe/initialization/row-order provenance control only. This audit does not grade outputs or conclude causal improvement/preserved general capability; the follow-up was informed by previously inspected validation.",
+    }
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("old_directory", type=Path)
+    parser.add_argument("new_directory", type=Path)
+    args = parser.parse_args()
+    print(json.dumps(audit(args.old_directory, args.new_directory), indent=2))

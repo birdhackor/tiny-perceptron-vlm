@@ -1,0 +1,124 @@
+"""Check actual committed v4 train artifacts; no model loading or generation."""
+
+import argparse
+import hashlib
+import json
+import math
+import random
+import re
+from collections import Counter
+from pathlib import Path
+
+PIN = "a008cec6fd447ca977503dbfd1130cd59a7c7a49"
+MANIFEST_SHA = "0c660490eb78bd82a8e092c2658646a6bae59c70058b6f5c2c944d138f732f60"
+
+
+def digest(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def load(path):
+    return json.loads(Path(path).read_text())
+
+
+def check(directory):
+    review = directory / "review"
+    wrapper = load(directory / "result.json")
+    report = load(review / "result.json")
+    assert wrapper["status"] == report["status"] == "completed"
+    assert wrapper["experiment"] == report
+    assert wrapper["revision"] == report["execution"]["revision"] == PIN
+    assert report["manifest_sha256"] == report["execution"]["manifest_sha256"] == MANIFEST_SHA
+    assert report["completed_steps"] == report["requested_steps"] == 2077
+    assert report["trainable_parameters"] == 1605632
+    assert report["optimizer_only_lora"] is True
+    names = report["optimizer_parameter_names"]
+    assert names and names == report["trainable_parameter_names"]
+    assert all(re.search(r"language_model\.layers\.[0-9]+\.self_attn\.(q_proj|v_proj)\.lora_[AB]\.", name) for name in names)
+    assert all(".visual." not in name for name in names)
+    assert report["frozen_parameter_samples_unchanged"] is True
+    assert report["frozen_parameter_samples_initial"] == report["frozen_parameter_samples_final"]
+    assert report["changed_adapter_tensor_count"] > 0
+    assert report["changed_adapter_tensor_count"] == sum(
+        value != report["final_adapter_tensors"][name] for name, value in report["initial_adapter_tensors"].items()
+    )
+    assert report["device"] == "cuda" and report["dtype"] == "bfloat16" and report["gpu_name"] == "NVIDIA L4"
+    assert report["peak_cuda_memory_allocated_bytes"] > 0
+    assert report["model"] == "Qwen/Qwen3-VL-2B-Instruct"
+    assert report["asr_model"] == "openai/whisper-large-v3-turbo"
+    assert report["model_revision"] == "89644892e4d85e24eaac8bacfd4f463576704203"
+    assert report["asr_revision"] == "41f01f3fe87f28c78e2fbf8b568835947dd65ed9"
+    assert report["learning_rate"] == 0.00003 and report["seed"] == 42 and report["max_pixels"] == 524288
+    assert report["gradient_accumulation"] == 2 and report["trained_rows"] == 4154
+    assert report["checkpoint_steps"] == [1039, 2077]
+    assert report["execution"]["volume_commit_errors"] == []
+    manifest_path = Path("docs/natural-assistant/v4/manifest.json")
+    assert digest(manifest_path) == MANIFEST_SHA
+    manifest = load(manifest_path)
+    train = [row for row in manifest["rows"] if row["split"] == "train"]
+    assert len(train) == 2077
+    audited = {
+        row["id"]: row["next_token_shifted_supervised_tokens"]
+        for row in map(json.loads, Path("docs/natural-assistant/evidence/v4-research/full-token-audit/final-current-assembly/row-results.jsonl").read_text().splitlines())
+        if row["split"] == "train"
+    }
+    assert set(audited) == {row["id"] for row in train} and sum(audited.values()) == 39436
+    expected = []
+    for epoch in range(2):
+        order = list(range(len(train)))
+        random.Random(42 + epoch).shuffle(order)
+        expected.extend(train[index]["id"] for index in order)
+    assert len(report["history"]) == 2077
+    seen = []
+    tokens = 0
+    for step, row in enumerate(report["history"], 1):
+        assert row["step"] == step and row["row_ids"] == expected[(step - 1) * 2 : step * 2]
+        assert row["supervised_tokens"] == sum(audited[name] for name in row["row_ids"])
+        assert math.isfinite(row["answer_token_loss_before_update"]) and math.isfinite(row["gradient_norm_before_clip"])
+        seen.extend(row["row_ids"])
+        tokens += row["supervised_tokens"]
+    assert set(Counter(seen).values()) == {2} and tokens == 78872
+    hf = wrapper["hf"]
+    assert hf["private"] is True and re.fullmatch(r"[a-f0-9]{40}", hf["revision"])
+    assert hf["prefix"] == f"natural-v3/natural-v4/train/{wrapper['run_id']}"
+    receipt = {item["path"]: item for item in hf["files"]}
+    checked_files = []
+    for file in sorted(review.rglob("*")):
+        if file.is_file():
+            relative = file.relative_to(review).as_posix()
+            assert relative in receipt
+            assert file.stat().st_size == receipt[relative]["bytes"] and digest(file) == receipt[relative]["sha256"]
+            checked_files.append(relative)
+    archives = []
+    for step, entry in zip((1039, 2077), report["archived_checkpoints"], strict=True):
+        assert entry["completed_steps"] == step and entry["path"] == f"checkpoints/step-{step:06d}"
+        archive = review / entry["path"]
+        metadata = load(archive / "checkpoint.json")
+        training = load(archive / "training.json")
+        assert digest(archive / "checkpoint.json") == entry["checkpoint_metadata_sha256"]
+        assert metadata["completed_steps"] == training["completed_steps"] == step
+        assert metadata["manifest_sha256"] == training["manifest_sha256"] == MANIFEST_SHA
+        assert training["trained_rows"] == 2 * step and len(training["history"]) == step
+        config = load(archive / "adapter_config.json")
+        assert config["peft_type"] == "LORA" and config["r"] == 8 and config["inference_mode"] is True
+        assert config["base_model_name_or_path"] == report["model"]
+        for item in metadata["files"]:
+            remote = receipt[f"{entry['path']}/{item['path']}"]
+            assert remote["sha256"] == item["sha256"] and remote["bytes"] == item["bytes"]
+        for name in ("adapter_model.safetensors", "training_state.pt"):
+            assert f"{entry['path']}/{name}" in hf["verified_weight_files"]
+        archives.append({"step": step, "training_rows": training["trained_rows"], "checkpoint_sha256": digest(archive / "checkpoint.json"), "adapter_sha256": digest(archive / "adapter_model.safetensors")})
+    assert digest(review / "adapter/adapter_model.safetensors") == archives[-1]["adapter_sha256"]
+    core_report = {key: value for key, value in report.items() if key != "execution"}
+    assert load(review / "adapter/training.json") == core_report
+    assert load(review / "training.json") == core_report
+    budget = wrapper["budget"]
+    assert budget["budget_usd"] == "40.00" and float(budget["reserved_total_usd"]) <= 40
+    return {"status": "verified_completed", "source_revision": PIN, "dataset_manifest_sha256": MANIFEST_SHA, "train_run_id": wrapper["run_id"], "completed_steps": 2077, "trained_rows": 4154, "supervised_tokens": tokens, "trainable_lora_parameters": 1605632, "optimizer_name_count": len(names), "changed_adapter_tensors": report["changed_adapter_tensor_count"], "frozen_samples_unchanged": True, "frozen_scope": report["frozen_check_scope"], "elapsed_seconds": report["elapsed_seconds"], "peak_cuda_memory_allocated_bytes": report["peak_cuda_memory_allocated_bytes"], "first_logged_loss": report["history"][0]["answer_token_loss_before_update"], "last_logged_loss": report["history"][-1]["answer_token_loss_before_update"], "archives": archives, "checked_review_files": checked_files, "hf": {key:hf[key] for key in ("repo", "revision", "prefix", "private", "verified_weight_files")}, "budget": {key:budget.get(key) for key in ("budget_usd", "reserved_total_usd")}, "report_sha256": digest(review / "result.json"), "receipt_sha256": digest(directory / "result.json")}
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("directory", type=Path)
+    args = parser.parse_args()
+    print(json.dumps(check(args.directory), indent=2))
