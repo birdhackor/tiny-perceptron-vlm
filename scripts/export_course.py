@@ -12,6 +12,27 @@ import tomllib
 from importlib.metadata import version
 from pathlib import Path
 
+if __package__:
+    from scripts.reading_time import (
+        METADATA,
+        ROUTES,
+        build_inventory,
+        chapter_introduction,
+        load_estimates,
+        load_routes,
+        render_page,
+    )
+else:
+    from reading_time import (
+        METADATA,
+        ROUTES,
+        build_inventory,
+        chapter_introduction,
+        load_estimates,
+        load_routes,
+        render_page,
+    )
+
 ROOT = Path(__file__).resolve().parents[1]
 REPOSITORY = "birdhackor/tiny-perceptron-vlm"
 COURSE_URL = "https://birdhackor.github.io/tiny-perceptron-vlm/"
@@ -154,7 +175,37 @@ def code_markdown(source):
     return f"{fence}python\n{source.rstrip()}\n{fence}\n"
 
 
-def build(destination, executed_root=None, revision="main"):
+def home_introduction(index, executed_outputs=False):
+    """首頁的作者說明；生成章節清單與閱讀時間不納入這段來源。"""
+    return (
+        "# 電腦怎麼學會接話？\n\n"
+        "看到「今天天氣」，你會怎麼接下一個字？這套教材從這個問題開始，"
+        "用接字表、具體數字與短程式，逐步解釋語言模型如何學習。"
+        "之後再看圖片與聲音怎麼接進同一套系統。\n\n"
+        "[從第一節開始](1.1.md){ .md-button .md-button--primary }\n"
+        "[先看基礎暖身](first-steps.md){ .md-button }\n\n"
+        + (
+            "可以先當書讀：程式下方已有實際結果，不必先安裝工具或準備 GPU。"
+            if executed_outputs
+            else "可以先當書讀：這份建置包含正文與程式，尚未附上執行結果。"
+        )
+        + "遇到陌生背景，每節都提供對應的前置連結。想先看個性、安全、圖片或量化，"
+        "[閱讀指南](course.md)會帶你挑需要的幾節。\n\n"
+        "## 找到想讀的內容\n\n"
+        f"上方搜尋可以找小節標題和正文中的概念。章節目錄收錄全部 {len(index)} 個小節；"
+        "手機上可點左上角的選單開啟目錄。每節下方都有 Colab 入口與 Notebook 下載，"
+        "想動手改程式時再開啟即可。\n\n"
+    )
+
+
+def build(
+    destination,
+    executed_root=None,
+    revision="main",
+    reading_times=METADATA,
+    reading_routes=ROUTES,
+    require_reading_times=False,
+):
     configuration = (ROOT / "zensical.toml").read_text(encoding="utf-8")
     settings = tomllib.loads(configuration)["project"]
     docs = ROOT / settings["docs_dir"]
@@ -166,6 +217,10 @@ def build(destination, executed_root=None, revision="main"):
     if docs.is_relative_to(destination) or destination.is_relative_to(docs):
         raise ValueError("網站目錄與產生的 Markdown 目錄不能重疊")
     index = json.loads((ROOT / "course/lesson-index.json").read_text(encoding="utf-8"))
+    home_source = home_introduction(index, bool(executed_root))
+    inventory = build_inventory(ROOT, index, DOCUMENTS, home_source)
+    estimates = load_estimates(reading_times, inventory, require_complete=require_reading_times)
+    routes = load_routes(reading_routes, inventory)
     targets = {(ROOT / path).resolve(): name + ".md" for name, path in DOCUMENTS.items()}
     targets[(ROOT / "course/lessons.md").resolve()] = "index.md"
     chapters = {item["source"]: "chapter-" + Path(item["source"]).stem + ".md" for item in index}
@@ -235,31 +290,12 @@ def build(destination, executed_root=None, revision="main"):
     for source, target in chapters.items():
         path = ROOT / source
         items = [item for item in index if item["source"] == source]
-        introduction = re.split(r"^## ", path.read_text(encoding="utf-8"), maxsplit=1, flags=re.M)[0]
+        introduction = chapter_introduction(path.read_text(encoding="utf-8"))
         content = reading(introduction, path) + "\n## 本章小節\n\n依序閱讀，或點進眼前想弄懂的問題。\n\n"
         content += "\n".join(f"- [{item['id']} {item['title']}]({item['id']}.md)" for item in items) + "\n"
         (docs / target).write_text(content, encoding="utf-8")
 
-    home = (
-        "# 電腦怎麼學會接話？\n\n"
-        "看到「今天天氣」，你會怎麼接下一個字？這套教材從這個問題開始，"
-        "用接字表、具體數字與短程式，逐步解釋語言模型如何學習。"
-        "之後再看圖片與聲音怎麼接進同一套系統。\n\n"
-        "[從第一節開始](1.1.md){ .md-button .md-button--primary }\n"
-        "[先看基礎暖身](first-steps.md){ .md-button }\n\n"
-        + (
-            "可以先當書讀：程式下方已有實際結果，不必先安裝工具或準備 GPU。"
-            if executed_root
-            else "可以先當書讀：這份建置包含正文與程式，尚未附上執行結果。"
-        )
-        + "遇到陌生背景，每節都提供對應的前置連結。想先看個性、安全、圖片或量化，"
-        "[閱讀指南](course.md)會帶你挑需要的幾節。\n\n"
-        "## 找到想讀的內容\n\n"
-        f"上方搜尋可以找小節標題和正文中的概念。章節目錄收錄全部 {len(index)} 個小節；"
-        "手機上可點左上角的選單開啟目錄。每節下方都有 Colab 入口與 Notebook 下載，"
-        "想動手改程式時再開啟即可。\n\n"
-        "## 章節\n\n"
-    )
+    home = home_source + "## 章節\n\n"
     for source, target in chapters.items():
         title = (ROOT / source).read_text(encoding="utf-8").splitlines()[0].removeprefix("# ")
         home += f"- [{title}]({target})\n"
@@ -277,6 +313,10 @@ def build(destination, executed_root=None, revision="main"):
     actual = list(nav_paths(settings["nav"]))
     if set(actual) != expected or len(actual) != len(expected):
         raise ValueError("zensical.toml 導覽與教材頁面不一致，請依 lesson-index.json 更新導覽")
+    for page in inventory["pages"]:
+        path = docs / page["page_path"]
+        content = path.read_text(encoding="utf-8")
+        path.write_text(render_page(content, page["page_id"], estimates, inventory, routes), encoding="utf-8")
     # Zensical 以設定檔所在目錄作為專案根目錄；網站不能寫到根目錄外。
     config_path = ROOT / ".zensical-build.toml"
     configuration = re.sub(
@@ -306,6 +346,8 @@ def build(destination, executed_root=None, revision="main"):
                 "executed_cpu_outputs": bool(executed_root),
                 "builder": "zensical",
                 "builder_version": version("zensical"),
+                "reading_time_pages": len(estimates),
+                "reading_time_complete": len(estimates) == len(inventory["pages"]),
             },
             indent=2,
         )
@@ -320,5 +362,19 @@ if __name__ == "__main__":
     p.add_argument("--output", type=Path, default=ROOT / "outputs/site")
     p.add_argument("--executed", type=Path, help="獨立 kernel 執行副本；提供時嚴格核對每份教材與執行結果")
     p.add_argument("--revision", default="main", help="網站原始碼與 Colab 連結的 Git ref")
+    p.add_argument(
+        "--reading-times", type=Path, default=METADATA, help="外部 AI 估時 JSON；已提供資料會嚴格核對來源 SHA"
+    )
+    p.add_argument("--reading-routes", type=Path, default=ROUTES, help="以 canonical page IDs 定義的閱讀路線 JSON")
+    p.add_argument(
+        "--require-reading-times", action="store_true", help="正式估時驗收：全部發布頁必須有目前來源與圖檔的估時"
+    )
     args = p.parse_args()
-    build(args.output.resolve(), args.executed, args.revision)
+    build(
+        args.output.resolve(),
+        args.executed,
+        args.revision,
+        args.reading_times,
+        args.reading_routes,
+        args.require_reading_times,
+    )
