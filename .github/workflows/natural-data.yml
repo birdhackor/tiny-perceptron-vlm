@@ -1,0 +1,60 @@
+name: Publish fixed natural teaching data to LFS
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          lfs: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - name: Install only data preparation dependencies
+        run: python -m pip install pillow==12.3.0 soundfile==0.14.0
+      - name: Reconstruct exact committed snapshots from fixed public sources
+        run: |
+          mkdir -p outputs/natural-data
+          python scripts/build_natural_assets.py --prepare \
+            --manifest outputs/natural-data/reconstructed-manifest.json \
+            --verify-manifest docs/natural-assistant/manifest.json
+      - name: Upload only the three verified LFS objects
+        shell: bash
+        run: |
+          set -euo pipefail
+          git lfs install --local
+          python - <<'PY'
+          import json
+          import subprocess
+          from pathlib import Path
+          manifest = json.loads(Path('docs/natural-assistant/manifest.json').read_text())
+          ids = []
+          for archive in manifest['archives']:
+              expected = f"version https://git-lfs.github.com/spec/v1\noid sha256:{archive['sha256']}\nsize {archive['bytes']}\n"
+              prior = subprocess.run(['git', 'show', f"HEAD:{archive['path']}"], capture_output=True, text=True)
+              if prior.returncode == 0 and prior.stdout != expected:
+                  raise RuntimeError('Committed LFS pointer differs from reconstructed archive')
+              subprocess.run(['git', 'add', '--', archive['path']], check=True)
+              pointer = subprocess.check_output(['git', 'show', f":{archive['path']}"], text=True)
+              if pointer != expected:
+                  raise RuntimeError('Reconstructed index pointer differs from frozen manifest')
+              ids.append(archive['sha256'])
+          subprocess.run(['git', 'lfs', 'push', '--object-id', 'origin', *ids], check=True)
+          changed = set(subprocess.check_output(['git','diff','--cached','--name-only'],text=True).splitlines())
+          if not changed.issubset({item['path'] for item in manifest['archives']}):
+              raise RuntimeError('Reconstruction changed files outside the three expected archives')
+          Path('outputs/natural-data/receipt.json').write_text(json.dumps({'revision': subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(), 'archive_sha256': ids, 'reconstructed_and_uploaded': True},indent=2)+'\n')
+          PY
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: natural-data-${{ github.run_id }}-${{ github.run_attempt }}
+          path: outputs/natural-data/
+          if-no-files-found: ignore
