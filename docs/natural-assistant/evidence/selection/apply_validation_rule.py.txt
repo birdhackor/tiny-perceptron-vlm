@@ -1,0 +1,53 @@
+"""Apply declared criteria to completed independently assessed validation only."""
+import argparse
+import hashlib
+import json
+from fractions import Fraction
+from pathlib import Path
+
+parser = argparse.ArgumentParser()
+parser.add_argument('--repo-root', type=Path, default=Path.cwd())
+args = parser.parse_args()
+root = args.repo_root.resolve()
+def read(path):
+    p = root / path
+    return json.loads(p.read_text()), hashlib.sha256(p.read_bytes()).hexdigest()
+rule, rule_sha = read('docs/natural-assistant/selection-rule-gentle.json')
+original, original_sha = read('docs/natural-assistant/evidence/semantic-validation/paired-384-semantic-review.json')
+gentle, gentle_sha = read('docs/natural-assistant/evidence/semantic-validation/gentle-384-semantic-review.json')
+values = {}
+for label, report, variant in [('base', original, 'base'), ('original', original, 'adapter'), ('gentle', gentle, 'adapter')]:
+    counts = report['summary']['variants'][variant]['six_domain_numerators_denominators']
+    assert set(counts) == set(rule['domains'])
+    assert all(x['denominator'] == rule['domains'][name] and 0 <= x['completed_success'] <= x['denominator'] for name, x in counts.items())
+    rates = {name: Fraction(x['completed_success'], x['denominator']) for name, x in counts.items()}
+    mean = sum(rates.values(), Fraction()) / len(rates)
+    values[label] = {'counts': counts, 'mean_fraction': str(mean), 'mean': float(mean)}
+    if label != 'base':
+        guard = rule['adapter_eligibility']
+        base = values['base']['counts']
+        checks = {
+            'ocr': counts['ocr']['completed_success'] >= guard['ocr_minimum_completed_exact'],
+            'presence': counts['text_presence']['completed_success'] >= guard['text_presence_minimum_completed_exact'],
+            'scene': counts['scene']['completed_success'] >= base['scene']['completed_success'] - guard['scene_maximum_completed_success_drop_vs_base'],
+            'chat': counts['text_chat_and_dialogue']['completed_success'] >= base['text_chat_and_dialogue']['completed_success'] - guard['text_chat_and_dialogue_maximum_completed_success_drop_vs_base'],
+        }
+        values[label]['eligibility_checks'] = checks
+        values[label]['eligible'] = all(checks.values())
+# Earliest eligible candidate wins an exact tie; base wins an exact tie with base.
+selected = 'base'
+for label in ('original', 'gentle'):
+    if values[label]['eligible'] and Fraction(values[label]['mean_fraction']) > Fraction(values[selected]['mean_fraction']):
+        selected = label
+assert selected == 'original'
+# The explicitly uncertain gentle scene item cannot change this decision even if accepted.
+upper = Fraction(values['gentle']['mean_fraction']) + Fraction(1, rule['domains']['scene'] * len(rule['domains']))
+assert upper < Fraction(values['original']['mean_fraction'])
+output = {
+    'schema_version': 1, 'selection_rule_sha256': rule_sha,
+    'semantic_reports': {'original': original_sha, 'gentle': gentle_sha},
+    'values': values, 'selected_candidate': selected,
+    'gentle_uncertain_item_sensitivity': {'upper_mean_fraction': str(upper), 'upper_mean': float(upper), 'same_selected_candidate': True},
+    'scope': 'Application of declared teaching preferences to independent completed semantic/exact validation; no final-test or external output used. This is not a universal score or statistical-significance claim.'
+}
+print(json.dumps(output, ensure_ascii=False, indent=2))
