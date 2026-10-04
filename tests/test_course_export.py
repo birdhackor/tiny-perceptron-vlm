@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from scripts import export_course
 from scripts.export_course import COURSE_URL, checked_notebook, output_html, reading_markdown
 
 
@@ -47,3 +48,35 @@ def test_execution_text_is_escaped():
     result = output_html([{"output_type": "stream", "text": ["<script>example</script>\n"]}])
     assert "&lt;script&gt;example&lt;/script&gt;" in result
     assert "<script>" not in result
+
+
+@pytest.mark.parametrize(
+    ("slug", "other_pages"),
+    [
+        ("natural-v4-student", ("natural-v4-data", "natural-v4-training")),
+        ("natural-v4-data", ("natural-v4-student", "natural-v4-training")),
+        ("natural-v4-training", ("natural-v4-student", "natural-v4-data")),
+    ],
+)
+def test_v4_guides_use_local_pages_and_keep_source_files_on_github(slug, other_pages):
+    root = export_course.ROOT
+    source = root / export_course.DOCUMENTS[slug]
+    targets = {(root / path).resolve(): name + ".md" for name, path in export_course.DOCUMENTS.items()}
+    chapter = root / "course/chapters/20.md"
+    # The published section route is independent of the notebook regeneration step.
+    lessons = {chapter.resolve(): {"20.1": "20.1.md"}}
+    fixture = (
+        "\n[章節](../../../course/chapters/20.md#20.1)\n"
+        "[清單](manifest.json)\n[來源](data/ocr-sources.json)\n"
+        "[程式](../../../scripts/natural_assistant.py)\n"
+        "```bash\npython scripts/natural_assistant.py --manifest manifest.json\n```\n"
+    )
+    result = reading_markdown(source.read_text(encoding="utf-8") + fixture, source, targets, lessons, "a" * 40)
+    for page in other_pages:
+        assert f"]({page}.md)" in result
+    assert "[章節](20.1.md)" in result
+    external = f"https://github.com/{export_course.REPOSITORY}/blob/" + "a" * 40 + "/"
+    assert f"[清單]({external}docs/natural-assistant/v4/manifest.json)" in result
+    assert f"[來源]({external}docs/natural-assistant/v4/data/ocr-sources.json)" in result
+    assert f"[程式]({external}scripts/natural_assistant.py)" in result
+    assert "```bash\npython scripts/natural_assistant.py --manifest manifest.json\n```" in result

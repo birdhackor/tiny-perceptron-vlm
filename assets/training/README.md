@@ -47,7 +47,11 @@ TinyStories／唐詩的`text` JSONL可用文字入口；UltraChat的`messages`�
 
 若要重建同一快照，先解包全部資料，再執行`python scripts/build_training_assets.py --source data/training --output outputs/rebuilt-training-assets`；壓縮包不包含時間戳差異，可比對manifest SHA-256。每次實質改動發布新版本，不覆蓋v1。
 
-## 實用成品 v3：照片、繁體中文讀字與中文語音
+## 第20章資料：照片、中文文件與真人語音
+
+目前成品的來源、授權、固定下載與逐檔核對見[新版資料說明](../../docs/natural-assistant/v4/DATA.md)，重新訓練見[訓練指引](../../docs/natural-assistant/v4/TRAINING.md)。只想開啟模型時，直接用[學生操作指引](../../docs/natural-assistant/v4/STUDENT.md)，不用先取得全部訓練資料。
+
+### 舊資料快照v3（供回查）
 
 這3包提供實用成品使用的自然照片、合成中文圖片與真人中文錄音。壓縮包共70,648,031 bytes（約67.4 MiB），解包後345個檔案共94,905,207 bytes（約90.5 MiB）。它們是資料，不包含模型權重；下載資料本身也不會開始訓練。
 

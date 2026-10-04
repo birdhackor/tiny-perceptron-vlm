@@ -26,7 +26,15 @@ ROOT = Path(__file__).resolve().parents[1]
 METADATA = ROOT / "course/reading-times.json"
 ROUTES = ROOT / "course/reading-time-routes.json"
 SCHEMA_VERSION = 1
-COURSE_DOCUMENTS = {"course", "first-steps", "training", "glossary"}
+COURSE_DOCUMENTS = {
+    "course",
+    "first-steps",
+    "training",
+    "glossary",
+    "natural-v4-student",
+    "natural-v4-data",
+    "natural-v4-training",
+}
 METHOD = (
     "這是 AI 對閱讀時間的估計，不是實測平均。以數學基礎良好的高中生，或具基本數學背景的大學生為對象，"
     "包含讀正文、看圖、理解範例程式與輸出，以及短暫停下來思考。"
