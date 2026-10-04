@@ -17,6 +17,8 @@
 
 `check_review_round.py` 另外核對本輪審閱身分與導言。基準清單保存實驗改寫前固定 Git 版本的248份舊讀者報告指紋；新報告不能沿用任何舊身分，技術審閱也不能沿用新讀者身分。每份來源的首節須連同導言實際閱讀，記錄 `intro_sha256` 與自己的 `intro_summary`。此核對不產生報告、摘要或判定，也不能證明署名的代理真的執行過；協調者仍需查實際派工與閱讀紀錄。
 
+後續新增B.5–B.8列在`docs/course-experiments/review-round-additions.json`，保留原248節基準與舊報告指紋。新增節同樣需要逐節的新讀者與不同技術審閱者，不能省略原節或以新增清單取代審閱報告。
+
 ```bash
 # 讀者階段全部完成後
 .venv/bin/python docs/review-tools/check_review_round.py --stage reader

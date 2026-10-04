@@ -1,0 +1,473 @@
+Original section: course/chapters/01.md#1.8
+SHA-256: c7ad6f245be1f0ebeb314d2985c81a7468d5326758ce34394435546c697ea574
+
+## 1.8 猜錯要付出多少代價？
+
+兩次預測都把「看」排第一，第一回給它 0.5，第二回給它 0.9。如果答案確實是「看」，第二回應算更好，因為它把更多機會放到正確答案上。只記「有沒有選對第一名」看不出這個差別；訓練需要一個能隨信心連續改變的代價，才知道分數調整是進步還是退步。
+
+接續 [1.7](#1.7) 的機率分配，我們只取正確答案那一格的機率 p，再計算 `-log(p)`。代價也叫 loss；這個名稱是在說「希望降低的數字」，並不是猜錯題數。[W.4](../first-steps.md#W.4) 解釋了對數與數值直覺：給正確答案 0.5，代價約 0.693；給 0.9，代價約 0.105；給 0.1，代價約 2.303。因此越有把握地忽略正確答案，處罰越大。
+
+如果一批例子每個都有唯一正確類別，把它們的負對數代價取平均，通常叫交叉熵（cross entropy）。這裡不需要先學整套資訊理論，只要能追到「正確答案的機率是哪一格」。自然對數的代價單位叫 nat；除以 `log(2)` 才換成 bit。換單位不改誰比較好。
+
+```python
+import torch
+from torch.nn import functional as F
+
+p = torch.tensor([0.1, 0.5, 0.9])
+print("正確機率", p, "代價", -p.log())
+logits = torch.tensor([[0.0, 2.0, 0.0]])
+target = torch.tensor([1])
+probabilities = logits.softmax(dim=-1)
+manual = -probabilities[0, 1].log()
+loss = F.cross_entropy(logits, target)
+print(probabilities, manual.item(), loss.item())
+assert torch.allclose(loss, manual)
+```
+
+第一段輸入三個正確機率，直接列出上述代價。第二段是一個問題、三個候選分數，形狀 `[1,3]`；這種未換成機率的分數常叫 logits。`target=[1]` 表示這一題的答案是索引 1 的候選，也就是從左數第二個，索引仍從 0 開始。`probabilities[0,1]` 因而取第一題的正確機率。分配約 `[0.1065,0.7870,0.1065]`，手算負對數和內建交叉熵都約 0.2395。
+
+`F` 是給 `torch.nn.functional` 取的簡短名字，裡面提供直接計算的函式。`F.cross_entropy` 接收原始 logits 和答案 ID，內部已用數值穩定的方式處理 softmax 與對數；不應把 `probabilities` 再送進它。否則機率會被當成另一組分數再換算一次，得到不同代價。這個介面也不用輸入完整的正確機率表，只需一個答案位置。
+
+比較平均 loss 要說清楚在哪份資料、哪種文字拆分上。相同文字若被拆成不同數量的片段，每片段平均的意義就不同；第 6 章會討論更公平的比較。現在先固定字表與例子，讓代價變化可以歸因於分數變化。
+
+練習只把 `target` 改成 `[0]`，並把手算索引 `[0,1]` 改成 `[0,0]`。先預測代價會高於還是低於 0.2395，再核對應約 2.2395。分數表完全沒變，只換了哪一格是答案；這說明 loss 同時需要預測與真實答案，光看分數高低無法判斷好壞。
+
+
+Original section: course/chapters/01.md#1.2
+SHA-256: 226453a6d24f3a87c8665fb083b3e91be546a88a446e0ea707527192cff89dbd
+
+## 1.2 記住資料等於學會嗎？
+
+老師把十道題目和答案交給學生，隔天考完全相同的十題。滿分可能表示學生理解，也可能只是背熟了。要分辨兩者，至少要留下沒拿來練習的題目。文字模型也是：用同一段文字讓模型學習，再用那段文字評分，不能知道它遇到新文章會怎樣。在 [1.1](#1.1) 我們已經能儲存一段文字；現在先決定哪些文字可以用來練習，哪些應留作檢查。
+
+通常把資料分成三份。訓練資料（training）用來調整模型的數字；驗證資料（validation）用來選設定，例如稍後比較看一字或看三字的模型；測試資料（test）留到設定選完，才評一次最後成績。驗證集若被反覆參考，也可能被間接迎合，因此不能把選設定時得到的最高分直接當最後能力。這三個名字指資料用途，不是三種模型。
+
+切分時應先分完整檔案，再從各檔案取出短片段。例如把「貓看狗。狗看貓。」切成相鄰的四字片段，將「貓看狗。」放訓練組、把「看狗。狗」放驗證組，兩組共享同一段原文「看狗。」。模型訓練時已見過這段連續內容，驗證卻又用它考一次，因此不是獨立的新文件。共用同一套中文字並不算洩漏；這裡的問題是同一來源中高度重疊的內容被拆到兩邊。這叫資料洩漏（data leakage）。完全一樣的檔案也要先去重，否則兩份複本會造成同樣問題。
+
+下面用專案內的 `split_documents` 做一個可看清的例子。它先移除完全重複的文字，打亂順序，再保留至少一份驗證、一份測試；這個小例子有五筆輸入，卻只有四份不同檔案。執行位置與工具箱見 [W.1](../first-steps.md#W.1)，清單和字典見 [W.2](../first-steps.md#W.2)。
+
+```python
+from tiny_perceptron.data import split_documents
+
+docs = ["貓看狗。", "狗看貓。", "鳥看魚。", "魚看鳥。", "貓看狗。"]
+parts = split_documents(docs, seed=42)
+for name, documents in parts.items():
+    print(name, len(documents), documents)
+assert not (set(parts["train"]) & set(parts["validation"]))
+```
+
+輸入 `docs` 裡的「貓看狗。」重複兩次。輸出會列出 train 兩份、validation 一份、test 一份，合計四份；可直接讀每份文字確認沒有同一句跨組。`seed=42` 是打亂順序時的起始設定，固定它讓本次切分可重現，並沒有特殊的學習意義。`.items()` 逐項提供字典的鍵和值，分別存到 `name`、`documents`，所以可以一起印出用途與檔案。
+
+最後的 `set` 取出各組不重複的文字，`&` 找兩組共同的文字。若交集為空，`not` 就為真，檢查通過。這只是檢查完全相同的文字；「貓望著狗。」和「貓看狗。」仍可能來自同一原文的改寫。真實資料要連同同一來源、同一對話或同一家族的近似版本一起分組，不能只靠字串相等。
+
+練習在 `docs` 再加一份「貓看狗。」，先預測各組總數是否從四變五。執行後仍應是四；再把新增那份改成新句「鳥看貓。」，總數才會變成五，具體各組內容也可能重排。這個核對教你先問「有多少不同材料」，而不是把檔案行數當作有多少新知識。
+
+
+Original section: course/chapters/05.md#5.16
+SHA-256: f0cbf8eac262cb0d1018e8800916da62cc442b2590ec50cf09e4a26e23abb7e8
+
+## 5.16 配比怎麼落到實際 batch？
+
+你想讓模型九成時間練短答、一成練長答，按筆數抽90筆短答與10筆長答。可是短答每筆只有一個答案token，長答每筆有二十個；算每個有效答案的平均loss時，實際長答貢獻200題、短答90題。筆數比例90:10，不會自動成為監督token比例90:10。
+
+[5.2](#5.2) 已確定代價分母按有效答案計數，本節把這個規則用在資料混合。source（來源）是每筆資料的類別標記，例如短答、長答，讓我們能在組batch後統計實際用了哪些資料。光記「預期抽樣九成」還不夠，要檢查執行出來的數量與長度。
+
+```python
+counts = {"短答": 90, "長答": 10}
+lengths = {"短答": 1, "長答": 20}
+tokens = {}
+for source in counts:
+    tokens[source] = counts[source] * lengths[source]
+total = sum(tokens.values())
+ratios = {source: amount / total for source, amount in tokens.items()}
+print("有效答案數", tokens)
+print("有效答案比例", ratios)
+```
+
+輸入counts是筆數、lengths是假設每筆有效答案數。迴圈逐來源相乘，得到短答90、長答200，總共290。輸出比例約0.310與0.690，所以少數長答貢獻約七成監督。這裡只計答案位置，不把用戶問題、填充或被忽略的文字混進去；真正batch長度不齊時，要逐筆數有效label，而不是用補齊後的總格數。
+
+如果目標真的是token比例90:10，需要調整抽樣筆數，或每筆取多少有效內容。假設兩類固定長度1與20，要令長答token只佔一成，短答筆數約應為長答筆數的180倍。你能從 `短數×1 : 長數×20 = 9:1` 算出這個比例，但數據與batch實際可行性還需檢查。
+
+也可以保留這批資料，只改來源的loss權重，例如把某類答案的代價乘上較大的係數，調整它對總代價的影響。這是改變計分方式，原來短答90、長答200個有效答案仍然不變。記錄時應分別寫清楚實際token比例與計分權重，避免把兩個數字混在一起。
+
+來源比例也可能隨訓練階段變化，長答平均長度也會漂移，所以要記錄實際累計token而非一次配置。評估時分來源報指標，可以看出總平均改善是不是只因為最常見來源佔得更多，少數任務反而退步。資料預算的約定見 [5.13](#5.13)。
+
+這個例子用假設每筆相同長度讓數值可手算，真資料可能長短分佈很寬。若每批剛好只有一兩筆長答，短期比例波動大，應統計一段訓練累計，並說明是否重新抽取或重複抽取某類資料（重採樣），以及是否只保留每筆答案的一部分（截斷）。前者會改實際筆數，後者會改有效答案位置數，都會影響最後比例。
+
+這個差別已在[7.16的回放實驗](07.md#7.16)實際出現：兩支都更新500次、每批16題，只練加法的累計有效答案是18,453個，混回較長屬性答案的支線卻有36,384個。配方的筆數與步數相同，監督總量仍差近一倍。因此比較資料混合成績時，要把實際計分位置帶回來，不能只寫「都跑500步」。
+
+練習只把長答長度20改成1，先預測兩類token為90與10、比例回到0.9與0.1，再跑核對。筆數完全沒變，變化來自答案長度。再恢復20並把長答筆數改成5，手算長答100、總190、比例約0.526，驗證少一半長答仍可能主導監督。
+
+
+Original section: course/chapters/05.md#5.8
+SHA-256: 6150518ffeba295e5e22a3b06e15b9c55689f438a5ff470fb9a4379189e14dc5
+
+## 5.8 Loss 下降代表任務做得更好嗎？
+
+四字答案是 `[1,2,3,4]`，模型只錯第三字，最後一字仍對，逐字正確率75%。但如果用戶要完整答案，這一串仍然錯。更麻煩的是，實際生成會把錯的第三字放回前文，第四字也可能跟着錯。因而訓練代價、逐位置正確率、整串答案是否正確，各能看到不同的表現，不能只報一個最低loss就解釋全部。
+
+[4.7](04.md#4.7) 訓練時給每位置正確前文，這叫teacher forcing（教師強制）：即使某位置預測錯，下一位置仍看到資料中的正確字。自由生成則按 [1.14](01.md#1.14) 把自己的預測接回去，所以錯誤會改變後續條件。本節用兩份明示的假設預測練習計分，數字不是從訓練模型測出。
+
+```python
+truth = [1, 2, 3, 4]
+teacher_forced = [1, 2, 0, 4]
+generated = [1, 2, 0, 0]
+for name, prediction in [("正確前文下", teacher_forced), ("自由生成", generated)]:
+    correct = sum(a == b for a, b in zip(truth, prediction, strict=True))
+    token_accuracy = correct / len(truth)
+    exact_match = prediction == truth
+    print(name, "逐字正確率", token_accuracy, "整串相同", exact_match)
+```
+
+輸入truth是真答案，兩份prediction分別模擬正確前文與自己前文的結果。`zip` 將同位置配對；`strict=True`要求兩份清單長度相同，否則提出ValueError並停止，不會默默略過較長清單的尾端。`a==b` 成立算1、不成立算0，`sum` 數正確位置；除以答案長4就得到token accuracy（逐片段正確率），這裡片段恰好一字。第一份三字正確，輸出0.75；第二份兩字正確，輸出0.5。
+
+`prediction==truth` 比較完整清單，順序、長度與每格都相同才為True，這叫sequence exact match（整串完全匹配）。兩份都False。對於像算術答案、固定標籤這樣的任務，整串匹配常比逐字比例直接；對於開放式表達，合理答案可有多種寫法，完全匹配則不一定能反映好壞，評分方法需要按任務選擇。
+
+為什麼正確前文能在第四字回到4？因為它使用真實第三字3來預測，不用自己錯出的0。這份示意說明機制上的差別，不保證任何模型錯誤後一定越來越錯，也不是說teacher forcing有錯；它讓訓練高效且可平行，但評估應補上真正自由生成的結果。
+
+還要注意loss本身量的是正確答案機率，不只最高候選是否碰巧選對。兩個模型逐字正確率相同，仍可能一個把正確字放0.6、另一個放0.9，代價不同，回顧 [1.8](01.md#1.8)。留出資料是事先分開、沒有參與權重更新的題目，分組原則見[1.2](01.md#1.2)。報告最好同時記錄這組新題的loss和任務成功指標，並固定生成設置，才能知道改善在哪裡。
+
+再看一個真正訓練後的例子。[T.4的短文模型](../training.md#T.4)在驗證資料的平均代價，從5.73454降到0.96282；可是給它開頭`color=blue;shape=circle;`，每次選最高分候選時，它接出`side=right.`。那篇驗證原文剩下的卻是`side=left.`。代價改善了，並沒有讓自由生成完整重現這篇原文。
+
+這裡還有一個重要的判斷：提示只給顏色與形狀，沒有告訴模型物體在哪一邊；左或右都可能是合格式的續寫。所以這個差異能說明「沒有重現驗證原文」，不能單憑它宣判右邊是錯誤的事實。若任務真的要求判斷左右，就要在輸入提供相應線索，另定答案與成功條件。文字接續的loss、寫出合法格式、回答有真值的問題，各自需要相應的評估，這也是後面另做[屬性問答](07.md#7.12)的理由。
+
+換成真正的故事，這個差別更容易看到。[T.4的TinyStories實驗](../training.md#T.4)用409篇故事訓練，在另外51篇驗證故事的全部42,453個計分位置，平均代價從5.76091降至1.80083。但是讓它每次選最高分候選、往後寫最多32個byte，一筆實際結果是：
+
+```text
+給模型的開頭：Once upon a time there w
+新生成的部分：as a big was a she was a ber the
+```
+
+它開始接出常見的英文片段，卻還沒有把片段組成清楚的句子，更沒有講出一個故事。這段輸出只是一筆觀察；平均代價用的是全部驗證文字，兩者不能互相取代。[完整實測報告](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/course-experiments/results/real_text.json)同時保留全部位置的分數與各留出側前八篇的生成示例，沒有因為續寫不好就省略。這也給我們一個實用的檢查順序：先確認模型確實學到一些文字規律，再問它能否在自己的前文下完成想要的任務。
+
+練習只把 `teacher_forced` 的第三格0改成3。先預測第一份逐字正確率變1、整串相同True，第二份仍0.5和False，再執行核對。程式這次只改示意資料，沒有真的改變生成模型；要提升第二份表現，還得在實際生成過程中驗證訓練是否有效。
+
+
+Original section: course/chapters/07.md#7.11
+SHA-256: 4622ff4e08f4756beaba1cd2efd5ad46ec0c477f65f49a6a31c17a37de98a168
+
+## 7.11 預訓練模型怎麼學會對話？
+
+預訓練讓模型從一般文字學續寫，SFT則繼續用正確對話示範，讓assistant邊界後出現合適回答。架構仍是 [4.6](04.md#4.6) 的TinyLM，目標仍是交叉熵；改變的是資料分佈、角色前文與哪些答案計入代價。只把prompt加一句「請回答」，沒有更新參數，不屬於這個訓練過程。
+
+[7.1](#7.1) 已建立對話表示，[7.3](#7.3) 已選有效回答目標，現在將兩筆問答組batch，按 [7.7](#7.7) 的valid提供讀取許可，再把代價傳回參數。本節先確認數據到梯度的接口；研究微調時，要明確載入已保存的基模。也可以刻意從隨機起點只用對話示範訓練，作為另一條基準，兩種起點應分開記錄。
+
+```python
+import torch
+from tiny_perceptron.data import toy_conversations, render_chat, pad_batch
+from tiny_perceptron.model import TinyLM, ModelConfig, masked_loss
+
+torch.manual_seed(42)
+examples = [render_chat(messages) for messages in toy_conversations()[:2]]
+x, y, valid = pad_batch(examples)
+model = TinyLM(ModelConfig(width=8))
+loss = masked_loss(model(x, valid=valid)["logits"], y)
+loss.backward()
+print("batch形狀", x.shape, "有效答案", (y != -100).sum().item())
+print("問答接口代價", loss.item())
+```
+
+`toy_conversations` 是專案的合成加法小世界，前兩筆問題0+0與0+1、回答0與1，ASCII答案各一byte加EOS，所以有效目標共4。`pad_batch` 回傳X、Y與有效輸入表，模型處理兩筆每筆10位置，輸出每位置264個byte/結構候選。最後loss為正，backward有梯度，說明串接成功；這段沒有optimizer.step，尚未進行新訓練。
+
+真正微調要加載基模checkpoint與匹配tokenizer，恢復需要的訓練狀態，再用問答資料更新。checkpoint契約見 [5.7](05.md#5.7)，腳本操作見[訓練配方](../training.md)。例如以 `--task sft --checkpoint checkpoints/text.pt --train` 選擇問答任務並啓用更新，步數與資料來源需按預算記錄。不是隻更換任務名字就自動擁有問答能力。
+
+微調前後要用固定題與生成設置，分別記錄回答內容、格式與舊能力，不能拿初始隨機模型的一次loss和新模型不同問題的回答直接比較。SFT可能讓已有知識更容易被調動，也會把錯誤示範學進去；[7.14](#7.14) 將檢查錯答案如何影響代價。
+
+本例不要求GPU或下載預訓練權重，先把小CPU的資料接口練好。進一步長訓練是同一路線上的更多更新，不需要重新定義shift、mask或字表。若舊模型tokenizer與當前數據ID不同，應先解決映射，不能靠訓練希望它自己理解新編號。
+
+我們已實跑兩條獨立路線。第一條從隨機模型開始，只用45筆屬性問答更新900次；第二條先把這45筆的問題與答案接成文字、練250次續寫，保存後再以對話角色與回答遮罩微調900次。第二條並沒有沿用前章的故事模型，也沒有先得到廣泛知識；它只在同一批小世界材料上多做了一個文字階段。兩條對話階段都用同樣寬度64、兩層、種子42、每批16筆與學習率0.003，最後用同一組留出題比較，見[7.12](#7.12)。因為第二條多了250次文字更新，成績差異不能全當成「預訓練形式本身」的因果效果；要隔離它，還需另外匹配總訓練預算。
+
+練習複製其中一筆消息，把assistant答案0改成3，再render並印有效目標ID。先預測原0的byte48加8=56變成3的51加8=59，EOS仍2；其他角色與問題不變。核對後恢復正確答案，避免把演示錯誤當正式訓練資料。
+
+
+Original section: course/chapters/07.md#7.12
+SHA-256: d9aa30c6c300f0666af0d74a092d9b8feceb9be2c08e053460d58a33600be98e
+
+## 7.12 模型會回答新組合嗎？
+
+訓練見過「紅圓、藍圓、藍方」，測試「紅方」：紅和方都學過，卻沒以這個組合同時出現。這樣的題能問模型是否組合已有屬性，而不只是背過整句。它與換幾個詞說同一道題不同，也與從沒見過藍色不同。想討論泛化，先說明新的是組合、措辭、屬性還是整種任務。
+
+[1.2](01.md#1.2) 的留出資料需要獨立，[5.12](05.md#5.12) 提醒近似改寫仍可能同家族；這裡再按完整屬性組合留出。兩顏色紅、藍，兩形狀圓、方，總共四格，特意留紅方做held-out（留出組）。其餘三格合起來仍涵蓋所有基本屬性：紅在紅圓裡、方在藍方裡，藍與圓也都出現過。這樣能較乾淨地檢查新組合，而不是考從沒見過的顏色或形狀。
+
+```python
+all_pairs = [(color, shape) for color in ["紅", "藍"] for shape in ["圓", "方"]]
+held_out = {("紅", "方")}
+train = [pair for pair in all_pairs if pair not in held_out]
+print("訓練組合", train)
+print("留出組合", held_out)
+assert not (set(train) & held_out)
+```
+
+輸入屬性列表，第一行是兩層清單迴圈的簡寫：每種顏色都配每種形狀，因此先紅圓、紅方，再藍圓、藍方。`held_out` 用集合保存留出項，`if pair not in held_out` 只保留其餘。輸出訓練三組，檢查兩組集合沒有交集；它只驗證split規則，沒有訓練或生成結果。
+
+真正實驗還要給每個組合一組明確問題與答案，並把所有措辭版本一起分組。例如紅方的「紅色方塊」「一個紅方形」都屬於同一組合，不能讓一份進訓練、另一份進留出後稱新組合。資料工具應記錄顏色與形狀欄位，不只憑文本表面分組。
+
+覆蓋所有屬性只是必要條件，不保證模型理解如何組合。它可能偏向訓練中紅總是圓，遇到紅方繼續答圓；也可能資料答案不需要兩種屬性就能碰巧答對。任務應讓目標真的依賴該組合，評估時同時看已見組合是否仍會與新組合成功率。
+
+如果留出全部藍色，訓練只紅圓紅方，藍對模型就是新屬性，問題變成更難的屬性遷移；不能把失敗歸因為沒學會組合。改變切分目標要重寫實驗解釋，避免同一個泛化詞掩蓋不同挑戰。
+
+上面只安排切分；真正的屬性實驗另有顏色、形狀、音高三項，共12個組合，每組問五種問題。九組共45題拿來教，一組五題驗證，另外兩組十題最後檢查；同一組合的不同問法都在同一側。種子42的這次完整生成結果如下。先把表格的計數單位說清楚：模型把文字編成一串ID，也就是每個token的數字編號，見[6.7](06.md#6.7)。EOS是表示回答結束的專用token，見[6.6](06.md#6.6)。完全匹配比較回答內容的整串ID；是否正常產生EOS另行檢查，因此能結束與答對內容是兩件事。
+
+「有效目標」是在計算代價時真正要求模型猜對的位置，包含回答內容與最後的EOS，不包含提問位置，見[7.3](#7.3)。例如本專案逐byte切詞，ASCII答案`red`有三個文字token，加EOS共四個有效目標，不是一題就只有一個目標。「平均代價」把每個真值目標的負自然log機率加總，再除以有效目標總數，見[1.8](01.md#1.8)；越低表示這項代價越小，仍要另外檢查自由生成是否答對。
+
+表中的250與900都算參數更新步數：每次取一小批資料、算代價，再調整一次權重，流程見[7.11](#7.11)。同一批45題會反覆取用，900次更新不代表有900道不同問題，也不代表完整讀過資料900輪。
+
+| 已完成的訓練路線 | 驗證答案完全相同 | 最後檢查答案完全相同 | 驗證平均代價 | 最後檢查平均代價 |
+| --- | ---: | ---: | ---: | ---: |
+| 從零做900次對話更新 | 1／5 | 5／10 | 1.02175 | 0.50580 |
+| 先做250次文字更新，尚未對話微調 | 1／5 | 1／10 | 2.30189 | 2.03647 |
+| 同一文字模型再做900次對話更新 | 3／5 | 7／10 | 0.09992 | 0.10462 |
+
+留出代價的分母固定為驗證36個、最後檢查69個有效目標，含回答結束。三列在這批留出題都會生成EOS，但內容仍沒有全對。例如從零對話模型看到`color=blue;shape=circle;pitch=low;describe`，標準答案是`circle`，卻生成`square`。這不是一個同樣合理的自由續寫：問題已提供形狀，答案能按規則核對。這份模型的訓練代價雖已由5.77779降到0.00033，仍不能熟練抽取沒教過組合的屬性。先文字再對話的支線本次較好，卻只有一個種子和少量家族，也多了訓練預算，不能升格成所有模型的通則。[完整實測報告](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/course-experiments/results/sft.json)保留每題，讓你檢查錯誤究竟在哪種問法。
+
+練習把held_out改成 `{("藍","圓"),("藍","方")}`，先預測訓練只兩種紅組合、訓練中缺藍，再執行核對。寫一句「這次測未見顏色」說明目標變化。恢復紅方留出後，確認紅、藍、圓、方仍各出現至少一次，才回到新組合的原問題。
+
+
+Original section: course/chapters/07.md#7.3
+SHA-256: 169853b46c7ffaa3daaadd1b96fc992bb24f0c06db64b053e54150d7221d5a13
+
+## 7.3 哪些位置應該學？
+
+整理好的對話同時含問題與答案。若我們想訓練一個回答者，就常只要求它學assistant的內容，而不要求它自己寫出user會提什麼。[7.1](#7.1) 已把問題留在輸入X，現在要明確哪些Y位置可以參與代價。這份監督選擇與能讀哪些前文是不同的表。
+
+本課label用-100表示忽略直接loss。有效監督條件是 `label!=-100`，不是查看輸入token是否屬於user。因為 [1.3](01.md#1.3) 的shift，第t位置輸入預測原序列t+1，標籤也要對到下一項；不能用當前字所屬角色直接當作該格答案角色。下一節會專門追首答案位置。
+
+```python
+from tiny_perceptron.data import render_chat
+
+messages = [
+    {"role": "user", "content": "問"},
+    {"role": "assistant", "content": "答"},
+]
+x, y = render_chat(messages)
+for position, (token, label) in enumerate(zip(x.tolist(), y.tolist(), strict=True)):
+    status = "學下一項" if label != -100 else "忽略直接loss"
+    print(position, "輸入ID", token, "目標", label, status)
+print("有效目標數", (y != -100).sum().item())
+assert (y != -100).sum().item() > 0
+```
+
+輸入一字中文問題與一字中文答案。ByteTokenizer以byte表示，問與答各三token，因此不能按一字就數一個有效目標，見 [6.7](06.md#6.7)。程序逐位置列出當前輸入ID、右移後label與是否計代價，最後有效數應4：答的三個byte與回答EOS。user內容、user段EOS與角色標記本身不作為要模仿的答案。
+
+迴圈中的 `status = ... if ... else ...` 是條件表達式：label不是-100時選左側文字，否則選右側。`(y!=-100)` 得真/假tensor，sum把True當1數有效目標，item取成普通整數。
+
+模型讀的是輸入X：它拿X中的合法ID，到一張數值表查出起始特徵。這個動作叫嵌入查表，英文embedding，見[4.1](04.md#4.1)。目標Y則交給交叉熵計算代價，其中的-100只表示「這個位置不計分」。-100不會拿去查輸入表，也不是合法文字ID；X中對應的問題文字仍會正常送進模型。
+
+不算某位置loss，表示不直接讓該位置的logits承擔答案代價；這段輸入仍可供後面回答讀取。我們還要用 [3.6](03.md#3.6) 因果遮罩限制未來，不因為user不計loss就刪除問題。若刪除問題，模型反而沒有問答關聯的條件，只能學常見回答。
+
+不同訓練目標可以監督全部對話或只部分角色，但必須說清楚目標與分母。這裡只學assistant，通常使訓練資源集中在回答內容與結束方式；它不能自動篩掉錯標答案，品質控制仍是資料工作。
+
+練習只把assistant內容改成 `"答案"`，先預測兩中文共六byte，加EOS共七有效目標，再執行核對。輸入也會變長，而忽略的user問題仍存在。再試英文 `"OK"`，應兩byte加EOS，共三；計數單位隨編碼規則，不隨肉眼字數。
+
+
+Original section: course/training.md#T.4
+SHA-256: 49185a05ae4ad7333d61282435b3ad168f234a9121a59f46b916e3fe2c9cc01c
+
+## T.4 把文字訓練和對話練習分開看
+
+文字接續路線先讀[4.7的題目與下一字對齊](chapters/04.md#4.7)；想做屬性問答，再讀[7.1的對話格式](chapters/07.md#7.1)與[7.3的回答位置](chapters/07.md#7.3)。文字接續讓每個有下一項的位置練習；SFT（supervised fine-tuning，監督式微調）用理想回答作示範，只把助手回答與結束標記當作答案。使用者問題仍提供線索，但不算回答代價。
+
+先產生不用下載的小資料，種子明定為 42：
+
+```bash
+.venv/bin/python scripts/prepare_data.py --kind toy-text --seed 42
+.venv/bin/python scripts/prepare_data.py --kind attributes-sft --seed 42
+```
+
+JSONL 每行是一筆有名稱欄位的 JSON 記錄。生成檔會多帶 `source`、`license` 與 `split`；以下摘出教學用的主要欄位，各行可獨立閱讀：
+
+```jsonl
+{"text":"color=red;shape=circle;side=left.","family":"color=red;shape=circle;side=left."}
+{"messages":[{"role":"user","content":"color=red;shape=circle;pitch=low;shape?"},{"role":"assistant","content":"circle"}],"family":"red:circle:low"}
+```
+
+第一行來自 `toy-text`，教的是文字接續；第二行來自 `attributes-sft`，問題是列出屬性後問形狀，理想答案就是 `circle`。同一組 `red:circle:low` 的 `describe`、`shape?`、`color?`、`pitch?`、`joint?` 都屬同一家族，答案依序是 `circle`、`circle`、`red`、`low`、`circle,low`。它們一起放在同一側，避免模型已見過同組屬性後，只換問法就算新題。
+
+| 檔案（位於 `data/generated/資料種類/`） | 角色 | toy-text 筆數／家族數 | attributes-sft 筆數／家族數 |
+| --- | --- | --- | --- |
+| `train.jsonl` | 練習，允許更新模型 | 9／9 | 45／9 |
+| `validation.jsonl` | 留出（held-out）的新家族，用來比較、調整設定 | 1／1 | 5／1 |
+| `test.jsonl` | 最後檢查；選完設定再用 | 2／2 | 10／2 |
+
+數量來自預設 12 個家族的整組切分；每個 SFT 家族有五種問題。下面程式可在根目錄執行，列印三份筆數、家族數、檔案指紋和一筆原文，核對產物。這裡用 SHA-256 指紋作資料版本的實務核對，前後比較要保留這份資料：
+
+```python
+import json
+from pathlib import Path
+
+for kind in ("toy-text", "attributes-sft"):
+    directory = Path("data/generated") / kind
+    manifest = json.loads((directory / "manifest.json").read_text())
+    print(kind, "seed", manifest["seed"], "切分單位", manifest["split_unit"])
+    for split, stats in manifest["splits"].items():
+        print(split, "筆數", stats["records"], "家族", stats["families"], "sha256", stats["sha256"])
+        print((directory / f"{split}.jsonl").read_text().splitlines()[0])
+```
+
+接著只選文字或屬性問答一條路。先預測：訓練會增加教學答案的機率，但未教過家族的平均代價與生成答案不一定改善。為了取得真正的開始回答，先保存零次更新的模型；移除 `--train` 的 dry-run 不會存檔，`--steps 0` 也不是可用入口。先執行 `mkdir -p outputs checkpoints`，將下面程式存為 `outputs/save_start.py`，再執行 `.venv/bin/python outputs/save_start.py`：
+
+```python
+from tiny_perceptron.model import ModelConfig, TinyLM
+from tiny_perceptron.training import save_checkpoint, seed_everything
+
+seed_everything(42)
+model = TinyLM(ModelConfig(width=32, layers=1, heads=1, max_length=128))
+save_checkpoint(
+    "checkpoints/start.pt",
+    model,
+    step=0,
+    metadata={"seed": 42, "note": "untrained baseline"},
+)
+print("已保存起始模型；沒有求導或更新")
+```
+
+`ModelConfig` 記錄模型設定，`TinyLM` 依設定建立 CPU 模型，`save_checkpoint` 保存它的數字。`width=32`（CLI 寫作 `--width 32`）表示每個位置的特徵向量有 32 個數字，`layers=1`／`heads=1` 是一層、一個注意力頭，`max_length=128` 是一次最多 128 個編碼位置；零件背景見[4.5](chapters/04.md#4.5)。這個 checkpoint 沒有更新工具狀態，用來開始新階段，不用 `--resume`。
+
+文字路線先評估起點，再正式更新，最後用完全相同的留出檔與生成上限評估結束：
+
+```bash
+.venv/bin/python scripts/evaluate.py checkpoints/start.pt --data data/generated/toy-text/validation.jsonl --mode text --tokens 32 --device cpu --output outputs/text-before.json
+.venv/bin/python scripts/infer.py checkpoints/start.pt --prompt "color=" --tokens 32 --temperature 0 --cache --device cpu > outputs/text-prompt-before.txt
+.venv/bin/python scripts/train.py --task text --data data/generated/toy-text/train.jsonl --checkpoint checkpoints/start.pt --seed 42 --device cpu --train --steps 200 --output checkpoints/text.pt
+.venv/bin/python scripts/evaluate.py checkpoints/text.pt --data data/generated/toy-text/validation.jsonl --mode text --tokens 32 --device cpu --output outputs/text-after.json
+.venv/bin/python scripts/infer.py checkpoints/text.pt --prompt "color=" --tokens 32 --temperature 0 --cache --device cpu > outputs/text-prompt-after.txt
+```
+
+上面的200步是用小型CPU模型練流程的起點。我們已另用相同種類、種子42切出的9／1／2篇短文，完成一次更寬的兩層模型訓練：每位置64個特徵、一個注意力頭、最多128個位置，手寫注意力，共141,568個參數。這次在NVIDIA L4上更新600次，每批抽16篇，學習率固定0.003。下表才是這份完整實跑的成績，不能拿來當上面width32、一層、200步命令的預期數字。
+
+| 資料側：短文篇數／計分目標數 | 訓練前平均代價 | 600次更新後平均代價 |
+| --- | ---: | ---: |
+| 訓練：9篇／321個目標 | 5.79243 | 0.06352 |
+| 驗證：1篇／35個目標 | 5.73454 | 0.96282 |
+| 最後檢查：2篇／70個目標 | 5.74439 | 0.61395 |
+
+這批英文每個字母與標點各用一個UTF-8 byte表示，這次模型每次處理一個byte；各篇還計入最後的結束目標。訓練與留出代價都降低，說明模型不只收到梯度，也確實改變了猜法。但是驗證只有一篇，不能由這個數字說它已會一般文字任務。給它`color=blue;shape=circle;`，它生成`side=right.`，驗證原文卻以`side=left.`結尾。提示沒有提供左右線索，右邊可以是合法續寫，卻沒有重現這篇原文；[5.8](chapters/05.md#5.8)會拆清loss與生成各自在測什麼。
+
+要用自己的NVIDIA GPU與CUDA版PyTorch重跑這份600步實驗，執行：
+
+```bash
+.venv/bin/python -m scripts.course_experiments.run --experiment text_foundation --device cuda
+```
+
+完整報告保存於 `outputs/course-experiments/course-v1/text_foundation/result.json`，同目錄的 `model.pt` 是這份文字續寫模型，`start.pt` 是它零次更新的起點。報告還包含一次80步中途接續檢查，以及[5.13的四格預算比較](chapters/05.md#5.13)，所以整組耗時不是純600步訓練時間；讀法見[5.9](chapters/05.md#5.9)。[課程公開原始報告](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/course-experiments/results/text_foundation.json)可供核對數值；權重則由這個重跑命令在你的環境產生。
+
+看懂這個小世界後，可以換成故事與詩，不必沿用同一份權重一路訓練。我們為兩種材料各建立一個新的模型：同樣每位置64個特徵、兩層、一個注意力頭、128個位置與141,568個參數，種子42，在L4上各更新800次，每批16個文字窗口，學習率固定0.003。先取整篇、按合併空白後的完整內容指紋去重，再以約80%／10%／10%自行切分；近重複版本尚未聚成同一家族，這個限制見[5.12](chapters/05.md#5.12)。
+
+| 材料 | 訓練／驗證／最後檢查篇數 | 訓練代價：前→後 | 驗證代價：前→後 | 最後檢查代價：前→後 |
+| --- | --- | ---: | ---: | ---: |
+| TinyStories完整故事 | 409／51／52 | 5.76175→1.72200 | 5.76091→1.80083 | 5.75491→1.78880 |
+| 古典中文詩 | 292／36／37 | 5.70992→1.85955 | 5.71337→2.58325 | 5.71744→2.56432 |
+
+長篇材料會切成最多128個輸入位置的窗口，各窗口重新開始自己的前文；同一篇的所有窗口仍在同一側，每個下一byte目標只計一次，各篇最後再計一個結束目標。英文驗證與最後檢查分別有42,453與40,685個有效目標，中文則有6,707與8,314個，表中的留出代價用了這些完整分母。不同語言的文字、篇長與練習量都不同，不能把英文的較低數字當成它比中文更有能力的證據。
+
+報告另把總代價換成每個原文byte的bit數，稱為bits per byte、BPB，算法見[6.5](chapters/06.md#6.5)。這裡把結束目標的代價也放入分子，分母只數原文bytes；驗證結果英文為2.60117、中文為3.74695。它仍是各自這批材料的預測代價，沒有把故事與古詩變成同一張能力考卷。更直接的限制是實際續寫：英文仍會反覆接片語，中文仍會重複字，見[5.8](chapters/05.md#5.8)與[6.1](chapters/06.md#6.1)的原樣示例。
+
+想重做這一組，先取得兩個固定資料包，再用可執行CUDA的環境訓練：
+
+```bash
+.venv/bin/python scripts/fetch_training_assets.py --asset tinystories --asset chinese-poetry
+.venv/bin/python -m scripts.course_experiments.run --experiment real_text --device cuda
+```
+
+產物放在 `outputs/course-experiments/course-v1/real_text/`：`tinystories.pt`與`chinese-poetry.pt`是兩個不同模型，兩份`*-data/manifest.json`記錄各切分的篇數與指紋，`result.json`保存前後分數和生成。數值、資料來源與授權可以核對[本次公開完整報告](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/course-experiments/results/real_text.json)。這次只是在小批固定材料上確認更新與觀察限制，不能據此宣稱一般故事創作能力，也沒有評估現代中文或指令問答能力。
+
+同樣的兩包材料還可用來比較拆字方法，這次仍重新建立兩個匹配各自字表的模型。逐byte與512項BPE都用相同的短片段、相同抽題順序更新400次；篇章先分側，BPE規則只從訓練側學。[6.5](chapters/06.md#6.5)用實測圖說明每token平均代價與共同原文尺度為何會給出不同排名。重跑時沿用上面的資料包，執行：
+
+```bash
+.venv/bin/python -m scripts.course_experiments.run --experiment tokenizer --device cuda
+```
+
+`outputs/course-experiments/course-v1/tokenizer/`中的`byte256.pt`配`tokenizer-byte.json`，`bpe512.pt`配`tokenizer-bpe512.json`；BPE的普通內容編碼另遵守[6.6](chapters/06.md#6.6)的控制標記區分。不要把一份工具的ID交給另一份模型。想自行看BPE續寫，在推論命令明確加上匹配的JSON：
+
+```bash
+.venv/bin/python scripts/infer.py outputs/course-experiments/course-v1/tokenizer/bpe512.pt --tokenizer outputs/course-experiments/course-v1/tokenizer/tokenizer-bpe512.json --prompt "Once" --tokens 32 --temperature 0 --device cuda --json
+```
+
+工具會核對字表大小與模型記錄的JSON指紋，`--json`同時保存原始生成ID、結束與非法控制標記的核對，讀文字之外也能檢查完整序列。比較命令則已按正確配對訓練、評估並保存`result.json`；[公開完整報告](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/course-experiments/results/tokenizer.json)可核對還原、新題代價與實際生成。
+
+如果選屬性問答，從同一個未訓練的起點開始即可，不必先教文字：
+
+```bash
+.venv/bin/python scripts/evaluate.py checkpoints/start.pt --data data/generated/attributes-sft/validation.jsonl --mode sft --tokens 24 --device cpu --output outputs/attributes-before.json
+.venv/bin/python scripts/infer.py checkpoints/start.pt --chat --prompt "color=red;shape=square;pitch=low;shape?" --tokens 24 --temperature 0 --cache --device cpu > outputs/attributes-prompt-before.txt
+.venv/bin/python scripts/train.py --task sft --data data/generated/attributes-sft/train.jsonl --checkpoint checkpoints/start.pt --seed 42 --device cpu --train --steps 500 --output checkpoints/attributes.pt
+.venv/bin/python scripts/evaluate.py checkpoints/attributes.pt --data data/generated/attributes-sft/validation.jsonl --mode sft --tokens 24 --device cpu --output outputs/attributes-after.json
+.venv/bin/python scripts/infer.py checkpoints/attributes.pt --chat --prompt "color=red;shape=square;pitch=low;shape?" --tokens 24 --temperature 0 --cache --device cpu > outputs/attributes-prompt-after.txt
+```
+
+我們已另完成一組正式GPU屬性實驗，保持12個屬性家族整組切分：45題訓練、5題驗證、10題最後檢查。模型改用寬度64、兩層、141,568個參數，從零更新900次，每批16題，學習率0.003、種子42。驗證與最後檢查的有效回答目標是36與69個，含EOS；生成最多32個新byte／結構單位，每次取最高分候選，答案匹配直接核對原始ID，不讓解碼藏起控制標記。[7.12](chapters/07.md#7.12)列出全部留出成績與失敗示例，不把它當上面CPU、width32、500步命令的預期數字。
+
+這組也另做「先250次文字、再900次對話」支線，以及一個很小的UltraChat首輪片段測試；後者只用80次更新確認自然資料能經過同一通路，不能當成完整聊天能力，截取範圍見[7.10](chapters/07.md#7.10)。要完整重跑，先取這一包資料：
+
+```bash
+.venv/bin/python scripts/fetch_training_assets.py --asset ultrachat-sft
+.venv/bin/python -m scripts.course_experiments.run --experiment sft --device cuda
+```
+
+`outputs/course-experiments/course-v1/sft/model.pt`是900次直接對話訓練的基準，`pretrain.pt`與`pretrain-sft.pt`分別保存另一支線的文字階段與微調後模型；`start.pt`保存零更新起點。`dataset.json`與`data/manifest.json`保留三側完整題目、家族與指紋，`result.json`保存生成和代價。[公開完整報告](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/course-experiments/results/sft.json)中的`matches/records`是完整答案ID匹配的分子／分母，`eos_rate`另記是否主動結束，`nll`則按有效目標平均。這些欄名屬於完整課程實驗入口，下面單一`evaluate.py`命令的報告欄名則另列解釋。
+
+接著可以讓同一份屬性模型學新加法，或刻意改錯少量答案，觀察[7.14到7.16](chapters/07.md#7.14)的資料效應。先完成上面的完整`sft`實驗，讓預設依賴目錄中確實有它的`model.pt`，再執行：
+
+```bash
+.venv/bin/python -m scripts.course_experiments.run --experiment sft_ablation --device cuda
+```
+
+這組每支都重新載入同一份屬性基模：`b-only.pt`與`replay.pt`各更新500次，`clean.pt`與`noisy.pt`各更新300次，並保存各自完整留出生成。`outputs/course-experiments/course-v1/sft_ablation/result.json`與[公開報告](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/course-experiments/results/sft_ablation.json)可核對實測；`corruptions.json`明列四筆被改錯的答案。這組加法是從64道題按交換加數的家族切成49／8／7，沒有用完整相同的算式或交換版本跨側做新題。回放只匹配更新次數與batch筆數，錯標比較則另保持問題與有效目標數相同，兩種比較要按各自的預算理解。
+
+`--data` 指資料檔，`--task`／`--mode` 選訓練／評估任務；`--checkpoint` 載入剛保存的同一起點，`--train` 才更新，`--steps` 指總更新步數，`--output` 指保存位置。這些 200／500 步是待檢查的配方，本文沒有宣稱它們會收斂。`--chat` 為提示加上對話角色邊界；固定提示的理想回答是 `square`。這一題用來觀察變化，是否屬留出家族仍要核對資料，整體新題成績看 validation 報告。
+
+`--tokens` 是最多新生成的編碼單位數。此入口的文字單位是 UTF-8 byte，另有開始、結束與角色等特殊 ID，並不是人眼字數；見[6.7](chapters/06.md#6.7)。`--temperature 0` 每次選最高分候選，固定前後生成方式。`--cache` 重用前文的 Key／Value 計算，後續仍讀前文，概念見[16.2](chapters/16.md#16.2)；它不改變學習目標。評估入口使用相同的最高分生成方式，預設只取前20筆（`--limit`）；本節的1／5筆validation都會納入，較大資料則加`--limit all`，才會選取整份檔案。BPE模型也要加訓練時配對的`--tokenizer`，沿用上面的JSON指紋核對。
+
+`evaluate.py`寫出的完整JSON含逐題生成，終端摘要省略`samples`，因此要打開`--output`指定的檔案。下面另用CPU、`torch.manual_seed(42)`、`TinyLM(ModelConfig(width=32))`的全新模型做一次最小檢查，其餘設定採預設值，包括128格上下文。這不是上述保存檔的重測，也不是500步後成績；它只評估一筆`shape? → circle`、最多生成兩單位，摘錄如下：
+
+```json
+{"mean_token_nll":5.97386714390346,"effective_tokens":7,"exact_match":0.0,"completed_exact_match":0.0,"eos_rate":0.0,"samples":[{"row":0,"target":"circle","generated":"�\u0016","generated_ids":[143,30],"eos":false,"generation_status":"token_or_context_limit","exact_match":false,"completed_exact_match":false}]}
+```
+
+| 報告欄位 | 讀法與成功核對條件 |
+| --- | --- |
+| `mean_token_nll` | 有效位置的 `-log(正確答案機率)` 合計除以位置數，即平均 loss；須有限，較低較好。代價背景見[1.8](chapters/01.md#1.8) |
+| `effective_tokens` | 實際計分位置數，必須大於零；本例是 circle 的六個 byte 加回答結束，共 7 個。SFT 忽略問題位置；文字計分下一單位並包含結束目標 |
+| `exact_match`／`completed_exact_match` | SFT先核對原始回答內容ID是否與理想答案完全一致，不刪首尾空白，也不藏非法角色標記；只移除正常的最後EOS。`completed_exact_match`還要求這次生成有正常EOS，因此答對內容卻耗盡生成額度時，前者可為真、後者為假。文字模式兩項均為`null` |
+| `eos_rate` | 實際生成題目中主動以EOS結束的比例；正常停止與內容正確是兩件事。本例兩個單位都不是EOS |
+| `records_read`／`records_selected`／`metric_denominators` | 先看讀入與選取幾題，再看loss與生成各用了幾題、各指標的分母。未選取或跳過的題不算答對，不能把少數成功當全檔成績 |
+| `skipped` | 保留題號、階段、原因與來源。SFT問題或完整回答過長時可同時跳過loss與生成；文字仍能分窗計loss，但生成前文過長時可只跳過生成。兩種分母可能不同，要分開核對 |
+| `samples` | `row`是選取資料中從0起算的行號。SFT逐題對照`target`、`expected_content_ids`、`generated_ids`與兩項匹配；`eos`、`generation_status`說明停止原因，`invalid_special_tokens`保留非法控制ID。文字用`prompt`／`generated`看固定前文的接續 |
+| `data`／`declared_split` | 應指向相同 validation 檔與 `validation`；只改標籤不會替資料切分 |
+
+完整報告還有`checkpoint`（模型檔路徑）、`note`（範圍提醒）與`bpb_including_eos_boundary_targets`（文字代價換成每byte的bit，目標含EOS、不含BOS），分母是`raw_text_bytes`；本練習不用BPB比較。沒有有效位置時工具直接報錯；只看到程式結束不能替代上述核對。預設SFT validation的有效位置應是36、文字是35；若資料或切法不同，就依實際資料重算。下面比較程式先保留loss與內容匹配；判讀完整回答時，也要回到原報告並排看`completed_exact_match`與`eos_rate`。
+
+更新完成後，將下面程式存為 `outputs/compare_validation.py`，執行 `.venv/bin/python outputs/compare_validation.py`。選文字時將 `kind` 改成 `"text"`；程式讀實際報告、列印開始／結束成績與所有固定新題的生成，並保存比較：
+
+```python
+import json
+import math
+from pathlib import Path
+
+kind = "attributes"
+before = json.loads(Path(f"outputs/{kind}-before.json").read_text())
+after = json.loads(Path(f"outputs/{kind}-after.json").read_text())
+assert before["data"] == after["data"]
+assert before["declared_split"] == after["declared_split"] == "validation"
+assert before["effective_tokens"] == after["effective_tokens"] > 0
+assert before["skipped"] == after["skipped"] == []
+assert [s["row"] for s in before["samples"]] == [s["row"] for s in after["samples"]]
+comparison = {}
+for stage, report in (("before", before), ("after", after)):
+    assert math.isfinite(report["mean_token_nll"])
+    rate = report["exact_match"]
+    assert rate is None or 0 <= rate <= 1
+    comparison[stage] = {
+        key: report[key] for key in ("mean_token_nll", "effective_tokens", "exact_match", "samples", "skipped")
+    }
+text = json.dumps(comparison, ensure_ascii=False, indent=2)
+Path(f"outputs/{kind}-comparison.json").write_text(text + "\n")
+print(text)
+print("固定提示開始：", Path(f"outputs/{kind}-prompt-before.txt").read_text())
+print("固定提示結束：", Path(f"outputs/{kind}-prompt-after.txt").read_text())
+```
+
+練習要求說出同一組新題的平均代價如何變、SFT 完全匹配率如何變，再指出 `samples` 中有哪些答案真的改變。生成不好但代價下降也要記錄；兩項量測不是同一件事，不能只挑一個變好的回答。跳過表非空時先依原因處理，再重新比較，不能悄悄丟掉難題。
+
+訓練中斷可用 `--resume --checkpoint` 恢復模型、optimizer（優化器／更新工具）、步數與隨機狀態；本節示範文字與 SFT 的接續。optimizer 保存管理參數更新所需的歷史，例如最近梯度方向與大小，見[5.4](chapters/05.md#5.4)。`--steps` 是整段訓練的總步數，不是多加幾步；已完成 200 步後要求接續到 200 步會被拒絕。若要驗證中斷後仍走同一條更新路線，還必須保留原來的學習率與總步數計畫，不能把增加`--steps`當成不改排程。單用 `--checkpoint` 則只載入模型，建立新的更新工具與排程，正是本節從零更新起點開始的方式。
+

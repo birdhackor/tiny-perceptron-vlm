@@ -142,7 +142,7 @@ def test_supporting_id_preserves_formal_thirty_and_rejects_ambiguous_lookup(runn
     plan = json.loads(runner.PLAN_PATH.read_text())
     assert len(plan["sequence"]) == 30
     assert "flash_probe" not in {entry["id"] for entry in plan["sequence"]}
-    assert [entry["id"] for entry in plan["supporting_experiments"]] == ["flash_probe"]
+    assert [entry["id"] for entry in plan["supporting_experiments"]] == ["flash_probe", "tool_choice"]
     assert runner.experiment_spec("flash_probe")["kind"] == "mechanism_probe"
     with pytest.raises(ValueError, match="Unknown"):
         runner.experiment_spec("unknown")
@@ -225,7 +225,10 @@ def test_supporting_inventory_is_separate_and_cannot_raise_formal_counts(tmp_pat
     builder.main()
     report = json.loads((plan.parent / "progress.json").read_text())
     assert report["counts"] == {"experiments": 30, "complete_runs": 1, "sections": 0}
-    assert len(report["experiments"]) == 30 and len(report["supporting_evidence"]) == 1
+    assert len(report["experiments"]) == 30 and len(report["supporting_evidence"]) == 2
+    pending_router = report["supporting_evidence"][1]
+    assert pending_router["id"] == "tool_choice" and pending_router["status"] == "pending"
+    assert not pending_router["student_model_release"]
     supporting = report["supporting_evidence"][0]
     assert supporting["id"] == "flash_probe" and not supporting["student_model_release"]
     assert supporting["supported_routes"] == ["fp16", "bf16"] and "training_revision" not in supporting

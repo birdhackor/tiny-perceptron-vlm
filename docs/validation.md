@@ -2,6 +2,18 @@
 
 教材本機驗證環境為 Linux、Python 3.13.5、PyTorch 2.14.1 CPU；正式訓練另使用 Modal NVIDIA L4、Python 3.13.3、PyTorch 2.14.1+cu126。本頁保留不同階段的紀錄。最新逐組訓練、自然資料短訓、私有備份與學生權重證據見[正式實驗](course-experiments/README.md)及[當前進度](course-experiments/progress.json)；早期流程測試與改寫前的審閱不能代替本輪驗收。
 
+## 工具選擇補充與三輪審閱
+
+2026-10-04：在工具請求、執行、回填與停止之後，加入[B.5–B.8](../course/chapters/0B.md#B.5)。四節分開教任務策略、以短回答訓練選擇、檢查漏選與多選，以及能力／成本比較；附一張自製SVG、四份Notebook與可重跑的CPU實驗。B.1補齊COPY分組及seed／CUDA／L4解釋，B.4補上生成次數與新內容的過渡。
+
+[tool_choice實報](course-experiments/results/tool_choice.json)記錄143,616參數、900次更新、121,297個有效回答／EOS位置，訓練約35.55秒、完整實驗約39.41秒。原模板留出數字對96/96選對；新問法總分42/48，卻有6/6應用工具題全選ASK。這是固定策略的選卡元件，沒有與原工具模型合併評估；自評能力和成本取捨只用人工算例說明。此輪沒有新增Modal工作、費用預留或HF學生權重。
+
+依序完成逐節理解、另一批逐節技術核對、兩位不同讀者從前節順讀的銜接審閱。每輪問題修正後由原審閱者親讀回查，另獨立重查15節受目錄、實驗計畫及匯出程式變更影響的舊證據。三輪實際任務與報告指紋見[收尾紀錄](validation-artifacts/tool-choice-review-closure.json)；252節正文、圖、證據及25份導言的版本／身分核對見[全站核對](validation-artifacts/tool-choice-review-round.json)。這些是AI審閱，沒有把它當成真人學生測試。
+
+本機先以獨立CPU kernel執行B.4–B.8，最後文字修訂後再執行B.1與B.8；其他來源相同的執行副本重新比對後重用。核對範圍見[五節執行](validation-artifacts/tool-choice-notebooks.json)及[最後兩節補跑](validation-artifacts/tool-choice-final-kernels.json)，沒有把副本比對說成全數重跑。GitHub Pages發布流程會重新逐份執行全部226份Notebook。完整本機Linux測試342 passed、1 skipped，見[當次測試](validation-artifacts/tool-choice-tests.json)。
+
+最終本機網站260頁、226份下載與Colab入口全部通過連結檢查；[Chromium核對](validation-artifacts/tool-choice-browser/report.json)實際查看桌面1440px與手機390px視窗的B.1–B.8、C.1及SVG文字範圍。這是瀏覽器視窗測試，尚未做實體手機或Colab雲端kernel驗證。
+
 ## 本輪正式訓練與公開權重驗收
 
 2026-10-02：30組正式實驗全部完成，對應段落已依實測修改；另完成L4上的Flash Attention輸出／梯度、實際CUDA後端、時間與記憶體探針。[實驗清單](course-experiments/plan.json)逐項連到報告；支持範圍與失敗結果都保留，沒有以下載成功或低代價推論一般能力。

@@ -1,0 +1,74 @@
+Original URL: https://arxiv.org/pdf/1712.05877v1
+Accessed 2026-10-04; arXiv v1, 2017-12-15; actual PDF SHA-256 049f08b194f03bb401e96c841708da3b71ae0924261224bc34444ebdc41ff675
+Extracted with pdftotext -layout; section 2.1 Eq. (1), scale and zero-point
+
+  ficiently implementable on integer-arithmetic-only hard-                            bers (denoted r below, for “real value”). Our quantization
+  ware such as the Qualcomm Hexagon (sections 2.2, 2.3),                              scheme is implemented using integer-only arithmetic dur-
+  and we describe an efficient, accurate implementation on                            ing inference and floating-point arithmetic during training,
+  ARM NEON (Appendix B).                                                              with both implementations maintaining a high degree of
+                                                                                      correspondence with each other. We achieve this by first
+• We provide a quantized training framework (section 3)                               providing a mathematically rigorous definition of our quan-
+  co-designed with our quantized inference to minimize the                            tization scheme, and separately adopting this scheme for
+  loss of accuracy from quantization on real models.                                  both integer-arithmetic inference and floating-point train-
+                                                                                      ing.
+• We apply our frameworks to efficient classification and
+  detection systems based on MobileNets and provide                                       1 The quantization scheme described here is the one adopted in Tensor-
+
+  benchmark results on popular ARM CPUs (section 4)                                   Flow Lite [5] and we will refer to specific parts of its code to illustrate
+  that show significant improvements in the latency-vs-                               aspects discussed below.
+                                                                                          2 We had earlier described this quantization scheme in the documen-
+  accuracy tradeoffs for state-of-the-art MobileNet archi-                            tation of gemmlowp [18]. That page may still be useful as an alternate
+  tectures, demonstrated in ImageNet classification [3],                              treatment of some of the topics developed in this section, and for its self-
+  COCO object detection [23], and other tasks.                                        contained example code.
+
+   A basic requirement of our quantization scheme is that it                    computation, and how the latter can be designed to involve
+permits efficient implementation of all arithmetic using only                   only integer arithmetic even though the scale values S are
+integer arithmetic operations on the quantized values (we                       not integers.
+eschew implementations requiring lookup tables because                              Consider the multiplication of two square N × N ma-
+these tend to perform poorly compared to pure arithmetic                        trices of real numbers, r1 and r2 , with their product repre-
+on SIMD hardware). This is equivalent to requiring that the                     sented by r3 = r1 r2 . We denote the entries of each of these
+                                                                                                                    (i,j)
+quantization scheme be an affine mapping of integers q to                       matrices rα (α = 1, 2 or 3) as rα for 1 ⩽ i, j ⩽ N ,
+real numbers r, i.e. of the form                                                and the quantization parameters with which they are quan-
+                                                                                                                                         (i,j)
+                                                                                tized as (Sα , Zα ). We denote the quantized entries by qα .
+                             r = S(q − Z)                                (1)
+                                                                                Equation (1) then becomes:
+for some constants S and Z. Equation (1) is our quantiza-
+                                                                                                    rα(i,j) = Sα (qα(i,j) − Zα ).                         (2)
+tion scheme and the constants S and Z are our quantization
+parameters. Our quantization scheme uses a single set of                        From the definition of matrix multiplication, we have
+quantization parameters for all values within each activa-
+tions array and within each weights array; separate arrays                                                N
+                                                                                       (i,k)                           (i,j)              (j,k)
+                                                                                                          X
+use separate quantization parameters.                                            S3 (q3        − Z3 ) =         S1 (q1         − Z1 )S2 (q2       − Z2 ), (3)
+    For 8-bit quantization, q is quantized as an 8-bit integer                                            j=1
+(for B-bit quantization, q is quantized as an B-bit integer).
+Some arrays, typically bias vectors, are quantized as 32-bit                    which can be rewritten as
+integers, see section 2.4.                                                                                 N
+                                                                                      (i,k)                        (i,j)              (j,k)
+                                                                                                           X
+    The constant S (for “scale”) is an arbitrary positive real                       q3        = Z3 + M          (q1       − Z1 )(q2          − Z2 ),     (4)
+number. It is typically represented in software as a floating-                                             j=1
+point quantity, like the real values r. Section 2.2 describes
+methods for avoiding the representation of such floating-                       where the multiplier M is defined as
+point quantities in the inference workload.                                                                              S1 S2
+    The constant Z (for “zero-point”) is of the same type                                                   M :=               .                          (5)
+                                                                                                                          S3
+as quantized values q, and is in fact the quantized value q
+corresponding to the real value 0. This allows us to auto-                      In Equation (4), the only non-integer is the multiplier M .
+matically meet the requirement that the real value r = 0 be                     As a constant depending only on the quantization scales
+exactly representable by a quantized value. The motivation                      S1 , S2 , S3 , it can be computed offline. We empirically find
+for this requirement is that efficient implementation of neu-                   it to always be in the interval (0, 1), and can therefore ex-
+ral network operators often requires zero-padding of arrays                     press it in the normalized form
+around boundaries.
+    Our discussion so far is summarized in the following                                                    M = 2−n M0                                    (6)
+quantized buffer data structure3 , with one instance of such a
+buffer existing for each activations array and weights array                    where M0 is in the interval [0.5, 1) and n is a non-negative
+in a neural network. We use C++ syntax because it allows                        integer. The normalized multiplier M0 now lends itself well
+the unambiguous conveyance of types.                                            to being expressed as a fixed-point multiplier (e.g. int16 or
+                                                                                int32 depending on hardware capability). For example, if
+template<typename QType>                // e.g. QType=uint8                     int32 is used, the integer representing M0 is the int32 value
+struct QuantizedBuffer {
+  vector<QType> q;                      // the quantized values                 nearest to 231 M0 . Since M0 ⩾ 0.5, this value is always at

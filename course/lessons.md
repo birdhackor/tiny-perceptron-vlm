@@ -219,6 +219,10 @@
 | B.2 文字怎麼變成有效呼叫？ | [閱讀](../course/chapters/0B.md#B.2) | [開啟](../notebooks/0B/B.2.ipynb) |
 | B.3 工具結果怎麼回到對話？ | [閱讀](../course/chapters/0B.md#B.3) | [開啟](../notebooks/0B/B.3.ipynb) |
 | B.4 任務完成後怎麼停止？ | [閱讀](../course/chapters/0B.md#B.4) | [開啟](../notebooks/0B/B.4.ipynb) |
+| B.5 同樣有數字，何時需要計算器？ | [閱讀](../course/chapters/0B.md#B.5) | [開啟](../notebooks/0B/B.5.ipynb) |
+| B.6 模型如何學會選擇下一個動作？ | [閱讀](../course/chapters/0B.md#B.6) | [開啟](../notebooks/0B/B.6.ipynb) |
+| B.7 工具選擇怎樣才算可靠？ | [閱讀](../course/chapters/0B.md#B.7) | [開啟](../notebooks/0B/B.7.ipynb) |
+| B.8 依能力與成本，何時值得借助工具？ | [閱讀](../course/chapters/0B.md#B.8) | [開啟](../notebooks/0B/B.8.ipynb) |
 | C.1 寫出中間步驟能幫忙嗎？ | [閱讀](../course/chapters/0C.md#C.1) | [開啟](../notebooks/0C/C.1.ipynb) |
 | C.2 最後答對代表過程正確嗎？ | [閱讀](../course/chapters/0C.md#C.2) | [開啟](../notebooks/0C/C.2.ipynb) |
 | C.3 多試幾次能找到正確答案嗎？ | [閱讀](../course/chapters/0C.md#C.3) | [開啟](../notebooks/0C/C.3.ipynb) |

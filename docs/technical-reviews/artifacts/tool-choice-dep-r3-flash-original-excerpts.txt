@@ -1,0 +1,230 @@
+{
+  "url": "https://arxiv.org/pdf/2205.14135v2",
+  "accessed_on": "2026-10-04",
+  "version": "arXiv:2205.14135v2; 23 Jun 2022; PDF cover June 24, 2022",
+  "pdf_sha256": "ca7f9fda10b90fc05dd291a3accc85e9c1a4a860b99b31928dab03ed3fcb14e4",
+  "conversion": "pdftotext -layout",
+  "read_scope": "Abstract, introduction on pp. 1-2, sections 2.2, 3.1 with Algorithm 1/Theorem 1, and 3.2 with Theorem 2 on pp. 4-6. Snapshot retains abstract and sections 2.2-3.2; excludes unrelated paper results and block-sparse extension."
+}
+
+                                         FlashAttention: Fast and Memory-Efficient Exact Attention
+                                                          with IO-Awareness
+                                                 Tri Dao† , Daniel Y. Fu† , Stefano Ermon† , Atri Rudra‡ , and Christopher Ré†
+                                                               † Department of Computer Science, Stanford University
+                                               ‡ Department of Computer Science and Engineering, University at Buffalo, SUNY
+arXiv:2205.14135v2 [cs.LG] 23 Jun 2022
+
+
+
+
+                                                 {trid,danfu}@cs.stanford.edu, ermon@stanford.edu, atri@buffalo.edu,
+                                                                     chrismre@cs.stanford.edu
+
+                                                                                         June 24, 2022
+
+                                                                                            Abstract
+                                                  Transformers are slow and memory-hungry on long sequences, since the time and memory complexity
+                                              of self-attention are quadratic in sequence length. Approximate attention methods have attempted
+                                              to address this problem by trading off model quality to reduce the compute complexity, but often do
+                                              not achieve wall-clock speedup. We argue that a missing principle is making attention algorithms IO-
+                                              aware—accounting for reads and writes between levels of GPU memory. We propose FlashAttention,
+                                              an IO-aware exact attention algorithm that uses tiling to reduce the number of memory reads/writes
+                                              between GPU high bandwidth memory (HBM) and GPU on-chip SRAM. We analyze the IO complexity
+                                              of FlashAttention, showing that it requires fewer HBM accesses than standard attention, and is
+                                              optimal for a range of SRAM sizes. We also extend FlashAttention to block-sparse attention, yielding
+                                              an approximate attention algorithm that is faster than any existing approximate attention method.
+                                              FlashAttention trains Transformers faster than existing baselines: 15% end-to-end wall-clock speedup
+                                              on BERT-large (seq. length 512) compared to the MLPerf 1.1 training speed record, 3× speedup on
+                                              GPT-2 (seq. length 1K), and 2.4× speedup on long-range arena (seq. length 1K-4K). FlashAttention
+                                              and block-sparse FlashAttention enable longer context in Transformers, yielding higher quality models
+                                              (0.7 better perplexity on GPT-2 and 6.4 points of lift on long-document classification) and entirely new
+                                              capabilities: the first Transformers to achieve better-than-chance performance on the Path-X challenge
+                                              (seq. length 16K, 61.4% accuracy) and Path-256 (seq. length 64K, 63.1% accuracy).
+
+
+                                         
+2.2    Standard Attention Implementation
+Given input sequences Q, K, V ∈ R 𝑁 ×𝑑 where 𝑁 is the sequence length and 𝑑 is the head dimension, we want
+to compute the attention output O ∈ R 𝑁 ×𝑑 :
+
+                      S = QK> ∈ R 𝑁 ×𝑁 ,         P = softmax(S) ∈ R 𝑁 ×𝑁 ,         O = PV ∈ R 𝑁 ×𝑑 ,
+
+where softmax is applied row-wise.
+    Standard attention implementations materialize the matrices S and P to HBM, which takes 𝑂 (𝑁 2 ) memory.
+Often 𝑁  𝑑 (e.g., for GPT2, 𝑁 = 1024 and 𝑑 = 64). We describe the standard attention implementation
+in Algorithm 0. As some or most of the operations are memory-bound (e.g., softmax), the large number of
+memory accesses translates to slow wall-clock time.
+    This problem is exacerbated by other elementwise operations applied to the attention matrix, such as
+masking applied to S or dropout applied to P. As a result, there have been many attempts to fuse several
+elementwise operations, such as fusing masking with softmax [77].
+    In Section 3.2, we will show that the standard attention implementation performs HBM accesses quadratic
+in the sequence length 𝑁. We also compare the number of FLOPs and number of HBM accesses of standard
+attention and of our method (FlashAttention).
+
+Algorithm 0 Standard Attention Implementation
+Require: Matrices Q, K, V ∈ R 𝑁 ×𝑑 in HBM.
+ 1: Load Q, K by blocks from HBM, compute S = QK> , write S to HBM.
+ 2: Read S from HBM, compute P = softmax(S), write P to HBM.
+ 3: Load P and V by blocks from HBM, compute O = PV, write O to HBM.
+ 4: Return O.
+
+
+
+3     FlashAttention: Algorithm, Analysis, and Extensions
+We show how to compute exact attention with fewer HBM reads/writes and without storing large intermediate
+matrices for the backward pass. This yields an attention algorithm that is both memory efficient and faster in
+wall-clock time. We analyze its IO complexity, showing that our method requires much fewer HBM accesses
+compared to standard attention. We further show that FlashAttention can serve as a useful primitive by
+extending it to handle block-sparse attention.
+   We focus here on the forward pass for ease of exposition; Appendix B contains details for the backward.
+
+3.1    An Efficient Attention Algorithm With Tiling and Recomputation
+Given the inputs Q, K, V ∈ R 𝑁 ×𝑑 in HBM, we aim to compute the attention output O ∈ R 𝑁 ×𝑑 and write it to
+HBM. Our goal is to reduce the amount of HBM accesses (to sub-quadratic in 𝑁).
+    We apply two established techniques (tiling, recomputation) to overcome the technical challenge of
+computing exact attention in sub-quadratic HBM accesses. We describe this in Algorithm 1. The main idea
+is that we split the inputs Q, K, V into blocks, load them from slow HBM to fast SRAM, then compute the
+attention output with respect to those blocks. By scaling the output of each block by the right normalization
+factor before adding them up, we get the correct result at the end.
+    Tiling. We compute attention by blocks. Softmax couples columns of K, so we decompose the large
+softmax with scaling [51, 60, 66]. For numerical stability, the softmax of vector 𝑥 ∈ R 𝐵 is computed as:
+                                                                                   ∑︁                              𝑓 (𝑥)
+                          𝑓 (𝑥) := 𝑒 𝑥1 −𝑚( 𝑥)           𝑒 𝑥𝐵 −𝑚( 𝑥) ,
+                                                                   
+      𝑚(𝑥) := max 𝑥 𝑖 ,                            ...                   ℓ(𝑥) :=        𝑓 (𝑥)𝑖 ,   softmax(𝑥) :=         .
+                𝑖
+                                                                                    𝑖
+                                                                                                                   ℓ(𝑥)
+
+
+
+
+                                                             4
+For vectors 𝑥 ( 1) , 𝑥 ( 2) ∈ R 𝐵 , we can decompose the softmax of the concatenated 𝑥 = 𝑥 ( 1) 𝑥 ( 2) ∈ R2 𝐵 as:
+                                                                                                          
+                                                                    h                                                     i
+                                                                           ( 1)                       ( 2)
+    𝑚(𝑥) = 𝑚( 𝑥 ( 1) 𝑥 ( 2) ) = max(𝑚(𝑥 ( 1) ), 𝑚(𝑥 ( 2) )), 𝑓 (𝑥) = 𝑒 𝑚( 𝑥 )−𝑚( 𝑥) 𝑓 (𝑥 ( 1) ) 𝑒 𝑚( 𝑥 )−𝑚( 𝑥) 𝑓 (𝑥 ( 2) ) ,
+                             
+
+                                        ( 1)                        ( 2)                                  𝑓 (𝑥)
+      ℓ(𝑥) = ℓ( 𝑥 ( 1) 𝑥 ( 2) ) = 𝑒 𝑚( 𝑥 )−𝑚( 𝑥) ℓ(𝑥 ( 1) ) + 𝑒 𝑚( 𝑥 )−𝑚( 𝑥) ℓ(𝑥 ( 2) ),
+                            
+                                                                                           softmax(𝑥) =         .
+                                                                                                          ℓ(𝑥)
+Therefore if we keep track of some extra statistics (𝑚(𝑥), ℓ(𝑥)), we can compute softmax one block at a time.2
+We thus split the inputs Q, K, V into blocks (Algorithm 1 line 3), compute the softmax values along with
+extra statistics (Algorithm 1 line 10), and combine the results (Algorithm 1 line 12).
+    Recomputation. One of our goals is to not store 𝑂 (𝑁 2 ) intermediate values for the backward pass. The
+backward pass typically requires the matrices S, P ∈ R 𝑁 ×𝑁 to compute the gradients with respect to Q, K, V.
+However, by storing the output O and the softmax normalization statistics (𝑚, ℓ), we can recompute the
+attention matrix S and P easily in the backward pass from blocks of Q, K, V in SRAM. This can be seen as a
+form of selective gradient checkpointing [10, 34]. While gradient checkpointing has been suggested to reduce
+the maximum amount of memory required [66], all implementations (that we know off) have to trade speed
+for memory. In contrast, even with more FLOPs, our recomputation speeds up the backward pass due to
+reduced HBM accesses (Fig. 2). The full backward pass description is in Appendix B.
+    Implementation details: Kernel fusion. Tiling enables us to implement our algorithm in one
+CUDA kernel, loading input from HBM, performing all the computation steps (matrix multiply, softmax,
+optionally masking and dropout, matrix multiply), then write the result back to HBM (masking and dropout
+in Appendix B). This avoids repeatedly reading and writing of inputs and outputs from and to HBM.
+Algorithm 1 FlashAttention
+Require: Matrices Q, K, V ∈ R 𝑁 ×𝑑 in HBM,          on-chip       SRAM of size 𝑀.
+ 1: Set block sizes 𝐵 𝑐 = 4𝑀𝑑 , 𝐵𝑟 = min 4𝑀𝑑 , 𝑑 .
+                                                              
+
+ 2: Initialize O = (0) 𝑁 ×𝑑l ∈ mR 𝑁 ×𝑑 , ℓ = (0) 𝑁 ∈ R 𝑁 , 𝑚 = (−∞) 𝑁 ∈ R 𝑁 in HBM.                                       l m
+ 3: Divide Q into 𝑇𝑟 = 𝐵𝑁 blocks Q1 , . . . , Q𝑇𝑟 of size 𝐵𝑟 × 𝑑 each, and divide K, V in to 𝑇𝑐 = 𝐵𝑁 blocks
+                                 𝑟                                                                                          𝑐
+    K1 , . . . , K𝑇𝑐 and V1 , . . . , V𝑇𝑐 , of size 𝐵𝑐 × 𝑑 each.
+ 4: Divide O into 𝑇𝑟 blocks O𝑖 , . . . , O𝑇𝑟 of size 𝐵𝑟 × 𝑑 each, divide ℓ into 𝑇𝑟 blocks ℓ𝑖 , . . . , ℓ𝑇𝑟 of size 𝐵𝑟 each,
+    divide 𝑚 into 𝑇𝑟 blocks 𝑚 1 , . . . , 𝑚𝑇𝑟 of size 𝐵𝑟 each.
+ 5: for 1 ≤ 𝑗 ≤ 𝑇𝑐 do
+ 6:   Load K 𝑗 , V 𝑗 from HBM to on-chip SRAM.
+ 7:   for 1 ≤ 𝑖 ≤ 𝑇𝑟 do
+ 8:       Load Q𝑖 , O𝑖 , ℓ𝑖 , 𝑚 𝑖 from HBM to on-chip SRAM.
+ 9:       On chip, compute S𝑖 𝑗 = Q𝑖 K𝑇𝑗 ∈ R 𝐵𝑟 ×𝐵𝑐 .
+10:       On chip, compute 𝑚          ˜ 𝑖 𝑗 = rowmax(S𝑖 𝑗 ) ∈ R 𝐵𝑟 , P̃𝑖 𝑗 = exp(S𝑖 𝑗 − 𝑚    ˜ 𝑖 𝑗 ) ∈ R 𝐵𝑟 ×𝐵𝑐 (pointwise), ℓ˜𝑖 𝑗 =
+          rowsum( P̃𝑖 𝑗 ) ∈ R . 𝐵 𝑟
+                                                                                       new               new
+11:       On chip, compute 𝑚 𝑖new = max(𝑚 𝑖 , 𝑚        ˜ 𝑖 𝑗 ) ∈ R 𝐵𝑟 , ℓ𝑖new = 𝑒 𝑚𝑖 −𝑚𝑖 ℓ𝑖 + 𝑒 𝑚˜ 𝑖 𝑗 −𝑚𝑖 ℓ˜𝑖 𝑗 ∈ R 𝐵𝑟 .
+                                                               new             new
+12:       Write O𝑖 ← diag(ℓ𝑖new ) −1 (diag(ℓ𝑖 )𝑒 𝑚𝑖 −𝑚𝑖 O𝑖 + 𝑒 𝑚˜ 𝑖 𝑗 −𝑚𝑖 P̃𝑖 𝑗 V 𝑗 ) to HBM.
+13:       Write ℓ𝑖 ← ℓ𝑖new , 𝑚 𝑖 ← 𝑚 𝑖new to HBM.
+14:   end for
+15: end for
+16: Return O.
+
+    We show FlashAttention’s correctness, runtime, and memory requirement (proof in Appendix C).
+Theorem 1. Algorithm 1 returns O = softmax(QK> )V with 𝑂 (𝑁 2 𝑑) FLOPs and requires 𝑂 (𝑁) additional
+memory beyond inputs and output.
+
+3.2      Analysis: IO Complexity of FlashAttention
+We analyze the IO complexity of FlashAttention, showing significant reduction in HBM accesses compared
+to standard attention. We also provide a lower bound, proving that no exact attention algorithm can
+   2 This style of aggregation is called algebraic aggregation [33].
+
+
+
+
+                                                                      5
+                                                                                  Effect of Block Size                                                           Sparsity Speedup
+
+
+
+
+                                                       HBM Accesses (GB)
+
+
+
+
+                                                                                                                                          Fwd + Bwd (ms)
+                                                                                                                       Fwd Runtime (ms)
+                                                                           6                                                                                         Dense
+             Attention     Standard   FlashAttention                                                               6                                       150   FlashAttention
+              GFLOPs         66.6          75.2                            4                                                                                                          rse
+                                                                                                   Runtime                                                 100                     pa on
+           HBM R/W (GB)      40.3           4.4                                    H                                                                                          c k-S enti
+                                                                           2    Acc BM                                                                                      o
+                                                                                                                                                                          Bl hAt    t
+                                                                                   ess                             2                                       50                  s
+            Runtime (ms)     41.7           7.3                                        es                                                                                  Fla
+                                                                               64 128        256             512                                                 20            60
+                                                                                            Block Size                                                           % Non-Zero Blocks
+
+Figure 2: Left: Forward + backward runtime of standard attention and FlashAttention for GPT-2 medium
+(seq. length 1024, head dim. 64, 16 heads, batch size 64) on A100 GPU. HBM access is the primary factor affecting
+runtime. Middle: Forward runtime of FlashAttention (seq. length 1024, head dim. 64, 16 heads, batch size 64) on
+A100 GPU. Fewer HBM accesses result in faster runtime, up to a point. Right: The runtime (for seq. length 4K) of
+block-sparse FlashAttention is faster than FlashAttention by a factor proportional to the sparsity.
+
+asymptotically improve on HBM accesses over all SRAM sizes. Proofs are in Appendix C.
+Theorem 2. Let 𝑁 be the sequence length, 𝑑 be the head dimension, and 𝑀 be size of SRAM with 𝑑 ≤ 𝑀 ≤ 𝑁 𝑑.
+Standard attention (Algorithm 0) requires Θ(𝑁 𝑑 + 𝑁 2 ) HBM accesses, while FlashAttention (Algorithm 1)
+requires Θ(𝑁 2 𝑑 2 𝑀 −1 ) HBM accesses.
+   For typical values of 𝑑 (64-128) and 𝑀 (around 100KB), 𝑑 2 is many times smaller than 𝑀, and thus
+FlashAttention requires many times fewer HBM accesses than standard implementation. This leads to
+both faster execution and lower memory footprint, which we validate in Section 4.3.
+   The main idea of the proof is that given the SRAM size of 𝑀, we can load blocks of K, V of size Θ(𝑀) each
+(Algorithm 1 line 6). For each block of K and V, we iterate over all blocks of Q (Algorithm 1 line 8) to compute
+the intermediate values, resulting in Θ(𝑁 𝑑𝑀 −1 ) passes over Q. Each pass loads Θ(𝑁 𝑑) elements, which
+amounts to Θ(𝑁 2 𝑑 2 𝑀 −1 ) HBM accesses. We similarly prove that the backward pass of standard attention
+requires Θ(𝑁 𝑑 + 𝑁 2 ) HBM accesses while the backward pass of FlashAttention requires Θ(𝑁 2 𝑑 2 𝑀 −1 )
+HBM accesses (Appendix B).
+   We prove a lower-bound: one cannot asymptotically improve on the number of HBM accesses for all
+values of 𝑀 (the SRAM size) when computing exact attention.
+Proposition 3. Let 𝑁 be the sequence length, 𝑑 be the head dimension, and 𝑀 be size of SRAM with
+𝑑 ≤ 𝑀 ≤ 𝑁 𝑑. There does not exist an algorithm to compute exact attention with 𝑜(𝑁 2 𝑑 2 𝑀 −1 ) HBM accesses
+for all 𝑀 in the range [𝑑, 𝑁 𝑑].
+    The proof relies on the fact that for 𝑀 = Θ(𝑁 𝑑) any algorithm must perform Ω(𝑁 2 𝑑 2 𝑀 −1 ) = Ω(𝑁 𝑑)
+HBM accesses. This type of lower bound over a subrange of 𝑀 is common in the streaming algorithms
+literature [88]. We leave proving parameterized complexity [27] lower bounds in terms of 𝑀 as exciting future
+work.
+    We validate that the number of HBM accesses is the main determining factor of attention run-time.
+In Fig. 2 (left), we see that even though FlashAttention has higher FLOP count compared to standard
+attention (due to recomputation in the backward pass), it has much fewer HBM accesses, resulting in much
+faster runtime. In Fig. 2 (middle), we vary the block size 𝐵𝑐 of FlashAttention, which results in different
+amounts of HBM accesses, and measure the runtime of the forward pass. As block size increases, the number
+of HBM accesses decreases (as we make fewer passes over the input), and runtime decreases. For large enough
+block size (beyond 256), the runtime is then bottlenecked by other factors (e.g., arithmetic operations).
+Moreover, larger block size will not fit into the small SRAM size.
+

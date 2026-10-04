@@ -1,0 +1,63 @@
+diff --git a/scripts/course_experiments/compression.py b/scripts/course_experiments/compression.py
+index e9a90cc..200c022 100644
+--- a/scripts/course_experiments/compression.py
++++ b/scripts/course_experiments/compression.py
+@@ -1003,9 +1003,16 @@ def run_multimodal_distillation(ctx):
+         if teacher_tokens != 16:
+             raise ValueError("本課程對比要求教師 16 個視覺 tokens")
+         parts, data = _dataset(ctx, identifier)
++        teacher_task = provenance["metadata"].get("task")
++        if teacher_task not in ("vision", "joint") or any(
++            record["modality"] != teacher_task for records in parts.values() for record in records
++        ):
++            raise ValueError("教師的原始 task 必須明確且與蒸餾資料一致")
+         teacher.eval().requires_grad_(False)
+         frozen_hash = _parameter_hash(teacher)
+-        teacher_path = _save_float(ctx, teacher, f"{identifier}-teacher", provenance["steps"], provenance)
++        teacher_path = _save_float(
++            ctx, teacher, f"{identifier}-teacher", provenance["steps"], {**provenance, "task": teacher_task}
++        )
+         teacher_eval = {split: evaluate_modal(teacher, parts[split], ctx) for split in ("validation", "test")}
+         cache, seconds = _cache_modal(ctx, teacher, parts["train"])
+         cache_path = Path(ctx.output) / f"{identifier}-teacher-answer-logits.pt"
+diff --git a/scripts/course_experiments/run.py b/scripts/course_experiments/run.py
+index 23acf47..311e3a8 100644
+--- a/scripts/course_experiments/run.py
++++ b/scripts/course_experiments/run.py
+@@ -16,7 +16,8 @@ PLAN_PATH = ROOT / "docs/course-experiments/plan.json"
+ 
+ def experiment_spec(experiment_id):
+     plan = json.loads(PLAN_PATH.read_text(encoding="utf-8"))
+-    matches = [item for item in plan["sequence"] if item["id"] == experiment_id]
++    specs = plan["sequence"] + plan.get("supporting_experiments", [])
++    matches = [item for item in specs if item["id"] == experiment_id]
+     if len(matches) != 1:
+         raise ValueError(f"Unknown experiment: {experiment_id}")
+     return matches[0]
+@@ -129,9 +130,11 @@ def execute(experiment_id, device, output, dependencies, assets, revision=None,
+         "step_scale": step_scale,
+         "evidence_status": (
+             "interface_smoke_only"
+-            if step_scale < 1 or (spec["module"] == "modalities" and device == "cpu")
++            if step_scale < 1
++            or (spec["module"] == "modalities" and device == "cpu")
++            or (spec.get("kind") == "mechanism_probe" and device == "cpu")
+             else "incomplete_run"
+-            if unfinished
++            if unfinished or (spec.get("kind") == "mechanism_probe" and results.get("schedule_completed") is False)
+             else "complete_run"
+         ),
+         "unfinished_schedules": unfinished,
+@@ -150,6 +153,12 @@ def execute(experiment_id, device, output, dependencies, assets, revision=None,
+         "code_sha256": code_hashes,
+         "public_exports": [],
+     }
++    if spec.get("kind") == "mechanism_probe":
++        result["experiment_kind"] = "mechanism_probe"
++        result["timing_scope"] = (
++            "Fixed-QKV component verification, profiler, synchronized measurements and local input fixture save; "
++            "no model training or quality evaluation. Excludes image build, startup and HF uploads."
++        )
+     write_json(output / "result.json", result)
+     return result
+ 
