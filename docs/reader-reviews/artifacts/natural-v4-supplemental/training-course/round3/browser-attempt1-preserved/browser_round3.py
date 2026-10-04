@@ -1,0 +1,38 @@
+import json,hashlib,math
+from pathlib import Path
+from playwright.sync_api import sync_playwright
+p=Path('docs/reader-reviews/artifacts/natural-v4-supplemental/training-course');q=p/'round3';base='http://127.0.0.1:8781/';build=Path('outputs/site-reader-executed-v4-sft');h=lambda x:hashlib.sha256(x).hexdigest()
+r={'reviewer_task':'/root/v4_review_coordinator/reader_whole_training_course','round':3,'real_browser':'existing .venv Playwright Chromium','executable_path':'/usr/bin/chromium','reported_literal_source_revision':'0789636 (coordinatorprovided; no Git inspected)','base':base,'training':{},'toc_clicks':[],'prerequisites':[],'guides':[],'navigation':[]}
+def preserve(response,name):
+ raw=response.body();(q/(name+'.http-response.html')).write_bytes(raw);target=build/(name+'.html');local=target.read_bytes();return {'status':response.status,'url':response.url,'http_snapshot':name+'.http-response.html','bytes':len(raw),'http_sha256':h(raw),'local_build':str(target),'local_sha256':h(local),'http_local_exact_byte_match':raw==local}
+with sync_playwright() as w:
+ b=w.chromium.launch(executable_path='/usr/bin/chromium',headless=True,args=['--no-sandbox']);page=b.new_page(viewport={'width':1440,'height':2700},device_scale_factor=1)
+ response=page.goto(base+'training.html#T.4',wait_until='networkidle');r['training']['HTTP']=preserve(response,'training');article=page.locator('article');txt=article.inner_text();(q/'training.rendered-visible-article.txt').write_text(txt);dom=page.content();(q/'training.rendered-dom.html').write_text(dom)
+ old=(p/'round2/training.rendered-visible-article.txt').read_text();heading4='把文字訓練和對話練習分開看¶';heading5='把風格、指令遵循與安全拆成不同目標¶';before,newtail=txt.split(heading4,1);new4,after=newtail.split(heading5,1);ob,ot=old.split(heading4,1);o4,oa=ot.split(heading5,1);(q/'T4.rendered-visible-complete.txt').write_text(heading4+new4)
+ r['training'].update({'requested_url':base+'training.html#T.4','actual_url':page.url,'h1':article.locator('h1').all_inner_texts(),'article_visible_text_sha256':h(txt.encode()),'rendered_DOM_sha256':h(dom.encode()),'paragraphs':article.locator('p').count(),'tables':article.locator('table').count(),'code_blocks':article.locator('pre').count(),'SVG_images':article.locator('img[src$=".svg"]').count(),'outside_T4_before_exact_visible_text_match_round2':before==ob,'outside_T4_after_exact_visible_text_match_round2':after==oa,'T4_exact_visible_text_match_round2':new4==o4,'T4_visible_sha256':h((heading4+new4).encode()),'CPU_output_nodes':article.locator('[class*="output"]').count(),'T4_screens':[]})
+ start=article.locator('[id="T.4"]').bounding_box();end=article.locator('[id="T.5"]').bounding_box();top=start['y']+page.evaluate('window.scrollY');length=end['y']-start['y'];bounds=article.bounding_box();r['training']['T4_height']=length
+ for n,offset in enumerate(range(0,math.ceil(length),2400),1):
+  page.evaluate('(y)=>window.scrollTo(0,y)',top+offset-96);page.wait_for_timeout(100);fn=f'T4-tile-{n:02}.png';page.screenshot(path=str(q/fn),clip={'x':bounds['x'],'y':96,'width':bounds['width'],'height':2600});r['training']['T4_screens'].append({'order':n,'offset':offset,'screenshot':fn,'scroll_y':page.evaluate('window.scrollY')})
+ page.set_viewport_size({'width':1440,'height':1100})
+ for i in range(1,12):
+  link=page.locator(f'a[href$="#T.{i}"]').filter(visible=True).first;label=link.inner_text();href=link.get_attribute('href');link.click();page.wait_for_timeout(120);target=article.locator(f'[id="T.{i}"]');r['toc_clicks'].append({'id':f'T.{i}','visible_label':label,'href':href,'actual_destination':page.url,'heading':target.inner_text()})
+ page.locator('a[href$="#T.4"]').filter(visible=True).first.click();page.wait_for_timeout(100);page.screenshot(path=str(q/'T4-heading-TOC.png'))
+ for name,label in [('7.1','7.1的對話格式'),('7.3','7.3的回答位置'),('7.11','7.11的接續')]:
+  page.goto(base+'training.html#T.4',wait_until='networkidle');link=page.locator('article a').filter(has_text=label).first;link.scroll_into_view_if_needed();labelactual=link.inner_text();href=link.get_attribute('href')
+  with page.expect_navigation(wait_until='networkidle') as result:link.click()
+  response=result.value;http=preserve(response,name);a=page.locator('article');v=a.inner_text();(q/(name+'.rendered-visible-article.txt')).write_text(v);(q/(name+'.rendered-dom.html')).write_text(page.content());page.screenshot(path=str(q/(name+'.png')),full_page=True)
+  outputs=a.locator('[class*="output"]').evaluate_all('(els)=>els.map(e=>({class:e.className,text:e.innerText}))');r['prerequisites'].append({'from':base+'training.html#T.4','visible_label':labelactual,'href':href,'actual_destination':page.url,'h1':a.locator('h1').all_inner_texts(),'HTTP':http,'visible_text_sha256':h(v.encode()),'visible_CPU_output_nodes':outputs,'screenshot':name+'.png','scope':'complete necessary subsection article with actual root-build CPU output; source subsection reread separately'})
+ for name,label in [('natural-v4-student','操作指引'),('natural-v4-data','資料與來源'),('natural-v4-training','自行重訓')]:
+  page.goto(base+'training.html',wait_until='networkidle');page.get_by_role('navigation',name='標籤頁').get_by_role('link',name='教材',exact=True).click();page.wait_for_load_state('networkidle');page.locator('label[for="__nav_3_20"]').filter(has_text='第 20 章').first.click();link=page.locator('nav a[href$="'+name+'.html"]').filter(visible=True).first;link.scroll_into_view_if_needed();href=link.get_attribute('href');actual_label=link.inner_text()
+  with page.expect_navigation(wait_until='networkidle') as result:link.click()
+  response=result.value;http=preserve(response,name);v=page.locator('article').inner_text();opening=v.split('1.')[0];(q/(name+'.landing-visible-opening.txt')).write_text(opening);oldguide=next(e for e in json.loads((p/'round2/browser-receipt.json').read_text())['guides'] if e['visible_label']==label);r['guides'].append({'visible_label':actual_label,'href':href,'destination':page.url,'h1':page.locator('article h1').all_inner_texts(),'opening':opening,'opening_exact_match_round2':opening==oldguide['opening'],'HTTP':http,'scope':'complete landing opening before numbered1; no full guide read claimed','prior_own_landing_view_evidence':str(p/'round2'/oldguide['screenshot'])})
+ page.goto(base+'training.html',wait_until='networkidle');link=page.get_by_role('navigation',name='標籤頁').get_by_role('link',name='開始閱讀',exact=True)
+ with page.expect_navigation(wait_until='networkidle') as result:link.click()
+ r['navigation'].append({'from':base+'training.html','visible_label':'開始閱讀','destination':page.url,'h1':page.locator('article h1').all_inner_texts(),'HTTP':preserve(result.value,'course')})
+ link=page.locator('nav a[href$="training.html"]').filter(visible=True).first;link.click();page.wait_for_load_state('networkidle');r['navigation'].append({'from':base+'course.html','visible_label':'訓練操作','destination':page.url,'h1':page.locator('article h1').all_inner_texts()})
+ for css,name in [('.md-footer__link--prev','glossary'),('.md-footer__link--next','chapter-01')]:
+  page.goto(base+'training.html',wait_until='networkidle');link=page.locator(css);link.scroll_into_view_if_needed();label=link.inner_text();href=link.get_attribute('href')
+  with page.expect_navigation(wait_until='networkidle') as result:link.click()
+  r['navigation'].append({'from':base+'training.html','visible_label':label,'href':href,'destination':page.url,'h1':page.locator('article h1').all_inner_texts(),'HTTP':preserve(result.value,name)})
+ b.close()
+(q/'browser-receipt.json').write_text(json.dumps(r,ensure_ascii=False,indent=2)+'\n');print(json.dumps(r,ensure_ascii=False,indent=2))

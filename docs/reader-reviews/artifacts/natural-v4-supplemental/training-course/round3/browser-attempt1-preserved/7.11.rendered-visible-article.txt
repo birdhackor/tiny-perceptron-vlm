@@ -1,0 +1,42 @@
+7.11 預訓練模型怎麼學會對話？¶
+
+預訓練讓模型從一般文字學續寫，SFT則繼續用正確對話示範，讓assistant邊界後出現合適回答。架構仍是 4.6 的TinyLM，目標仍是交叉熵；改變的是資料分佈、角色前文與哪些答案計入代價。只把prompt加一句「請回答」，沒有更新參數，不屬於這個訓練過程。
+
+7.1 已建立對話表示，7.3 已選有效回答目標，現在將兩筆問答組batch，按 7.7 的valid提供讀取許可，再把代價傳回參數。本節先確認數據到梯度的接口；研究微調時，要明確載入已保存的基模。也可以刻意從隨機起點只用對話示範訓練，作為另一條基準，兩種起點應分開記錄。
+
+import torch
+from tiny_perceptron.data import toy_conversations, render_chat, pad_batch
+from tiny_perceptron.model import TinyLM, ModelConfig, masked_loss
+
+torch.manual_seed(42)
+examples = [render_chat(messages) for messages in toy_conversations()[:2]]
+x, y, valid = pad_batch(examples)
+model = TinyLM(ModelConfig(width=8))
+loss = masked_loss(model(x, valid=valid)["logits"], y)
+loss.backward()
+print("batch形狀", x.shape, "有效答案", (y != -100).sum().item())
+print("問答接口代價", loss.item())
+
+
+實際執行結果 · CPU
+
+batch形狀 torch.Size([2, 10]) 有效答案 4
+問答接口代價 5.337442874908447
+
+
+toy_conversations 是專案的合成加法小世界，前兩筆問題0+0與0+1、回答0與1，ASCII答案各一byte加EOS，所以有效目標共4。pad_batch 回傳X、Y與有效輸入表，模型處理兩筆每筆10位置，輸出每位置264個byte/結構候選。最後loss為正，backward有梯度，說明串接成功；這段沒有optimizer.step，尚未進行新訓練。
+
+真正微調要加載基模checkpoint與匹配tokenizer，恢復需要的訓練狀態，再用問答資料更新。checkpoint契約見 5.7，腳本操作見訓練配方。例如以 --task sft --checkpoint checkpoints/text.pt --train 選擇問答任務並啓用更新，步數與資料來源需按預算記錄。不是隻更換任務名字就自動擁有問答能力。
+
+微調前後要用固定題與生成設置，分別記錄回答內容、格式與舊能力，不能拿初始隨機模型的一次loss和新模型不同問題的回答直接比較。SFT可能讓已有知識更容易被調動，也會把錯誤示範學進去；7.14 將檢查錯答案如何影響代價。
+
+本例不要求GPU或下載預訓練權重，先把小CPU的資料接口練好。進一步長訓練是同一路線上的更多更新，不需要重新定義shift、mask或字表。若舊模型tokenizer與當前數據ID不同，應先解決映射，不能靠訓練希望它自己理解新編號。
+
+我們已實跑兩條獨立路線。第一條從隨機模型開始，只用45筆屬性問答更新900次；第二條先把這45筆的問題與答案接成文字、練250次續寫，保存後再以對話角色與回答遮罩微調900次。第二條並沒有沿用前章的故事模型，也沒有先得到廣泛知識；它只在同一批小世界材料上多做了一個文字階段。兩條對話階段都用同樣寬度64、兩層、種子42、每批16筆與學習率0.003，最後用同一組留出題比較，見7.12。因為第二條多了250次文字更新，成績差異不能全當成「預訓練形式本身」的因果效果；要隔離它，還需另外匹配總訓練預算。
+
+練習複製其中一筆消息，把assistant答案0改成3，再render並印有效目標ID。先預測原0的byte48加8=56變成3的51加8=59，EOS仍2；其他角色與問題不變。核對後恢復正確答案，避免把演示錯誤當正式訓練資料。
+
+在 Colab 動手做 ↗
+下載本節 .ipynb
+
+要試做本節練習，可開啟 Colab；閱讀與練習使用同一份內容。操作步驟見暖身 W.1，小實驗使用 CPU 即可。

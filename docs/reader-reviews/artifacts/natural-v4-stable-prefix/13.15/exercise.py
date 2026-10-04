@@ -1,0 +1,39 @@
+import copy
+import torch
+from tiny_perceptron.posttraining import (
+    FiniteResponsePolicy,
+    FiniteRewardModel,
+    FiniteValueModel,
+    bandit_advantage,
+    exact_kl,
+    ppo_clipped_objective,
+)
+
+torch.manual_seed(42)
+context = torch.tensor([[0.1, 0.2, 1.0, 0.0]])
+policy, critic = FiniteResponsePolicy(), FiniteValueModel()
+reward_model = FiniteRewardModel().requires_grad_(False)
+reference = copy.deepcopy(policy).requires_grad_(False)
+optimizer = torch.optim.SGD(list(policy.parameters()) + list(critic.parameters()), lr=0.1)
+
+with torch.no_grad():
+    old_distribution = torch.distributions.Categorical(logits=policy(context))
+    action = old_distribution.sample()
+    old_log_probability = old_distribution.log_prob(action)
+    reward = reward_model(context).gather(1, action[:, None]).squeeze(1)
+    advantage = bandit_advantage(reward, critic(context))
+
+new_logits = policy(context)
+new_log_probability = torch.distributions.Categorical(logits=new_logits).log_prob(action)
+terms = ppo_clipped_objective(new_log_probability, old_log_probability, advantage)
+value_loss = (critic(context) - reward).square().mean()
+loss = terms["policy_loss"] + 0.1 * exact_kl(new_logits, reference(context)).mean() + 0.5 * value_loss
+before = next(policy.parameters()).detach().clone()
+optimizer.zero_grad()
+loss.backward()
+optimizer.step()
+print("選中的卡", action.item(), "更新前ratio", terms["ratio"].item())
+print("策略參數改變", not torch.equal(before, next(policy.parameters())))
+print("評分員有梯度", any(p.grad is not None for p in reward_model.parameters()))
+print("輸入與選卡分數形狀", list(context.shape), list(new_logits.shape))
+print("固定參考有梯度", any(p.grad is not None for p in reference.parameters()))
