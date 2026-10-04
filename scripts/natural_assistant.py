@@ -37,6 +37,9 @@ def parser():
     result.add_argument("--adapter", type=Path)
     result.add_argument("--adapter-label", default="adapter")
     result.add_argument("--comparison-adapter", action="append", default=[], help="Validation only: LABEL=PATH")
+    result.add_argument(
+        "--selected-only", action="store_true", help="Evaluate only the explicitly selected adapter, or base if absent"
+    )
     result.add_argument("--steps", type=int, default=100)
     result.add_argument("--learning-rate", type=float, choices=(1e-4, 3e-5), default=3e-5)
     result.add_argument("--lora-rank", type=int, default=8)
@@ -77,6 +80,10 @@ def main():
         raise ValueError("At most two uniquely labelled comparison adapters are allowed")
     if labels and options.stage != "validation":
         raise ValueError("Multiple checkpoint candidates are validation-only")
+    if options.selected_only and options.comparison_adapters:
+        raise ValueError("Selected-only evaluation cannot include comparison adapters")
+    if options.selected_only and options.stage != "evaluate":
+        raise ValueError("--selected-only is a final evaluate option, not validation or training")
     options.output.mkdir(parents=True, exist_ok=True)
     for name in (
         "min_pixels",
