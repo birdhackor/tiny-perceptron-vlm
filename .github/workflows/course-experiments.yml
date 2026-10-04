@@ -1,60 +1,174 @@
-name: Publish fixed natural teaching data to LFS
+name: Natural image OCR and speech assistant
 
+# Explicit dispatch only. Every stage reserves against the original durable
+# course ledger before it can build the CUDA image or start a GPU container.
 on:
   workflow_dispatch:
+    inputs:
+      stage:
+        description: One bounded, serial stage; review its actual evidence before the next
+        type: choice
+        options: [prepare, baseline, train, validation, evaluate, release]
+        default: prepare
+      batch_id:
+        description: Versioned data/model batch; changing it does not reset the cumulative budget
+        type: string
+        default: natural-v3
+        required: true
+      manifest:
+        description: Committed data manifest under docs/natural-assistant
+        type: string
+        default: docs/natural-assistant/manifest.json
+        required: true
+      adapter_run_id:
+        description: Exact prior train run, e.g. gha-123456-1; empty means base model
+        type: string
+        default: ''
+      steps:
+        description: Requested updates, capped at 5000; incomplete steps are reported honestly
+        type: number
+        default: 100
+      seed:
+        description: Training/evaluation seed
+        type: number
+        default: 42
+      max_seconds:
+        description: Runner seconds (prepare or release at most 1620; GPU stages at most 3420)
+        type: number
+        default: 1500
+      max_pixels:
+        description: Upper visual pixel budget, capped at 1048576
+        type: number
+        default: 524288
+      approval_file:
+        description: Release only; committed reviewed allowlist under docs/natural-assistant/releases
+        type: string
+        default: ''
+      selection_file:
+        description: Evaluate only; committed pre-test validation decision and exact model hashes
+        type: string
+        default: docs/natural-assistant/selection.json
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: tiny-perceptron-course-gpu
+  cancel-in-progress: false
 
 jobs:
-  publish:
+  natural-assistant:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 100
+    env:
+      MODAL_TOKEN_ID: ${{ vars.MODAL_TOKEN_ID || secrets.MODAL_TOKEN_ID }}
+      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+      MODAL_ENVIRONMENT: ${{ vars.MODAL_ENVIRONMENT || 'main' }}
+      HF_CHECKPOINT_REPO: ${{ vars.HF_CHECKPOINT_REPO }}
+      HF_RELEASE_REPO: ${{ vars.HF_RELEASE_REPO }}
+      HF_MODAL_SECRET: ${{ vars.HF_MODAL_SECRET }}
+      NATURAL_STAGE: ${{ inputs.stage }}
+      NATURAL_BATCH: ${{ inputs.batch_id }}
+      NATURAL_MANIFEST: ${{ inputs.manifest }}
+      NATURAL_ADAPTER_RUN: ${{ inputs.adapter_run_id }}
+      NATURAL_STEPS: ${{ inputs.steps }}
+      NATURAL_SEED: ${{ inputs.seed }}
+      NATURAL_MAX_SECONDS: ${{ inputs.max_seconds }}
+      NATURAL_MAX_PIXELS: ${{ inputs.max_pixels }}
+      NATURAL_APPROVAL: ${{ inputs.approval_file }}
+      NATURAL_SELECTION: ${{ inputs.selection_file }}
     steps:
       - uses: actions/checkout@v7
         with:
           lfs: false
       - uses: actions/setup-python@v6
         with:
-          python-version: '3.13'
-      - name: Install only data preparation dependencies
-        run: python -m pip install pillow==12.3.0 soundfile==0.14.0
-      - name: Reconstruct exact committed snapshots from fixed public sources
-        run: |
-          mkdir -p outputs/natural-data
-          python scripts/build_natural_assets.py --prepare \
-            --manifest outputs/natural-data/reconstructed-manifest.json \
-            --verify-manifest docs/natural-assistant/manifest.json
-      - name: Upload only the three verified LFS objects
+          python-version: '3.12'
+      - name: Check names and committed input without exposing credentials
         shell: bash
         run: |
           set -euo pipefail
-          git lfs install --local
+          for name in MODAL_TOKEN_ID MODAL_TOKEN_SECRET HF_CHECKPOINT_REPO HF_RELEASE_REPO; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Missing existing Repository setting: $name"
+              exit 1
+            fi
+          done
+          python -m py_compile scripts/modal_natural.py scripts/natural_assistant.py
           python - <<'PY'
-          import json
+          import os
           import subprocess
           from pathlib import Path
-          manifest = json.loads(Path('docs/natural-assistant/manifest.json').read_text())
-          ids = []
-          for archive in manifest['archives']:
-              expected = f"version https://git-lfs.github.com/spec/v1\noid sha256:{archive['sha256']}\nsize {archive['bytes']}\n"
-              prior = subprocess.run(['git', 'show', f"HEAD:{archive['path']}"], capture_output=True, text=True)
-              if prior.returncode == 0 and prior.stdout != expected:
-                  raise RuntimeError('Committed LFS pointer differs from reconstructed archive')
-              subprocess.run(['git', 'add', '--', archive['path']], check=True)
-              pointer = subprocess.check_output(['git', 'show', f":{archive['path']}"], text=True)
-              if pointer != expected:
-                  raise RuntimeError('Reconstructed index pointer differs from frozen manifest')
-              ids.append(archive['sha256'])
-          subprocess.run(['git', 'lfs', 'push', '--object-id', 'origin', *ids], check=True)
-          changed = set(subprocess.check_output(['git','diff','--cached','--name-only'],text=True).splitlines())
-          if not changed.issubset({item['path'] for item in manifest['archives']}):
-              raise RuntimeError('Reconstruction changed files outside the three expected archives')
-          Path('outputs/natural-data/receipt.json').write_text(json.dumps({'revision': subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(), 'archive_sha256': ids, 'reconstructed_and_uploaded': True},indent=2)+'\n')
+          path = Path(os.environ['NATURAL_MANIFEST'])
+          if path.is_absolute() or '..' in path.parts or path.parts[:2] != ('docs', 'natural-assistant'):
+              raise ValueError('Manifest must be committed inside docs/natural-assistant')
+          committed = subprocess.run(['git', 'show', f"{os.environ['GITHUB_SHA']}:{path.as_posix()}"], check=True, capture_output=True).stdout
+          if path.read_bytes() != committed:
+              raise ValueError('Manifest differs from selected Git version')
           PY
-      - uses: actions/upload-artifact@v6
+      - name: Install the existing Modal client only
+        run: python -m pip install modal==1.6.0
+      - name: Select existing HF Secret by name and key presence only
+        run: python scripts/select_modal_hf_secret.py
+      - name: Reserve live-rate bounded cost before heavy image build
+        id: reserve
+        env:
+          NATURAL_MODAL_PHASE: control
+        run: |
+          modal run scripts/modal_natural.py \
+            --stage reserve --requested-stage "$NATURAL_STAGE" \
+            --run-id "gha-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --revision "$GITHUB_SHA" --batch-id "$NATURAL_BATCH" \
+            --manifest "$NATURAL_MANIFEST" --approval-file "$NATURAL_APPROVAL" \
+            --adapter-run-id "$NATURAL_ADAPTER_RUN" --selection-file "$NATURAL_SELECTION"
+      - name: Execute one bounded stage and preserve actual HF evidence
+        id: execute
+        env:
+          NATURAL_MODAL_PHASE: ${{ inputs.stage == 'release' && 'control' || 'execute' }}
+        run: |
+          modal run scripts/modal_natural.py \
+            --stage "$NATURAL_STAGE" \
+            --run-id "gha-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --revision "$GITHUB_SHA" --batch-id "$NATURAL_BATCH" \
+            --manifest "$NATURAL_MANIFEST" \
+            --checkpoint-repo "$HF_CHECKPOINT_REPO" --release-repo "$HF_RELEASE_REPO" \
+            --adapter-run-id "$NATURAL_ADAPTER_RUN" --approval-file "$NATURAL_APPROVAL" \
+            --selection-file "$NATURAL_SELECTION" \
+            --steps "$NATURAL_STEPS" --seed "$NATURAL_SEED" \
+            --max-seconds "$NATURAL_MAX_SECONDS" --max-pixels "$NATURAL_MAX_PIXELS"
+      - name: Retain failed reservation if image build or execution was interrupted
+        if: always() && steps.reserve.outcome == 'success' && steps.execute.outcome != 'success'
+        env:
+          NATURAL_MODAL_PHASE: control
+        run: |
+          modal run scripts/modal_natural.py \
+            --stage finish --finish-status failed-or-cancelled \
+            --run-id "gha-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --revision "$GITHUB_SHA" --batch-id "$NATURAL_BATCH"
+      - name: Save reservation, report, review outputs and inference adapter
         if: always()
+        uses: actions/upload-artifact@v6
         with:
-          name: natural-data-${{ github.run_id }}-${{ github.run_attempt }}
-          path: outputs/natural-data/
+          name: natural-${{ inputs.batch_id }}-${{ inputs.stage }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: outputs/natural-assistant/
           if-no-files-found: ignore
+      - name: Show stage result
+        if: always()
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          output = Path('outputs/natural-assistant')
+          result = output / 'result.json'
+          reservation = output / 'reservation.json'
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+              summary.write('## Natural assistant evidence\n\n')
+              if result.exists():
+                  data = json.loads(result.read_text())
+                  summary.write(f"Stage: {data['stage']}\n\nStatus: {data.get('status', 'unknown')}\n\n")
+              if reservation.exists():
+                  data = json.loads(reservation.read_text())
+                  summary.write(f"Reserved: US${data['entry']['reserved_usd']}; cumulative US${data['reserved_total_usd']} / US${data['budget_usd']}\n\n")
+              summary.write('The artifact preserves actual outputs, pins and hashes. Reservation is a conservative bound, not the invoice.\n')
+          PY
