@@ -1,0 +1,44 @@
+import argparse,hashlib,json,os,pathlib,platform,resource,sys,time
+from types import SimpleNamespace
+ROOT=pathlib.Path(__file__).resolve().parents[3];sys.path.insert(0,str(ROOT))
+import torch
+from tiny_perceptron import natural_assistant as assistant
+parser=argparse.ArgumentParser();parser.add_argument('--variant',choices=('small','turbo'),required=True);args=parser.parse_args()
+torch.set_num_threads(5);torch.set_num_interop_threads(1)
+output=ROOT/'outputs/natural-v4/asr-cpu-validation';output.mkdir(parents=True,exist_ok=True)
+audio_root=ROOT/'outputs/natural-v4/data/voice'
+inputs=[ROOT/'docs/natural-assistant/v4/data/voice-sources.json',ROOT/'docs/natural-assistant/v4/data/voice-question-sources.json']
+rows=[];sources=[]
+for path in inputs:
+ metadata=json.loads(path.read_text());validation=[r for r in metadata['audio_rows'] if r['split']=='validation']
+ expected=12 if path.name=='voice-sources.json' else 4
+ if len(validation)!=expected:raise ValueError('Validation count changed before this protocol')
+ for row in validation:
+  file=audio_root/row['audio']
+  if assistant.sha256(file)!=row['sha256'] or file.stat().st_size!=row['bytes']:raise ValueError('Original audio hash mismatch')
+  rows.append(row)
+ sources.append({'path':str(path.relative_to(ROOT)),'sha256':assistant.sha256(path),'validation_rows':len(validation)})
+# Only validation objects are inspected; no test text/audio reaches model input.
+a=[r for r in rows if r['source']=='aishell1-human-read-questions-v4'];f=[r for r in rows if r['source']=='fleurs-mandarin-v4']
+pilot=[min(a,key=lambda r:r['duration_seconds']),min(f,key=lambda r:abs(r['duration_seconds']-10))]
+ordered=pilot+[r for r in rows if r['id'] not in {p['id'] for p in pilot}]
+protocol={'scope':'Local CPU ASR-only paired validation; no LM inference, GPU, Modal stage or new test outputs','sources':sources,'ordered_ids':[r['id'] for r in ordered],'pilot_ids':[r['id'] for r in pilot],'threads':5,'interop_threads':1,'dtype':'float32','device':'cpu','decoding':'existing assistant.transcribe: greedy, chinese, transcribe, no timestamps, 128 max new tokens','metric_policy':'Original Unicode-codepoint CER plus NFKC/remove-all-Unicode-whitespace CER; preserve punctuation/script after NFKC, no Traditional/Simplified conversion','continuation_gate':'After first two actual calls: stop if their summed ASR generation time exceeds 300 seconds; otherwise continue to all 16; preserve probe outputs without rerunning them','core_source_sha256':assistant.sha256(ROOT/'tiny_perceptron/natural_assistant.py')}
+protocol_path=output/'protocol.json'
+if protocol_path.exists() and json.loads(protocol_path.read_text())!=protocol:raise ValueError('Frozen local CPU ASR protocol changed between variants')
+assistant.write_json(protocol_path,protocol)
+cache=ROOT/('outputs/natural-v4/student-base-cache/hf' if args.variant=='turbo' else 'outputs/natural-extension/student-base-cache/hf')
+repo,pin=assistant.ASR_VARIANTS[args.variant];options=SimpleNamespace(asr_model=repo,asr_revision=pin,cache_dir=cache,local_files_only=True)
+started=time.monotonic();model,processor=assistant.load_asr(options);loaded=time.monotonic()-started
+print(json.dumps({'variant':args.variant,'model_loaded_seconds':loaded,'parameters':sum(p.numel() for p in model.parameters())}),flush=True)
+records=[];status='in_progress'
+for index,row in enumerate(ordered):
+ before=time.monotonic();record=assistant.transcribe(model,processor,audio_root/row['audio']);call=time.monotonic()-before
+ record.update(id=row['id'],split='validation',source=row['source'],original_source_task=row['task'],evaluation_role='ASR-only validation; no language-model response',reference_transcript=row['user'],source_member=row['source_member'],source_audio_sha256=row['sha256'],source_reference_sha256=hashlib.sha256(row['user'].encode()).hexdigest(),source_duration_seconds=row['duration_seconds'],variant=args.variant,asr_repo=repo,asr_revision=pin,full_transcribe_call_seconds=call,**assistant.asr_cer_metrics(row['user'],record['transcript']))
+ records.append(record);assistant.write_json(output/f'{args.variant}-records.json',records)
+ print(json.dumps({'variant':args.variant,'completed':len(records),'id':row['id'],'audio_seconds':record['audio_seconds'],'generate_seconds':record['seconds'],'full_call_seconds':call,'raw_errors':record['raw_errors'],'raw_reference_characters':record['raw_reference_characters'],'stop_reason':record['stop_reason']}),flush=True)
+ if len(records)==2:
+  assistant.write_json(output/f'{args.variant}-pilot.json',{'variant':args.variant,'model_load_seconds':loaded,'records':records,'continue':sum(r['seconds'] for r in records)<=300})
+  if sum(r['seconds'] for r in records)>300:status='stopped_after_predeclared_pilot';break
+if len(records)==len(ordered):status='completed'
+summary={'variant':args.variant,'status':status,'model':repo,'revision':pin,'parameters':sum(p.numel() for p in model.parameters()),'model_load_seconds':loaded,'total_seconds_including_load_and_record_writes':time.monotonic()-started,'audio_seconds':sum(r['audio_seconds'] for r in records),'generation_seconds':sum(r['seconds'] for r in records),'full_transcribe_seconds':sum(r['full_transcribe_call_seconds'] for r in records),'metrics':assistant.transcription_summary(records),'by_source':{source:assistant.transcription_summary([r for r in records if r['source']==source]) for source in sorted({r['source'] for r in records})},'environment':{'python':platform.python_version(),'torch':torch.__version__,'threads':torch.get_num_threads(),'interop_threads':torch.get_num_interop_threads(),'cpu_count_logical':os.cpu_count(),'platform':platform.platform(),'versions':assistant.environment_versions()},'process_peak_rss_kib_linux':resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,'protocol_sha256':assistant.sha256(protocol_path),'records_sha256':assistant.sha256(output/f'{args.variant}-records.json'),'scope':protocol['scope'],'limits':'Human read public statements and question-shaped utterances, not spontaneous voice dialogue; text/audio were not heard by the evaluator, CER is against official reference; no LM/chat success measured; local CPU time does not predict Modal timing.'}
+assistant.write_json(output/f'{args.variant}-summary.json',summary);print(json.dumps({'variant':args.variant,'status':status,'count':len(records),'raw_cer':summary['metrics']['raw_micro_cer'],'normalized_cer':summary['metrics']['normalized_micro_cer'],'generation_seconds':summary['generation_seconds']}),flush=True)
