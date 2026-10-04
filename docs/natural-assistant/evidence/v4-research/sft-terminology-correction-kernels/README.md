@@ -1,0 +1,3 @@
+# SFT terminology correction: actual notebook execution
+
+The factual reviewer identified a from-scratch toy stage being named literal fine-tuning. Three explanations were clarified; code and empirical records were unchanged. Both affected notebooks then actually passed new independent CPU kernels. The closure checks all 266 current notebooks against their real executed cells, while explicitly retaining the first 266 native run and seven earlier correction runs as separate original records. It does not impersonate a second full run. Python and notebook originals are byte-exact inert evidence copies; the index maps filenames. This records execution, not readability or factual approval.
