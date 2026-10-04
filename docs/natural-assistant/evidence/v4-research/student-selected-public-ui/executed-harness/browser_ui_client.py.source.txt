@@ -1,0 +1,187 @@
+"""Actual headless browser UI controls, four serial model calls, no grading."""
+
+import argparse
+import json
+import resource
+import time
+from pathlib import Path
+from urllib.parse import urlsplit
+
+from playwright.sync_api import sync_playwright
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--url", required=True)
+    parser.add_argument("--image", type=Path, required=True)
+    parser.add_argument("--audio", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--timeout-ms", type=int, default=600000)
+    args = parser.parse_args()
+    args.output.mkdir()
+    report = {
+        "schema_version": 1,
+        "scope": "Actual Chromium DOM controls/network/model responses; no HTTP/model mock or accuracy scoring",
+        "browser": "/usr/bin/chromium",
+        "requests": [],
+        "screenshots": [],
+        "console_errors": [],
+    }
+    started = time.monotonic()
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(executable_path="/usr/bin/chromium", headless=True, args=["--no-sandbox"])
+        report["browser_version"] = browser.version
+        page = browser.new_page(viewport={"width": 1440, "height": 1000}, device_scale_factor=1)
+        page.set_default_timeout(args.timeout_ms)
+        page.on("pageerror", lambda error: report["console_errors"].append(str(error)))
+
+        def response(response):
+            parsed = urlsplit(response.url)
+            if not parsed.path.startswith("/api/"):
+                return
+            req = response.request
+            data = req.post_data_json if req.method == "POST" else None
+            if isinstance(data, dict):
+                data = {key: value for key, value in data.items() if key not in {"session", "base64"}}
+            value = (
+                response.json()
+                if response.headers.get("content-type", "").startswith("application/json")
+                else {"bytes": len(response.body())}
+            )
+            report["requests"].append(
+                {
+                    "route": parsed.path,
+                    "method": req.method,
+                    "status": response.status,
+                    "request": data,
+                    "response": value,
+                }
+            )
+            (args.output / "requests.json").write_text(
+                json.dumps(report["requests"], ensure_ascii=False, indent=2) + "\n"
+            )
+
+        page.on("response", response)
+
+        def save(name):
+            path = args.output / (name + ".png")
+            page.screenshot(path=str(path), full_page=True)
+            report["screenshots"].append(str(path))
+            (args.output / (name + ".html")).write_text(page.content())
+
+        def settled():
+            page.wait_for_function("!document.getElementById('send').disabled")
+
+        def chat(prompt, turn):
+            page.locator("#prompt").fill(prompt)
+            tick = time.monotonic()
+            with page.expect_response(lambda item: urlsplit(item.url).path == "/api/chat") as pending:
+                page.locator("#send").click()
+            actual = pending.value
+            if actual.status != 200:
+                raise RuntimeError("Actual browser chat request failed")
+            value = actual.json()
+            settled()
+            page.wait_for_function("document.querySelectorAll('.turn.assistant').length === " + str(turn))
+            if value.get("user") != prompt or not value.get("prediction", "").strip():
+                raise RuntimeError("Chat did not preserve submitted text and actual decoded output")
+            displayed = (
+                page.locator(".turn.assistant").nth(turn - 1).evaluate("node => node.lastElementChild.textContent")
+            )
+            if displayed != value["prediction"]:
+                raise RuntimeError("Browser displayed text differs from the actual model response")
+            report.setdefault("chat_seconds", []).append(time.monotonic() - tick)
+            save("turn-" + str(turn))
+            print(json.dumps({"browser_turn": turn, "seconds": report["chat_seconds"][-1]}), flush=True)
+            return value
+
+        try:
+            main = page.goto(args.url, wait_until="domcontentloaded")
+            if main.status != 200:
+                raise RuntimeError("Actual UI page failed to load")
+            settled()
+            save("ready")
+            chat("你好，請用一句話回答。", 1)
+            page.locator("#image").set_input_files(str(args.image.resolve()))
+            page.locator("#preview").wait_for(state="visible")
+            chat("請用一句話描述這張照片的主要物件。", 2)
+            page.wait_for_function(
+                "Array.from(document.querySelectorAll('.turn img')).every(img => img.complete && img.naturalWidth > 0)"
+            )
+            if page.locator(".turn img").count() != 1 or page.locator("#image").input_value():
+                raise RuntimeError("Historical photo rendering/current upload reset differs from UI contract")
+            page.locator("#audio").set_input_files(str(args.audio.resolve()))
+            tick = time.monotonic()
+            with page.expect_response(lambda item: urlsplit(item.url).path == "/api/transcribe") as pending:
+                page.locator("#transcribe").click()
+            actual = pending.value
+            if actual.status != 200:
+                raise RuntimeError("Actual browser ASR failed")
+            asr = actual.json()
+            settled()
+            page.locator("#original-transcript").wait_for(state="visible")
+            if (
+                page.locator("#prompt").input_value() != asr["asr"]["transcript"]
+                or asr["asr"]["transcript"] not in page.locator("#original-transcript").inner_text()
+            ):
+                raise RuntimeError("Original transcript was not displayed/copied intact into the editable field")
+            report["asr_seconds_including_load"] = time.monotonic() - tick
+            save("transcript-before-edit")
+            corrected = "如何加強與員工溝通？請用一句話回答。"
+            if corrected == asr["asr"]["transcript"]:
+                corrected += "請簡短回答。"
+            value = chat(corrected, 3)
+            if value.get("asr", {}).get("submitted_text") != corrected or value["asr"].get("corrected") is not True:
+                raise RuntimeError("Edited transcript did not reach the same actual chat core")
+            note = page.locator(".turn.user").nth(2).inner_text()
+            if asr["asr"]["transcript"] not in note or "送出前已更正" not in note:
+                raise RuntimeError("Browser did not preserve original/correction distinction")
+            chat("請把剛才的建議縮成一句話。", 4)
+            if page.locator(".turn img").count() != 1:
+                raise RuntimeError("Prior image disappeared from browser conversation")
+            page.set_viewport_size({"width": 358, "height": 1000})
+            report["mobile_horizontal_overflow"] = page.evaluate("document.documentElement.scrollWidth > innerWidth")
+            save("conversation-mobile")
+            page.set_viewport_size({"width": 1440, "height": 1000})
+            with page.expect_response(lambda item: urlsplit(item.url).path == "/api/reset") as pending:
+                page.locator("#reset").click()
+            if pending.value.status != 200:
+                raise RuntimeError("New dialogue reset failed")
+            settled()
+            page.wait_for_function("document.querySelectorAll('.turn').length === 0")
+            if (
+                page.locator("#prompt").input_value()
+                or page.locator("#image").input_value()
+                or page.locator("#audio").input_value()
+                or page.locator("#original-transcript").is_visible()
+            ):
+                raise RuntimeError("New dialogue retained an input/visible transcript")
+            save("new-dialogue")
+            report.update(
+                status="passed",
+                actual_browser_interactions_complete=True,
+                rendered_turn_count_before_reset=8,
+                reset_rendered_turns=page.locator(".turn").count(),
+            )
+        except BaseException as error:
+            report.update(status="failed", error={"type": type(error).__name__, "message": str(error)})
+            save("failure")
+            raise
+        finally:
+            usage = resource.getrusage(resource.RUSAGE_SELF)
+            report.update(
+                wall_seconds=time.monotonic() - started,
+                driver_resources={
+                    "user_seconds": usage.ru_utime,
+                    "system_seconds": usage.ru_stime,
+                    "maximum_resident_set_kib": usage.ru_maxrss,
+                    "scope": "Python browser driver process; excludes Chromium subprocess tree and model server",
+                },
+            )
+            (args.output / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
+            browser.close()
+    print(json.dumps({"status": report["status"], "report": str(args.output / "report.json")}), flush=True)
+
+
+if __name__ == "__main__":
+    main()

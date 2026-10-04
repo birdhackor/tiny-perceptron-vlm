@@ -1,0 +1,236 @@
+"""Close an already completed selected-public trial without loading models."""
+
+import hashlib
+import importlib.util
+import json
+import shutil
+import subprocess
+import sys
+from datetime import UTC, datetime
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[3]
+PREFLIGHT = ROOT / "outputs/natural-v4/release-preflight"
+FETCH = PREFLIGHT / "anonymous-selected-fetch-001"
+UI = PREFLIGHT / "selected-public-ui-run-001"
+RELEASE = PREFLIGHT / "anonymous-selected-release"
+EVIDENCE = ROOT / "docs/natural-assistant/evidence/v4-research/student-selected-public-ui"
+EXPECTED_MANIFEST = "1758ceb9f8859108fa3ad315fb8f6a61e0c8cef40ec49b0bc41361d9c70e5ccf"
+
+
+def digest(path):
+    content = path.read_bytes()
+    return {"bytes": len(content), "sha256": hashlib.sha256(content).hexdigest()}
+
+
+def read(path):
+    return json.loads(path.read_text())
+
+
+def write_json(path, value):
+    path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n")
+
+
+def copy(source, relative):
+    destination = EVIDENCE / relative
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source, destination)
+    assert digest(source) == digest(destination)
+    return {"source": str(source.relative_to(ROOT)), "checkout_copy": relative, **digest(source)}
+
+
+def main():
+    assert not EVIDENCE.exists(), "Use a new evidence directory; never overwrite receipts"
+    fetch = read(FETCH / "receipt.json")
+    ui = read(UI / "report.json")
+    browser = read(UI / "browser/report.json")
+    disk = read(UI / "disk-observation.json")
+    events = [json.loads(line) for line in (UI / "observer.jsonl").read_text().splitlines()]
+    manifest_path = ROOT / "docs/natural-assistant/v4/public-release.json"
+    manifest = read(manifest_path)
+    assert digest(manifest_path)["sha256"] == EXPECTED_MANIFEST
+    assert fetch["status"] == ui["status"] == browser["status"] == "passed"
+    assert all(ui["infrastructure_checks"].values())
+    assert ui["selected_public_release"] and ui["interaction"] == "browser"
+    assert ui["git_revision"] == "59a1eda4ed7b6e8609892ec2b9013c821ac93e69"
+    assert manifest["selected_variant"] == "base" and manifest["adapter_parameters"] == 0
+    assert manifest["revision"] == "d3954d6900b3cf81e593d99d9b8b1a91e6f9741d"
+    assert fetch["manifest_sha256"] == EXPECTED_MANIFEST
+    assert all(phase["exit_code"] == 0 for phase in fetch["phases"])
+    assert not browser["console_errors"] and not browser["mobile_horizontal_overflow"]
+    assert browser["rendered_turn_count_before_reset"] == 8
+    assert browser["reset_rendered_turns"] == 0
+    assert ui["process_exit_code"] == 0 and not ui["timed_out"]
+
+    # Native read-only verification; no download, server startup or model loading.
+    sys.path.insert(0, str(ROOT))
+    spec = importlib.util.spec_from_file_location("product_release", ROOT / "scripts/fetch_natural_release.py")
+    product = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(product)
+    product.validate_manifest(manifest)
+    product.verify_release(manifest, RELEASE)
+    product.check_runtime(manifest)
+    for source in ui["sources_before"]:
+        assert digest(ROOT / source["path"]) == {k: source[k] for k in ("bytes", "sha256")}
+    for record in ui["inputs"].values():
+        assert digest(ROOT / record["path"]) == {k: record[k] for k in ("bytes", "sha256")}
+
+    http = read(FETCH / "fetch.http.json")["requests"]
+    assert len(http) == 6
+    assert all(not request["authentication_headers"] for request in http)
+    assert len([r for r in http if r["method"] == "GET" and r["status"] == 200]) == 2
+    assert all(not read(FETCH / f"{phase}.http.json")["requests"] for phase in ("list", "verify"))
+    core = [e for e in events if e["kind"] == "load_core_begin"]
+    asr = [e for e in events if e["kind"] == "load_asr_begin"]
+    generated = [e["result"] for e in events if e["kind"] == "generate_end"]
+    transcripts = [e["result"] for e in events if e["kind"] == "transcribe_end"]
+    begins = [e for e in events if e["kind"] == "generate_begin"]
+    assert len(core) == len(asr) == 1 and len(generated) == 4 and len(transcripts) == 1
+    assert [len(e["row"]["history"]) for e in begins] == [0, 2, 4, 6]
+    assert all(r["score"] is None and r["reference_answer"] is None for r in generated)
+    assert all(r["ended_with_eos"] and not r["truncated"] for r in generated + transcripts)
+    options = core[0]["options"]
+    assert options["adapter"] == "None" and options["device"] == "cpu"
+    assert options["dtype"] == "float32" and options["local_files_only"] == "True"
+    assert options["model_revision"] == manifest["base_model"]["revision"]
+    assert options["asr_revision"] == manifest["asr_model"]["revision"]
+    reset = [e["state"] for e in events if e["kind"] == "operation_end" and e["route"] == "/api/reset"]
+    assert reset == [{"history_messages": 0, "assets": 0, "transcriptions": 0, "asset_files": []}]
+    resources = ui["server_cpu_resources"]
+    assert not Path(f"/proc/{resources['pid']}").exists(), "Actual model server must have exited"
+    uploads = {asset["path"] for e in events if e["kind"] == "operation_end" and e["state"]
+               for asset in e["state"]["asset_files"]}
+    assert all(not Path(path).exists() for path in uploads)
+
+    EVIDENCE.mkdir(parents=True)
+    copies = []
+    copies.append(copy(Path(__file__), "executed-harness/close_selected_trial.py.source.txt"))
+    for name in ("receipt.json", "list.stdout.txt", "list.stderr.txt", "list.http.json",
+                 "fetch.stdout.txt", "fetch.stderr.txt", "fetch.http.json",
+                 "verify.stdout.txt", "verify.stderr.txt", "verify.http.json"):
+        copies.append(copy(FETCH / name, "anonymous-fetch/" + name))
+    copies.append(copy(FETCH / "manifest.json.raw", "public-release.json.raw"))
+    for name in ("README.md", "release-provenance.json", "verified-release.json"):
+        copies.append(copy(RELEASE / name, "fetched-public-files/" + name + ".raw"))
+    for name in ("report.json", "observer.jsonl", "disk-observation.json", "serve.stdout.txt",
+                 "serve.stderr.txt", "browser.stdout.txt", "browser.stderr.txt"):
+        copies.append(copy(UI / name, "actual-ui/" + name))
+    for name in ("report.json", "requests.json"):
+        copies.append(copy(UI / "browser" / name, "actual-ui/browser/" + name))
+    for base, source, destination in (
+        (FETCH, "run_public_fetch.py", "run_public_fetch.py.source.txt"),
+        (FETCH, "sitecustomize.py", "anonymous_observer.py.source.txt"),
+        (UI, "run_ui_smoke.py", "run_ui_smoke.py.source.txt"),
+        (UI, "sitecustomize.py", "ui_observer.py.source.txt"),
+        (UI, "browser_ui_client.py", "browser_ui_client.py.source.txt"),
+    ):
+        copies.append(copy(base / source, "executed-harness/" + destination))
+    reviewed = {
+        "ready.png": "Desktop controls, empty dialogue, instructions and send/reset buttons are visible.",
+        "transcript-before-edit.png": "Uploaded photo is visible in history; audio control, original transcript and editable copy are visible.",
+        "turn-3.png": "Submitted correction and original-transcript correction note are visible; previous photo and messages remain visible.",
+        "conversation-mobile.png": "358px viewport stacks controls and history; photo and transcript correction note remain visible with no horizontal overflow.",
+        "new-dialogue.png": "After actual reset click, conversation is empty and upload fields are cleared.",
+    }
+    visual = []
+    for name, observation in reviewed.items():
+        record = copy(UI / "browser" / name, "screenshots/" + name)
+        copies.append(record)
+        visual.append({"screenshot": record["checkout_copy"], **digest(UI / "browser" / name),
+                       "actually_viewed": True, "observation": observation,
+                       "scope": "Interface state and layout only; model response correctness was not graded"})
+
+    source_records = []
+    for base in (FETCH, UI, RELEASE):
+        for path in sorted(base.rglob("*")):
+            if path.is_file() and not path.is_symlink() and "empty-hf-home" not in path.parts:
+                source_records.append({"raw_path": str(path.relative_to(ROOT)), **digest(path),
+                                       "availability": "local outputs; requires separately published proof archive outside checkout"})
+    write_json(EVIDENCE / "source-index.json", {
+        "schema_version": 1,
+        "scope": "Exact bytes from completed runs; no model weights, HF cache, source photo or WAV copied",
+        "raw_files": source_records,
+        "checkout_copies": copies,
+        "raw_archive_uploaded_by_this_trial": False,
+    })
+    provenance = read(RELEASE / "release-provenance.json")
+    receipt = {
+        "schema_version": 1,
+        "closed_at_utc": datetime.now(UTC).isoformat(),
+        "status": "passed",
+        "scope": "Actual selected-public anonymous retrieval and CPU Chromium UI infrastructure smoke; no inference-quality grade, benchmark test, GPU or publication",
+        "actual_run_git_revision": ui["git_revision"],
+        "closure_git_revision": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
+        "closure_head_note": "Root resumed independent book/evidence commits after run source capture; original runtime and manifest bytes remain unchanged",
+        "public_manifest": {"path": "docs/natural-assistant/v4/public-release.json", **digest(manifest_path)},
+        "public_repo": manifest["repo"], "public_revision": manifest["revision"],
+        "selected_variant": "base", "adapter_parameters": 0,
+        "base_model": {**manifest["base_model"], "upstream_license": "Apache-2.0"},
+        "asr_model": {**manifest["asr_model"], "upstream_license": "MIT"},
+        "public_project_document_license": "MIT",
+        "fetched_provenance": provenance,
+        "public_files": fetch["independently_verified_files"],
+        "anonymous": {
+            "new_empty_destination_and_isolated_cache": True, "product_hf_token": False,
+            "removed_credential_environment_names": fetch["credential_environment_names_removed"],
+            "request_authentication_headers": [], "actual_head_requests": 4,
+            "actual_get_requests": 2, "downloaded_document_bytes": 9262,
+            "native_list_fetch_verify": fetch["phases"],
+            "network_mock": False, "signed_query_values_recorded": False,
+        },
+        "model_cache_scope": "Existing official pinned cache; no fresh anonymous model-weight download claimed",
+        "known_cache_integrity_receipt": "docs/natural-assistant/evidence/v4-research/student-local-cache-prepare/cache-prepare-receipt.json",
+        "runtime": {"device": "cpu", "dtype": "float32", "offline": True,
+                    "torch_threads": 5, "torch_interop_threads": 1,
+                    "dependencies": ui["dependencies"],
+                    "model_load_counts": ui["model_load_counts"],
+                    "core_load_seconds": next(e["seconds"] for e in events if e["kind"] == "load_core_end"),
+                    "asr_load_seconds": next(e["seconds"] for e in events if e["kind"] == "load_asr_end"),
+                    "ready_seconds": ui["ready_seconds"], "wall_seconds": ui["wall_seconds"],
+                    "max_seconds": ui["max_seconds"], "request_timeout_seconds": 600,
+                    "exit_code": ui["process_exit_code"], "timed_out": ui["timed_out"]},
+        "server_cpu_resources": {**resources, "maximum_resident_set_gib": resources["maximum_resident_set_kib"] / 1048576},
+        "disk": disk,
+        "browser": {k: browser[k] for k in ("browser_version", "chat_seconds", "asr_seconds_including_load",
+                     "mobile_horizontal_overflow", "console_errors", "rendered_turn_count_before_reset",
+                     "reset_rendered_turns", "wall_seconds", "actual_browser_interactions_complete")},
+        "browser_manual_trial_complete": ui["browser_manual_trial_complete"],
+        "visual_review_method": "AI agent actually viewed five browser-produced PNGs; no human manual click trial or human usability study",
+        "actual_interaction_order": ["typed greeting/send", "photo input/send and historical image display",
+            "audio input/transcribe and editable transcript", "edit transcript/send with original correction note",
+            "history follow-up/send", "358px mobile layout", "new-dialogue button/reset"],
+        "history_message_counts_before_generation": [0, 2, 4, 6],
+        "language_generation_stop_conditions": ui["generation_stop_conditions"],
+        "asr_stop_conditions": {k: transcripts[0][k] for k in ("generated_token_count", "ended_with_eos",
+             "reached_token_limit", "stop_reason", "truncated", "completion_unknown", "decoder_prompt_matches", "completion_scope")},
+        "reset_state": reset[0],
+        "shutdown_removed_new_upload_directories": ui["shutdown_removed_new_upload_directories"],
+        "closure_server_process_absent": True, "closure_upload_files_absent": True,
+        "infrastructure_checks": ui["infrastructure_checks"],
+        "visual_review": visual,
+        "inputs": ui["inputs"],
+        "input_attribution": {
+            "photo": {"dataset": "google/docci", "revision": "a0a43eaf34676ffd008fb6565dd8c2ba00d09100",
+                      "example_id": "train_07076", "official_split": "train", "image_creator": "Jason Baldridge and family",
+                      "licensor": "Google LLC", "license": "CC BY 4.0", "license_url": "https://creativecommons.org/licenses/by/4.0/",
+                      "source_url": "https://storage.googleapis.com/docci/thumbnails/train_07076.jpg?generation=1713028332973171",
+                      "screenshot_modification": "Browser scaled source photograph within generated UI; original photo bytes unchanged"},
+            "audio": {"dataset": "AISHELL/AISHELL-1", "revision": "bbe295d530192a4cd41644b711c9aecd087df653",
+                      "utterance_id": "BAC009S0005W0205", "project_split": "validation", "license": "Apache-2.0",
+                      "license_source": "https://www.openslr.org/33", "duration_seconds": 3.1529375,
+                      "attribution": "Hui Bu, Jiayu Du, Xingyu Na, Bengu Wu, Hao Zheng; AIShell-1 (2017); Beijing Shell Shell Technology Co., Ltd.",
+                      "domain": "Human-read question-shaped utterance, not spontaneous assistant conversation",
+                      "modification": "Original WAV unchanged; actual ASR output displayed, then user-edited text sent"},
+        },
+        "quality_claim": "No accuracy/capability grade; EOS and rendered answers establish infrastructure and stopping only",
+        "test_rows_used": 0, "models_loaded_again_during_closure": 0,
+        "product_sources_unchanged_at_closure": True,
+    }
+    write_json(EVIDENCE / "receipt.json", receipt)
+    print(json.dumps({"status": "passed", "evidence": str(EVIDENCE.relative_to(ROOT)),
+                      "indexed_raw_files": len(source_records), "checkout_copies": len(copies),
+                      "server_maximum_rss_gib": receipt["server_cpu_resources"]["maximum_resident_set_gib"]}, indent=2))
+
+
+if __name__ == "__main__":
+    main()
