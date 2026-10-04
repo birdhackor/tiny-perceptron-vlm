@@ -1,0 +1,204 @@
+{
+  "lesson_id": "17.14",
+  "source": "course/chapters/17.md#17.14",
+  "reviewer_task": "/root/v4_review_coordinator/reader_cleanup_17_14",
+  "reviewer_context": "fresh",
+  "source_sha256": "1d9c34d6e3d4c70285405ef6cc8f113a707238dc2fb41093362137179e7e67af",
+  "figure_sha256": {
+    "course/figures/qat_training_deployment.svg": "4809ed99448a94903c26ae0565852bc5fe8f0a38b2aab40e270e064d7de94b03",
+    "course/figures/architecture_quantize_grid.svg": "14927d2523dd2b3ca4473502a2f7a4bd148ac4bc6f4a2d691890b25421230e2e"
+  },
+  "verdict": "revise",
+  "reader_summary": "本節問：訓練好的權重直接落到粗整數格後可能受傷，能否在訓練期間先體驗這種誤差？QAT保存仍可小幅調整的FP32主權重，每次前向先量化再反量化，而STE在反向把捨入當成原樣通過，讓上游仍得到學習訊號。x=[0.1,0.4,0.9]時scale=0.9/7，整数碼為[1,3,7]，前向約[0.1286,0.3857,0.9]。x+(還原值-x).detach()的前向抵消原x，反向則只沿外面的x：y.sum對各y的導數為1，於是STE梯度是[1,1,1]；hard是切斷關係、複製後另啟求導的輸入，普通round給[0,0,0]。這是刻意選的近似，並非round真導數，也不保證任務品質改善。圖把保留主權重、反覆模擬、最後packed4存檔三步連起來；部署仍先還原成FP32參考計算。正式表是相同SFT底座的350次普通微調與350次weight-only QAT比較，模型每個输出列各有scale，與三元素共用scale的CPU例不同。測試時應比兩個都額外更新350次的packed版本：普通微調後PTQ4答6/10、NLL0.4066，QAT後packed4答4/10、NLL0.5979，差兩題與約0.1913；正常EOS與logit對齊不等於答對。qat_float.pt只存浮點主權重，model.pt才是部署打包檔。平方和練習讓各y的誤差梯度變2y，經STE得到約[0.2571,0.7714,1.8]，hard分支仍不改而保持零。核心教學我能解釋，但表後驗證NLL的支線配對和「降低」比較起點尚不清楚。",
+  "issues": [
+    {
+      "id": "17.14-R1-validation-comparison",
+      "status": "open",
+      "kind": "missing_comparison_reference",
+      "location": "表後段落：「驗證五題兩者都2/5，但NLL分別0.5273與1.1811。驗證代價降低沒有在這批最後題轉成收益」",
+      "reader_obstacle": "前一句按QAT、普通微調後PTQ的順序描述，這裡只有「兩者」「分別」，不知道0.5273和1.1811各屬哪支。「降低」也沒有起點驗證NLL可對照；表只列最後測試NLL，不能用它推知驗證前後。因此我無法從本節重述這項驗證結論。",
+      "requested_change": "把兩個驗證NLL直接配上普通微調後PTQ4／QAT後packed4等完整支線名稱；若要說驗證代價降低，補明該支線相較哪個起點及其驗證NLL。若只要比較最終支線，改成明確的最終比較並移除沒有交代起點的「降低」。"
+    }
+  ],
+  "checks": {
+    "background_and_links": {
+      "status": "pass",
+      "reason": "完整讀明示W.6理解梯度與更新；17.2理解捨入與scale；T.4理解SFT底座、有效回答目標、EOS、NLL與validation/test；17.9及其17.7前置理解PTQ和QuantizedLinear的浮點參考forward；17.2明示的17.1及章導言補FP32/bit/byte/metadata。只追讀理解本節所需的明示前置，未讀其全部其他連結或外部實報。"
+    },
+    "terminology": {
+      "status": "pass",
+      "reason": "QAT、fake quantization、STE、PTQ都在本節展開並配具體操作；forward、kernel和detach也有就地說明。FP32、packed4、weight-only、NLL、EOS、optimizer與logits在實際讀過的明示前置獲得必要讀法：保存格式、權重限定、平均正確答案代價、正常停止、更新工具與候選分數。没有靠未讀的作者說明填補。"
+    },
+    "examples": {
+      "status": "revise",
+      "reason": "三元素例及測試六行表可重述：相同前向格子、不同行為梯度；公平比较兩個350更新部署支線。兩張圖已親自view且與文字對應。表後驗證兩個NLL配對與「驗證代價降低」起點不清，見17.14-R1-validation-comparison。這一處阻礙完整讀懂實驗結論。"
+    },
+    "program_explanation": {
+      "status": "pass",
+      "reason": "完整讀Python與bash兩個fence。Python的requires_grad建立可求導輸入，fake_quantize供前向還原值，sum().backward算梯度，detach/clone/requires_grad_另建獨立hard路徑；原例已CPU執行，三行輸出符合文意。bash第一行是從T.4底座重做完整350步比較，第二行載入QAT部署檔做chat推論、最多24新單位並输出JSON；沒有執行這個訓練入口，也沒有把其正式L4數字當成本次CPU結果。"
+    },
+    "exercise": {
+      "status": "pass",
+      "reason": "執行前保存預測，只把第一個y.sum().backward改成y.square().sum().backward，hard總和分支維持原樣。因d(sum(y_i²))/dy_i=2y_i且STE近似dy_i/dx_i=1，應得兩倍量化後y而非原x。CPU輸出[0.2571428418,0.7714285254,1.7999999523]、hard仍[0,0,0]，符合預測。"
+    }
+  },
+  "reader_understanding": {
+    "formula_symbols": {
+      "x": "可求導的原三元素浮點輸入；在圖中作主權重數字的例子",
+      "y": "fake quantization後用于前向的還原浮點值",
+      "scale": "一個整數格代表的浮點間隔，本單向量例為最大絕對值0.9除以7",
+      "q": "我用來稱捨入后的整數碼[1,3,7]，不是原例中另宣告的變數",
+      "hard": "獨立求導的原數值副本，供普通round比較",
+      "STE": "刻意在反向採原樣通過的梯度近似；不是取整真導數",
+      "NLL": "每個有效回答目標的-log(正確答案機率)平均，較低較好"
+    },
+    "numbers": {
+      "four_bit_positive_endpoint": "7；此工具用對稱-7到7而非用滿所有編碼",
+      "350": "各支線實際額外更新次數，不含共同底座原先訓練",
+      "39348": "每支線讀過的回答與EOS計分目標數，不是39,348道題",
+      "10_and_69": "最後測試題數10與有效回答目標69；正確答案匹配和目標代價各有分母",
+      "zero_logit_difference": "一個含標準答案前文的輸入上模擬forward與重載packed4對齊，不表示開放生成答案正確"
+    },
+    "figure_interpretation": "QAT圖右侧返回箭頭是每一步更新主權重，向下到第三格才是訓練完成後真正打包；刻度圖逐欄除、round、乘還原，最右和最左不相等，顯示誤差。"
+  },
+  "reading_order": [
+    {
+      "order": 1,
+      "source": "outputs/natural-v4/review-plan/reader-contract.md",
+      "scope": "完整唯一schema/tool指令"
+    },
+    {
+      "order": 2,
+      "source": "course/chapters/17.md#17.14",
+      "scope": "完整assigned節，從##到下一##前；只以bytes複製舊report，不讀其內容"
+    },
+    {
+      "order": 3,
+      "source": "course/first-steps.md#W.6",
+      "scope": "完整明示梯度前置"
+    },
+    {
+      "order": 4,
+      "source": "course/chapters/17.md#17.2",
+      "scope": "完整明示scale捨入前置"
+    },
+    {
+      "order": 5,
+      "source": "course/training.md#T.4",
+      "scope": "完整明示SFT實驗底座前置；讀指令與表，不執行訓練或下載"
+    },
+    {
+      "order": 6,
+      "source": "course/chapters/17.md#17.9",
+      "scope": "完整明示PTQ前置"
+    },
+    {
+      "order": 7,
+      "source": "course/chapters/17.md#17.1",
+      "scope": "完整17.2明示bytes前置"
+    },
+    {
+      "order": 8,
+      "source": "course/chapters/17.md#introduction",
+      "scope": "完整17.1之前的章導言"
+    },
+    {
+      "order": 9,
+      "source": "course/chapters/17.md#17.7",
+      "scope": "完整17.9明示weight-only/QuantizedLinear前置"
+    },
+    {
+      "order": 10,
+      "source": "course/figures/qat_training_deployment.svg",
+      "scope": "Inkscape渲染後親自用view_image查看"
+    },
+    {
+      "order": 11,
+      "source": "course/figures/architecture_quantize_grid.svg",
+      "scope": "Inkscape渲染後親自用view_image查看"
+    },
+    {
+      "order": 12,
+      "source": "docs/reader-reviews/artifacts/natural-v4-cleanup/17.14/predictions-before-execution.json",
+      "scope": "先保存原例與練習預測，再各CPU短執行一次"
+    }
+  ],
+  "necessary_prerequisites": [
+    {
+      "source": "course/first-steps.md#W.6",
+      "start_byte": 18832,
+      "end_byte_exclusive": 21742,
+      "sha256": "5d8ab2f94321c8db814758a488259896ea4056dfa573ad1049777a06e56653f0",
+      "snapshot": "docs/reader-reviews/artifacts/natural-v4-cleanup/17.14/prerequisite-W.6-read-snapshot.md"
+    },
+    {
+      "source": "course/chapters/17.md#17.2",
+      "start_byte": 5596,
+      "end_byte_exclusive": 8944,
+      "sha256": "ed895082611e15c5860a8884771f9237565f6b9d7984642908158b2ca1763ecb",
+      "snapshot": "docs/reader-reviews/artifacts/natural-v4-cleanup/17.14/prerequisite-17.2-read-snapshot.md"
+    },
+    {
+      "source": "course/training.md#T.4",
+      "start_byte": 23246,
+      "end_byte_exclusive": 48210,
+      "sha256": "cfff70f0b4fac9ce984151d46e1c1b03ee753d24c372eda4b90982d5790fbb24",
+      "snapshot": "docs/reader-reviews/artifacts/natural-v4-cleanup/17.14/prerequisite-T.4-read-snapshot.md"
+    },
+    {
+      "source": "course/chapters/17.md#17.9",
+      "start_byte": 29177,
+      "end_byte_exclusive": 33677,
+      "sha256": "3182cf2dcf07044181e7ea060891930fa23795707ef48c7bbd01a9743dfbcd71",
+      "snapshot": "docs/reader-reviews/artifacts/natural-v4-cleanup/17.14/prerequisite-17.9-read-snapshot.md"
+    },
+    {
+      "source": "course/chapters/17.md#17.1",
+      "start_byte": 512,
+      "end_byte_exclusive": 5596,
+      "sha256": "bbbd6a41fae53426959e02f29db048d7cdd3e9bb0735b220abb803a5d7c94784",
+      "snapshot": "docs/reader-reviews/artifacts/natural-v4-cleanup/17.14/prerequisite-17.1-read-snapshot.md"
+    },
+    {
+      "source": "course/chapters/17.md#introduction",
+      "start_byte": 0,
+      "end_byte_exclusive": 512,
+      "sha256": "e876606a077cd061db655e0b6a1677319b1d64972e54f3cfe655baf93971cada",
+      "snapshot": "docs/reader-reviews/artifacts/natural-v4-cleanup/17.14/prerequisite-17-intro-read-snapshot.md"
+    },
+    {
+      "source": "course/chapters/17.md#17.7",
+      "start_byte": 21885,
+      "end_byte_exclusive": 25466,
+      "sha256": "0cb75b021ac0335e7a0bc95f543ae462567127a6eaf735d2f601584b21451948",
+      "snapshot": "docs/reader-reviews/artifacts/natural-v4-cleanup/17.14/prerequisite-17.7-read-snapshot.md"
+    }
+  ],
+  "reading_evidence": {
+    "assigned_snapshot": "docs/reader-reviews/artifacts/natural-v4-cleanup/17.14/section-read-snapshot.md",
+    "assigned_receipt": "docs/reader-reviews/artifacts/natural-v4-cleanup/17.14/section-receipt.json",
+    "prerequisite_receipts": "docs/reader-reviews/artifacts/natural-v4-cleanup/17.14/prerequisite-receipts.json",
+    "preserved_prior_report": "docs/reader-reviews/artifacts/natural-v4-cleanup/17.14/prior-report-unread.json",
+    "prior_report_read": false,
+    "current_assigned_bytes_equal_read_snapshot": true,
+    "current_figure_bytes_equal_render_receipts": true
+  },
+  "render_and_view_evidence": {
+    "renders": "docs/reader-reviews/artifacts/natural-v4-cleanup/17.14/render-evidence.json",
+    "personal_viewing_notes": "docs/reader-reviews/artifacts/natural-v4-cleanup/17.14/viewing-notes.json",
+    "all_target_and_used_prerequisite_svgs_viewed": true,
+    "count": 2,
+    "renderer": "Inkscape",
+    "actual_view_tool": "view_image"
+  },
+  "execution_evidence": {
+    "predictions_before_run": "docs/reader-reviews/artifacts/natural-v4-cleanup/17.14/predictions-before-execution.json",
+    "records": "docs/reader-reviews/artifacts/natural-v4-cleanup/17.14/execution-evidence.json",
+    "original_script": "docs/reader-reviews/artifacts/natural-v4-cleanup/17.14/original-example.py",
+    "original_stdout": "docs/reader-reviews/artifacts/natural-v4-cleanup/17.14/original-example-stdout.txt",
+    "exercise_script": "docs/reader-reviews/artifacts/natural-v4-cleanup/17.14/exercise-example.py",
+    "exercise_stdout": "docs/reader-reviews/artifacts/natural-v4-cleanup/17.14/exercise-example-stdout.txt",
+    "scope": "兩個三元素離線CPU短程序；原例與練習各執行一次，均exit0。未下載、安裝、訓練、使用GPU或重跑表中正式實驗。"
+  },
+  "review_scope": "獨立READABILITY ONLY；不提供factual審查、benchmark複現或閱讀時間估計。"
+}

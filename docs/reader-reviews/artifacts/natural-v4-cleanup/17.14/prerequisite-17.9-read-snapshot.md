@@ -1,0 +1,39 @@
+## 17.9 已訓練模型怎麼直接轉換？
+
+手上已有訓練好的權重，想先壓縮看看，是否一定要重新訓練？Post-Training Quantization（PTQ，訓練後量化）是在既有權重上選刻度、轉換表示，再用同一批輸入評估。最基本的weight-only PTQ只依權重範圍選scale，通常不需要先收集中間特徵。前置是[只量化權重的線性層](17.md#17.7)：轉換保留原模型架構的大部分運算，差異來自那些被量化的權重。
+
+關鍵是從同一份權重出發。若分別建立兩個隨機模型，再量化其中一個，輸出不同可能來自初始化，而不是壓縮。應先保留原版，再深複製它，對副本逐層轉換。深複製意味著把參數數值複製到獨立物件，後續修改副本不會回頭改原版。
+
+```python
+import copy
+import torch
+from tiny_perceptron.model import TinyLM, ModelConfig
+from tiny_perceptron.quantization import replace_linear_layers
+
+torch.manual_seed(0)
+original = TinyLM(ModelConfig(width=8, tied=False)).eval()
+ids = torch.tensor([[1, 2, 3]])
+with torch.no_grad():
+    before = original(ids)["logits"]
+    quantized = replace_linear_layers(copy.deepcopy(original), bits=4)
+    after = quantized(ids)["logits"]
+    original_again = original(ids)["logits"]
+print("兩版形狀", tuple(before.shape), tuple(after.shape))
+print("原版是否被改", (before - original_again).abs().max().item())
+print("量化分數MAE", (before - after).abs().mean().item())
+```
+
+輸入一段三個token，預設詞表264項，兩版形狀都應為 `(1,3,264)`。`.eval()`把模型切到評估模式，讓會區分訓練與評估的層採用評估行為；`torch.no_grad()`則讓這個區塊的運算不記錄求導關係，兩者的差別見[5.17](05.md#5.17)。`copy.deepcopy`先建立完整獨立副本；`replace_linear_layers`在這份副本內把Linear換成參考QuantizedLinear，因此不要把原版直接傳進去再假設它仍未量化。這個函數不替換字嵌入與正規化層，所以也不是「全部數字都改四位元」。
+
+`torch.manual_seed(0)`設定PyTorch的隨機種子，也就是產生隨機數時的起點。本例建立模型時會隨機初始化權重；在同一環境、以相同順序重跑時，保留這個起點，才能讓4-bit與8-bit比較從相同的初始化出發。`copy.deepcopy`則保證一次執行內的原版與量化副本起初具有相同權重。
+
+第二行應為0，確認原版沒有被轉換改動。第三行通常是非零小數，表示同一輸入各位置、各詞表分數的平均絕對差；它不是答錯率，也沒有固定跨模型合格門檻。本例使用隨機權重，只驗證轉換流程與比較方法，沒有稱它完成了真實訓練後品質評估。實際PTQ要先載入選定的訓練權重，使用同樣的原版與副本流程，再做獨立任務檢查。
+
+正式實驗則載入[T.4的直接SFT模型](../training.md#T.4)，寬64、兩層、不共享輸入輸出表，再以原45筆訓練題更新120次，batch16、學習率0.003、seed42，讀到13,610個有效回答目標。這份更新後的FP32才是共同來源；4-bit與8-bit各從它直接轉換，沒有再訓練，也沒有先轉8-bit再降4-bit。原始家族切分仍為45／5／10筆，分別來自9／1／2個屬性家族，三側無交集。兩份packed檔重新載入後才評估，結果見[17.15](17.md#17.15)，完整重跑入口見[T.9](../training.md#T.9)。來源模型原來的5/10與這次FP32的6/10之間另有120次更新，不能把那一題進步歸功於量化。
+
+這裡明確 `tied=False`，避免[輸入輸出權重共享](14.md#14.6)造成另一個問題：若原輸出與embedding共用一份權重，將輸出換成量化buffer後，共享關係可能改變。這時不只表示精度不同，還改了共享語意，必須另外設計與交代，不能默默當作普通等價替換。
+
+PTQ若也量化中間特徵，要先決定如何取得它們的範圍：可以隨當次輸入估計，也可以先用代表性資料校準，再固定範圍。兩種做法見[範圍校準](17.md#17.12)，都不同於現在只量化權重的weight-only方法。保存轉換版時也要保存格式與還原資訊，讓載入與運算使用同一套規則。
+
+練習只將bits由4改成8，保持隨機種子、原版與ids不變。先預測形狀和原版不變檢查仍相同，分數MAE通常降低，再執行核對。若要比較速度，應使用另一個明確計時實驗，不能從這個MAE推斷加速。
+

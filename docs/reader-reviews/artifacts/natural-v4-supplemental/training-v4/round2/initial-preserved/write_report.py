@@ -1,0 +1,78 @@
+from pathlib import Path
+import json,hashlib
+ROOT=Path('/workspace/tiny-perceptron-vlm'); OUT=Path(__file__).resolve().parent
+source=json.loads((OUT/'source-receipt.json').read_text())
+current=(ROOT/source['path']).read_bytes(); current_sha=hashlib.sha256(current).hexdigest()
+assert current== (OUT/'TRAINING.md.snapshot').read_bytes(), 'Assigned canonical source changed; a full fresh reread is required.'
+prereq=json.loads((OUT/'prerequisites.browser.receipt.json').read_text())
+figure_receipts=json.loads((OUT/'figure-render-receipts.json').read_text())
+notes={
+'natural-v4-family-crops.svg':'親自看見綠色家族A把原圖、裁切、换問法、繁中改寫一起放訓練；黃色家族B另留出。圖明說是資料卡示意，不是實際數量，支持TRAINING的train/validation/test用途分離。',
+'natural_base_adapter.svg':'同一x分成灰色固定W和藍色A→B→alpha/r兩路，兩路在加號相加得到Wx+(alpha/r)BAx；底部明說只更新A、B。看得出凍結不等於停用底座。',
+'natural-v4-answer-mask.svg':'上方六格X仍保留起始、使用者、Q、結束、助理、A；下方右移Y只把助理位置的A與A位置的結束標藍。灰格不直接計分且沒有刪掉問題，圖明說不是完整模型長度。',
+'natural_photo_evidence.svg':'兩幅人工場景都有同一人與車，A的手脚和座位連接表示騎車，B的人站在車旁。物件相同不足以證明動作或關係正確；頁底明說不是自然照片能力實測。',
+'natural_reading_order.svg':'原單上牛奶、下麵包，綠框牛奶→麵包和黃框麵包→牛奶清楚相反；同字同數量仍不是同順序，頁底指出多欄或直排另需閱讀規則。',
+'natural-v4-asr-two-routes.svg':'來源原話分為正確逐字稿直入聊天，及真錄音→ASR→原始辨識稿→同一聊天模型。兩路各保存回答，且明寫相同權重、歷史與照片；先核對聽寫，再看兩份完整回答。'
+}
+for r in figure_receipts:
+    r['personally_viewed']=True; r['view_tool']='tools.view_image(detail=original)'; r['own_view_note']=notes[Path(r['source']).name]
+issues=[
+ {'severity':'nonblocking','location':'docs/natural-assistant/v4/TRAINING.md:85 and :143','observed':'命令中的 --checkpoint-every 25 沒有與正文解釋的1,039／2,077步不可覆寫候選對照。我能確定後兩個候選是選版用的，但只靠這份文字無法確定25步設定保存哪些進度或檔案。','proposed_correction':'在候選保存說明旁補一句，說明每25步的保存用途、位置，以及它和兩份不可覆寫候選的差別。','impact':'不阻斷完成狀態、續訓或兩份指定候選的閱讀，但讀者不能完整解釋這個配方數字。'},
+ {'severity':'nonblocking','location':'docs/natural-assistant/v4/TRAINING.md:191–203','observed':'本版實際採底座，指紋命令卻只示範選LoRA的分支；底座分支說保存版本、資料及驗證配方，但沒有相應的具體保存範例。後文省略 --adapter 的操作本身清楚。','proposed_correction':'追加一個保留底座時保存指定底座revision、manifest與驗證生成設定的小範例，或連到同等具體的能力卡欄位。','impact':'不妨礙理解base候選與最後測試用途；首次操作者需要自行決定保存檔案的形式。'},
+ {'severity':'nonblocking','location':'docs/natural-assistant/v4/TRAINING.md:181–187; validation-protocol-lower-lr.json score and adapter_nonregression_gates_vs_base','observed':'必要判準連結可讀且內容足够，但落在英文JSON。中文正文講完整性、保留門檻與嚴格提升，沒有把五項平均、各項可退一題或不得退的門檻翻成中文，也沒有一個算例。','proposed_correction':'保留JSON作固定紀錄，再加短中文門檻表和用分數比較base與一個假候選的算例；明示ASR CER不計入LoRA綜合分。','impact':'基本分數和平均可算，我能從此JSON自行解釋選版；需要跨語言與欄位名稱對照，增大第一次閱讀負擔。'}
+]
+commands=[
+ {'location':'15–17','name':'GPU與bfloat16探測','executed':False,'inputs':'已建立 .venv-natural 中的torch及本機驅動／GPU。','expected_outputs_from_text':'兩個布林值都應True；不符合則先處理驅動／套件或另存不同精度配方。','understanding':'它檢查這套訓練精度能否用，沒有開始訓練。'},
+ {'location':'37–41','name':'fetch_natural_data --list / download / --verify','executed':False,'inputs':'固定 manifest 路徑、資料revision 9a61ecf524c9518f33f1501c28aa72997d4a82d0、完整manifest SHA-256及 data/natural-v4。','expected_outputs_from_text':'第一條列清單與大小；第二條取得三包並解包；第三條只核對既有檔案。DATA第6節解釋逐包與逐檔核對。','understanding':'manifest是題目配對清單；data-root才是照片／OCR／voice資料位置。相同指紋不是答案內容正確的證據。'},
+ {'location':'51–61','name':'prepare','executed':False,'inputs':'Qwen/Qwen3-VL-2B-Instruct固定revision 89644892e4d85e24eaac8bacfd4f463576704203、Whisper turbo、CUDA bfloat16、圖片與token預算、seed42。','expected_outputs_from_text':'模型准备紀錄在 outputs/natural-my-v4/models，下載快取留在 .cache/natural-v4-models。','understanding':'先取得完整底座和ASR零件；此步尚未更新權重。後續local-files-only缺檔停止。'},
+ {'location':'69–89','name':'mkdir / cat heredoc / bash train.sh','executed':False,'inputs':'新的 outputs/natural-my-v4 工作名稱；固定底座／資料／快取；2077總更新、learning-rate0.00003、rank8、累積2題、候選1039及2077、每25步保存設定、3300秒軟上限。','expected_outputs_from_text':'mkdir建目錄；cat將BASH之間文字寫成train.sh；最後bash才啟動一次train；輸出adapter、result/training/provenance及候選檢查點。','understanding':'步數數更新器真正更新的次數；完成與否讀status/requested_steps/completed_steps。25步保存的具體用途是我的非阻擋疑問。'},
+ {'location':'125–145','name':'PENDING_CHECKPOINTS 與續訓train','executed':False,'inputs':'自己的完整 train/adapter 與training.json中的completed_steps；保持原底座、資料、rank、累積、種子、學習率；新resumed輸出。','expected_outputs_from_text':'Python先把尚未經過的1039／2077連成逗號清單，殼層存入變數再傳给train；恢復既有進度並往總目標2077更新，另外保存新候選。','understanding':'1000步時清單1039,2077；1100步只剩2077。2077是總數，非追加2077；未保存更新無法恢復。再次中斷應同時改讀取和載入路徑，且新開輸出。'},
+ {'location':'157–175','name':'validation','executed':False,'inputs':'固定validation卷和相同圖片／歷史／生成設定；base與1039、2077兩個實際完整候選路徑。','expected_outputs_from_text':'generations-base.json、generations-adapter-step-001039.json、generations-adapter-step-002077.json、result.json，以及共用ASR的transcripts.json。','understanding':'不更新權重；每次生成取最高機率下一token，最多384新token。先確認所有題完成，再按來源素材和references人工判照片／聊天；自動統計不能替人選版。validation中learning-rate仍列為配方值，正文已明說不做更新。'},
+ {'location':'193–201','name':'SELECTED_ADAPTER 與sha256sum','executed':False,'inputs':'假設驗證選中1039步，將其實際路徑存變數；那份修正權重與設定、manifest、validation/result.json。','expected_outputs_from_text':'chosen-before-test.sha256 中的完整檔案指紋。','understanding':'這固定同一組檔案，不證明能力；若選2077或resumed便改實際路徑。底座分支保存例子不完整但文字已指出省略adapter。'},
+ {'location':'205–221','name':'evaluate --split test --selected-only','executed':False,'inputs':'已固定的選定底座及可選adapter、固定test資料和生成配方。','expected_outputs_from_text':'outputs/natural-my-v4/final中的最後報告，保留完整回答、停止原因與評分範圍；本文沒有列每個最後輸出檔名，我不自行假定。','understanding':'只驗收選中配置，不重新比較候選或按test換版；各用途分母分開保留。看錯題後修改就需要下一份未參與決策的考卷。'},
+ {'location':'235–247','name':'serve自己的配置','executed':False,'inputs':'相同底座revision／ASR／生成設定／本機完整快取，以及選用LoRA時的SELECTED_ADAPTER。','expected_outputs_from_text':'本機服務127.0.0.1:8766及自己的ui輸出目錄；同機瀏覽器打開該地址。','understanding':'保留底座省略adapter；此命令直接用自己配置，不走教材公開成品下載清單。'},
+ {'location':'251','name':'可選遠端GPU路線','executed':False,'inputs':'自己的Modal／權重儲存與工作名稱；明寫natural-v4、manifest、2077步、0.00003、turbo、1039/2077、524288pixels、seed42、GPU階段3300軟上限。','expected_outputs_from_text':'自己的遠端工作與保存權重；本文未给远端檔案的具體可下載位置。','understanding':'這是另選的環境，不可把本機outputs路徑當遠端檔案。這條可選路線不影響本機配方理解，未讀workflow程式source、未執行或建立服務。'}
+]
+report={
+ 'review_type':'fresh independent whole-document readability only',
+ 'document_scope_id':'training-v4',
+ 'role_contract':'outputs/natural-v4/review-plan/supplemental-reader-contract.md',
+ 'actual_full_reviewer_task':'Repo /workspace/tiny-perceptron-vlm。獨立fresh READABILITY ONLY whole-document，完整canonical docs/natural-assistant/v4/TRAINING.md（不draft）＋真正browser http://127.0.0.1:8769/natural-v4-training.html/其學生training導航與確實必要explicitlinks。先讀唯一 /workspace/tiny-perceptron-vlm/outputs/natural-v4/review-plan/supplemental-reader-contract.md role/schema/tool。高中/大學基礎數學首次讀者，完整全部255行currentfullfilehash/snapshot自保留，所有命令用途/inputs/outputs/配方/數字/選版與最後考卷/限制自述，自己5checks summary/issues/verdict，不舊review/作者原因/expectedpass。SVG如果所需真render/view_image。existing.venv Chromium/Playwright真browser保存URL/screens/heading與destinationmeans（HTMLsource-only非browser）；localpreview未發布且無CPU執行輸出，新估時未開始，不估分鐘。實際install/download/data/models/GPUlongtrain禁止，只boundedofflineCPU如真必要；不source/checker/Git/time、不spawn。自己 docs/reader-reviews/artifacts/natural-v4-supplemental/training-v4/report.json＋small durable read/browser evidence；noinventednumberedID/otherowner，未run命令誠實可理解性。真正FINAL附verdict/currentfileSHA/remainingissues/實讀browserpaths。',
+ 'fresh_context':{'reader_background':'第一次遇到本專案，高中／大學基礎數學；用分數、平均、乘法與清楚步驟判讀，不假定已懂完整模型source。','prior_reviews_read':False,'author_editorial_reasoning_read':False,'expected_verdict_received':False,'note':'只讀canonical教材和本文明示必要背景。必要判準JSON含prior_validation欄位，該欄是隨原文讀到的配方內容；未追讀舊評分紀錄或以作者決定代替本次可讀性判斷。檔案搜尋曾列出其他review路徑名稱，沒有開啟其內容。'},
+ 'assigned_documents':[dict(source,current_sha256=current_sha,exact_snapshot_matches_current=True,complete_read=True,actual_read_order='完整原稿第1行至255行，包含全部命令、表格與最後能力卡提醒；其後完整讀browser正文及必要前置連結。',original_figures_in_assigned_document=[],understanding_assessment='能重述完整本機GPU配方、候選與交付分開、驗證選版與最後考卷分開，以及完成狀態與品質分開。')],
+ 'actual_read_order':['先讀唯一supplemental reader contract。','完整canonical TRAINING.md 1–255行。','真Chromium取得training頁，保存全文DOM可見文字、標題、連結及top/配方/驗證/最後測試/使用自己的模型畫面，親自讀正文。','讀STUDENT第1、2步、完整DATA及必要validation-protocol-lower-lr.json canonical內容；chapter20完整source只保存，不宣稱其餘章節全讀。','從training明示連結取得并完整讀20.5、20.6、20.7、20.8頁正文。','從20.9–20.12連結進20.9，再循實際下一頁讀20.10、20.11、20.12；完整讀20.13能力卡。','親自讀學生頁的訓練入口上下文，真browser讀GitHub約定判準JSON及其標題／內容。','真Chromium渲染六張必要SVG原圖，再用view_image(original)逐張看完整圖。','學生正文訓練指引與側欄自行重訓各實際點擊到training，保存入口／目的地畫面。'],
+ 'own_summary':'這份指引重做的是照片、中文OCR與聊天的圖文LoRA候選。ASR是另一位先聽寫的同學，這次沒有音訊進入更新。先取得独立GPU環境、固定資料和指定底座／ASR快取，把配方保存成腳本再訓練。用自己的紀錄確認2077總更新是否完成，必要時從完整狀態續訓，保留1039與2077候選。三個候選共用驗證題與實際ASR逐字稿，按不同用途分開判；滿足完整結束、能力保留及嚴格提升才選LoRA。固定版和資料指紋後只對所選版做test；不能再用最後錯題替這一版挑設定。最後serve自己的配置，並寫清能力卡範圍。',
+ 'workflow_and_counts':{
+   'data_and_roles':'資料為三個快照包及文字清單。rows訓練2077題、validation124題、test170題。train題439主場景+439可見事實+710單行合成OCR+117多行合成OCR+141 Commons抄寫+6 Commons分行+103有無字+42OpenAssistant+80本課條件對話。它們不等於2077份獨立素材：509張DOCCI照片依439/28/42分三側、827個NVIDIA裁切共享153原頁家族、Commons70整圖另有62訓練裁切；多題可能共圖。audio_rows沒有訓練音訊；38錄音分validation16/test22，FLEURS12/18只測聽寫，AISHELL4/4每問句有正確文字和實際ASR兩路聊天。',
+   'models':'固定Qwen3-VL-2B-Instruct圖文底座負責文字／照片；Whisper-large-v3-turbo另負責聽寫且共用實際逐字稿。LoRA只加語言注意力q/v，rank8、alpha16，因此alpha/r=2；底座、視覺部與ASR不因這次步驟重新訓練。底座共有2,127,532,032參數，LoRA1,605,632參數分112張量，含LoRA圖文模型2,129,137,664參數；ASR808,878,080另計。這些是教材所述數字，未自行核驗模型source。',
+   'update_counts':'每更新累積2題，2077更新共4154筆讀取；2077題各讀兩次，不是增加到4154獨立題。chapter20.7說有效目標39436、讀兩遍計分78872位置，這是編碼後的答案／後綴位置，不是中文字或獨立答案數。1039和2077是總完成更新的候選保存點。',
+   'recipe':'Linux/Python3.12/NVIDIA L4的歷史完整配方，PyTorch2.8.0+CUDA12.8、torchvision0.23.0+CUDA12.8、Transformers4.57.6、PEFT0.18.1、bfloat16、learning-rate0.00003、65536–524288pixels、最多2048編碼位置、最多384生成token、seed42。token不必是一中文字；圖片壓縮可能丟筆畫。3300秒是更新前檢查的軟上限，載入、一次更新、保存可超過它。',
+   'file_and_resource_numbers':'單候選修正權重6,438,952 bytes約6.44 MB，不含完整底座、更新器和進度。歷史核心1708.814秒與子程序1728.676秒有不同邊界；PyTorch已分配峰值5,719,892,480 bytes約5.327GiB不是整張卡占用或最低需求。4CPU/32GiB是雲端配置而非CPU峰值。我沒有量測本次閱讀或重做這些數字。',
+   'validation_selection':'本次固定判準先要求LoRA每個生成完整EOS，然後照片summary、ordered OCR、兩條voice chat不得少於base；photo fact、text presence、single OCR、text chat各可少一題。通過門檻後才比五項等權平均：photo=(summary率+fact率)/2，presence、single OCR、ordered OCR各一項，dialogue=(text chat率+typed voice率+actual ASR voice率)/3。ASR CER另報不進LoRA分數。必須未四捨五入的分數嚴格高於base；和base平手保留base，合格adapter平手取較早保存版。',
+   'last_exam_and_limits':'版固定後evaluate selected-only，不回頭選權重。原版test178助手回答由170文字／圖片題加兩路各4語音问句構成，並不是178獨立情境；22段錄音是另一分母。能力卡保留42照片描述、84共圖問答、18有無字、10單區OCR、3分行、13文字聊天、22聽寫錄音與兩路各4聊天。原版171正常結束、7文字聊天截斷仍留在13題分母。能區分CER字元錯誤率與聊天成功率，且未測長對話、多欄大頁、噪聲／即興／多人重疊不能宣稱已驗收。這些是所讀能力卡內容，沒有本次跑模型生成。'
+ },
+ 'command_inventory':commands,
+ 'five_checks':[
+  {'check':'background_and_links','status':'pass','own_assessment':'必要背景分工合理：STUDENT1/2给獨立環境與GPU配套；DATA給資料／題目／家族數、固定快照與各來源用途；20.5–20.8教家族、LoRA、答案遮罩和選版；20.9–20.12逐用途驗收；20.13收束限制。學生正文和側欄實際到達正確training標題。約定判準GitHub可讀，但中文算例會降低負擔。','issues':['英文JSON的中文門檻／算例可補。']},
+  {'check':'terminology_symbols_numbers','status':'pass','own_assessment':'能說明底座與上游、LoRA/adapter、rank/alpha、train/validation/test、mask、token、CER、manifest/data-root、SHA-256、續訓狀態與小推論檔。圖中的W/A/B/x和alpha/r指两路相加；q/v是注意力中插入修正的位置標籤，本文不教注意力詳細推導，但操作理解不依赖该推導。數字多但與作用、範圍和分母一起说明。','issues':['--checkpoint-every 25 的具體保存用途未解释。']},
+  {'check':'examples_and_figures','status':'pass','own_assessment':'training本身没有直接SVG；必要前置的六圖實際渲染／看圖完整清楚。四卡片家族、4→rank2→3的LoRA、Q/A遮罩、同人車不同活動、臺/台差一字、牛奶／麵包行序、漏不字、SHA配套錯配各隔離一個觀念；它們明說手寫概念例子沒有代替自然模型結果。','issues':[]},
+  {'check':'program_and_command','status':'pass','own_assessment':'整條命令的先後、输入目錄與主要輸出能按文字解釋；cat存腳本與bash只執行一次、resume總步數與新輸出、三候選共用逐字稿、selected-only和省略adapter分支都清楚。沒有執行教材的安裝、Git、資料／模型下載、訓練、驗證或服務；可讀性pass不是可執行性或環境ready聲明。','issues':['每25步保存的用途可补。','保留底座時的具體指紋／版本保存例子可补。']},
+  {'check':'exercise_completion_and_self_description','status':'pass','own_assessment':'這份操作指引的練習是重做完整候選比較，不是預設訓練成功。完成需看status/requested/completed；保存兩候選、全卷validation與原始停止原因；按不同任務判尺選版；固定後只讀一次最後卷；最後用能力卡說配置、來源、實際驗收和未驗收範圍。必要章節的小練習可在不跑GPU下預測结果，例如split改test露出重疊、rank1成7參數、A→AB多一計分目标、臺/台CER1/5、行序交換字袋仍同、補回不CER0、兩串bytes相同則指紋相同。這些只作阅读预测，未当作CPU执行输出。','issues':['完整選版的數值算例可补。']}
+ ],
+ 'browser_inspection':{'mode':'Actual Playwright-driven existing Chromium /usr/bin/chromium, not HTML-source-only','browser_version':prereq['browser_version'],'local_preview_published':False,'training_page_receipt':'training.browser.receipt.json','training_full_visible_text':'training.browser.text.txt','necessary_page_receipt':'prerequisites.browser.receipt.json','student_training_navigation_receipt':'student-training-navigation.receipt.json','actual_page_paths':[r.get('final_url',r.get('target_url')) for r in prereq['pages']],'destination_meanings_note':'20-11 receipt内最初purpose寫成聽寫是我的準備標籤錯誤；實際讀到的heading與正文明確是OCR行序，本報告按實讀內容說明。兩站聽寫與聊天責任在20.12。'},
+ 'necessary_prerequisite_source_receipts':['prerequisite-source-receipts.json','chapter20-source-receipt.json'],
+ 'figures':figure_receipts,
+ 'unfollowed_explicit_links':[
+  {'label':'訓練核對摘要','reason':'training表已說明量測邊界；此為技術證據，不是理解配方所必需，未追讀。'},
+  {'label':'驗證決定／章節的完整評分紀錄','reason':'正文已說明選版規則與結果；不追讀舊評分或以作者選版替代自己的可讀性判断。'},
+  {'label':'GPU環境指南／自然助理工作流程','reason':'可選遠端分支；本機訓練閱讀不依賴它，未檢查程式source或遠端服務。'},
+  {'label':'各必要章節內其他早期章節與Colab','reason':'20.5–20.13正文自身已重述這次理解所需的家族、矩陣分支、遮罩、CER、行序、兩站與指紋；沒有另擴張成前面所有課程review，也沒有開Colab執行。'}
+ ],
+ 'execution_evidence':{'curriculum_commands_executed':[],'bounded_offline_cpu_examples_executed':False,'cpu_output_claimed':False,'genuine_browser_commands':['.venv/bin/python docs/reader-reviews/artifacts/natural-v4-supplemental/training-v4/browser_read.py','.venv/bin/python docs/reader-reviews/artifacts/natural-v4-supplemental/training-v4/browser_prerequisites.py','.venv/bin/python docs/reader-reviews/artifacts/natural-v4-supplemental/training-v4/browser_figures.py','.venv/bin/python docs/reader-reviews/artifacts/natural-v4-supplemental/training-v4/browser_navigation.py'],'browser_initial_failure':'Playwright bundled default Chromium executable absent; launch with existing /usr/bin/chromium succeeded. No installation/download performed.','benchmark_replication':False,'technical_correctness_review':False,'site_build_or_publication':False,'new_reading_time_estimates_started':False,'time_records_changed':False},
+ 'issues':issues,'blockers':[],'remaining_issues':issues,'verdict':'pass','verdict_reason':'完整教材與必要連結讓我能解釋整套工作、資料／模型分工、配方數字、續訓、按validation選版及最後考卷限制。三項補充會讓首次操作更直接，但目前沒有阻止理解核心流程或把歷史數字誤認最低硬體／本次複現的障礙。',
+ 'scope_limits':['只判可讀性，不聲稱完整配方在本環境能執行或達成教材成績。','沒有執行CPU小例子、安裝／下載、Git或任何GPU／長訓練。','只完整review指定TRAINING；DATA作必要資料前置完整讀，STUDENT只讀1/2與訓練入口，chapter20只讀20.5–20.13，不接管其他owner。','瀏覽器證據是本機未發布preview；GitHub必要判準為實際外部browser取得。','未估閱讀分鐘，未改time、source、checker、產品導覽或環境配置。'],
+ 'prior_supplemental_preservation':{'preserved_previous_directory_exists':(OUT/'preserved-previous').exists(),'prior_content_read':False},
+ 'report_artifact':'docs/reader-reviews/artifacts/natural-v4-supplemental/training-v4/report.json'
+}
+(OUT/'report.json').write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+print(json.dumps({'verdict':report['verdict'],'current_file_sha256':current_sha,'complete_lines':source['lines'],'blockers':len(report['blockers']),'remaining_nonblocking':len(issues),'report':report['report_artifact']},ensure_ascii=False))

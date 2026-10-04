@@ -1,0 +1,58 @@
+## 19.4 怎麼確認下一階段真的接著上一階段學？
+
+一位學生讀完課文再練習回答，和另一位學生直接練習回答，都可能得到好看的結果。但若我們想研究「讀書後再練習」這條路，就必須確認練習的人確實是剛讀完的那位。整合模型也是如此：各章獨立實驗的權重不能因為檔名都叫`model.pt`，就被當成同一個成品接續長大。
+
+前置是[為何分預訓練與後訓練](07.md#7.17)、[只學回答位置](07.md#7.3)、[儲存訓練狀態](05.md#5.7)與[本成品的Dense／MoE選擇](19.md#19.2)；偏好分支的兩份模型角色另見[後訓練角色地圖](13.md#13.17)。checkpoint是某一時刻的權重及相關狀態快照。本成品固定架構與tokenizer，先pretrain，再載入那份權重做SFT；後面的模態與偏好階段，也儲存自己讀進來的父檔案指紋。指紋是從檔案bytes算出的摘要，用來辨認實際讀的是哪一份檔案，不是替模型加能力。
+
+![同一份語言核心依序讀文字、練回答、接素材與調偏好，每站留下一份快照](../figures/capstone_pipeline.svg)
+
+先從一筆資料看兩種教法的差別。下面只建立隨機Dense模型並各計一次誤差，不執行完整成品訓練。Dense示範每層只有一組前饋規則；正式成品則用MoE的多組expert與路由。短程式省去分派，是為了只看「哪些位置要學」，不能把它的模型誤當正式MoE權重。
+
+`build_dataset()`依固定規則產生資料，回傳`splits`與資料清單manifest；`splits["train"]`是訓練記錄串列，`_`表示此處暫不使用第二個回傳值。每筆記錄用`task`標任務、`user`放問題、`answer`放示範回答。`next(...)`取第一筆`style`記錄，下面也印出那筆問答，讓你能知道誤差在量什麼。
+
+```python
+import torch
+
+from tiny_perceptron.capstone import CapstoneModel, build_dataset, default_config, prepare_batch
+from tiny_perceptron.data import IGNORE
+from tiny_perceptron.model import masked_loss
+
+torch.manual_seed(42)
+splits, _ = build_dataset()
+row = next(row for row in splits["train"] if row["task"] == "style")
+print("問題", row["user"], "示範回答", row["answer"])
+model = CapstoneModel(default_config(dense=True))
+for pretrain in (True, False):
+    batch, labels = prepare_batch([row], pretrain=pretrain)
+    result = model(**batch)
+    loss = masked_loss(result["logits"], labels)
+    print("預訓練" if pretrain else "SFT", "有效目標", int((labels != IGNORE).sum()), "誤差有限", bool(loss.isfinite()))
+```
+
+本例問題是「照抄數字29，只要答案。」，示範是`DIRECT:29`。`prepare_batch`把它轉成模型輸入字典`batch`與下一位置的目標編號`labels`；`**batch`將字典各欄展開成模型的具名參數，例如輸入編號`ids`。`result["logits"]`是每個位置對候選編號的分數，`masked_loss`只計沒有被忽略的位置。
+
+預訓練版本把短文字裡每個下一byte都當目標；SFT版本提供對話前文，只把回答及結束編號當目標，因此本例的有效目標數分別是43與10。IGNORE是「這個位置不計回答誤差」的標記，不是從模型視野刪掉前文。兩行應印出有限誤差，這只證明資料與計分接得上，不表示預訓練更有效，也不比較兩種不同目標的loss高低。
+
+本小世界的預訓練材料把訓練家族的題目與標準回答接成短文字，不放對話角色，逐個下一byte學習。它沒有讀完大型網路語料，也不是用兩套全然不同內容來證明預訓練的好處；這輪主要演示同一個模型如何接續改變學習目標。正式流程每站會另測同一份能力矩陣，讓我們知道哪一站改善了哪項能力、又傷到哪項。
+
+正式流程使用固定資料版本`capstone-small-world-v2`、種子42與NVIDIA L4。前三站沿同一核心接續訓練，DPO則從joint接出比較分支；每站都評估同一份84題驗證資料。
+
+| 階段 | 從哪裡接續 | 這一站練什麼 | 完成更新 | 驗證整題正確 |
+| --- | --- | --- | ---: | ---: |
+| 預訓練 | 隨機權重 | 不帶角色的文字續寫 | 300 | 0／84 |
+| SFT | 預訓練權重 | 文字對話中的助理回答 | 1,400 | 42／84 |
+| joint | SFT權重 | 文字、圖片、聲音與聯合示範 | 600 | 75／84 |
+| DPO比較分支 | joint權重 | 比較偏好回答，並重練示範 | 100 | 71／84 |
+
+前三站都在交叉熵之外加入係數0.01的路由平衡項，避免少數專家獨占工作。實際學習目標數依序是364,409、647,067、249,100，包含反覆抽到的下一byte或EOS位置，不是不同文章數。DPO的41,403個目標只計重練示範的交叉熵位置，沒有包含policy與固定reference評分偏好回答的全部計算，不能把它與前三站直接當成等成本預算。
+
+表中的「整題正確」要求完整動作字串、內容或參數與EOS符合預期；工具題還要讀回結果並回答正確。預訓練為什麼0／84？像把題目和答案讀熟，還沒有練習「老師問完後，輪到我用指定格式回答」。例如「4+4等於多少？」得到`多4孔。算回算23`，並沒有產生計算器動作。這只說明本輪文字續寫尚未學會對話協定，不能推成所有文字續寫能力都為零。
+
+SFT的42／84則由42題文字全部正確、42題模態全部錯誤組成，不是每種能力都有一半成功率。joint後文字仍42／42，模態變33／42；九次失敗全是圖片形狀，[19.6](19.md#19.6)會拆開看。DPO反而降到71／84，因此「最後更新的檔案」不必然是較好的成品，選擇理由見[19.8](19.md#19.8)。
+
+怎樣確認這些階段真的接在一起？以SFT接入joint為例，比較[SFT實報](https://github.com/birdhackor/tiny-perceptron-vlm/blob/1df335318bda03fd771807f66976953231d5a00b/docs/course-experiments/results/capstone_sft.json)的`results.inference_export.sha256`，與[joint實報](https://github.com/birdhackor/tiny-perceptron-vlm/blob/1df335318bda03fd771807f66976953231d5a00b/docs/course-experiments/results/capstone_joint.json)的`results.parent_checkpoint_sha256`；應比較完整64字元，不能只看檔名或指紋開頭。本輪兩者相同，其他接續階段也通過同樣核對。這證明載入了指定父檔，能力則另由考題確認。從隨機權重開始的第一站沒有父檔，欄位為空值。
+
+完整條件、檔案大小與計時保留在[預訓練實報](https://github.com/birdhackor/tiny-perceptron-vlm/blob/1df335318bda03fd771807f66976953231d5a00b/docs/course-experiments/results/capstone_pretrain.json)、上述SFT／joint實報及[DPO實報](https://github.com/birdhackor/tiny-perceptron-vlm/blob/1df335318bda03fd771807f66976953231d5a00b/docs/course-experiments/results/capstone_preference.json)。逐站驗證用來決定成品，當時尚未開啟最後90題；定版後的各項能力統一見[19.12](19.md#19.12)。推論檔與完整續訓狀態的用途則在[19.11](19.md#19.11)分開說明。
+
+練習將選取`row`那行的`"style"`改成`"concept"`。固定資料下，問題會是「用3和6說明加法。」，示範是`DIRECT:把兩個數合起來`；先預測目標數會變長，再核對預訓練53個、SFT29個，誤差仍有限。較長回答增加有效目標，但合併批次仍應把有效位置的誤差相加，再除以有效位置總數，不能讓補齊的空格影響分母，詳見[5.2的長短答案算例](05.md#5.2)。
+
