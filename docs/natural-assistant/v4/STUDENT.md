@@ -8,7 +8,7 @@
 
 ## 1. 取得程式，確認 Python
 
-以下使用Linux的Bash終端機與Python 3.12。先把本版放在新的`tiny-perceptron-natural`資料夾，保留原有專案與練習：
+以下使用Linux的Bash終端機、Git與Python 3.12。先執行`git --version`確認Git已安裝；若找不到命令，依[Git官方安裝指引](https://git-scm.com/downloads)安裝後再繼續。先把本版放在新的`tiny-perceptron-natural`資料夾，保留原有專案與練習：
 
 ```bash
 GIT_LFS_SKIP_SMUDGE=1 git clone --no-checkout https://github.com/birdhackor/tiny-perceptron-vlm.git tiny-perceptron-natural
@@ -52,7 +52,7 @@ nvidia-smi
 
 CPU與GPU兩條路都要載入完整圖文底座。磁碟放下載檔，記憶體另外放運算中間結果、照片與對話。語音辨識器也有自己的權重，這份程式在CPU執行聽寫；只看顯示卡容量，還不能判斷整套助理的負擔。[20.3](../../../course/chapters/20.md#20.3)用一個乘法例子解釋這個差別。
 
-下面是本版一次Linux CPU操作的實際記錄。圖文模型使用float32，也就是每個浮點數用32 bits表示；Torch設定5個運算執行緒及1個interop執行緒。模型快取已齊備，接著用實際Chromium瀏覽器走文字、照片、語音、更正送出、追問與清除對話：
+下面是本版一次Linux CPU操作的實際記錄。圖文模型使用float32，也就是每個浮點數用32 bits表示；Torch把同一項運算分給5個執行緒，另設定1個管理不同運算之間工作的執行緒（interop）。模型快取已齊備，接著用實際Chromium瀏覽器走文字、照片、語音、更正送出、追問與清除對話：
 
 | 觀察項目 | 實際數字 | 量測範圍 |
 | --- | ---: | --- |

@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from scripts import export_course
+from scripts.build_course import notebook_reading_links
 from scripts.export_course import COURSE_URL, checked_notebook, output_html, reading_markdown
 
 
@@ -48,6 +49,19 @@ def test_execution_text_is_escaped():
     result = output_html([{"output_type": "stream", "text": ["<script>example</script>\n"]}])
     assert "&lt;script&gt;example&lt;/script&gt;" in result
     assert "<script>" not in result
+
+
+@pytest.mark.parametrize(
+    ("filename", "page"),
+    [("STUDENT.md", "natural-v4-student"), ("DATA.md", "natural-v4-data"), ("TRAINING.md", "natural-v4-training")],
+)
+def test_chapter_notebook_guide_link_stays_in_the_reading_site(filename, page):
+    source = export_course.ROOT / "course/chapters/20.md"
+    prose = f"[操作指引](../../docs/natural-assistant/v4/{filename})"
+    portable = notebook_reading_links(prose, source)
+    assert portable == f"[操作指引]({COURSE_URL}{page}.html)"
+    published = reading_markdown(portable, source, {}, {}, "a" * 40)
+    assert published == f"[操作指引]({page}.md)\n"
 
 
 @pytest.mark.parametrize(
