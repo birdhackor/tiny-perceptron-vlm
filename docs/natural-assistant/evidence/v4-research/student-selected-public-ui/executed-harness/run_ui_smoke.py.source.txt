@@ -1,0 +1,454 @@
+"""Serial actual CPU UI smoke, core now or reviewed public release later.
+
+No accuracy scoring. Observation wrappers never replace model/ASR outputs.
+"""
+
+import argparse
+import base64
+import hashlib
+import importlib.metadata
+import json
+import os
+import resource
+import signal
+import socket
+import subprocess
+import sys
+import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[3]
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT))
+
+
+def digest(path):
+    h = hashlib.sha256()
+    with Path(path).open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def file_record(path):
+    path = Path(path).resolve()
+    return {"path": str(path.relative_to(ROOT)), "bytes": path.stat().st_size, "sha256": digest(path)}
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--mode", choices=("core", "release"), required=True)
+    parser.add_argument("--interaction", choices=("http", "browser"), default="browser")
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--image", type=Path, required=True)
+    parser.add_argument("--audio", type=Path, required=True)
+    parser.add_argument("--manifest", type=Path)
+    parser.add_argument("--manifest-sha256")
+    parser.add_argument("--release-directory", type=Path)
+    parser.add_argument("--cache-dir", type=Path, default=ROOT / "outputs/natural-v4/student-base-cache/hf")
+    parser.add_argument("--max-seconds", type=int, default=1800)
+    parser.add_argument("--request-timeout", type=int, default=600)
+    args = parser.parse_args()
+    if args.mode == "core" and (args.manifest or args.release_directory or args.manifest_sha256):
+        parser.error("Public manifest/release inputs belong only to --mode release")
+    if args.output.exists():
+        parser.error("Use a new evidence directory, preserving earlier actual runs")
+    if args.mode == "release":
+        if args.manifest is None or args.release_directory is None or args.manifest_sha256 is None:
+            parser.error(
+                "Reviewed public mode requires --manifest, its exact --manifest-sha256 and --release-directory"
+            )
+        if not args.manifest.is_file() or digest(args.manifest) != args.manifest_sha256:
+            parser.error("Public manifest differs from actual reviewed SHA; no model will be loaded")
+        from scripts import fetch_natural_release as release
+
+        selected = release.validate_manifest(release.read_json(args.manifest))
+        release.verify_release(selected, args.release_directory)
+        release.check_runtime(selected)
+    args.output.mkdir(parents=True)
+    output = args.output.resolve()
+    sources = [
+        "scripts/natural_assistant.py",
+        "scripts/fetch_natural_release.py",
+        "tiny_perceptron/natural_assistant.py",
+        "tiny_perceptron/natural_ui.py",
+        "requirements-natural.txt",
+        ".github/workflows/natural-assistant.yml",
+    ]
+    before = [file_record(ROOT / path) for path in sources]
+    for item in before:
+        target = output / "source-bytes" / item["path"]
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes((ROOT / item["path"]).read_bytes())
+    for path in (Path(__file__), HERE / "ui_observer/sitecustomize.py"):
+        (output / path.name).write_bytes(path.read_bytes())
+    if args.interaction == "browser":
+        (output / "browser_ui_client.py").write_bytes((HERE / "browser_ui_client.py").read_bytes())
+    env = dict(os.environ)
+    removed = []
+    for key in list(env):
+        if "TOKEN" in key.upper() or key.upper().endswith(("SECRET", "PASSWORD")):
+            removed.append(key)
+            env.pop(key)
+    env.update(
+        HF_HUB_OFFLINE="1",
+        HF_DATASETS_OFFLINE="1",
+        HF_HUB_DISABLE_IMPLICIT_TOKEN="1",
+        HF_HUB_DISABLE_TELEMETRY="1",
+        OMP_NUM_THREADS="5",
+        MKL_NUM_THREADS="5",
+        OPENBLAS_NUM_THREADS="5",
+        NUMEXPR_NUM_THREADS="5",
+        PYTHONUNBUFFERED="1",
+        NATURAL_UI_OBSERVER_LOG=str(output / "observer.jsonl"),
+        PYTHONPATH=os.pathsep.join((str(HERE / "ui_observer"), str(ROOT))),
+    )
+    with socket.socket() as port_socket:
+        port_socket.bind(("127.0.0.1", 0))
+        port = port_socket.getsockname()[1]
+    if args.mode == "core":
+        command = [
+            str(ROOT / ".venv-natural/bin/python"),
+            "scripts/natural_assistant.py",
+            "serve",
+            "--output",
+            str(output / "core-output"),
+            "--data-root",
+            str(output / "ui-data"),
+            "--asr-variant",
+            "turbo",
+            "--device",
+            "cpu",
+            "--dtype",
+            "float32",
+            "--cache-dir",
+            str(args.cache_dir.resolve()),
+            "--local-files-only",
+            "--port",
+            str(port),
+        ]
+        ui_root = output / "ui-data"
+    else:
+        command = [
+            str(ROOT / ".venv-natural/bin/python"),
+            "scripts/fetch_natural_release.py",
+            "--manifest",
+            str(args.manifest.resolve()),
+            "--output",
+            str(args.release_directory.resolve()),
+            "--serve",
+            "--device",
+            "cpu",
+            "--dtype",
+            "float32",
+            "--cache-dir",
+            str(args.cache_dir.resolve()),
+            "--local-files-only",
+            "--port",
+            str(port),
+        ]
+        ui_root = ROOT / "outputs/natural-student/ui-data"
+    old_uploads = set(ui_root.glob(".natural-ui-*"))
+    report = {
+        "schema_version": 1,
+        "scope": "Actual serial UI infrastructure smoke; no accuracy grade, model selection or benchmark test",
+        "mode": args.mode,
+        "interaction": args.interaction,
+        "selected_public_release": args.mode == "release",
+        "git_revision": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
+        "command": command,
+        "sources_before": before,
+        "inputs": {"image": file_record(args.image), "audio": file_record(args.audio)},
+        "credential_environment_names_removed": sorted(removed),
+        "offline": True,
+        "torch_threads": 5,
+        "torch_interop_threads": 1,
+        "max_seconds": args.max_seconds,
+        "requests": [],
+    }
+    if args.manifest:
+        report["public_manifest"] = file_record(args.manifest)
+        report["public_release_prelaunch_gate"] = {
+            "manifest_sha256": args.manifest_sha256,
+            "selected_variant": selected.get("selected_variant", "adapter"),
+            "repo": selected["repo"],
+            "revision": selected["revision"],
+            "base_model": selected["base_model"],
+            "asr_model": selected["asr_model"],
+            "runtime_and_exact_download_receipt_verified_before_model_load": True,
+        }
+    deps = [
+        "torch",
+        "torchvision",
+        "transformers",
+        "peft",
+        "accelerate",
+        "numpy",
+        "pillow",
+        "soundfile",
+        "huggingface-hub",
+        "safetensors",
+        "scipy",
+    ]
+    report["dependencies"] = {name: importlib.metadata.version(name) for name in deps}
+    report["host_memory_before"] = Path("/proc/meminfo").read_text() if Path("/proc/meminfo").exists() else None
+    started = time.monotonic()
+    usage_before = resource.getrusage(resource.RUSAGE_CHILDREN)
+    stop = threading.Event()
+    timed_out = threading.Event()
+    with (output / "serve.stdout.txt").open("wb") as stdout, (output / "serve.stderr.txt").open("wb") as stderr:
+        process = subprocess.Popen(command, cwd=ROOT, env=env, stdout=stdout, stderr=stderr, start_new_session=True)
+
+        def deadline():
+            if not stop.wait(args.max_seconds):
+                timed_out.set()
+                os.killpg(process.pid, signal.SIGINT)
+
+        threading.Thread(target=deadline, daemon=True).start()
+        base = f"http://127.0.0.1:{port}"
+
+        def request(route, body=None, expected=200):
+            tick = time.monotonic()
+            content = None if body is None else json.dumps(body, ensure_ascii=False).encode()
+            req = urllib.request.Request(
+                base + route, data=content, headers={"Content-Type": "application/json"} if content else {}
+            )
+            try:
+                response = urllib.request.urlopen(req, timeout=args.request_timeout)
+            except urllib.error.HTTPError as error:
+                response = error
+            with response:
+                data = response.read()
+                media = response.headers.get("Content-Type", "")
+                value = (
+                    json.loads(data)
+                    if media.startswith("application/json")
+                    else {"bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+                )
+                report["requests"].append(
+                    {
+                        "route": route.split("?")[0],
+                        "request": None
+                        if body is None
+                        else {key: item for key, item in body.items() if key not in {"session", "base64"}},
+                        "status": response.status,
+                        "seconds": time.monotonic() - tick,
+                        "response": value,
+                    }
+                )
+                (output / "requests.json").write_text(
+                    json.dumps(report["requests"], ensure_ascii=False, indent=2) + "\n"
+                )
+                if response.status != expected:
+                    raise RuntimeError(f"{route} returned {response.status}, expected {expected}")
+                print(
+                    json.dumps(
+                        {"route": route.split("?")[0], "status": response.status, "seconds": time.monotonic() - tick},
+                        ensure_ascii=False,
+                    ),
+                    flush=True,
+                )
+                return value
+
+        try:
+            while True:
+                if process.poll() is not None:
+                    raise RuntimeError(f"UI process exited during startup: {process.returncode}")
+                try:
+                    page = urllib.request.urlopen(base + "/", timeout=2).read()
+                    break
+                except (urllib.error.URLError, ConnectionError):
+                    if timed_out.is_set():
+                        raise TimeoutError("Actual core load did not finish before the wall limit")
+                    stop.wait(1)
+            report["ready_seconds"] = time.monotonic() - started
+            (output / "actual-page.html").write_bytes(page)
+            for name in (b'"send"', b'"transcribe"', b'"reset"', b'"image"', b'"audio"'):
+                if name not in page:
+                    raise RuntimeError("Actual browser page is missing a required control")
+            if args.interaction == "browser":
+                browser_env = dict(env)
+                browser_env.pop("PYTHONPATH", None)
+                browser_env.pop("NATURAL_UI_OBSERVER_LOG", None)
+                browser_command = [
+                    str(ROOT / ".venv/bin/python"),
+                    str(HERE / "browser_ui_client.py"),
+                    "--url",
+                    base,
+                    "--image",
+                    str(args.image.resolve()),
+                    "--audio",
+                    str(args.audio.resolve()),
+                    "--output",
+                    str(output / "browser"),
+                    "--timeout-ms",
+                    str(args.request_timeout * 1000),
+                ]
+                report["browser_command"] = browser_command
+                with (
+                    (output / "browser.stdout.txt").open("wb") as browser_stdout,
+                    (output / "browser.stderr.txt").open("wb") as browser_stderr,
+                ):
+                    browser_result = subprocess.run(
+                        browser_command,
+                        cwd=ROOT,
+                        env=browser_env,
+                        stdout=browser_stdout,
+                        stderr=browser_stderr,
+                        timeout=args.max_seconds,
+                    )
+                if browser_result.returncode:
+                    raise RuntimeError("Actual headless browser interaction failed; see browser logs")
+                browser_report = json.loads((output / "browser/report.json").read_text())
+                if browser_report.get("status") != "passed" or not browser_report.get(
+                    "actual_browser_interactions_complete"
+                ):
+                    raise RuntimeError("Actual browser receipt is incomplete")
+                report["requests"] = browser_report["requests"]
+                report["headless_browser_interaction_complete"] = True
+            else:
+                identifier = request("/api/session", {})["session"]
+
+                def chat(prompt, **extras):
+                    result = request("/api/chat", {"session": identifier, "prompt": prompt, **extras})
+                    if (
+                        result.get("user") != prompt
+                        or not isinstance(result.get("prediction"), str)
+                        or not result["prediction"].strip()
+                    ):
+                        raise RuntimeError("Actual chat did not echo submitted text and return decoded text")
+                    return result
+
+                def upload(path, kind):
+                    path = Path(path)
+                    return request(
+                        "/api/upload",
+                        {
+                            "session": identifier,
+                            "kind": kind,
+                            "filename": path.name,
+                            "base64": base64.b64encode(path.read_bytes()).decode(),
+                        },
+                    )["asset"]
+
+                chat("你好，請用一句話回答。")
+                image = upload(args.image, "image")
+                chat("請用一句話描述這張照片的主要物件。", image=image)
+                audio = upload(args.audio, "audio")
+                asr = request("/api/transcribe", {"session": identifier, "audio": audio})
+                corrected = "如何加強與員工溝通？請用一句話回答。"
+                if corrected == asr["asr"]["transcript"]:
+                    corrected += "請簡短回答。"
+                result = chat(corrected, speech=asr["speech"])
+                if (
+                    result.get("asr", {}).get("submitted_text") != corrected
+                    or result["asr"].get("corrected") is not True
+                ):
+                    raise RuntimeError("Edited transcript did not reach the chat submission intact")
+                chat("請把剛才的建議縮成一句話。")
+                request("/api/reset", {"session": identifier})
+                request("/api/asset?" + urllib.parse.urlencode({"session": identifier, "asset": image}), expected=400)
+                request("/api/asset?" + urllib.parse.urlencode({"session": identifier, "asset": audio}), expected=400)
+            report["status"] = "passed"
+        except BaseException as error:
+            report.update(status="failed", error={"type": type(error).__name__, "message": str(error)})
+            raise
+        finally:
+            stop.set()
+            if process.poll() is None:
+                os.killpg(process.pid, signal.SIGINT)
+            try:
+                process.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                os.killpg(process.pid, signal.SIGTERM)
+                process.wait(timeout=30)
+            report.update(
+                process_exit_code=process.returncode,
+                wall_seconds=time.monotonic() - started,
+                timed_out=timed_out.is_set(),
+                sources_after=[file_record(ROOT / path) for path in sources],
+                shutdown_removed_new_upload_directories=not bool(set(ui_root.glob(".natural-ui-*")) - old_uploads),
+                browser_manual_trial_complete=False,
+            )
+            usage_after = resource.getrusage(resource.RUSAGE_CHILDREN)
+            report["cpu_resources"] = {
+                "user_seconds": usage_after.ru_utime - usage_before.ru_utime,
+                "system_seconds": usage_after.ru_stime - usage_before.ru_stime,
+                "maximum_resident_set_kib": usage_after.ru_maxrss,
+                "scope": "Linux RUSAGE_CHILDREN for actual server plus optional browser driver/tree; separate observer process_resources contains server-only metrics",
+            }
+            report["source_bytes_unchanged"] = report["sources_before"] == report["sources_after"]
+            if args.manifest:
+                report["public_manifest_unchanged"] = digest(args.manifest) == args.manifest_sha256
+            if (output / "observer.jsonl").exists():
+                events = [json.loads(line) for line in (output / "observer.jsonl").read_text().splitlines()]
+                server_usage = [event for event in events if event["kind"] == "process_resources"]
+                if server_usage:
+                    report["server_cpu_resources"] = server_usage[-1]
+                report["model_load_counts"] = {
+                    name: sum(event["kind"] == name + "_end" for event in events) for name in ("load_core", "load_asr")
+                }
+                bound = next(
+                    (event["options"]["max_new_tokens"] for event in events if event["kind"] == "load_core_begin"), None
+                )
+                report["generation_stop_conditions"] = [
+                    {
+                        key: event["result"].get(key)
+                        for key in (
+                            "input_tokens",
+                            "generated_tokens",
+                            "ended_with_eos",
+                            "reached_max_new_tokens",
+                            "stop_reason",
+                            "truncated",
+                            "completion_unknown",
+                        )
+                    }
+                    | {"configured_max_new_tokens": int(bound) if bound is not None else None}
+                    for event in events
+                    if event["kind"] == "generate_end"
+                ]
+                report["reset_states"] = [
+                    event["state"]
+                    for event in events
+                    if event["kind"] == "operation_end" and event["route"] == "/api/reset"
+                ]
+                begins = [event for event in events if event["kind"] == "generate_begin"]
+                checks = {
+                    "one_load_per_model": report["model_load_counts"] == {"load_core": 1, "load_asr": 1},
+                    "four_serial_chat_turns": len(begins) == 4
+                    and [len(event["row"]["history"]) for event in begins] == [0, 2, 4, 6],
+                    "prior_image_persisted_in_later_turns": len(begins) == 4
+                    and all(
+                        event["assets"]
+                        and all(asset["sha256"] == report["inputs"]["image"]["sha256"] for asset in event["assets"])
+                        for event in begins[1:]
+                    ),
+                    "reset_cleared_state": report["reset_states"]
+                    == [{"history_messages": 0, "assets": 0, "transcriptions": 0, "asset_files": []}],
+                    "shutdown_removed_uploads": report["shutdown_removed_new_upload_directories"],
+                    "sources_unchanged": report["source_bytes_unchanged"],
+                    "manifest_unchanged": report.get("public_manifest_unchanged", True),
+                    "bounded_normal_exit": process.returncode == 0 and not timed_out.is_set(),
+                }
+                report["infrastructure_checks"] = checks
+                if report.get("status") == "passed" and not all(checks.values()):
+                    report.update(
+                        status="failed",
+                        error={
+                            "type": "InfrastructureInvariant",
+                            "message": "Inspect infrastructure_checks; actual outputs preserved",
+                        },
+                    )
+            (output / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
+    print(json.dumps({"status": report["status"], "report": str(output / "report.json")}), flush=True)
+    if report["status"] != "passed":
+        raise RuntimeError("Actual UI smoke did not satisfy infrastructure invariants")
+
+
+if __name__ == "__main__":
+    main()

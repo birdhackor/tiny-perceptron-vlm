@@ -1,0 +1,134 @@
+"""Observe the actual UI/core; every wrapped call delegates unchanged once."""
+
+import atexit
+import hashlib
+import json
+import os
+import resource
+import time
+from pathlib import Path
+
+import torch
+
+from tiny_perceptron import natural_assistant as core
+from tiny_perceptron import natural_ui as ui
+
+torch.set_num_threads(5)
+torch.set_num_interop_threads(1)
+LOG = Path(os.environ["NATURAL_UI_OBSERVER_LOG"])
+
+
+def write(kind, **value):
+    with LOG.open("a", encoding="utf-8") as stream:
+        stream.write(
+            json.dumps({"kind": kind, "monotonic": time.monotonic(), "pid": os.getpid(), **value}, ensure_ascii=False)
+            + "\n"
+        )
+
+
+@atexit.register
+def process_resources():
+    usage = resource.getrusage(resource.RUSAGE_SELF)
+    write(
+        "process_resources",
+        user_seconds=usage.ru_utime,
+        system_seconds=usage.ru_stime,
+        maximum_resident_set_kib=usage.ru_maxrss,
+        scope="Actual Linux model server process; excludes browser/driver",
+    )
+
+
+def source(path):
+    data = Path(path).read_bytes()
+    return {"path": str(path), "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+
+
+def observe_load(name):
+    original = getattr(core, name)
+
+    def observed(options, *args, **kwargs):
+        started = time.monotonic()
+        write(
+            name + "_begin",
+            options={
+                key: str(getattr(options, key, None))
+                for key in (
+                    "model",
+                    "model_revision",
+                    "asr_model",
+                    "asr_revision",
+                    "adapter",
+                    "device",
+                    "dtype",
+                    "cache_dir",
+                    "local_files_only",
+                    "min_pixels",
+                    "max_pixels",
+                    "max_tokens",
+                    "max_new_tokens",
+                )
+            },
+        )
+        result = original(options, *args, **kwargs)
+        write(name + "_end", seconds=time.monotonic() - started)
+        return result
+
+    setattr(core, name, observed)
+
+
+original_generate = core.generate
+
+
+def generate(model, processor, row, data_root, options):
+    assets = [source(core.asset_path(path, data_root)) for path in core.row_assets(row)]
+    write("generate_begin", row=row, assets=assets)
+    result = original_generate(model, processor, row, data_root, options)
+    write("generate_end", result=result)
+    return result
+
+
+original_transcribe = core.transcribe
+
+
+def transcribe(model, processor, path):
+    write("transcribe_begin", audio=source(path))
+    result = original_transcribe(model, processor, path)
+    write("transcribe_end", result=result)
+    return result
+
+
+original_operation = ui.NaturalServer.operation
+
+
+def operation(server, route, data):
+    result = original_operation(server, route, data)
+    session = server.sessions.get(data.get("session"))
+    write(
+        "operation_end",
+        route=route,
+        state=None
+        if session is None
+        else {
+            "history_messages": len(session["history"]),
+            "assets": len(session["assets"]),
+            "transcriptions": len(session["transcriptions"]),
+            "asset_files": [
+                source(core.asset_path(asset["path"], server.data_root)) for asset in session["assets"].values()
+            ],
+        },
+    )
+    return result
+
+
+for name in ("load_core", "load_asr"):
+    observe_load(name)
+core.generate = generate
+core.transcribe = transcribe
+ui.NaturalServer.operation = operation
+write(
+    "observer_ready",
+    torch_threads=torch.get_num_threads(),
+    torch_interop_threads=torch.get_num_interop_threads(),
+    inference_mock=False,
+    sources=[source(core.__file__), source(ui.__file__)],
+)

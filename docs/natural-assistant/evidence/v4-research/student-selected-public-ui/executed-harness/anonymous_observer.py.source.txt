@@ -1,0 +1,46 @@
+"""Observe actual Hugging Face requests without replacing their responses."""
+
+import atexit
+import json
+import os
+from pathlib import Path
+from urllib.parse import urlsplit
+
+import requests
+
+events = []
+original = requests.Session.send
+
+
+def send(session, request, **options):
+    names = sorted(request.headers)
+    if any(name.lower() in {"authorization", "cookie", "proxy-authorization"} for name in names):
+        raise RuntimeError("Anonymous release fetch unexpectedly contains authentication headers")
+    parsed = urlsplit(request.url)
+    event = {
+        "url_without_query": parsed._replace(query="", fragment="").geturl(),
+        "method": request.method,
+        "header_names": names,
+        "authentication_headers": [],
+    }
+    events.append(event)
+    response = original(session, request, **options)
+    event["status"] = response.status_code
+    return response
+
+
+requests.Session.send = send
+
+
+@atexit.register
+def save():
+    Path(os.environ["NATURAL_RELEASE_HTTP_LOG"]).write_text(
+        json.dumps(
+            {
+                "scope": "Actual requests.Session.send observer; delegated unchanged to original; signed query values omitted",
+                "requests": events,
+            },
+            indent=2,
+        )
+        + "\n"
+    )

@@ -1,0 +1,109 @@
+"""Future actual anonymous list/fetch/verify of the reviewed v4 public manifest.
+
+Requires a new destination and isolated empty Hub cache. Does not publish.
+"""
+
+import argparse
+import hashlib
+import json
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[3]
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT))
+from scripts import fetch_natural_release as release  # noqa: E402
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--manifest", type=Path, required=True)
+    parser.add_argument("--manifest-sha256", required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--evidence", type=Path, required=True)
+    args = parser.parse_args()
+    if not args.manifest.is_file() or release.sha256(args.manifest) != args.manifest_sha256:
+        parser.error("Require the actual reviewed manifest and its exact SHA, never a guessed public pin")
+    manifest = release.validate_manifest(release.read_json(args.manifest))
+    release.check_runtime(manifest)
+    if args.output.exists() or args.evidence.exists():
+        parser.error("Use new output/evidence directories; preserve previous actual runs")
+    args.evidence.mkdir(parents=True)
+    evidence = args.evidence.resolve()
+    (evidence / "manifest.json.raw").write_bytes(args.manifest.read_bytes())
+    (evidence / "run_public_fetch.py").write_bytes(Path(__file__).read_bytes())
+    (evidence / "sitecustomize.py").write_bytes((HERE / "anonymous_observer/sitecustomize.py").read_bytes())
+    env = dict(os.environ)
+    removed = []
+    for key in list(env):
+        if "TOKEN" in key.upper() or key.upper().endswith(("SECRET", "PASSWORD")):
+            removed.append(key)
+            env.pop(key)
+    for key in ("HF_HUB_OFFLINE", "HF_DATASETS_OFFLINE", "HF_ENDPOINT", "HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE"):
+        env.pop(key, None)
+    env.update(
+        HF_HOME=str(evidence / "empty-hf-home"),
+        HF_HUB_CACHE=str(evidence / "empty-hf-home/hub"),
+        HF_HUB_DISABLE_IMPLICIT_TOKEN="1",
+        HF_HUB_DISABLE_TELEMETRY="1",
+        PYTHONPATH=str(HERE / "anonymous_observer"),
+    )
+    common = [
+        sys.executable,
+        "scripts/fetch_natural_release.py",
+        "--manifest",
+        str(args.manifest.resolve()),
+        "--output",
+        str(args.output.resolve()),
+    ]
+    receipt = {
+        "schema_version": 1,
+        "scope": "Actual anonymous product CLI; new isolated HF cache; no model generation or publication",
+        "manifest_sha256": args.manifest_sha256,
+        "public_repo": manifest["repo"],
+        "public_revision": manifest["revision"],
+        "selected_variant": manifest.get("selected_variant", "adapter"),
+        "credential_environment_names_removed": sorted(removed),
+        "script_sha256": release.sha256(ROOT / "scripts/fetch_natural_release.py"),
+        "phases": [],
+    }
+    for name, flags in (("list", ["--list"]), ("fetch", []), ("verify", ["--verify"])):
+        env["NATURAL_RELEASE_HTTP_LOG"] = str(evidence / (name + ".http.json"))
+        started = time.monotonic()
+        with (
+            (evidence / (name + ".stdout.txt")).open("wb") as stdout,
+            (evidence / (name + ".stderr.txt")).open("wb") as stderr,
+        ):
+            result = subprocess.run(common + flags, cwd=ROOT, env=env, stdout=stdout, stderr=stderr, timeout=1800)
+        receipt["phases"].append(
+            {
+                "phase": name,
+                "command": common + flags,
+                "exit_code": result.returncode,
+                "seconds": time.monotonic() - started,
+            }
+        )
+        (evidence / "receipt.json").write_text(json.dumps(receipt, ensure_ascii=False, indent=2) + "\n")
+        if result.returncode:
+            raise RuntimeError(f"Actual anonymous {name} failed; inspect preserved receipt/logs")
+    release.verify_release(manifest, args.output)
+    receipt.update(
+        status="passed",
+        independently_verified_files=[
+            {
+                "output": item["output"],
+                "bytes": (args.output / item["output"]).stat().st_size,
+                "sha256": hashlib.sha256((args.output / item["output"]).read_bytes()).hexdigest(),
+            }
+            for item in manifest["files"]
+        ],
+    )
+    (evidence / "receipt.json").write_text(json.dumps(receipt, ensure_ascii=False, indent=2) + "\n")
+    print(json.dumps({"status": "passed", "receipt": str(evidence / "receipt.json")}, ensure_ascii=False))
+
+
+if __name__ == "__main__":
+    main()
