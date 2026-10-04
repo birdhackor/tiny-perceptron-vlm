@@ -812,6 +812,10 @@ def evaluation_adapter(model, name):
 
 
 def run_evaluate(options, *, baseline=False):
+    selected_only = getattr(options, "selected_only", False)
+    comparisons = getattr(options, "comparison_adapters", [])
+    if selected_only and comparisons:
+        raise ValueError("Selected-only evaluation cannot include comparison adapters")
     started = time.monotonic()
     deadline = started + options.max_seconds
     manifest, data_root = load_manifest(options.manifest, options.data_root)
@@ -821,12 +825,15 @@ def run_evaluate(options, *, baseline=False):
     if not rows and not audio_rows:
         raise ValueError("No evaluation rows in requested split")
     model, processor = load_core(options, adapter=None if baseline else options.adapter)
-    comparisons = getattr(options, "comparison_adapters", [])
     if comparisons and (baseline or not options.adapter or Path(comparisons[0][1]) != Path(options.adapter)):
         raise ValueError("Comparison adapters need an adapter evaluation with the first exact loaded path")
-    variants = [
-        ("base", model.disable_adapter()) if options.adapter and not baseline else ("base", contextlib.nullcontext())
-    ]
+    variants = []
+    if not (selected_only and options.adapter and not baseline):
+        variants.append(
+            ("base", model.disable_adapter())
+            if options.adapter and not baseline
+            else ("base", contextlib.nullcontext())
+        )
     if options.adapter and not baseline:
         if comparisons:
             variants.append((comparisons[0][0], evaluation_adapter(model, "default")))
@@ -840,6 +847,7 @@ def run_evaluate(options, *, baseline=False):
         provenance(options, manifest),
         **parameter_counts(model),
         split=options.split,
+        selected_only=selected_only,
         requested_visual_text_rows=len(rows),
         requested_audio_rows=len(audio_rows),
         requested_audio_chat_rows=len(audio_chat_rows),

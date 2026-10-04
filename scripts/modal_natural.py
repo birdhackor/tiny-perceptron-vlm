@@ -755,6 +755,8 @@ def execute_stage(stage, batch_id, run_id, revision, manifest_sha, options):
         args.append("--local-files-only")
     if stage in ("baseline", "validation", "evaluate"):
         args.extend(["--split", "test" if stage == "evaluate" else "validation", "--max-new-tokens", "384"])
+    if stage == "evaluate":
+        args.append("--selected-only")
     if stage == "train":
         args.extend(
             [
