@@ -1,0 +1,197 @@
+Original PDF: outputs/posttrain-design/ppo-reference/instructgpt-original.pdf
+SHA-256: c1984bb50a5b90fddb895fdc3a0f72e5bc977148c9f63ef6040cbe7a3e1f0d98
+Version: 2203.02155v1
+To train the very first InstructGPT models, we asked labelers to write prompts themselves. This is
+because we needed an initial source of instruction-like prompts to bootstrap the process, and these
+kinds of prompts weren’t often submitted to the regular GPT-3 models on the API. We asked labelers
+to write three kinds of prompts:
+
+       • Plain: We simply ask the labelers to come up with an arbitrary task, while ensuring the
+         tasks had sufficient diversity.
+       • Few-shot: We ask the labelers to come up with an instruction, and multiple query/response
+         pairs for that instruction.
+       • User-based: We had a number of use-cases stated in waitlist applications to the OpenAI
+         API. We asked labelers to come up with prompts corresponding to these use cases.
+
+From these prompts, we produce three different datasets used in our fine-tuning procedure: (1) our
+SFT dataset, with labeler demonstrations used to train our SFT models, (2) our RM dataset, with
+labeler rankings of model outputs used to train our RMs, and (3) our PPO dataset, without any human
+labels, which are used as inputs for RLHF fine-tuning. The SFT dataset contains about 13k training
+prompts (from the API and labeler-written), the RM dataset has 33k training prompts (from the API
+and labeler-written), and the PPO dataset has 31k training prompts (only from the API). More details
+on dataset sizes are provided in Table 6.
+To give a sense of the composition of our dataset, in Table 1 we show the distribution of use-case
+categories for our API prompts (specifically the RM dataset) as labeled by our contractors. Most of
+the use-cases have are generative, rather than classification or QA. We also show some illustrative
+prompts (written by researchers to mimic the kinds of prompts submitted to InstructGPT models) in
+Table 2; more prompts submitted to InstructGPT models are shown in Appendix A.2.1, and prompts
+submitted to GPT-3 models are shown in Appendix A.2.2. We provide more details about our dataset
+in Appendix A.
+
+3.3   Tasks
+
+Our training tasks are from two sources: (1) a dataset of prompts written by our labelers and (2) a
+dataset of prompts submitted to early InstructGPT models on our API (see Table 6). These prompts
+are very diverse and include generation, question answering, dialog, summarization, extractions, and
+other natural language tasks (see Table 1). Our dataset is over 96% English, however in Section 4.3
+we also probe our model’s ability to respond to instructions in other languages and complete coding
+tasks.
+For each natural language prompt, the task is most often specified directly through a natural language
+instruction (e.g. “Write a story about a wise frog”), but could also be indirectly through either few-shot
+examples (e.g. giving two examples of frog stories, and prompting the model to generate a new one)
+or implicit continuation (e.g. providing the start of a story about a frog). In each case, we ask our
+labelers to do their best to infer the intent of the user who wrote the prompt, and ask them to skip
+inputs where the task is very unclear. Moreover, our labelers also take into account the implicit
+intentions such as truthfulness of the response, and potentially harmful outputs such as biased or toxic
+language, guided by the instructions we provide them (see Appendix B) and their best judgment.
+
+3.4   Human data collection
+
+To produce our demonstration and comparison data, and to conduct our main evaluations, we hired
+a team of about 40 contractors on Upwork and through ScaleAI. Compared to earlier work that
+collects human preference data on the task of summarization (Ziegler et al., 2019; Stiennon et al.,
+2020; Wu et al., 2021), our inputs span a much broader range of tasks, and can occasionally include
+controversial and sensitive topics. Our aim was to select a group of labelers who were sensitive to the
+preferences of different demographic groups, and who were good at identifying outputs that were
+potentially harmful. Thus, we conducted a screening test designed to measure labeler performance
+on these axes. We selected labelers who performed well on this test; for more information about our
+selection procedure and labeler demographics, see Appendix B.1.
+During training and evaluation, our alignment criteria may come into conflict: for example, when a
+user requests a potentially harmful response. During training we prioritize helpfulness to the user (not
+
+
+                                                    7
+doing so requires making some difficult design decisions that we leave to future work; see Section 5.4
+for more discussion). However, in our final evaluations we asked labelers prioritize truthfulness and
+harmlessness (since this is what we really care about).
+As in Stiennon et al. (2020), we collaborate closely with labelers over the course of the project. We
+have an onboarding process to train labelers on the project, write detailed instructions for each task
+(see Appendix B.2), and answer labeler questions in a shared chat room.
+As an initial study to see how well our model generalizes to the preferences of other labelers, we hire
+a separate set of labelers who do not produce any of the training data. These labelers are sourced
+from the same vendors, but do not undergo a screening test.
+Despite the complexity of the task, we find that inter-annotator agreement rates are quite high:
+training labelers agree with each-other 72.6 ± 1.5% of the time, while for held-out labelers this
+number is 77.3 ± 1.3%. For comparison, in the summarization work of Stiennon et al. (2020)
+researcher-researcher agreement was 73 ± 4%.
+
+3.5       Models
+
+We start with the GPT-3 pretrained language models from Brown et al. (2020). These models are
+trained on a broad distribution of Internet data and are adaptable to a wide range of downstream tasks,
+but have poorly characterized behavior. Starting from these models, we then train models with three
+different techniques:
+
+Supervised fine-tuning (SFT). We fine-tune GPT-3 on our labeler demonstrations using supervised
+learning. We trained for 16 epochs, using a cosine learning rate decay, and residual dropout of 0.2.
+We do our final SFT model selection based on the RM score on the validation set. Similarly to Wu
+et al. (2021), we find that our SFT models overfit on validation loss after 1 epoch; however, we find
+that training for more epochs helps both the RM score and human preference ratings, despite this
+overfitting.
+
+Reward modeling (RM). Starting from the SFT model with the final unembedding layer removed,
+we trained a model to take in a prompt and response, and output a scalar reward. In this paper we
+only use 6B RMs, as this saves a lot of compute, and we found that 175B RM training could be
+unstable and thus was less suitable to be used as the value function during RL (see Appendix C for
+more details).
+In Stiennon et al. (2020), the RM is trained on a dataset of comparisons between two model outputs
+on the same input. They use a cross-entropy loss, with the comparisons as labels—the difference in
+rewards represents the log odds that one response will be preferred to the other by a human labeler.
+In order to speed up comparison collection,we present labelers with anywhere between K = 4 and
+K = 9 responses to rank. This produces K  2 comparisons for each prompt shown to a labeler. Since
+comparisons are very correlated within each labeling task, we found that if we simply shuffle the
+                                                                                                    5
+comparisons into one dataset,
+                            a single pass over the dataset caused the reward model to overfit.
+                         K
+Instead, we train on all 2 comparisons from each prompt as a single batch element. This is much
+more computationally efficient  because it only requires a single forward pass of the RM for each
+completion (rather than K
+                           
+                         2   forward passes for K completions) and, because it no longer overfits, it
+achieves much improved validation accuracy and log loss.
+Specifically, the loss function for the reward model is:
+
+                                 1
+                    loss (θ) = − K  E(x,yw ,yl )∼D [log (σ (rθ (x, yw ) − rθ (x, yl )))]                    (1)
+                                    2
+
+where rθ (x, y) is the scalar output of the reward model for prompt x and completion y with parameters
+θ, yw is the preferred completion out of the pair of yw and yl , and D is the dataset of human
+comparisons.
+     That is, if each of the possible K
+      5
+                                        
+                                      2
+                                          comparisons is treated as a separate data point, then each completion
+will potentially be used for K − 1 separate gradient updates. The model tends to overfit after a single epoch, so
+repeating data within an epoch also causes it to overfit.
+
+
+                                                       8
+                      Table 3: Labeler-collected metadata on the API distribution.
+           Metadata                                                                           Scale
+           Overall quality                                                         Likert scale; 1-7
+           Fails to follow the correct instruction / task                                    Binary
+           Inappropriate for customer assistant                                              Binary
+           Hallucination                                                                     Binary
+           Satisifies constraint provided in the instruction                                 Binary
+           Contains sexual content                                                           Binary
+           Contains violent content                                                          Binary
+           Encourages or fails to discourage violence/abuse/terrorism/self-harm              Binary
+           Denigrates a protected class                                                      Binary
+           Gives harmful advice                                                              Binary
+           Expresses opinion                                                                 Binary
+           Expresses moral judgment                                                          Binary
+
+
+Finally, since the RM loss is invariant to shifts in reward, we normalize the reward model using a bias
+so that the labeler demonstrations achieve a mean score of 0 before doing RL.
+
+Reinforcement learning (RL). Once again following Stiennon et al. (2020), we fine-tuned the
+SFT model on our environment using PPO (Schulman et al., 2017). The environment is a bandit
+environment which presents a random customer prompt and expects a response to the prompt. Given
+the prompt and response, it produces a reward determined by the reward model and ends the episode.
+In addition, we add a per-token KL penalty from the SFT model at each token to mitigate over-
+optimization of the reward model. The value function is initialized from the RM. We call these
+models “PPO.”
+We also experiment with mixing the pretraining gradients into the PPO gradients, in order to fix the
+performance regressions on public NLP datasets. We call these models “PPO-ptx.” We maximize the
+following combined objective function in RL training:
+
+
+            objective (φ) =E(x,y)∼DπRL rθ (x, y) − β log πφRL (y | x)/π SFT (y | x) +
+                                                                                  
+                                      φ
+                                                                                                           (2)
+                           γEx∼Dpretrain log(πφRL (x))
+                                                     
+
+
+where πφRL is the learned RL policy, π SFT is the supervised trained model, and Dpretrain is the
+pretraining distribution. The KL reward coefficient, β, and the pretraining loss coefficient, γ, control
+the strength of the KL penalty and pretraining gradients respectively. For "PPO" models, γ is set to 0.
+Unless otherwise specified, in this paper InstructGPT refers to the PPO-ptx models.
+
+Baselines. We compare the performance of our PPO models to our SFT models and GPT-3. We also
+compare to GPT-3 when it is provided a few-shot prefix to ‘prompt’ it into an instruction-following
+mode (GPT-3-prompted). This prefix is prepended to the user-specified instruction.6
+We additionally compare InstructGPT to fine-tuning 175B GPT-3 on the FLAN (Wei et al., 2021) and
+T0 (Sanh et al., 2021) datasets, which both consist of a variety of NLP tasks, combined with natural
+language instructions for each task (the datasets differ in the NLP datasets included, and the style of
+instructions used). We fine-tune them on approximately 1 million examples respectively and choose
+the checkpoint which obtains the highest reward model score on the validation set. See Appendix C
+for more training details.
+
+3.6   Evaluation
+
+To evaluate how “aligned” our models are, we first need to clarify what alignment means in this
+context. The definition of alignment has historically been a vague and confusing topic, with various
+   6
+     To obtain this prefix, authors RL and DA held a prefix-finding competition: each spent an hour interacting
+with GPT-3 to come up with their two best prefixes. The winning prefix was the one that led GPT-3 to attain the
+highest RM score on the prompt validation set. DA won.
+
+
+                                                      9
+

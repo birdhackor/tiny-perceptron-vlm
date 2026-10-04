@@ -1,0 +1,278 @@
+"""Bounded, independent CPU verification of lesson 17.14; no full retraining."""
+
+import ast
+import contextlib
+import copy
+import hashlib
+import io
+import json
+import platform
+import random
+import re
+import subprocess
+from pathlib import Path
+
+import torch
+from torch import nn
+
+from scripts.check_technical_reviews import sections
+from scripts.course_experiments.common import split_records
+from scripts.course_experiments.compression import (
+    _evaluate,
+    _example,
+    _examples,
+    _parameter_hash,
+    _qat_layers,
+    _storage,
+)
+from scripts.prepare_data import generate_records
+from tiny_perceptron.data import IGNORE, ByteTokenizer
+from tiny_perceptron.quantization import QuantizedLinear
+from tiny_perceptron.training import load_checkpoint
+
+ROOT = Path.cwd()
+ART = ROOT / "docs/technical-reviews/artifacts"
+PREFIX = "fact_v2_17_14"
+COMMAND = f"PYTHONPATH=. .venv/bin/python docs/technical-reviews/artifacts/{PREFIX}_audit.py"
+REVISION = "5af615e5d7c9642afee800390fa072257f895d0c"
+torch.set_num_threads(2)
+
+
+def sha(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def write(name, value):
+    path = ART / f"{PREFIX}_{name}.json"
+    path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n")
+    return path
+
+
+environment = {
+    "python": platform.python_version(),
+    "torch": str(torch.__version__),
+    "torch_git_version": torch.version.git_version,
+    "device": "cpu",
+    "platform": platform.platform(),
+    "torch_threads": str(torch.get_num_threads()),
+}
+source_paths = [
+    "scripts/course_experiments/compression.py",
+    "scripts/course_experiments/common.py",
+    "scripts/course_experiments/run.py",
+    "scripts/course_experiments/text.py",
+    "scripts/prepare_data.py",
+    "scripts/infer.py",
+    "tiny_perceptron/quantization.py",
+    "tiny_perceptron/data.py",
+    "tiny_perceptron/model.py",
+    "tiny_perceptron/training.py",
+]
+sources = {}
+for path in source_paths:
+    original = subprocess.check_output(["git", "show", f"{REVISION}:{path}"])
+    sources[path] = {
+        "executed_sha256": sha(path),
+        "formal_revision_sha256": hashlib.sha256(original).hexdigest(),
+        "identical": original == Path(path).read_bytes(),
+    }
+    if path == "scripts/course_experiments/compression.py":
+        (ART / f"{PREFIX}_formal_compression.txt").write_bytes(original)
+        original_ast = ast.parse(original)
+        current_ast = ast.parse(Path(path).read_text())
+        relevant = {
+            "_teacher", "_dataset", "_example", "_examples", "_prompt", "_answer",
+            "_parameter_hash", "_storage", "_save_float", "_packed", "_evaluate",
+            "_fit_text", "_QATLinear", "_qat_layers", "run_qat", "_steps", "_sync",
+        }
+        old = {x.name: ast.dump(x) for x in original_ast.body if hasattr(x, "name") and x.name in relevant}
+        new = {x.name: ast.dump(x) for x in current_ast.body if hasattr(x, "name") and x.name in relevant}
+        assert old == new
+        sources[path]["qat_relevant_ast_equal"] = sorted(relevant)
+    elif not sources[path]["identical"]:
+        # A full diff is retained for differences outside the QAT pathway.
+        sources[path]["diff"] = subprocess.check_output(
+            ["git", "diff", REVISION, "--", path], text=True
+        )
+
+section_paths = [
+    ("course/chapters/17.md", "17.14"),
+    ("course/first-steps.md", "W.6"),
+    ("course/chapters/17.md", "17.2"),
+    ("course/chapters/17.md", "17.9"),
+    ("course/training.md", "T.4"),
+]
+bodies = {}
+for path, tag in section_paths:
+    body = dict(sections(Path(path)))[tag]
+    bodies[f"{path}#{tag}"] = {
+        "sha256": hashlib.sha256(body.encode()).hexdigest(), "body": body
+    }
+write("inspected_sections", bodies)
+
+# Execute the exact lesson example and the sole requested exercise change.
+body = bodies["course/chapters/17.md#17.14"]["body"]
+program = re.search(r"```python\n(.*?)\n```", body, re.S)[1]
+numeric = {}
+for name, code in (("original", program), ("exercise", program.replace("y.sum().backward()", "y.square().sum().backward()"))):
+    (ART / f"{PREFIX}_{name}.txt").write_text(code + "\n")
+    values = {}
+    stream = io.StringIO()
+    with contextlib.redirect_stdout(stream):
+        exec(compile(code, f"lesson17.14-{name}", "exec"), values)
+    x, y, hard = values["x"], values["y"], values["hard"]
+    expected_y = torch.tensor([0.9 / 7, 3 * 0.9 / 7, 0.9])
+    assert torch.allclose(y, expected_y, atol=1e-7, rtol=0)
+    assert torch.equal(hard.grad, torch.zeros(3))
+    assert torch.allclose(x.grad, torch.ones(3) if name == "original" else 2 * y, atol=0, rtol=0)
+    assert x.data_ptr() != hard.data_ptr()
+    assert hard.is_leaf and hard.requires_grad and hard.grad_fn is None
+    numeric[name] = {
+        "stdout": stream.getvalue(), "x": x.tolist(), "forward": y.tolist(),
+        "ste_gradient": x.grad.tolist(), "hard_gradient": hard.grad.tolist(),
+        "dtype": str(x.dtype), "shape": list(x.shape),
+        "hard_independent_storage": x.data_ptr() != hard.data_ptr(),
+        "hard_new_leaf": hard.is_leaf and hard.grad_fn is None,
+    }
+
+parts = split_records(generate_records("attributes-sft"), seed=42)
+dataset_text = json.dumps(parts, ensure_ascii=False, indent=2) + "\n"
+dataset_sha = hashlib.sha256(dataset_text.encode()).hexdigest()
+(ART / f"{PREFIX}_dataset.json").write_text(dataset_text)
+formal_path = ROOT / "docs/course-experiments/results/qat.json"
+formal = json.loads(formal_path.read_text())
+results = formal["results"]
+assert dataset_sha == results["data"]["sha256"]
+raw = json.loads((ROOT / "outputs/course-control/37060494307/result.json").read_text())
+assert raw["results"] == results and raw["code_sha256"] == formal["code_sha256"]
+examples = _examples(parts["train"], 128)
+rng = random.Random(42)
+plan = [[rng.randrange(len(examples)) for _ in range(16)] for _ in range(350)]
+plan_sha = hashlib.sha256(json.dumps(plan).encode()).hexdigest()
+effective = sum(int((examples[i][1] != IGNORE).sum()) for indices in plan for i in indices)
+assert effective == 39348
+for training in results["training"].values():
+    assert training["batch_plan_sha256"] == plan_sha
+    assert training["effective_supervised_tokens"] == effective
+    assert training["steps"] == training["optimizer_updates"] == 350
+    assert training["batch_size"] == 16 and training["learning_rate"] == 0.003
+
+directory = ROOT / "checkpoints/course/qat"
+release = json.loads((ROOT / "docs/course-experiments/public-releases/qat.json").read_text())
+manifest = json.loads((directory / "export-manifest.json").read_text())
+published = {row["output"]: row for row in release["release"]["public_manifest"]["files"]}
+local_manifest = {row["output"]: row for row in manifest["files"]}
+formal_artifacts = {row["path"]: row for row in formal["artifacts"]}
+names = {
+    "initial_fp32": "initial_fp32.pt", "initial_ptq4": "initial_ptq4.pt",
+    "fp_finetuned": "fp_finetuned.pt", "matched_ptq4": "matched_ptq4.pt",
+    "qat_float": "qat_float.pt", "qat_packed4": "model.pt",
+}
+models, inspected, checked_runs = {}, {}, {}
+tok = ByteTokenizer()
+for name, filename in names.items():
+    path = directory / filename
+    digest = sha(path)
+    assert digest == published[filename]["sha256"] == local_manifest[filename]["sha256"]
+    assert path.stat().st_size == published[filename]["bytes"]
+    assert local_manifest[filename]["source_sha256"] == formal_artifacts[filename]["sha256"]
+    model, payload = load_checkpoint(path, "cpu")
+    model.eval()
+    models[name] = model
+    state = model.state_dict()
+    tensor_details = {
+        key: {"shape": list(value.shape), "dtype": str(value.dtype), "bytes": value.numel() * value.element_size(),
+              "sha256": hashlib.sha256(value.contiguous().numpy().tobytes()).hexdigest()}
+        for key, value in state.items()
+    }
+    inspected[name] = {
+        "path": path.relative_to(ROOT).as_posix(), "public_sha256": digest,
+        "source_original_sha256": local_manifest[filename]["source_sha256"],
+        "public_bytes": path.stat().st_size, "format_version": payload["format_version"],
+        "config": payload["config"], "metadata": payload["metadata"],
+        "optimizer_present": payload.get("optimizer") is not None,
+        "state_sha256": _parameter_hash(model), "tensors": tensor_details,
+        "storage": _storage(model, path),
+        "pinned_url": "https://huggingface.co/" + release["release"]["repo"] + "/resolve/" +
+                      release["release"]["revision"] + "/course/course-v1/qat/" + filename,
+    }
+    assert inspected[name]["storage"]["tensor_bytes"] == results["runs"][name]["storage"]["tensor_bytes"]
+    checked_runs[name] = {}
+    for split in ("validation", "test"):
+        original = results["runs"][name][split]
+        rows = original["generated_samples"]
+        count = sum(len(tok.encode(row["expected"])) + 1 for row in rows)
+        assert count == original["supervised_tokens"]
+        assert count == (36 if split == "validation" else 69)
+        hits, eos, invalid = 0, 0, []
+        for row, record in zip(rows, parts[split], strict=True):
+            ids = row["generated_ids"]
+            raw_ids = ids[:-1] if ids[-1] == tok.eos_id else ids
+            assert row["family"] == record["family"]
+            assert row["question"] == record["messages"][0]["content"]
+            assert row["expected"] == record["messages"][1]["content"]
+            exact = raw_ids == tok.encode(row["expected"])
+            assert row["exact"] == exact and row["generated"] == tok.decode(raw_ids)
+            assert row["ended_with_eos"] == (ids[-1] == tok.eos_id)
+            hits += exact
+            eos += row["ended_with_eos"]
+            invalid += [i for i in raw_ids if i < 8]
+        assert not invalid and hits == original["correct"] and eos == original["eos_count"]
+        assert original["answer_nll"] == original["nll_sum"] / count
+        observed = _evaluate(model, parts[split], "cpu", tokens=24)
+        assert observed["generated_samples"] == rows
+        assert abs(observed["answer_nll"] - original["answer_nll"]) < 2e-5
+        checked_runs[name][split] = {
+            "formal": original, "cpu_observed": observed,
+            "independently_counted_targets": count,
+            "counted_exact": hits, "counted_eos": eos, "invalid_special_tokens": invalid,
+            "nll_abs_difference": abs(observed["answer_nll"] - original["answer_nll"]),
+        }
+
+assert inspected["initial_fp32"]["state_sha256"] == results["initialization_sha256"]
+assert inspected["fp_finetuned"]["state_sha256"] == results["training"]["fp_finetuning"]["final_sha256"]
+assert inspected["qat_float"]["state_sha256"] == results["training"]["qat"]["final_sha256"]
+fake = _qat_layers(copy.deepcopy(models["qat_float"]))
+packed = models["qat_packed4"]
+layer_checks = {}
+for name, layer in fake.named_modules():
+    if isinstance(layer, nn.Linear):
+        deployed = packed.get_submodule(name)
+        assert isinstance(deployed, QuantizedLinear)
+        repacked = QuantizedLinear(layer, 4)
+        assert torch.equal(repacked.values, deployed.values)
+        assert torch.equal(repacked.scale, deployed.scale)
+        layer_checks[name] = {"packed_values_equal": True, "row_scale_equal": True,
+                              "scale_shape": list(deployed.scale.shape), "weight_shape": deployed.shape}
+x, _ = _example(parts["test"][0], 128)
+with torch.no_grad():
+    difference = float((fake(x[None])["logits"] - packed(x[None])["logits"]).abs().max())
+assert difference <= 1e-4
+assert not any(type(layer).__name__ == "_QATLinear" for layer in models["qat_float"].modules())
+delta = results["runs"]["qat_packed4"]["test"]["answer_nll"] - results["runs"]["matched_ptq4"]["test"]["answer_nll"]
+assert delta == results["qat_vs_matched_ptq_test_nll_delta"]
+
+# Create isolated dependencies for a one-step CLI check, retaining all weights in ignored storage.
+dependencies = ROOT / "outputs/technical-checks" / PREFIX / "dependencies/sft"
+dependencies.mkdir(parents=True, exist_ok=True)
+(dependencies / "model.pt").write_bytes((directory / "initial_fp32.pt").read_bytes())
+(dependencies / "dataset.json").write_text(dataset_text)
+receipt = {
+    "command": COMMAND, "environment": environment, "result": "all assertions passed",
+    "sources": sources, "numeric": numeric,
+    "formal_result_sha256": sha(formal_path),
+    "original_raw_result_sha256": sha("outputs/course-control/37060494307/result.json"),
+    "raw_and_published_results_equal": True,
+    "dataset_sha256": dataset_sha, "batch_plan_sha256": plan_sha,
+    "effective_supervised_training_targets_per_branch": effective,
+    "inspected_checkpoints": inspected, "checked_runs": checked_runs,
+    "fake_deployed_cpu_max_logit_difference": difference,
+    "packed_layer_checks": layer_checks, "test_nll_delta": delta,
+    "formal_environment": {k: formal[k] for k in ["python_version", "torch_version", "device", "gpu", "seed"]},
+    "timing": {k: formal[k] for k in ["elapsed_seconds", "timing_scope", "peak_allocated_bytes", "peak_memory_scope"]},
+    "limitations": "CPU re-evaluation of existing trained weights; no repetition of L4 training or its timing. Public files strip optimizer/RNG and differ in file bytes from private originals.",
+}
+output = write("execution", receipt)
+print(json.dumps({"output": str(output.relative_to(ROOT)), "sha256": sha(output),
+                  "result": receipt["result"], "fake_deployed_max_logit_difference": difference,
+                  "all_90_generated_samples_match": True, "environment": environment}, indent=2))

@@ -1,0 +1,303 @@
+"""Fresh CPU verification of lesson 13.11, without training or modifying course code."""
+
+import hashlib
+import json
+import math
+import platform
+import re
+import shlex
+import subprocess
+import sys
+from pathlib import Path
+
+import torch
+from fact_v2_13_11_portable import install_original_read_guard, load_portable_state
+
+from scripts.check_technical_reviews import sections
+from scripts.course_experiments.common import records_sha256
+from scripts.course_experiments.posttraining import (
+    CONFIG,
+    _evaluate,
+    _state_sha256,
+    build_records,
+    split_records,
+)
+from tiny_perceptron.posttraining import (
+    FiniteResponsePolicy,
+    FiniteRewardModel,
+    bandit_advantage,
+    ppo_clipped_objective,
+)
+
+ROOT = Path.cwd()
+ARTIFACTS = ROOT / "docs/technical-reviews/artifacts"
+PREFIX = "fact_v2_13_11_"
+ENVIRONMENT = {
+    "python": platform.python_version(),
+    "torch": str(torch.__version__),
+    "torch_git_version": str(torch.version.git_version),
+    "device": "cpu",
+    "platform": platform.platform(),
+    "cpu_threads": "2",
+}
+
+
+def digest(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def save(name, value):
+    path = ARTIFACTS / (PREFIX + name)
+    content = json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
+    path.write_text(content, encoding="utf-8")
+    return path
+
+
+def assert_close_tree(expected, observed, path="root", errors=None):
+    errors = [] if errors is None else errors
+    if isinstance(expected, dict):
+        assert expected.keys() == observed.keys(), path
+        for key in expected:
+            assert_close_tree(expected[key], observed[key], f"{path}.{key}", errors)
+    elif isinstance(expected, list):
+        assert len(expected) == len(observed), path
+        for index, item in enumerate(expected):
+            assert_close_tree(item, observed[index], f"{path}[{index}]", errors)
+    elif isinstance(expected, float):
+        assert math.isclose(expected, observed, rel_tol=1e-6, abs_tol=1e-6), (path, expected, observed)
+        errors.append(abs(expected - observed))
+    else:
+        assert expected == observed, (path, expected, observed)
+    return errors
+
+
+def run_snippet(label, code, expected):
+    path = ARTIFACTS / (PREFIX + label + "_code.txt")
+    path.write_text(code, encoding="utf-8")
+    command = [sys.executable, "-c", code]
+    run = subprocess.run(command, capture_output=True, text=True, check=False)
+    (ARTIFACTS / (PREFIX + label + "_stdout.txt")).write_text(run.stdout, encoding="utf-8")
+    assert run.returncode == 0, run.stderr
+    assert run.stdout == expected, (label, run.stdout, expected)
+    return {
+        "command": shlex.join(command),
+        "source_path": path.relative_to(ROOT).as_posix(),
+        "exit_code": run.returncode,
+        "stdout": run.stdout,
+        "stderr": run.stderr,
+        "environment": ENVIRONMENT,
+    }
+
+
+def main():
+    torch.set_num_threads(2)
+    read_paths = install_original_read_guard()
+    section_hashes, prerequisites = {}, {}
+    for filename, ids in (
+        ("13.md", {"13.10", "13.11", "13.14"}),
+        ("01.md", {"1.7", "1.11"}),
+        ("0C.md", {"C.7"}),
+    ):
+        for lesson, body in sections(ROOT / "course/chapters" / filename):
+            if lesson in ids:
+                section_hashes[lesson] = hashlib.sha256(body.encode()).hexdigest()
+                if lesson == "13.11":
+                    section = body
+                    (ARTIFACTS / (PREFIX + "section.txt")).write_text(body, encoding="utf-8")
+                else:
+                    prerequisites[lesson] = {"path": f"course/chapters/{filename}#{lesson}", "body": body}
+    save("prerequisites.json", {"section_sha256": section_hashes, "sections": prerequisites})
+    assert not re.findall(r"!\[[^\]]*\]\(([^)]+\.svg)\)", section)
+    snippet = re.search(r"```python\n(.*?)```", section, re.S)[1]
+    executions = {
+        "original": run_snippet(
+            "original", snippet,
+            "優勢估計 [0.6, -0.4]\n更新策略時還追蹤基準梯度嗎 False\n",
+        ),
+        "exercise": run_snippet(
+            "exercise", snippet.replace("[0.4, 0.4]", "[0.9, 0.9]"),
+            "優勢估計 [0.1, -0.9]\n更新策略時還追蹤基準梯度嗎 False\n",
+        ),
+    }
+    prerequisite_code = re.search(r"```python\n(.*?)```", prerequisites["13.10"]["body"], re.S)[1]
+    executions["prerequisite13_10"] = run_snippet(
+        "prerequisite13_10", prerequisite_code,
+        "差距 0.0 勝出機率 0.5 代價 0.6931\n差距 2.0 勝出機率 0.8808 代價 0.1269\n",
+    )
+    executions["prerequisite13_10_exercise"] = run_snippet(
+        "prerequisite13_10_exercise",
+        prerequisite_code.replace("rejected = torch.tensor([0.0])", "rejected = torch.tensor([1.0])"),
+        "差距 -1.0 勝出機率 0.2689 代價 1.3133\n差距 1.0 勝出機率 0.7311 代價 0.3133\n",
+    )
+    detach_probes = []
+    zero_advantage = bandit_advantage(torch.tensor([1.0]), torch.tensor([1.0]))
+    assert zero_advantage.item() == 0.0
+    for baseline in (0.4, 0.9):
+        rewards = torch.tensor([1.0, 0.0], dtype=torch.float32, requires_grad=True)
+        values = torch.tensor([baseline, baseline], dtype=torch.float32, requires_grad=True)
+        advantage = bandit_advantage(rewards, values)
+        expected = torch.tensor([1 - baseline, -baseline])
+        torch.testing.assert_close(advantage, expected, atol=1e-7, rtol=0)
+        logits = torch.zeros(2, 2, requires_grad=True)
+        old_selected = torch.full((2,), -math.log(2))
+        new_selected = logits.log_softmax(-1)[:, 0]
+        loss = ppo_clipped_objective(new_selected, old_selected, advantage)["policy_loss"]
+        loss.backward()
+        assert rewards.grad is None and values.grad is None
+        assert not advantage.requires_grad and advantage.grad_fn is None
+        expected_grad = torch.tensor([[-(1 - baseline) / 4, (1 - baseline) / 4], [baseline / 4, -baseline / 4]])
+        torch.testing.assert_close(logits.grad, expected_grad, atol=1e-7, rtol=0)
+        value_loss = (values - rewards.detach()).square().mean()
+        value_loss.backward()
+        assert values.grad is not None and rewards.grad is None
+        detach_probes.append({
+            "baseline": baseline, "reward": rewards.detach().tolist(),
+            "advantage": advantage.tolist(), "shape": list(advantage.shape), "dtype": str(advantage.dtype),
+            "requires_grad": advantage.requires_grad, "grad_fn": str(advantage.grad_fn),
+            "policy_logits_gradient": logits.grad.tolist(),
+            "value_gradient_after_separate_mse": values.grad.tolist(),
+            "reward_gradient": str(rewards.grad),
+            "numerator_count": 2, "policy_mean_denominator": 2,
+            "value_mean_denominator": 2, "mask": "none; both bandit actions valid",
+        })
+    invalid_input_results = []
+    for rewards, values in ((torch.zeros(2), torch.zeros(3)), (torch.empty(0), torch.empty(0))):
+        try:
+            bandit_advantage(rewards, values)
+        except ValueError as error:
+            invalid_input_results.append(str(error))
+        else:
+            raise AssertionError("Expected shape/empty validation error")
+
+    report_path = ROOT / "docs/course-experiments/results/posttraining.json"
+    report = json.loads(report_path.read_text())
+    results = report["results"]
+    records_path = ARTIFACTS / (PREFIX + "records.json")
+    records = json.loads(records_path.read_text())
+    assert records == split_records(build_records(), report["seed"])
+    assert results["config"] == CONFIG
+    assert results["effective_tokens"] == 0 and results["schedule_completed"] is True
+    source_hashes = {path: digest(ROOT / path) for path in report["code_sha256"]}
+    assert source_hashes == report["code_sha256"]
+    checkpoint_hashes = []
+    for checkpoint in results["checkpoints"]:
+        name = Path(checkpoint["file"]).stem
+        path = ARTIFACTS / (PREFIX + name + "_portable.json")
+        state = load_portable_state(name)
+        assert state["provenance"]["sha256"] == checkpoint["sha256"]
+        assert state["provenance"]["bytes"] == checkpoint["bytes"]
+        checkpoint_hashes.append({"name": name, "path": path.relative_to(ROOT).as_posix(),
+                                  "sha256": digest(path), "original_checkpoint": state["provenance"]})
+    policies = {}
+    for name in ("sft", "ppo", "dpo"):
+        policy = FiniteResponsePolicy().eval().requires_grad_(False)
+        state = load_portable_state(name)
+        policy.load_state_dict(state["model"])
+        policies[name] = policy
+    reward_model = FiniteRewardModel().eval().requires_grad_(False)
+    reward_state = load_portable_state("reward")
+    reward_model.load_state_dict(reward_state["model"])
+    scale = results["reward"]["fixed_normalization_scale_from_train"]
+    assert scale == reward_state["metadata"]["scale_from_training_candidates"]
+    assert _state_sha256(policies["sft"]) == results["reference_state_sha256_before"]
+    assert results["reference_state_sha256_before"] == results["reference_state_sha256_after"]
+    fresh_evaluations, split_audit, all_families = {}, {}, []
+    for name, rows in records.items():
+        families = {row["family"] for row in rows}
+        all_families.append(families)
+        assert records_sha256(rows) == results["splits"][name]["sha256"]
+        observed = _evaluate(rows, policies, reward_model, policies["sft"], scale, "cpu")
+        errors = assert_close_tree(results["evaluations"][name], observed)
+        fresh_evaluations[name] = observed
+        row_checks = []
+        for row in observed["rows"]:
+            assert len(row["candidates"]) == 4 and len(row["features"]) == 4
+            assert row["expected_action"] == {"number": 0, "explain": 1, "missing": 3}[row["mode"]]
+            assert row["candidates"][0] == str(sum(row["operands"]))
+            normalized = row["reward_model_normalized_scores"]
+            raw = row["reward_model_raw_scores"]
+            assert abs(sum(normalized)) < 2e-6
+            assert all(math.isclose((r - sum(raw) / 4) / scale, n, abs_tol=1e-6) for r, n in zip(raw, normalized))
+            for policy in row["policies"].values():
+                probabilities = policy["probabilities"]
+                assert len(probabilities) == 4 and math.isclose(sum(probabilities), 1, abs_tol=2e-7)
+                assert policy["chosen_action"] == max(range(4), key=probabilities.__getitem__)
+                assert policy["chosen_response"] == row["candidates"][policy["chosen_action"]]
+                assert policy["full_request_success"] == (policy["chosen_action"] == row["expected_action"])
+            row_checks.append({"family": row["family"], "mode": row["mode"], "all_fields_reproduced": True})
+        for policy in observed["policies"].values():
+            assert policy["greedy_full_request_success"]["denominator"] == len(rows)
+            assert sum(m["denominator"] for m in policy["by_mode"].values()) == len(rows)
+        split_audit[name] = {
+            "contexts": len(rows), "families": len(families),
+            "preference_pairs": sum(len(row["preference_pairs"]) for row in rows),
+            "records_sha256": records_sha256(rows), "maximum_numeric_absolute_error": max(errors),
+            "row_checks": row_checks,
+        }
+    assert not all_families[0] & all_families[1]
+    assert not all_families[0] & all_families[2]
+    assert not all_families[1] & all_families[2]
+    trace = results["ppo"]["first_rollout_trace"]
+    assert len(trace) == 3
+    for epoch in trace:
+        rewards = torch.tensor(epoch["normalized_rm_rewards"], dtype=torch.float32)
+        values = torch.tensor(epoch["old_values"], dtype=torch.float32)
+        advantage = bandit_advantage(rewards, values)
+        torch.testing.assert_close(advantage, torch.tensor(epoch["fixed_advantages"]), atol=0, rtol=0)
+        assert len(rewards) == 64
+        for field in ("train_context_indices", "sampled_actions", "old_values", "fixed_advantages", "normalized_rm_rewards"):
+            assert epoch[field] == trace[0][field]
+    assert any(r < 0 for r in trace[0]["normalized_rm_rewards"])
+    assert any(r > 1 for r in trace[0]["normalized_rm_rewards"])
+    assert all(r not in (0.0, 1.0) for r in trace[0]["normalized_rm_rewards"])
+    assert results["ppo"]["sampled_actions"] == 120 * 64
+    assert results["ppo"]["reused_action_draws"] == 120 * 64 * 3
+    assert results["ppo"]["value_updates"] == results["ppo"]["policy_updates"] == 120 * 3
+    save("frozen_evaluations.json", fresh_evaluations)
+    export = json.loads((ARTIFACTS / (PREFIX + "portable_export_receipt.json")).read_text())
+    original_hashes = {}
+    for name in ("ppo-original.pdf", "instructgpt-original.pdf", "dpo-original.pdf"):
+        path = ARTIFACTS / (PREFIX + name)
+        metadata = next(item for item in export["copies"] if Path(item["copied_path"]).name == PREFIX + name)
+        assert digest(path) == metadata["sha256"]
+        extracted = ARTIFACTS / (PREFIX + name.replace(".pdf", "_pdftotext.txt"))
+        subprocess.run(["pdftotext", "-layout", str(path), str(extracted)], check=True, capture_output=True)
+        original_hashes[name] = {"sha256": digest(path), "extracted_path": extracted.relative_to(ROOT).as_posix()}
+    retrieval_path = ARTIFACTS / (PREFIX + "retrieval.json")
+    retrieval = json.loads(retrieval_path.read_text())
+    for item in retrieval:
+        if "path" in item and item["path"].endswith(".py"):
+            item["path"] = item["path"][:-3] + ".txt"
+    save("retrieval.json", retrieval)
+    output = {
+        "command": "PYTHONPATH=. .venv/bin/python docs/technical-reviews/artifacts/fact_v2_13_11_audit.py",
+        "result": "All assertions passed using portable JSON model states only; exact original/exercise stdout; CPU gradient isolation; all 165 frozen evaluation rows reproduced. Original outputs reads and torch.load prohibited.",
+        "environment": ENVIRONMENT, "section_sha256": section_hashes,
+        "snippet_executions": executions, "detach_probes": detach_probes,
+        "reward_equals_baseline_probe": {"reward": [1.0], "old_value": [1.0], "advantage": zero_advantage.tolist()},
+        "invalid_inputs": invalid_input_results, "code_sha256": source_hashes,
+        "report_sha256": digest(report_path), "records_sha256": digest(records_path),
+        "checkpoint_sha256": checkpoint_hashes, "split_audit": split_audit,
+        "normalization_scale": scale, "first_rollout_actions": 64, "reuse_epochs": 3,
+        "first_rollout_reward_range": [min(trace[0]["normalized_rm_rewards"]), max(trace[0]["normalized_rm_rewards"])],
+        "all_first_rollout_rewards_nonbinary": True, "effective_tokens": 0,
+        "training_denominators": {"seed": 42, "rollouts": 120, "actions_per_rollout": 64, "policy_updates": 360, "value_updates": 360, "sampled_actions": 7680, "reused_action_draws": 23040},
+        "historical_timing_scope": {
+            "ppo_seconds": results["ppo"]["seconds"],
+            "ppo_scope": "Existing single CPU training loop, including rollout and three policy/value epochs; excludes later checkpoint serialization/evaluation. No rerun timing claimed.",
+            "wrapper_elapsed_seconds": report["elapsed_seconds"],
+            "wrapper_scope": "Existing complete run wrapper; not a warmed multi-run throughput benchmark, no GPU or comparative acceleration evidence.",
+        },
+        "primary_pdf_integrity": original_hashes,
+        "portable_recheck_receipt": PREFIX + "portable_verify_receipt.json",
+        "torch_load_forbidden": True, "outputs_directory_read_forbidden": True,
+        "evidence_paths_opened": sorted(set(read_paths)),
+        "limitations": "Frozen inference audit and two-item arithmetic only. No training, no GPU, no new quality/generalization or speed conclusions.",
+    }
+    save("audit.json", output)
+    print(output["result"])
+    print(json.dumps({"section_sha256": section_hashes["13.11"], "splits": {k: {f: v[f] for f in ("contexts", "families", "preference_pairs", "maximum_numeric_absolute_error")} for k, v in split_audit.items()}, "reward_range": output["first_rollout_reward_range"]}, indent=2))
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,144 @@
+"""Evidence bookkeeping only; minutes and summaries are supplied by the reader."""
+
+import hashlib
+import json
+from pathlib import Path
+
+ROOT = Path("/workspace/tiny-perceptron-vlm")
+SHARD = ROOT / "outputs/reading-time/shards/preference.json"
+REPORT = ROOT / "docs/reading-time-reviews/integration-preference.json"
+EVIDENCE = ROOT / "docs/reading-time-reviews/artifacts/integration-preference-evidence.json"
+TASK = "/root/reading_time_preference_fresh"
+
+
+def sha(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def add_batch(rows, batch, figures=None, ranges=None):
+    inventory = json.loads(SHARD.read_text())
+    lookup = {p["page_id"]: p for p in inventory["pages"]}
+    render_records = {
+        x["page_id"]: x
+        for x in json.loads((ROOT / "outputs/reading-time/rendered/manifest.json").read_text())["records"]
+    }
+    report = (
+        json.loads(REPORT.read_text())
+        if REPORT.exists()
+        else {
+            "schema_version": 1,
+            "estimate_kind": "ai_estimate",
+            "group": "preference",
+            "reviewer_task": TASK,
+            "frozen_shard_sha256": sha(SHARD),
+            "reader_profile": "數學不錯的高中生或有基本數學能力但不夠熟的大學生；無 repo 背景。",
+            "scope_inclusions": [
+                "凍結正文、表格、公式與引用圖",
+                "示例程式及網站已展示的 CPU 輸出",
+                "理解練習題目與短暫停下思考",
+            ],
+            "scope_exclusions": [
+                "安裝與下載",
+                "自行改寫或執行程式",
+                "練習實操",
+                "等待 training",
+                "另補前置頁",
+                "完整閱讀引用論文",
+            ],
+            "measurement_note": "本人逐頁完整閱讀後人工選定區間；AI 估計，非真人測量；未用字數、行數或標題公式產生分鐘。",
+            "evidence": str(EVIDENCE.relative_to(ROOT)),
+            "pages": [],
+            "pending_issues": [],
+        }
+    )
+    evidence = (
+        json.loads(EVIDENCE.read_text())
+        if EVIDENCE.exists()
+        else {
+            "reviewer_task": TASK,
+            "frozen_shard_sha256": sha(SHARD),
+            "inventory_sha256_recorded_by_shard": inventory["frozen_inventory_sha256"],
+            "read_sequence": [],
+            "pages": [],
+            "figure_views": [],
+            "initial_read_note": "第一個讀取已完整顯示五頁正文與 C.1 supplement，但誤印全部圖 manifest 造成工具尾部截斷；第二個讀取重新完整顯示這五頁與 supplement。未依被截斷 manifest 宣稱讀圖。",
+        }
+    )
+    assert report["frozen_shard_sha256"] == sha(SHARD)
+    existing = {p["page_id"] for p in report["pages"]}
+    for page_id, low, high, summary, reason in rows:
+        assert page_id in lookup and page_id not in existing
+        assert isinstance(low, int) and low > 0 and isinstance(high, int) and high >= low
+        p = lookup[page_id]
+        actual = sha(ROOT / p["snapshot"])
+        assert actual == p["source_sha256"], (page_id, "source mismatch")
+        fhash = {name: sha(ROOT / name) for name in p["figures_sha256"]}
+        assert fhash == p["figures_sha256"]
+        report["pages"].append(
+            {
+                "page_id": page_id,
+                "minutes_min": low,
+                "minutes_max": high,
+                "reviewer_task": TASK,
+                "reason": reason,
+                "source_sha256": actual,
+                "figures_sha256": fhash,
+            }
+        )
+        receipt = {
+            "page_id": page_id,
+            "batch": batch,
+            "reader_summary": summary,
+            "chosen_minutes": [low, high],
+            "source_sha256": actual,
+            "source_read_ranges": (ranges or {}).get(page_id, ["whole snapshot, start through EOF"]),
+            "supplement": None,
+        }
+        rec = render_records.get(page_id)
+        if rec:
+            supplement = ROOT / rec["supplement"]
+            assert sha(supplement) == rec["supplement_sha256"]
+            chapter = "0C" if page_id.startswith("C.") else page_id.split(".")[0]
+            authored = ROOT / "notebooks" / chapter / (page_id + ".ipynb")
+            executed = ROOT / "outputs/integration-notebooks" / chapter / (page_id + ".ipynb")
+            assert sha(authored) == rec["authored_notebook_sha256"], (page_id, "authored mismatch")
+            assert sha(executed) == rec["executed_notebook_sha256"], (page_id, "executed mismatch")
+            receipt["supplement"] = {
+                **rec,
+                "authored_path": str(authored.relative_to(ROOT)),
+                "executed_path": str(executed.relative_to(ROOT)),
+                "read_range": "whole supplement through EOF",
+                "manifest_and_actual_hashes_match": True,
+            }
+        else:
+            assert not (ROOT / "outputs/reading-time/rendered" / (page_id + ".md")).exists()
+        evidence["pages"].append(receipt)
+        evidence["read_sequence"].append(
+            {
+                "order": len(evidence["read_sequence"]) + 1,
+                "page_id": page_id,
+                "batch": batch,
+                "parts": receipt["source_read_ranges"],
+                "supplement_read": bool(rec),
+            }
+        )
+    for view in figures or []:
+        records = json.loads((ROOT / "outputs/reading-time/figures/manifest.json").read_text())["records"]
+        rec = next(x for x in records if x["source"] == view["source"])
+        assert sha(ROOT / rec["source"]) == rec["source_sha256"]
+        assert sha(ROOT / rec["render"]) == rec["render_sha256"]
+        evidence["figure_views"].append(
+            {
+                **rec,
+                **view,
+                "rendered_by": "root before this reading task",
+                "viewed_by": TASK,
+                "source_xml_read": "whole XML through EOF",
+                "actual_hashes_match": True,
+            }
+        )
+    REPORT.parent.mkdir(parents=True, exist_ok=True)
+    EVIDENCE.parent.mkdir(parents=True, exist_ok=True)
+    REPORT.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
+    EVIDENCE.write_text(json.dumps(evidence, ensure_ascii=False, indent=2) + "\n")
+    print("SAVED", len(report["pages"]), "pages; batch", batch)

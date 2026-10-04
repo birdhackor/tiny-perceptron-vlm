@@ -1,0 +1,163 @@
+URL: https://raw.githubusercontent.com/pytorch/pytorch/5c4886908584029761b579af026dcfb627c84070/torch/distributions/categorical.py
+Version: 2.14.1+cpu; commit: 5c4886908584029761b579af026dcfb627c84070
+
+Categorical; original lines 13-171
+   13: class Categorical(Distribution):
+   14:     r"""
+   15:     Creates a categorical distribution parameterized by either :attr:`probs` or
+   16:     :attr:`logits` (but not both).
+   17: 
+   18:     .. note::
+   19:         It is equivalent to the distribution that :func:`torch.multinomial`
+   20:         samples from.
+   21: 
+   22:     Samples are integers from :math:`\{0, \ldots, K-1\}` where `K` is ``probs.size(-1)``.
+   23: 
+   24:     If `probs` is 1-dimensional with length-`K`, each element is the relative probability
+   25:     of sampling the class at that index.
+   26: 
+   27:     If `probs` is N-dimensional, the first N-1 dimensions are treated as a batch of
+   28:     relative probability vectors.
+   29: 
+   30:     .. note:: The `probs` argument must be non-negative, finite and have a non-zero sum,
+   31:               and it will be normalized to sum to 1 along the last dimension. :attr:`probs`
+   32:               will return this normalized value.
+   33:               The `logits` argument will be interpreted as unnormalized log probabilities
+   34:               and can therefore be any real number. It will likewise be normalized so that
+   35:               the resulting probabilities sum to 1 along the last dimension. :attr:`logits`
+   36:               will return this normalized value.
+   37: 
+   38:     See also: :func:`torch.multinomial`
+   39: 
+   40:     Example::
+   41: 
+   42:         >>> # xdoctest: +IGNORE_WANT("non-deterministic")
+   43:         >>> m = Categorical(torch.tensor([ 0.25, 0.25, 0.25, 0.25 ]))
+   44:         >>> m.sample()  # equal probability of 0, 1, 2, 3
+   45:         tensor(3)
+   46: 
+   47:     Args:
+   48:         probs (Tensor): event probabilities
+   49:         logits (Tensor): event log probabilities (unnormalized)
+   50:     """
+   51: 
+   52:     # pyrefly: ignore [bad-override]
+   53:     arg_constraints = {"probs": constraints.simplex, "logits": constraints.real_vector}
+   54:     has_enumerate_support = True
+   55: 
+   56:     def __init__(
+   57:         self,
+   58:         probs: Tensor | None = None,
+   59:         logits: Tensor | None = None,
+   60:         validate_args: bool | None = None,
+   61:     ) -> None:
+   62:         if (probs is None) == (logits is None):
+   63:             raise ValueError(
+   64:                 "Either `probs` or `logits` must be specified, but not both."
+   65:             )
+   66:         if probs is not None:
+   67:             if probs.dim() < 1:
+   68:                 raise ValueError("`probs` parameter must be at least one-dimensional.")
+   69:             # pyrefly: ignore [read-only]
+   70:             self.probs = probs / probs.sum(-1, keepdim=True)
+   71:         else:
+   72:             if logits is None:
+   73:                 raise AssertionError("logits is unexpectedly None")
+   74:             if logits.dim() < 1:
+   75:                 raise ValueError("`logits` parameter must be at least one-dimensional.")
+   76:             # Normalize
+   77:             # pyrefly: ignore [read-only]
+   78:             self.logits = logits - logits.logsumexp(dim=-1, keepdim=True)
+   79:         self._param = self.probs if probs is not None else self.logits
+   80:         self._num_events = self._param.size()[-1]
+   81:         batch_shape = (
+   82:             self._param.size()[:-1] if self._param.ndimension() > 1 else torch.Size()
+   83:         )
+   84:         # pyrefly: ignore [bad-argument-type]
+   85:         super().__init__(batch_shape, validate_args=validate_args)
+   86: 
+   87:     def expand(self, batch_shape, _instance=None):
+   88:         new = self._get_checked_instance(Categorical, _instance)
+   89:         batch_shape = torch.Size(batch_shape)
+   90:         param_shape = batch_shape + torch.Size((self._num_events,))
+   91:         if "probs" in self.__dict__:
+   92:             new.probs = self.probs.expand(param_shape)
+   93:             new._param = new.probs
+   94:         if "logits" in self.__dict__:
+   95:             new.logits = self.logits.expand(param_shape)
+   96:             new._param = new.logits
+   97:         new._num_events = self._num_events
+   98:         super(Categorical, new).__init__(batch_shape, validate_args=False)
+   99:         new._validate_args = self._validate_args
+  100:         return new
+  101: 
+  102:     def _new(self, *args, **kwargs):
+  103:         return self._param.new(*args, **kwargs)
+  104: 
+  105:     @constraints.dependent_property(is_discrete=True, event_dim=0)
+  106:     # pyrefly: ignore [bad-override]
+  107:     def support(self):
+  108:         return constraints.integer_interval(0, self._num_events - 1)
+  109: 
+  110:     @lazy_property
+  111:     def logits(self) -> Tensor:
+  112:         return probs_to_logits(self.probs)
+  113: 
+  114:     @lazy_property
+  115:     def probs(self) -> Tensor:
+  116:         return logits_to_probs(self.logits)
+  117: 
+  118:     @property
+  119:     def param_shape(self) -> torch.Size:
+  120:         return self._param.size()
+  121: 
+  122:     @property
+  123:     def mean(self) -> Tensor:
+  124:         return torch.full(
+  125:             self._extended_shape(),
+  126:             nan,
+  127:             dtype=self.probs.dtype,
+  128:             device=self.probs.device,
+  129:         )
+  130: 
+  131:     @property
+  132:     def mode(self) -> Tensor:
+  133:         return self.probs.argmax(dim=-1)
+  134: 
+  135:     @property
+  136:     def variance(self) -> Tensor:
+  137:         return torch.full(
+  138:             self._extended_shape(),
+  139:             nan,
+  140:             dtype=self.probs.dtype,
+  141:             device=self.probs.device,
+  142:         )
+  143: 
+  144:     def sample(self, sample_shape=torch.Size()):
+  145:         if not isinstance(sample_shape, torch.Size):
+  146:             sample_shape = torch.Size(sample_shape)
+  147:         probs_2d = self.probs.reshape(-1, self._num_events)
+  148:         samples_2d = torch.multinomial(probs_2d, sample_shape.numel(), True).T
+  149:         return samples_2d.reshape(self._extended_shape(sample_shape))
+  150: 
+  151:     def log_prob(self, value):
+  152:         if self._validate_args:
+  153:             self._validate_sample(value)
+  154:         value = value.long().unsqueeze(-1)
+  155:         value, log_pmf = torch.broadcast_tensors(value, self.logits)
+  156:         value = value[..., :1]
+  157:         return log_pmf.gather(-1, value).squeeze(-1)
+  158: 
+  159:     def entropy(self):
+  160:         min_real = torch.finfo(self.logits.dtype).min
+  161:         logits = torch.clamp(self.logits, min=min_real)
+  162:         p_log_p = logits * self.probs
+  163:         return -p_log_p.sum(-1)
+  164: 
+  165:     def enumerate_support(self, expand=True):
+  166:         num_events = self._num_events
+  167:         values = torch.arange(num_events, dtype=torch.long, device=self._param.device)
+  168:         values = values.view((-1,) + (1,) * len(self._batch_shape))
+  169:         if expand:
+  170:             values = values.expand((-1,) + self._batch_shape)
+  171:         return values

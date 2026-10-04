@@ -1,0 +1,33 @@
+## 13.13 為什麼別一次改太多？
+
+模型選了一張不錯的卡，收到正向評語。若只一味提高它的機率，即使已經提高很多，這份舊評語仍會推它繼續升。PPO的一個做法是：對已沿正確方向改得夠多的樣本，暫時不再增加同一項鼓勵，先去收集新的作答。這一步叫**clipping，裁切**，但要看清它裁的是哪一項。
+
+前置是[13.12的ratio](#13.12)。這裡設裁切範圍為0.8到1.2；對每筆樣本，一邊算`ratio×advantage`，另一邊先把ratio壓到這個區間再乘advantage，最後取兩者較小的值。這個待提高的數字叫**surrogate objective，替代目標**：它用已收集的樣本近似指引策略更新，不是直接測最終成品的用途。
+
+```python
+import torch
+from tiny_perceptron.posttraining import ppo_clipped_objective
+
+ratio = torch.tensor([0.7, 1.0, 1.3, 0.7, 1.0, 1.3], requires_grad=True)
+advantage = torch.tensor([1.0, 1.0, 1.0, -1.0, -1.0, -1.0])
+old_log_probability = torch.full((6,), 0.5).log()
+new_log_probability = old_log_probability + ratio.log()
+result = ppo_clipped_objective(new_log_probability, old_log_probability, advantage, clip_range=0.2)
+loss = -result["surrogate"].sum()
+loss.backward()
+print("待提高的值", [round(value, 2) for value in result["surrogate"].tolist()])
+print("下降代價時對ratio的梯度", [round(value, 2) for value in ratio.grad.tolist()])
+```
+
+六格分成兩組：前三格優勢為正1，後三格為負1；每組都試0.7、1、1.3的ratio。舊機率0.5，因此新機率是0.35、0.5、0.65，都是合法機率。函式按兩路取較小值，輸出`[0.7,1.0,1.2,−0.8,−1.0,−1.3]`。我們把這些值取負並加總作代價，所以梯度為`[−1,−1,0,0,1,1]`；這些是相對ratio的梯度，不是完整網路每個參數的梯度。
+
+正優勢應提高選擇機率，ratio超過1.2後，這筆的裁切項變平，梯度為0。負優勢應降低機率，ratio低於0.8後，同方向的鼓勵也變平。但若負優勢的卡反而更常見，ratio1.3仍有梯度，讓錯方向的變化付出代價。只把ratio裁切後相乘，漏掉最後取較小值，就會弄錯這種正負不對稱。
+
+圖中的水平軸都是ratio，左圖是正優勢，右圖是負優勢；實線畫待提高的值，虛線是未裁切的延伸。變平的那一側表示這筆舊樣本暫停額外鼓勵，不表示新策略被鎖在區間內。
+
+![正負優勢的PPO替代目標，只有沿有利方向超出範圍的一側變平](../figures/ppo_clip.svg)
+
+這就是[PPO原論文第3節公式7與圖1](https://arxiv.org/pdf/1707.06347)的機制。它沒有直接把模型機率改寫成上限0.6，也沒有保證所有ratio永遠介於0.8與1.2；其他樣本、共享參數與其他代價仍能讓機率继續改變。因此還要監看實際偏移，不能因為代價名字叫PPO就免除評估。
+
+練習只把clip_range改成0.1，先預測正組最後變1.1、負組第一變−0.9，其他四格不變，梯度在這六個點也維持原值，再執行核對。最後說出「裁切待提高的鼓勵」與「硬限制所有新機率」為何不同。
+

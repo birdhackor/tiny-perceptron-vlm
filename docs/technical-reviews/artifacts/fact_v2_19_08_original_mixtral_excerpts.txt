@@ -1,0 +1,98 @@
+Original source: https://arxiv.org/pdf/2401.04088v1
+Original PDF SHA256: f8bbf0e9d979b7a8ce7be65119266545a229a85b57e077d8bd048e458bb642da
+PDF text extraction independently succeeded with pdftotext. Verbatim excerpt from supplied original-text extraction; ranges below use its 1-based lines.
+
+Original text lines 36-128:
+                                        licensed under Apache 2.0. Mixtral outperforms Llama 2 70B and GPT-3.5 on most benchmarks. As
+                                        it only uses a subset of its parameters for every token, Mixtral allows faster inference speed at low
+                                        batch-sizes, and higher throughput at large batch-sizes.
+                                        Mixtral is a sparse mixture-of-experts network. It is a decoder-only model where the feedforward
+                                        block picks from a set of 8 distinct groups of parameters. At every layer, for every token, a router
+                                        network chooses two of these groups (the “experts”) to process the token and combine their output
+                                        additively. This technique increases the number of parameters of a model while controlling cost and
+                                        latency, as the model only uses a fraction of the total set of parameters per token.
+                                        Mixtral is pretrained with multilingual data using a context size of 32k tokens. It either matches
+                                        or exceeds the performance of Llama 2 70B and GPT-3.5, over several benchmarks. In particular,
+
+Figure 1: Mixture of Experts Layer. Each input vector is assigned to 2 of the 8 experts by a router. The
+layer’s output is the weighted sum of the outputs of the two selected experts. In Mixtral, an expert is a standard
+feedforward block as in a vanilla transformer architecture.
+Mixtral demonstrates superior capabilities in mathematics, code generation, and tasks that require
+multilingual understanding, significantly outperforming Llama 2 70B in these domains. Experiments
+show that Mixtral is able to successfully retrieve information from its context window of 32k tokens,
+regardless of the sequence length and the location of the information in the sequence.
+We also present Mixtral 8x7B – Instruct, a chat model fine-tuned to follow instructions using
+supervised fine-tuning and Direct Preference Optimization [25]. Its performance notably surpasses
+that of GPT-3.5 Turbo, Claude-2.1, Gemini Pro, and Llama 2 70B – chat model on human evaluation
+benchmarks. Mixtral – Instruct also demonstrates reduced biases, and a more balanced sentiment
+profile in benchmarks such as BBQ, and BOLD.
+We release both Mixtral 8x7B and Mixtral 8x7B – Instruct under the Apache 2.0 license1 , free for
+academic and commercial usage, ensuring broad accessibility and potential for diverse applications.
+To enable the community to run Mixtral with a fully open-source stack, we submitted changes to
+the vLLM project, which integrates Megablocks CUDA kernels for efficient inference. Skypilot also
+allows the deployment of vLLM endpoints on any instance in the cloud.
+
+2         Architectural details
+Mixtral is based on a transformer architecture [31] and uses the same
+                                                                                    Parameter            Value
+modifications as described in [18], with the notable exceptions that Mix-
+tral supports a fully dense context length of 32k tokens, and the feed-             dim                   4096
+forward blocks are replaced by Mixture-of-Expert layers (Section 2.1).              n_layers                32
+The model architecture parameters are summarized in Table 1.                        head_dim               128
+                                                                                    hidden_dim           14336
+                                                                                    n_heads                 32
+2.1        Sparse Mixture of Experts                                                n_kv_heads               8
+We present a brief overview of the Mixture of Experts layer (Figure 1).             context_len          32768
+For a more in-depth overview, see [12]. The output of the MoE module                vocab_size           32000
+for a given input x is determined by the weighted sum of the outputs                num_experts              8
+of the expert networks, where the weights are given by the gating                   top_k_experts            2
+network’s output. i.e. given n expert networks {E0 , Ei , ..., En−1 }, the Table 1: Model architecture.
+output of the expert layer is given by:
+                                         n−1
+                                          X
+                                             G(x)i · Ei (x).
+                                              i=0
+
+Here, G(x)i denotes the n-dimensional output of the gating network for the i-th expert, and Ei (x)
+is the output of the i-th expert network. If the gating vector is sparse, we can avoid computing
+the outputs of experts whose gates are zero. There are multiple alternative ways of implementing
+G(x) [6, 15, 35], but a simple and performant one is implemented by taking the softmax over the
+Top-K logits of a linear layer [28]. We use
+                                 G(x) := Softmax(TopK(x · Wg )),
+where (TopK(ℓ))i := ℓi if ℓi is among the top-K coordinates of logits ℓ ∈ Rn and (TopK(ℓ))i := −∞
+otherwise. The value of K – the number of experts used per token – is a hyper-parameter that modu-
+lates the amount of compute used to process each token. If one increases n while keeping K fixed, one
+      1
+          https://mistral.ai/news/mixtral-of-experts/
+
+
+                                                        2
+
+can increase the model’s parameter count while keeping its computational cost effectively constant.
+This motivates a distinction between the model’s total parameter count (commonly referenced as the
+sparse parameter count), which grows with n, and the number of parameters used for processing an
+individual token (called the active parameter count), which grows with K up to n.
+MoE layers can be run efficiently on single GPUs with high performance specialized kernels. For
+example, Megablocks [13] casts the feed-forward network (FFN) operations of the MoE layer as large
+sparse matrix multiplications, significantly enhancing the execution speed and naturally handling
+cases where different experts get a variable number of tokens assigned to them. Moreover, the
+MoE layer can be distributed to multiple GPUs through standard Model Parallelism techniques, and
+through a particular kind of partitioning strategy called Expert Parallelism (EP) [28]. During the MoE
+layer’s execution, tokens meant to be processed by a specific expert are routed to the corresponding
+GPU for processing, and the expert’s output is returned to the original token location. Note that EP
+introduces challenges in load balancing, as it is essential to distribute the workload evenly across the
+GPUs to prevent overloading individual GPUs or hitting computational bottlenecks.
+In a Transformer model, the MoE layer is applied independently per token and replaces the
+feed-forward (FFN) sub-block of the transformer block. For Mixtral we use the same SwiGLU
+architecture as the expert function Ei (x) and set K = 2. This means each token is routed to two
+SwiGLU sub-blocks with different sets of weights. Taking this all together, the output y for an input
+token x is computed as:
+                                 n−1
+                                 X
+                           y=          Softmax(Top2(x · Wg ))i · SwiGLUi (x).
+                                 i=0
+
+This formulation is similar to the GShard architecture [21], with the exceptions that we replace all
+FFN sub-blocks by MoE layers while GShard replaces every other block, and that GShard uses a
+more elaborate gating strategy for the second expert assigned to each token.
+

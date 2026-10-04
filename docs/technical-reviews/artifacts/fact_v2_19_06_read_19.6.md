@@ -1,0 +1,71 @@
+## 19.6 圖片與聲音怎麼交給同一位助理？
+
+一位能讀文字標籤的助理，不會因為檔案旁邊寫著「red」，就證明看懂了紅色圖片。我們需要真正把畫素送進模型，再換圖片、保持問題不變，看回答是否跟著素材走。聲音也一樣：模型要讀的是聲學數字，不能把人生成純音時使用的`high`標籤直接放進問題。
+
+前置是[圖片數字表](10.md#10.1)、[頻譜與log-mel](12.md#12.5)、[多模態錯配](12.md#12.12)、[本成品的回答協定](19.md#19.1)與[接續訓練階段](19.md#19.4)。`DIRECT:`表示直接回答；SFT先學文字作答，joint階段再混入圖音，DPO則是後續偏好比較分支。另有`task == "joint"`的聯合題型，要求同時答顏色與音高；題型名稱與訓練階段雖同名，一個是一筆題目的種類，另一個是一段更新流程。
+
+本成品採一個刻意較簡單的接頭：16×16 RGB圖片平均成4×4色塊，再攤成48項數字；聲音實際做16帶log-mel頻譜，再沿時間平均成16項數字。log-mel是一種把聲音頻率能量整理成頻帶的表示；時間平均會丟掉前後順序，所以它適合這裡的高低純音，不適合據此宣稱辨識語句。
+
+這裡的low／high是本成品兩群純音的相對名稱：較低一群在約440Hz附近，較高一群在約880Hz附近，各加入小頻率變化。第12章曾用300Hz當人工分類界線，所以那裡的440Hz叫high；兩個任務採用不同資料規則，不能直接搬標籤。本成品不是把300Hz界線訓練得更準，也沒有重用那個分類器的答案。
+
+下面先檢查一筆題目怎麼轉成模型能收的資料。`build_dataset`回傳各份資料`splits`和摘要清單；`_`略過摘要，`splits["train"]`取訓練記錄，`next(...)`選第一筆聯合題。這筆`row`有問句、示範回答與圖音生成規格；`modality_tensors(row)`根據規格真的生成圖片畫素與聲學摘要，不能把文字標籤當成素材。
+
+```python
+import torch
+
+from tiny_perceptron.capstone import CapstoneModel, build_dataset, modality_tensors, prepare_batch
+
+splits, _ = build_dataset()
+row = next(row for row in splits["train"] if row["task"] == "joint")
+print("問題", row["user"], "示範回答", row["answer"])
+image, audio = modality_tensors(row)
+print("實際圖片形狀", tuple(image.shape), "聲學摘要形狀", tuple(audio.shape))
+model = CapstoneModel()
+batch, labels = prepare_batch([row])
+with torch.no_grad():
+    result = model(**batch)
+print("回答分數形狀", tuple(result["logits"].shape), "與目標位置對齊", result["logits"].shape[:2] == labels.shape)
+```
+
+`CapstoneModel()`建立尚未訓練的完整模型；`prepare_batch([row])`把一筆記錄整理成輸入字典`batch`與下一位置目標`labels`。輸入字典含前文／回答前段的`ids`、有效位置`valid`、圖片`images`與聲學摘要`audio_features`；`model(**batch)`把字典各欄展開成同名參數送進模型。
+
+這是訓練格式的對齊檢查：模型看到問句、素材與已提供的回答前段，預測下一個回答編號；`labels`只把回答及EOS當目標，問句與素材前文位置用IGNORE略過。它沒有逐步生成自己的答案，也沒有執行更新。圖片形狀應為`(3,16,16)`，聲學摘要為`(16,)`；logits最後一軸有264個候選，前兩軸與labels的位置對齊。`torch.no_grad()`表示這次只檢視分數，不為更新權重儲存求導圖。尺寸接得上只證明接頭能通，辨識能力要看後面的真生成結果。
+
+接頭把這些摘要投影成64項特徵，各佔一個前文位置。這與[10–12章](10.md#10.7)一次展開很多素材向量的路線不同：它省下位置與計算，但也失去細節。我們沒有在它裡面偷偷載入通用視覺或語音模型；同一個語言核心要從小世界示範學習如何使用新特徵。
+
+部署檢查已真正換過素材：保留問題，只換圖片顏色或形狀；或保持圖片，只換聲音高低，再按換入素材重新給真值。這叫反事實對照：同一問句，換一個本來會改變答案的輸入，檢查回答是否正確跟著改變。joint題也要分開記圖片部分與聲音部分：答對顏色、答錯音高，不能算整題成功，也不能只看一個較好分項。
+
+把素材置零是另一種檢查，但本輪整合配方沒有量這項結果；[12.12](12.md#12.12)保留先前獨立模型的實際遮蔽對照，不能直接貼成這個新成品的成績。
+
+joint的600次正式更新已完成，先看目前真正取得的固定驗證結果。這不是換圖對照，也不是最後檢查成績。
+
+| 模態驗證任務 | SFT後 | joint後 | DPO分支 | 要保留的限制 |
+| --- | --- | --- | --- | --- |
+| 圖片顏色 | 0／9 | 9／9 | 9／9 | 這9題全是藍色；一直答blue也能9／9 |
+| 圖片形狀 | 0／9 | 0／9 | 0／9 | 留出的藍色圓形仍未成功 |
+| 單獨音高 | 0／6 | 6／6 | 6／6 | low／high各3題，固定答一類只能3／6 |
+| 顏色與音高聯合 | 0／18 | 18／18 | 14／18 | 顏色全為blue，音高各半；題目沒有問形狀 |
+
+形狀的失敗尤其值得看：模型對留出的藍色圓形正常生成`DIRECT:square`，真正答案卻是`DIRECT:circle`。9種明暗與位移變體全部如此，不是某題偶然少了結束編號。訓練中的藍色只搭配方形，這提醒我們注意顏色與形狀的關聯；但光憑這組輸出，還不能證明模型出錯的內部原因。先保留失敗，才有理由設計下一個對照。
+
+單獨音高6／6高於固定答案的3／6基線，支持模型在這份平衡、固定問法的純音題庫中能分開高低；沒有因此取得語音辨識能力。聯合題18／18也沒有解決形狀失敗：它只要求顏色與音高，顏色又是固定的。必須等換素材的對照實跑，再討論對圖片特徵的依賴。[joint逐題證據](https://github.com/birdhackor/tiny-perceptron-vlm/blob/1df335318bda03fd771807f66976953231d5a00b/docs/course-experiments/capstone-evidence/joint/validation.json)完整保留這9次錯誤與其他回答。
+
+DPO分支又讓4題原本正確的聯合回答變錯。例如真值為`blue,low`的一題，joint產生`DIRECT:blue,low`，DPO後卻產生`DIRECT:red,low`；另外也有`blue,high`被答成`red,high`。這4題音高仍正確，顏色卻全部誤成red，整題分數因此從18／18降到14／18。這是[實際逐題退步](https://github.com/birdhackor/tiny-perceptron-vlm/blob/1df335318bda03fd771807f66976953231d5a00b/docs/course-experiments/capstone-evidence/dpo/validation.json)，不是為了示範而人工指定的錯誤，也不是單看偏好訓練誤差能發現的事。
+
+最後考卷換成事先留出的綠色方形家族。推薦joint在原圖顏色9／9、形狀0／9，形狀全部正常生成`DIRECT:circle`而真值是square；單獨音高6／6，圖音聯合18／18。DPO分支在這份最後考卷的這四項分數恰好相同，但沒有因此改掉依驗證選joint的決定。
+
+真正的換圖結果更能說明為什麼不能只報高分。顏色由green換成blue；形狀由square換成circle；聯合題只換顏色、保持音高。每筆都重新生成圖片畫素，並重新生成模型回答。
+
+| 推薦joint的圖片對照 | 原素材答對 | 換後按新真值答對 | 原／換兩題都答對 |
+| --- | --- | --- | --- |
+| 單獨顏色 | 9／9 | 9／9 | 9／9對 |
+| 單獨形狀 | 0／9 | 9／9 | 0／9對 |
+| 圖音聯合，只換顏色 | 18／18 | 18／18 | 18／18對 |
+| 合計 | 27／36 | 36／36 | 27／36對 |
+
+只看「換後36／36」會誤以為形狀也懂了；實際上原圖與換後都答circle，換後才剛好對。成對0／9把這個問題保留下來。顏色與聯合題則在原圖和換色後都答對，才支持本小世界裡回答依圖片顏色改變。再保持圖片、將聯合題的low／high音訊互換，18／18也按換入音高答對；連同原題，這18對皆正確。它仍只涵蓋合成圖形、兩群純音與固定問句。
+
+資料與回答可並排核對[原始90題](https://github.com/birdhackor/tiny-perceptron-vlm/blob/1df335318bda03fd771807f66976953231d5a00b/docs/course-experiments/capstone-evidence/deployment/test-joint.json)、[換圖36題](https://github.com/birdhackor/tiny-perceptron-vlm/blob/1df335318bda03fd771807f66976953231d5a00b/docs/course-experiments/capstone-evidence/deployment/test-joint-image-swaps.json)、[圖片成對紀錄](https://github.com/birdhackor/tiny-perceptron-vlm/blob/1df335318bda03fd771807f66976953231d5a00b/docs/course-experiments/capstone-evidence/deployment/test-joint-image-pairs.json)與[換聲18題](https://github.com/birdhackor/tiny-perceptron-vlm/blob/1df335318bda03fd771807f66976953231d5a00b/docs/course-experiments/capstone-evidence/deployment/test-joint-audio-swaps.json)。正式檢查後保留了形狀失敗，沒有再依考卷換配方重訓。
+
+練習把`joint`改成`image_color`，在列印前判斷`audio`是否為`None`；若沒有聲音，不要對它呼叫`.shape`。少一種素材仍有同一位助理，但前文只應放實際提供的素材位置，不能靠不存在的輸入回答。
+

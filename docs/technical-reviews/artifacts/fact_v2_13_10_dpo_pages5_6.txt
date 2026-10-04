@@ -1,0 +1,138 @@
+model, it enjoys certain theoretical properties, such as consistencies under suitable assumption of the
+preference data distribution [4]. In Section 5, we further discuss theoretical properties of DPO in
+relation to other works.
+What does the DPO update do? For a mechanistic understanding of DPO, it is useful to analyze the
+gradient of the loss function LDPO . The gradient with respect to the parameters θ can be written as:
+
+    ∇θ LDPO (πθ ; πref ) =
+                                                                                                             
+    − βE(x,yw ,yl )∼D      σ(r̂θ (x, yl ) − r̂θ (x, yw ))                  ∇θ log π(yw | x) − ∇θ log π(yl | x) ,
+                           |             {z             }                  |      {z      }   |     {z       }
+                         higher weight when reward estimate is wrong       increase likelihood of yw   decrease likelihood of yl
+
+where r̂θ (x, y) = β log ππrefθ (y|x)
+                                (y|x) is the reward implicitly defined by the language model πθ and refer-
+ence model πref (more in Section 5). Intuitively, the gradient of the loss function LDPO increases the
+likelihood of the preferred completions yw and decreases the likelihood of dispreferred completions
+yl . Importantly, the examples are weighed by how much higher the implicit reward model r̂θ rates
+the dispreferred completions, scaled by β, i.e, how incorrectly the implicit reward model orders
+the completions, accounting for the strength of the KL constraint. Our experiments suggest the
+importance of this weighting, as a naïve version of this method without the weighting coefficient can
+cause the language model to degenerate (Appendix Table 3).
+DPO outline. The general DPO pipeline is as follows: 1) Sample completions y1 , y2 ∼ πref (· | x)
+for every prompt x, label with human preferences to construct the offline dataset of preferences
+              (i)
+D = {x(i) , yw , yl )(i) }N
+                          i=1 and 2) optimize the language model πθ to minimize LDPO for the given
+πref and D and desired β. In practice, one would like to reuse preference datasets publicly available,
+rather than generating samples and gathering human preferences. Since the preference datasets
+are sampled using π SFT , we initialize πref = π SFT whenever available. However, when π SFT is
+not available, we initialize πref by maximizing likelihood of preferred completions (x, yw ), that
+is, πref = arg maxπ Ex,yw ∼D [log π(yw | x)]. This procedure helps mitigate the distribution shift
+between the true reference distribution which is unavailable, and πref used by DPO. Further details
+related to the implementation and hyperparameters can be found in Appendix B.
+
+5     Theoretical Analysis of DPO
+In this section, we give further interpretation of the DPO method, provide theoretical backing, and
+relate advantages of DPO to issues with actor critic algorithms used for RLHF (such as PPO [39]).
+
+5.1     Your Language Model Is Secretly a Reward Model
+
+DPO is able to bypass both fitting an explicit reward and performing RL to learn the policy using
+a single maximum likelihood objective. Note the optimization objective Eq. 5 is equivalent to a
+                                                                        π ∗ (y|x)
+Bradley-Terry model with a reward parameterization r∗ (x, y) = β log πrefθ (y|x) and we optimize our
+parametric model πθ , equivalently to the reward model optimization in Eq. 2 under the change of
+variables. In this section we will build the theory behind this reparameterization, show that it does
+not constrain the class of learned reward models, and allows for the exact recovery of the optimal
+policy. We begin with by defining an equivalence relation between reward functions.
+Definition 1. We say that two reward functions r(x, y) and r′ (x, y) are equivalent iff
+r(x, y) − r′ (x, y) = f (x) for some function f .
+
+It is easy to see that this is indeed an equivalence relation, which partitions the set of reward functions
+into classes. We can state the following two lemmas:
+Lemma 1. Under the Plackett-Luce, and in particular the Bradley-Terry, preference framework, two
+reward functions from the same class induce the same preference distribution.
+Lemma 2. Two reward functions from the same equivalence class induce the same optimal policy
+under the constrained RL problem.
+
+The proofs are straightforward and we defer them to Appendix A.5. The first lemma is a well-known
+under-specification issue with the Plackett-Luce family of models [32]. Due to this under-specification,
+
+
+                                                               5
+we usually have to impose additional identifiability constraints to achieve any guarantees on the MLE
+estimates from Eq. 2 [4]. The second lemma states that all reward functions from the same class
+yield the same optimal policy, hence for our final objective, we are only interested in recovering an
+arbitrary reward function from the optimal class. We prove the following Theorem in Appendix A.6:
+Theorem 1. Under mild assumptions, all reward classes consistent with the Plackett-Luce
+(and Bradley-Terry in particular) models can be represented with the reparameterization
+r(x, y) = β log ππ(y|x)
+                 ref (y|x)
+                           for some model π(y | x) and a given reference model πref (y | x).
+
+Proof Sketch. Consider any reward function r(x, y), which induces a corresponding optimal model
+πr (y | x), specified by Eq. 4. We will show that a reward function from the equivalence class of r
+can be represented using the reparameterization given above. We define the projection f as
+                                                                                     
+                                                        X                    1
+                f (r; πref , β)(x, y) = r(x, y) − β log   πref (y | x) exp     r(x, y)          (8)
+                                                        y
+                                                                             β
+
+The operator f simply normalizes the reward function with the logarithm of the partition function
+of πr . Since the added normalization term is only a function of the prefix x, f (r; πref , β)(x, y) is a
+reward function in the equivalence class of r(x, y). Finally, replacing r with the RHS of Eq. 5 (which
+holds for any reward function), we have f (r; πref , β)(x, y) = β log ππrefr (y|x)
+                                                                             (y|x) . That is, the projection
+f produces a member of the equivalence class of r with the desired form, and we do not lose any
+generality in our reward model from the proposed reparameterization.
+
+We can alternatively view Theorem 1 as specifying exactly which reward function within each
+equivalence class the DPO reparameterization selects, that is, the reward function satisfying:
+                                                             
+                              X                     1
+                                 πref (y | x) exp     r(x, y) = 1,                             (9)
+                               y |
+                                                    β
+                                                {z             }
+                                        =π(y|x), using Thm. 1 reparam.
+
+i.e., π(y | x) is a valid distribution (probabilities are positive and sum to 1). However, following
+Eq. 4, we can see that Eq. 9 is the partition function of the optimal policy induced by the reward
+function r(x, y). The key insight of the DPO algorithm is that we can impose certain constraints on
+the under-constrained Plackett-Luce (and Bradley-Terry in particular) family of preference models,
+such that we preserve the class of representable reward models, but explicitly make the optimal policy
+in Eq. 4 analytically tractable for all prompts x.
+
+5.2   Instability of Actor-Critic Algorithms
+
+We can also use our framework to diagnose instabilities with standard actor-critic algorithms used
+for the RLHF, such as PPO. We follow the RLHF pipeline and focus on the RL fine-tuning step
+outlined in Section 3. We can draw connections to the control as inference framework [22] for the
+constrained RL problem outlined in 3. We assume a parameterized model πθ (y | x) and minimize
+DKL [πθ (y|x) || π ∗ (y | x)] where π ∗ is the optimal policy from Eq. 7 induced by the reward function
+rϕ (y, x). With some algebra this leads to the optimization objective:
+                                                                                              
+                                         X                      1                   πθ (y | x)
+     max Eπθ (y|x) rϕ (x, y) − β log         πref (y | x) exp     rϕ (x, y) − β log                (10)
+       πθ
+                                          y
+                                                                β                   πref (y | x)
+                                                                              |      {z        }
+                                                                                      KL
+                      |                         {z                         }
+                                           f (rϕ ,πref ,β)
+
+This is the same objective optimized in prior works [51, 40, 1, 28] using the DPO-equivalent reward
+for the reward class of rϕ . In this setting, we can interpret the normalization term in f (rϕ , πref , β)
+as the soft value function of the reference policy πref . While this term does not affect the optimal
+solution, without it, the policy gradient of the objective could have high variance, making learning
+unstable. We can accommodate for the normalization term using a learned value function, but that
+can also be difficult to optimize. Alternatively, prior works have normalized rewards using a human
+completion baseline, essentially a single sample Monte-Carlo estimate of the normalizing term. In
+contrast the DPO reparameterization yields a reward function that does not require any baselines.
+
+
+                                                        6
+

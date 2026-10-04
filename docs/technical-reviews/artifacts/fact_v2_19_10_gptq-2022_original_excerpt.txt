@@ -1,0 +1,147 @@
+                                         Published as a conference paper at ICLR 2023
+
+
+
+
+                                         GPTQ: ACCURATE P OST-T RAINING Q UANTIZATION
+                                         FOR G ENERATIVE P RE - TRAINED T RANSFORMERS
+
+                                          Elias Frantar∗          Saleh Ashkboos         Torsten Hoefler        Dan Alistarh
+                                          IST Austria             ETH Zurich             ETH Zurich             IST Austria & NeuralMagic
+
+
+
+                                                                                       A BSTRACT
+arXiv:2210.17323v2 [cs.LG] 22 Mar 2023
+
+
+
+
+                                                     Generative Pre-trained Transformer models, known as GPT or OPT, set them-
+                                                     selves apart through breakthrough performance across complex language mod-
+                                                     elling tasks, but also by their extremely high computational and storage costs.
+                                                     Specifically, due to their massive size, even inference for large, highly-accurate
+                                                     GPT models may require multiple performant GPUs, which limits the usability
+                                                     of such models. While there is emerging work on relieving this pressure via
+                                                     model compression, the applicability and performance of existing compression
+                                                     techniques is limited by the scale and complexity of GPT models. In this paper,
+                                                     we address this challenge, and propose GPTQ, a new one-shot weight quantiza-
+                                                     tion method based on approximate second-order information, that is both highly-
+                                                     accurate and highly-efficient. Specifically, GPTQ can quantize GPT models with
+                                                     175 billion parameters in approximately four GPU hours, reducing the bitwidth
+                                                     down to 3 or 4 bits per weight, with negligible accuracy degradation relative to the
+                                                     uncompressed baseline. Our method more than doubles the compression gains rel-
+                                                     ative to previously-proposed one-shot quantization methods, preserving accuracy,
+                                                     allowing us for the first time to execute an 175 billion-parameter model inside a
+                                                     single GPU for generative inference. Moreover, we also show that our method
+                                                     can still provide reasonable accuracy in the extreme quantization regime, in which
+                                                     weights are quantized to 2-bit or even ternary quantization levels. We show ex-
+                                                     perimentally that these improvements can be leveraged for end-to-end inference
+                                                     speedups over FP16, of around 3.25x when using high-end GPUs (NVIDIA A100)
+                                                     and 4.5x when using more cost-effective ones (NVIDIA A6000). The implemen-
+                                                     tation is available at https://github.com/IST-DASLab/gptq.
+
+
+                                         1       I NTRODUCTION
+                                         Pre-trained generative models from the Transformer (Vaswani et al., 2017) family, commonly known
+                                         as GPT or OPT (Radford et al., 2019; Brown et al., 2020; Zhang et al., 2022), have shown break-
+                                         through performance for complex language modelling tasks, leading to massive academic and prac-
+                                         tical interest. One major obstacle to their usability is computational and storage cost, which ranks
+                                         among the highest for known models. For instance, the best-performing model variants, e.g. GPT3-
+                                         175B, have in the order of 175 billion parameters and require tens-to-hundreds of GPU years to
+                                         train (Zhang et al., 2022). Even the simpler task of inferencing over a pre-trained model, which is
+                                         our focus in this paper, is highly challenging: for instance, the parameters of GPT3-175B occupy
+                                         326GB (counting in multiples of 1024) of memory when stored in a compact float16 format. This
+                                         exceeds the capacity of even the highest-end single GPUs, and thus inference must be performed
+                                         using more complex and expensive setups, such as multi-GPU deployments.
+                                         Although a standard approach to eliminating these overheads is model compression, e.g. (Hoefler
+                                         et al., 2021; Gholami et al., 2021), surprisingly little is known about compressing such models for
+                                         inference. One reason is that more complex methods for low-bitwidth quantization or model prun-
+                                         ing usually require model retraining, which is extremely expensive for billion-parameter models.
+                                         Alternatively, post-training methods (Nagel et al., 2020; Wang et al., 2020; Hubara et al., 2020;
+                                         Nahshan et al., 2021), which compress the model in one shot, without retraining, would be very
+                                         appealing. Unfortunately, the more accurate variants of such methods (Li et al., 2021; Hubara et al.,
+                                         2021; Frantar et al., 2022) are complex and challenging to scale to billions of parameters (Yao et al.,
+                                             ∗
+                                                 Corresponding author: elias.frantar@ist.ac.at
+
+
+                                                                                              1
+Published as a conference paper at ICLR 2023
+
+
+
+
+2022). To date, only basic variants of round-to-nearest quantization (Yao et al., 2022; Dettmers
+et al., 2022) have been applied at the scale of GPT-175B; while this works well for low compression
+targets, e.g., 8-bit weights, they fail to preserve accuracy at higher rates. It therefore remains open
+whether one-shot post-training quantization to higher compression rates is generally-feasible.
+
+                                  50
+                                                          OPT Model Family                                                    BLOOM Model Family
+                                  45                                                                               60
+                                                                                 110.                                                                         571.
+                                  40                                                                               50
+        Perplexity on WikiText2
+
+
+
+
+                                                                                         Perplexity on WikiText2
+                                  35
+                                  30                                                                               40                                 3bit RTN
+                                                                                                                                                      3bit GPTQ
+                                  25                                                                               30                                 FP16
+                                  20
+                                  15          4bit RTN                                                             20
+                                  10          4bit GPTQ
+                                              FP16                                                                 10
+                                   5
+                                       10 1               100           101        102                                  100           101               102
+                                                           #params in billions                                                  #params in billions
+Figure 1: Quantizing OPT models to 4 and BLOOM models to 3 bit precision, comparing GPTQ
+with the FP16 baseline and round-to-nearest (RTN) (Yao et al., 2022; Dettmers et al., 2022).
+
+Contribution. In this paper, we present a new post-training quantization method, called GPTQ,1
+which is efficient enough to execute on models with hundreds of billions of parameters in at most
+a few hours, and precise enough to compress such models to 3 or 4 bits per parameter without
+significant loss of accuracy. For illustration, GPTQ can quantize the largest publicly-available mod-
+els, OPT-175B and BLOOM-176B, in approximately four GPU hours, with minimal increase in
+perplexity, known to be a very stringent accuracy metric.
+Further, we show that our model can also provide robust results in the extreme quantization regime,
+in which models are quantized to 2 bits per component, or even ternary values. On the practical
+side, we develop an execution harness which allows us to execute the resulting compressed models
+efficiently for generative tasks. Specifically, we are able to run the compressed OPT-175B model
+for the first time on a single NVIDIA A100 GPU, or using only two more cost-effective NVIDIA
+A6000 GPUs. We also implement bespoke GPU kernels which are able to leverage compression for
+faster memory loading, resulting in speedups of ≈ 3.25× when using A100 GPUs, and 4.5× when
+using A6000 GPUs.
+To our knowledge, we are the first to show that extremely accurate language models with hundreds
+of billions of parameters can be quantized to 3-4 bits/component: prior post-training methods only
+remain accurate at 8 bits (Yao et al., 2022; Dettmers et al., 2022), while prior training-based tech-
+niques have only tackled models that are smaller by one to two orders of magnitude (Wu et al., 2022).
+This high degree of compression may appear natural, as these networks are overparametrized; yet,
+as we discuss in our detailed analysis of results, compression induces non-trivial tradeoffs between
+the accuracy of the language modeling (perplexity), bit-width, and the size of the original model.
+We hope that our work will stimulate further research in this area, and can be a further step towards
+making these models available to a wider audience. In terms of limitations, our method currently
+does not provide speedups for the actual multiplications, due to the lack of hardware support for
+mixed-precision operands (e.g. FP16 x INT4) on mainstream architectures. Moreover, our current
+results do not include activation quantization, as they are not a significant bottleneck in our target
+scenarios; however, this can be supported using orthogonal techniques (Yao et al., 2022).
+
+2         R ELATED W ORK
+Quantization methods fall broadly into two categories: quantization during training, and post-
+training methods. The former quantize models during typically extensive retraining and/or fine-
+tuning, using some approximate differentiation mechanism for the rounding operation (Gholami
+et al., 2021; Nagel et al., 2021). By contrast, post-training (“one-shot”) methods quantize a pre-
+    1
+        This merges the name of the OPT model family with the abbreviation for post-training quantization (PTQ).
+
+
+                                                                                         2
+Published as a conference paper at ICLR 2023
+
+
+
+

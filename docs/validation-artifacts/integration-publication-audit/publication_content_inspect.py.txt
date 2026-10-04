@@ -1,0 +1,92 @@
+"""Inspect serialized values and retained GSM source; never emit model values."""
+import hashlib
+import json
+import math
+from pathlib import Path
+
+ROOT = Path.cwd()
+BASE = ROOT / "outputs/integration-runs"
+manifest = json.loads((BASE / "publication-required-paths.json").read_text())
+models, large_values = [], []
+parsed_count = 0
+unparsed_json_named_artifacts = []
+
+def numbers(value):
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return 1
+    if isinstance(value, list):
+        return sum(numbers(x) for x in value)
+    return 0
+
+for name in manifest["required_paths"]:
+    path = ROOT / name
+    if path.suffix not in (".json", ".jsonl"):
+        continue
+    try:
+        data = json.loads(path.read_text()) if path.suffix == ".json" else [json.loads(x) for x in path.read_text().splitlines() if x]
+    except (ValueError, UnicodeError) as exc:
+        unparsed_json_named_artifacts.append({"path": name, "bytes": path.stat().st_size, "sha256": hashlib.sha256(path.read_bytes()).hexdigest(), "error": str(exc), "classification": "expected failed-probe empty stdout" if any(x["path"] == name for x in manifest.get("expected_non_json_stdout_artifacts", [])) else "unresolved"})
+        continue
+    parsed_count += 1
+    value_arrays = []
+    def walk(value, trail=()):
+        if isinstance(value, dict):
+            if isinstance(value.get("values"), list):
+                count = numbers(value["values"])
+                row = {"locator": ".".join(trail), "shape": value.get("shape"), "dtype": value.get("dtype"), "numeric_value_count": count}
+                value_arrays.append(row)
+                if count > 512:
+                    large_values.append({"path": name} | row)
+            for key, child in value.items():
+                walk(child, trail + (str(key),))
+        elif isinstance(value, list):
+            for i, child in enumerate(value):
+                if isinstance(child, (dict, list)):
+                    walk(child, trail + (str(i),))
+    walk(data)
+    if isinstance(data, dict) and (("tensors" in data and any(x["numeric_value_count"] for x in value_arrays)) or ("state" in data and "parameter_elements" in data)):
+        models.append({"path": name, "bytes": path.stat().st_size, "sha256": hashlib.sha256(path.read_bytes()).hexdigest(), "model_class": data.get("model_class"), "parameter_elements_field": data.get("parameter_elements"), "actual_serialized_numeric_values": sum(x["numeric_value_count"] for x in value_arrays), "tensors": value_arrays, "interpretation": "Small finite-response PPO teaching model. Inspected actual tensor dictionaries, shapes, dtypes and count of serialized values; this is the task-authorized tiny portable exception."})
+
+gsm = ROOT / "docs/technical-reviews/artifacts/fact_finish_c_1_dependency"
+retention = json.loads((gsm / "source-retention.json").read_text())
+snapshot = gsm / retention["retained_git_snapshot"]
+lines = snapshot.read_text().splitlines()
+original = Path(retention["outside_repository_preserved_path"])
+receipts = json.loads((gsm / "external-fetch.json").read_text())
+source = next(x for x in receipts if x["name"] == "upstream-gsm8k-train.jsonl")
+relocation_path = ROOT / "docs/technical-reviews/artifacts/fact_v2_19_01_raw_source_storage.json"
+relocations = []
+for row in json.loads(relocation_path.read_text()):
+    original_path = ROOT / row["original_fetch_path"]
+    retained_path = ROOT / row["retained_ignored_path"]
+    relocations.append({"original_fetch_path": row["original_fetch_path"], "original_repo_path_absent": not original_path.exists(), "retained_ignored_path": row["retained_ignored_path"], "retained_exists": retained_path.is_file(), "actual_bytes_match": retained_path.is_file() and retained_path.stat().st_size == row["bytes"], "actual_sha256_matches": retained_path.is_file() and hashlib.sha256(retained_path.read_bytes()).hexdigest() == row["sha256"], "persistent_receipt": str(relocation_path.relative_to(ROOT)), "retrieval_contract": row["retrieval"], "staging_requirement": "Retain persistent receipt and referenced excerpts; original ignored fetch is provenance/runtime material, not a new Git requirement."})
+result = {
+    "manifest_sha256": hashlib.sha256((BASE / "publication-required-paths.json").read_bytes()).hexdigest(),
+    "parsed_json_jsonl_count": parsed_count,
+    "unparsed_json_named_artifacts": unparsed_json_named_artifacts,
+    "small_toy_parameter_json": models,
+    "serialized_values_lists_over_512_elements": large_values,
+    "formal_model_weight_json_found": bool(large_values),
+    "relocated_original_source_receipts": relocations,
+    "interpretation": "Actual required JSON/JSONL content inspected. Serialized weight values found only in listed small finite-response teaching models. Other largest arrays are per-step target counts or 640-sample audio preview, not formal model parameter storage. Formal checkpoint files are excluded runtime references. No claim is made about arbitrary formats or dynamic replay coverage.",
+    "gsm8k": {
+        "retention_receipt": str((gsm / "source-retention.json").relative_to(ROOT)),
+        "fetch_receipt": str((gsm / "external-fetch.json").relative_to(ROOT)),
+        "snapshot_path": str(snapshot.relative_to(ROOT)),
+        "snapshot_bytes": snapshot.stat().st_size,
+        "snapshot_rows": len(lines),
+        "snapshot_sha256": hashlib.sha256(snapshot.read_bytes()).hexdigest(),
+        "all_snapshot_rows_have_question_answer": all(set(json.loads(x)) == {"question", "answer"} for x in lines),
+        "original_repo_full_source_absent": not (gsm / "upstream-gsm8k-train.jsonl").exists(),
+        "outside_repo_original_path": str(original),
+        "outside_repo_original_exists": original.is_file(),
+        "outside_repo_original_sha256_matches": original.is_file() and hashlib.sha256(original.read_bytes()).hexdigest() == source["sha256"],
+        "pinned_full_source_url": source["url"],
+        "pinned_full_source_bytes": source["bytes"],
+        "pinned_full_source_sha256": source["sha256"],
+        "replay_source": "docs/technical-reviews/artifacts/fact_finish_c_1_dependency/replay.py",
+        "replay_contract_inspected_lines": "139-150: fetch fixed HTTPS original to memory, check full SHA/bytes against external-fetch.json, compare first200 bytes; no full source added to Git.",
+    },
+}
+(BASE / "publication-content-inspection.json").write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n")
+print(json.dumps({"parsed_json_jsonl_count": result["parsed_json_jsonl_count"], "toy_parameter_json": len(models), "large_serialized_value_arrays": len(large_values), "gsm_snapshot_rows": len(lines), "gsm_outside_source_verified": result["gsm8k"]["outside_repo_original_sha256_matches"]}))

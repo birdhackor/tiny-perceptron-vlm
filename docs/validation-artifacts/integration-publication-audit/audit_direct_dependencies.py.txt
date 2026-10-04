@@ -1,0 +1,30 @@
+import hashlib
+import json
+import subprocess
+from pathlib import Path
+
+root = Path.cwd()
+records = []
+for stage in ('reader', 'technical'):
+    for report in sorted((root / f'docs/{stage}-reviews').glob('*.json')):
+        data = json.loads(report.read_text())
+        values = data.get('artifacts', [])
+        if isinstance(values, dict):
+            values = list(values.values())
+        paths = [(v if isinstance(v, str) else v.get('path', ''), 'artifact') for v in values]
+        paths += [(v.get('path', ''), 'repository_code') for v in data.get('sources', []) if isinstance(v, dict) and v.get('kind') == 'repository_code']
+        for value, kind in paths:
+            if not value:
+                continue
+            path = root / value
+            records.append({'report': report.relative_to(root).as_posix(), 'path': value, 'kind': kind, 'exists': path.is_file(), 'bytes': path.stat().st_size if path.is_file() else None})
+paths = sorted({row['path'] for row in records})
+checked = subprocess.run(['git', 'check-ignore', '--stdin'], input='\n'.join(paths) + '\n', capture_output=True, text=True)
+assert checked.returncode in (0, 1), checked.stderr
+ignored = set(checked.stdout.splitlines())
+for row in records:
+    row['ignored'] = row['path'] in ignored
+summary = {'current_direct_dependencies': len(records), 'unique_paths': len(paths), 'missing': [r for r in records if not r['exists']], 'ignored': [r for r in records if r['ignored']]}
+result = {'summary': summary, 'scope': 'Current report direct artifact and repository_code paths only; original owner reading, nested replay dependencies and report meaning remain separate checks. This does not stage files, execute replays or change review conclusions.', 'program_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(), 'program': Path(__file__).read_text(), 'records': records}
+Path('outputs/integration-runs/root-report-direct-dependencies.json').write_text(json.dumps(result, ensure_ascii=False, indent=2) + '\n')
+print(json.dumps(summary, ensure_ascii=False))

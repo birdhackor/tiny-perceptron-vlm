@@ -1,0 +1,67 @@
+URL: https://raw.githubusercontent.com/pytorch/pytorch/5c4886908584029761b579af026dcfb627c84070/torch/optim/optimizer.py
+Version: 2.14.1+cpu; commit: 5c4886908584029761b579af026dcfb627c84070
+
+Optimizer.zero_grad; original lines 1047-1109
+ 1047:     @torch._disable_dynamo
+ 1048:     def zero_grad(self, set_to_none: bool = True) -> None:
+ 1049:         r"""Reset the gradients of all optimized :class:`torch.Tensor` s.
+ 1050: 
+ 1051:         Args:
+ 1052:             set_to_none (bool, optional): Instead of setting to zero, set the grads to None. Default: ``True``
+ 1053: 
+ 1054:                 This will in general have lower memory footprint, and can modestly improve performance.
+ 1055:                 However, it changes certain behaviors. For example:
+ 1056: 
+ 1057:                 1. When the user tries to access a gradient and perform manual ops on it,
+ 1058:                    a None attribute or a Tensor full of 0s will behave differently.
+ 1059:                 2. If the user requests ``zero_grad(set_to_none=True)`` followed by a backward pass, ``.grad``\ s
+ 1060:                    are guaranteed to be None for params that did not receive a gradient.
+ 1061:                 3. ``torch.optim`` optimizers have a different behavior if the gradient is 0 or None
+ 1062:                    (in one case it does the step with a gradient of 0 and in the other it skips
+ 1063:                    the step altogether).
+ 1064:         """
+ 1065:         foreach = self.defaults.get("foreach", False) or self.defaults.get(
+ 1066:             "fused", False
+ 1067:         )
+ 1068: 
+ 1069:         if not hasattr(self, "_zero_grad_profile_name"):
+ 1070:             self._patch_step_function()
+ 1071: 
+ 1072:         per_device_and_dtype_grads: (
+ 1073:             defaultdict[torch.device, defaultdict[torch.dtype, list[torch.Tensor]]]
+ 1074:             | None
+ 1075:         )
+ 1076:         if foreach:
+ 1077:             per_device_and_dtype_grads = defaultdict(lambda: defaultdict(list))
+ 1078:         else:
+ 1079:             per_device_and_dtype_grads = None
+ 1080: 
+ 1081:         with torch.autograd.profiler.record_function(self._zero_grad_profile_name):
+ 1082:             for group in self.param_groups:
+ 1083:                 for p in group["params"]:
+ 1084:                     if p.grad is not None:
+ 1085:                         if set_to_none:
+ 1086:                             p.grad = None
+ 1087:                         else:
+ 1088:                             if p.grad.grad_fn is not None:
+ 1089:                                 p.grad.detach_()
+ 1090:                             else:
+ 1091:                                 p.grad.requires_grad_(False)
+ 1092:                             if not foreach or p.grad.is_sparse:
+ 1093:                                 p.grad.zero_()
+ 1094:                             else:
+ 1095:                                 if per_device_and_dtype_grads is None:
+ 1096:                                     raise AssertionError(
+ 1097:                                         "Expected per_device_and_dtype_grads to be set"
+ 1098:                                     )
+ 1099:                                 per_device_and_dtype_grads[p.grad.device][
+ 1100:                                     p.grad.dtype
+ 1101:                                 ].append(p.grad)
+ 1102:             if foreach:
+ 1103:                 if per_device_and_dtype_grads is None:
+ 1104:                     raise AssertionError(
+ 1105:                         "Expected per_device_and_dtype_grads to be set"
+ 1106:                     )
+ 1107:                 for per_dtype_grads in per_device_and_dtype_grads.values():
+ 1108:                     for grads in per_dtype_grads.values():
+ 1109:                         torch._foreach_zero_(grads)

@@ -1,0 +1,156 @@
+import hashlib
+import json
+import pathlib
+import sys
+
+ROOT = pathlib.Path("/workspace/tiny-perceptron-vlm")
+TASK = "/root/reading_time_modalities_fresh"
+REPORT = ROOT / "docs/reading-time-reviews/integration-modalities.json"
+LEDGER = ROOT / "docs/reading-time-reviews/artifacts/integration-modalities-ledger.json"
+SHARD = ROOT / "outputs/reading-time/shards/modalities.json"
+
+
+def sha(p):
+    return hashlib.sha256(p.read_bytes()).hexdigest()
+
+
+shard = json.loads(SHARD.read_text())
+pages = {p["page_id"]: p for p in shard["pages"]}
+rendered = {
+    p["page_id"]: p for p in json.loads((ROOT / "outputs/reading-time/rendered/manifest.json").read_text())["records"]
+}
+figures = {
+    p["source"]: p for p in json.loads((ROOT / "outputs/reading-time/figures/manifest.json").read_text())["records"]
+}
+
+
+def checks(pid):
+    p = pages[pid]
+    assert sha(ROOT / p["snapshot"]) == p["source_sha256"]
+    result = {"source_sha256": p["source_sha256"], "figures_sha256": p["figures_sha256"], "supplement": None}
+    if pid in rendered:
+        r = rendered[pid]
+        assert sha(ROOT / r["supplement"]) == r["supplement_sha256"]
+        folder = "0A" if pid.startswith("A.") else pid.split(".")[0].zfill(2)
+        authored = ROOT / "notebooks" / folder / (pid + ".ipynb")
+        executed = ROOT / "outputs/integration-notebooks" / folder / (pid + ".ipynb")
+        assert sha(authored) == r["authored_notebook_sha256"], str(authored)
+        assert sha(executed) == r["executed_notebook_sha256"], str(executed)
+        result["supplement"] = dict(
+            r,
+            authored_path=str(authored.relative_to(ROOT)),
+            executed_path=str(executed.relative_to(ROOT)),
+            all_hashes_verified=True,
+        )
+    for f, h in p["figures_sha256"].items():
+        r = figures[f]
+        assert sha(ROOT / f) == h == r["source_sha256"]
+        assert sha(ROOT / r["render"]) == r["render_sha256"]
+    return result
+
+
+def load():
+    if REPORT.exists():
+        return json.loads(REPORT.read_text()), json.loads(LEDGER.read_text())
+    return {
+        "schema_version": 1,
+        "estimate_kind": "ai_estimate",
+        "reviewer_task": TASK,
+        "group": "modalities",
+        "frozen_shard_sha256": sha(SHARD),
+        "frozen_inventory_sha256": shard["frozen_inventory_sha256"],
+        "reader_profile": "數學不錯的高中生，或有基本但不熟數學的大學生；無 repo 背景。AI 估計，非真人實測。",
+        "scope_included": [
+            "完整 frozen authored 正文、表格、公式、練習題理解",
+            "實際網站 code/CPU outputs supplement",
+            "本人讀 XML 並 view_image 的圖",
+            "短暫思考及不熟機率、矩陣、導數的合理停頓",
+        ],
+        "scope_excluded": ["安裝及下載", "自行改寫或執行程式", "練習實操", "training 等待", "額外前置頁或引用論文全文"],
+        "pages": [],
+    }, {"reviewer_task": TASK, "read_sequence": [], "figure_view_receipts": [], "pending_issues": []}
+
+
+def write(report, ledger):
+    REPORT.parent.mkdir(parents=True, exist_ok=True)
+    LEDGER.parent.mkdir(parents=True, exist_ok=True)
+    REPORT.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
+    LEDGER.write_text(json.dumps(ledger, ensure_ascii=False, indent=2) + "\n")
+
+
+mode = sys.argv[1]
+if mode == "read":
+    for pid in sys.argv[2:]:
+        c = checks(pid)
+        print("\nPAGE", pid, "CHECKS", json.dumps(c, ensure_ascii=False))
+        for label, path in [
+            ("snapshot", pages[pid]["snapshot"]),
+            ("supplement", rendered.get(pid, {}).get("supplement")),
+        ]:
+            if path:
+                print("READ", label, path)
+                for i, line in enumerate((ROOT / path).read_text().splitlines(), 1):
+                    print(f"{i}: {line}")
+elif mode == "save":
+    report, ledger = load()
+    batch = json.loads(sys.stdin.read())
+    for item in batch:
+        pid = item["page_id"]
+        c = checks(pid)
+        assert pid not in {p["page_id"] for p in report["pages"]}
+        assert (
+            isinstance(item["minutes_min"], int)
+            and item["minutes_min"] > 0
+            and item["minutes_max"] >= item["minutes_min"]
+        )
+        ranges = item.pop("read_ranges", None)
+        read_event = {
+            "sequence": len(ledger["read_sequence"]) + 1,
+            "page_id": pid,
+            "snapshot": pages[pid]["snapshot"],
+            "source_sha256": c["source_sha256"],
+            "snapshot_ranges": ranges or [[1, len((ROOT / pages[pid]["snapshot"]).read_text().splitlines())]],
+            "supplement": c["supplement"],
+            "supplement_read_complete": c["supplement"] is not None,
+            "read_command": "python docs/reading-time-reviews/artifacts/integration-modalities-helper.py read " + pid,
+            "reader_summary": item["reader_summary"],
+            "minutes_chosen_by_reviewer": [item["minutes_min"], item["minutes_max"]],
+        }
+        ledger["read_sequence"].append(read_event)
+        report["pages"].append(
+            dict(item, reviewer_task=TASK, source_sha256=c["source_sha256"], figures_sha256=c["figures_sha256"])
+        )
+    write(report, ledger)
+    print("saved", len(batch), "pages; total", len(report["pages"]))
+elif mode == "figures":
+    for source in sys.argv[2:]:
+        r = figures[source]
+        assert sha(ROOT / source) == r["source_sha256"] and sha(ROOT / r["render"]) == r["render_sha256"]
+        print("\nFIGURE", json.dumps(r, ensure_ascii=False))
+        print((ROOT / source).read_text())
+elif mode == "receipt":
+    report, ledger = load()
+    for item in json.loads(sys.stdin.read()):
+        r = figures[item["source"]]
+        assert sha(ROOT / r["source"]) == r["source_sha256"] and sha(ROOT / r["render"]) == r["render_sha256"]
+        ledger["figure_view_receipts"].append(
+            dict(
+                r,
+                reviewer_task=TASK,
+                root_rendered_before_review=True,
+                xml_read_by_reviewer=True,
+                viewed_by_reviewer_this_round=True,
+                view_tool="tools.view_image",
+                view_path=str(ROOT / r["render"]),
+                view_summary=item["view_summary"],
+            )
+        )
+    write(report, ledger)
+elif mode == "chunk":
+    report, ledger = load()
+    c = checks("curriculum")
+    item = json.loads(sys.stdin.read())
+    ledger.setdefault("curriculum_read_chunks", []).append(
+        dict(item, source_sha256=c["source_sha256"], reader_task=TASK, fully_read_in_tool_output=True)
+    )
+    write(report, ledger)

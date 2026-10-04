@@ -1,0 +1,56 @@
+13.11 independent hand calculation and scope, 2026-10-04
+
+For a one-step terminal contextual bandit, let state/context be s, selected card a,
+reward be R, and the state-only value estimate before optimization be V_old(s).
+PPO v2 §5 eqs. (10)-(12) reduce to A_hat = R - V_old(s) when the next state is
+terminal (V(terminal)=0) and no later rewards remain. A_hat is a sampled estimate,
+not the exact action advantage E[R|s,a] - E[R|s]. A learned baseline can be inaccurate.
+
+Original numbers (decimal arithmetic):
+R=[1,0], V_old=[0.4,0.4].
+A_hat[0]=1-0.4=0.6, A_hat[1]=0-0.4=-0.4.
+If R=1 and V_old=1, A_hat=0: a positive reward is not automatically above baseline.
+Exercise: V_old=[0.9,0.9].
+A_hat=[1-0.9,0-0.9]=[0.1,-0.9].
+Expected printed numbers use round(x,2); each printed value must match exactly.
+Actual torch.float32 subtraction differs from ideal decimal arithmetic by less
+than 1e-7; the CPU audit checks that absolute bound with rtol=0.
+
+For a fixed advantage and two logits z, loss=-A*log softmax(z)[chosen].
+d(loss)/dz_j=-A*(1[j=chosen]-p_j). For chosen action 0 and p=[0.5,0.5],
+the derivative is [-A/2,+A/2]. With a mean over two separate contexts it is
+[-A/4,+A/4] per row: baseline 0.4 gives [-0.15,+0.15] and [+0.10,-0.10].
+At new=old, PPO ratio=1, so its unclipped surrogate has the same local direction.
+Gradient descent raises the chosen probability for the positive contribution
+and lowers it for the negative contribution. This local intuition does not
+guarantee that every selected probability changes in that direction after a full
+batch update: shared parameters, other samples, clipping, and a separate KL term
+can change the combined update.
+
+A state-only baseline b(s) preserves the expected policy gradient:
+E_a[b(s)*grad log pi(a|s)] = b(s)*sum_a grad pi(a|s)
+=b(s)*grad sum_a pi(a|s)=b(s)*grad 1=0.
+Arbitrary action-dependent baselines do not have that cancellation. In this
+chapter FiniteValueModel sees only four context features, not a chosen-card id.
+
+Squared prediction error targets a conditional mean: letting mu=E[R|s],
+E[(v-R)^2|s] = (v-mu)^2 + E[(R-mu)^2|s]. The minimum is v=mu.
+The implemented critic optimizes a separate MSE against sampled normalized RM
+scores. KL(policy||fixed SFT) is separately optimized in the policy loss and is
+not part of this chapter's critic target. The estimator uses old values during
+all three PPO reuse epochs and the critic is trained from its own loss.
+
+Advantage sign measures relative reward, not truth of a response. For example,
+R=1,V=1 and R=0,V=0 both give zero even if the chosen response's truth differs.
+With an unconstrained approximate value prediction, R=1,V=1.5 gives -0.5;
+R=0,V=-1 gives +1. Reward models themselves need not encode binary correctness.
+DPO v3 §3 eq. (2) uses reward differences, so adding the same context offset to
+all scores leaves preference probabilities/loss unchanged; there is no absolute
+zero or calibrated correctness scale. Those mathematical examples are not measured
+networks or claims that a trained value model always produces these particular values.
+
+No loss or optimizer is present in the lesson snippet: it computes the detached
+feedback only. Merely receiving or subtracting a reward does not update the policy.
+The executed audit separately verifies that an actual policy loss backpropagates
+to policy logits without reward/value gradients, and that a separate MSE can then
+backpropagate to value estimates.

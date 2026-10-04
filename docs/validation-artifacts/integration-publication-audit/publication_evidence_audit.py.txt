@@ -1,0 +1,406 @@
+"""Read-only publication dependency/content audit; outputs remain ignored.
+
+No replay is executed. Explicit structured repository references and literal
+replay path expressions are collected, not arbitrary prose or dynamic paths.
+"""
+import ast
+import collections
+import datetime
+import hashlib
+import json
+import re
+import subprocess
+from pathlib import Path
+
+ROOT = Path.cwd().resolve()
+OUT = ROOT / "outputs/integration-runs"
+PREFIXES = ("docs/", "course/", "scripts/", "tiny_perceptron/", "tests/", "notebooks/", "assets/", ".github/")
+ROOT_FILES = {"pyproject.toml", "uv.lock", ".python-version", ".gitignore", ".gitattributes", "README.md", "LICENSE", "zensical.toml"}
+EXPLICIT = re.compile(r"(?<![A-Za-z0-9_./-])(?:docs|course|scripts|tiny_perceptron|tests|notebooks|assets|\.github)/[A-Za-z0-9_.+/@-]+(?:#[A-Za-z0-9_.-]+)?")
+STARTED = datetime.datetime.now(datetime.timezone.utc).isoformat()
+primary_reports = [*(ROOT / "docs/reader-reviews").glob("*.json"), *(ROOT / "docs/technical-reviews").glob("*.json")]
+continuity_reports = list((ROOT / "docs/continuity-reviews").glob("*.json"))
+reading_reports = list((ROOT / "docs/reading-time-reviews").glob("integration-*.json"))
+supplemental_reports = continuity_reports + reading_reports
+integration_receipts = sorted(p for p in (ROOT / "docs/validation-artifacts").glob("integration-*.json") if "-before-" not in p.name)
+reports = sorted(primary_reports + supplemental_reports)
+report_hashes = {p.relative_to(ROOT).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest() for p in reports}
+tracked = set(subprocess.check_output(["git", "ls-files", "-z"], text=True).split("\0"))
+reasons = collections.defaultdict(set)
+pending = collections.deque()
+scanned = set()
+missing = []
+observations = []
+directories = []
+replay_probes = []
+potential = []
+parse_errors = []
+excluded_weights = []
+source_snapshots = []
+declared_source_snapshots = set()
+declared_empty_stdout = {}
+expected_non_json_stdout_artifacts = []
+portable_bundle_checks = []
+portable_bundle_digest_mismatches = []
+
+
+def normalize(value):
+    value = value.strip().removeprefix("./")
+    if value.startswith(str(ROOT) + "/"):
+        value = value[len(str(ROOT)) + 1:]
+    value = value.split("#", 1)[0]
+    value = re.sub(r":\d+(?:[-–]\d+)?$", "", value)
+    if not re.fullmatch(r"[A-Za-z0-9_.+/@-]+", value):
+        return None
+    if not (value.startswith(PREFIXES) or value in ROOT_FILES):
+        return None
+    p = (ROOT / value).resolve()
+    if not p.is_relative_to(ROOT):
+        return None
+    return p.relative_to(ROOT).as_posix()
+
+
+def add(value, source, locator, kind, strict=False):
+    path = normalize(value)
+    if not path:
+        return
+    p = ROOT / path
+    if p.suffix in (".pt", ".pth", ".ckpt", ".safetensors") and not strict:
+        excluded_weights.append({"path": path, "source": source, "locator": locator, "kind": kind, "exists": p.is_file(), "reason": "Runtime/historical weight observation; excluded from Git staging requirements by task policy."})
+        return
+    reason = json.dumps({"source": source, "locator": locator, "kind": kind}, sort_keys=True, ensure_ascii=False)
+    if p.is_file():
+        if path not in reasons:
+            pending.append(path)
+        reasons[path].add(reason)
+    elif p.is_dir():
+        directories.append({"source": source, "path": path, "locator": locator, "kind": kind, "directory_not_expanded": True})
+    else:
+        row = {"source": source, "path": path, "locator": locator, "kind": kind}
+        (missing if strict else observations).append(row)
+
+
+def strings(value, trail=()):
+    if isinstance(value, dict):
+        for k, v in value.items():
+            if isinstance(k, str):
+                yield k, trail + ("<key>",)
+            yield from strings(v, trail + (str(k),))
+    elif isinstance(value, list):
+        for i, v in enumerate(value):
+            yield from strings(v, trail + (str(i),))
+    elif isinstance(value, str):
+        yield value, trail
+
+
+def explicit_strings(data, source):
+    for value, trail in strings(data):
+        loc = ".".join(trail)
+        exact = normalize(value)
+        if exact and "\n" not in value and not re.search(r"\s", value):
+            # Historical git object locators and model/runtime observations do
+            # not imply a second working-tree source or a Git-staged weight.
+            add(exact, source, loc, "structured_repository_reference")
+            continue
+        if trail and re.fullmatch(r"[A-Za-z0-9_.+@-]+", value) and trail[-1] in ("path", "file", "name", "snapshot_path", "receipt", "previous_report_snapshot"):
+            candidate = (ROOT / source).parent / value
+            if candidate.is_file():
+                add(candidate.relative_to(ROOT).as_posix(), source, loc, "receipt_relative_file_reference")
+        for match in EXPLICIT.finditer(value):
+            before = value[max(0, match.start() - 180):match.start()]
+            if re.search(r"https?://[^\s]*$", before) or re.search(r"[0-9a-f]{40}:$", before):
+                continue
+            add(match.group(), source, loc, "explicit_repository_token")
+
+
+def eval_expr(node, env):
+    if isinstance(node, ast.Constant):
+        return node.value if isinstance(node.value, (str, int)) else None
+    if isinstance(node, ast.Name):
+        return env.get(node.id)
+    if isinstance(node, (ast.List, ast.Tuple)):
+        return [eval_expr(x, env) for x in node.elts]
+    if isinstance(node, ast.JoinedStr):
+        parts = []
+        for x in node.values:
+            value = eval_expr(x.value if isinstance(x, ast.FormattedValue) else x, env)
+            if not isinstance(value, (str, int)):
+                return None
+            parts.append(str(value))
+        return "".join(parts)
+    if isinstance(node, ast.Call):
+        if isinstance(node.func, ast.Name) and node.func.id == "Path" and node.args:
+            value = eval_expr(node.args[0], env)
+            return Path(value) if isinstance(value, (str, Path)) else None
+        if isinstance(node.func, ast.Attribute):
+            value = eval_expr(node.func.value, env)
+            if isinstance(value, Path) and node.func.attr in ("resolve", "absolute"):
+                return value.resolve()
+        return None
+    if isinstance(node, ast.Attribute):
+        value = eval_expr(node.value, env)
+        if isinstance(value, Path):
+            if node.attr == "parent":
+                return value.parent
+            if node.attr == "parents":
+                return list(value.parents)
+    if isinstance(node, ast.Subscript):
+        value, index = eval_expr(node.value, env), eval_expr(node.slice, env)
+        if isinstance(value, list) and isinstance(index, int) and -len(value) <= index < len(value):
+            return value[index]
+    if isinstance(node, ast.BinOp):
+        left, right = eval_expr(node.left, env), eval_expr(node.right, env)
+        if isinstance(node.op, ast.Div) and isinstance(left, (str, Path)) and isinstance(right, str):
+            return Path(left) / right
+        if isinstance(node.op, ast.Add) and isinstance(left, str) and isinstance(right, str):
+            return left + right
+    return None
+
+
+def replay_script(path):
+    p = ROOT / path
+    text = p.read_text(errors="replace")
+    try:
+        tree = ast.parse(text)
+    except SyntaxError as exc:
+        parse_errors.append({"path": path, "type": "python_syntax", "error": str(exc)})
+        return
+    env = {"__file__": p}
+    helpers = {}
+    for fn in (x for x in tree.body if isinstance(x, ast.FunctionDef)):
+        reads = [x.func.value for x in ast.walk(fn) if isinstance(x, ast.Call) and isinstance(x.func, ast.Attribute) and x.func.attr in ("read_text", "read_bytes")]
+        if reads:
+            helpers[fn.name] = ([x.arg for x in fn.args.args], reads)
+    nodes = sorted(ast.walk(tree), key=lambda n: (getattr(n, "lineno", 0), getattr(n, "col_offset", 0)))
+    for node in nodes:
+        if isinstance(node, ast.Assign):
+            val = eval_expr(node.value, env)
+            for target in node.targets:
+                if isinstance(target, ast.Name) and val is not None:
+                    env[target.id] = val
+        if isinstance(node, ast.ImportFrom) and node.module:
+            module = node.module.replace(".", "/")
+            if node.level:
+                candidate = p.parent / (module + ".py")
+            else:
+                candidate = ROOT / (module + ".py")
+            if candidate.is_file() and candidate.is_relative_to(ROOT):
+                add(candidate.relative_to(ROOT).as_posix(), path, "line:" + str(node.lineno), "repository_python_import")
+        if not isinstance(node, ast.Call):
+            continue
+        name = node.func.id if isinstance(node.func, ast.Name) else node.func.attr if isinstance(node.func, ast.Attribute) else ""
+        # File readers plus custom common replay reading helpers. Outputs are
+        # excluded here; report/receipt references still preserve saved outputs.
+        inputs = []
+        local_env = env
+        if isinstance(node.func, ast.Name) and name in helpers and node.args:
+            args, expressions = helpers[name]
+            local_env = env | {key: eval_expr(value, env) for key, value in zip(args, node.args)}
+            inputs.extend(expressions)
+        elif isinstance(node.func, ast.Attribute) and name in ("read_text", "read_bytes"):
+            inputs.append(node.func.value)
+        elif isinstance(node.func, ast.Attribute) and name == "open":
+            receiver = eval_expr(node.func.value, env)
+            if isinstance(receiver, Path):
+                mode = eval_expr(node.args[0], env) if node.args else "r"
+                if not isinstance(mode, str) or not any(c in mode for c in "wax"):
+                    inputs.append(node.func.value)
+            elif isinstance(node.func.value, ast.Name) and node.func.value.id in ("tarfile", "gzip", "bz2", "lzma") and node.args:
+                inputs.append(node.args[0])
+            else:
+                inputs.append(node.func.value)
+        elif name in ("read", "sha", "audit_file", "audit_evaluation", "load", "loadtxt", "read_csv", "read_json", "load_state_dict", "load_capstone", "load_quantized_capstone") and node.args:
+            inputs.append(node.args[0])
+        elif name == "open" and node.args:
+            mode = eval_expr(node.args[1], env) if len(node.args) > 1 else "r"
+            if not isinstance(mode, str) or not any(c in mode for c in "wax"):
+                inputs.append(node.args[0])
+        for expr in inputs:
+            val = eval_expr(expr, local_env)
+            rendered = ast.get_source_segment(text, expr) or ast.dump(expr)
+            if not isinstance(val, (Path, str)):
+                # Parameter reads/dynamic loops are explicitly outside coverage.
+                if isinstance(expr, (ast.BinOp, ast.JoinedStr)):
+                    potential.append({"script": path, "line": node.lineno, "expression": rendered, "status": "dynamic_expression_unresolved"})
+                continue
+            candidate = Path(val)
+            if not candidate.is_absolute():
+                if normalize(str(candidate)):
+                    candidate = ROOT / candidate
+                elif (p.parent / candidate).is_file():
+                    candidate = p.parent / candidate
+                else:
+                    candidate = ROOT / candidate
+            candidate = candidate.resolve()
+            if not candidate.is_relative_to(ROOT):
+                replay_probes.append({"script": path, "line": node.lineno, "expression": rendered, "path": str(candidate), "status": "external_runtime_path_not_for_git"})
+                continue
+            relative = candidate.relative_to(ROOT).as_posix()
+            row = {"script": path, "line": node.lineno, "expression": rendered, "path": relative, "exists": candidate.is_file()}
+            replay_probes.append(row)
+            if candidate.is_file():
+                add(relative, path, "line:" + str(node.lineno), "literal_replay_input")
+            else:
+                potential.append(row | {"status": "literal_read_path_absent_at_audit"})
+
+
+for p in reports:
+    path = p.relative_to(ROOT).as_posix()
+    add(path, "<current-report-set>", "glob", "current_review_report", strict=True)
+    data = json.loads(p.read_text())
+    for item in data.get("artifacts", []):
+        if isinstance(item, dict) and item.get("kind") in ("source_snapshot", "original_source", "original_code") and item.get("path"):
+            declared_source_snapshots.add(item["path"])
+        if isinstance(item, dict) and item.get("path") and item.get("sha256") == hashlib.sha256(b"").hexdigest() and "stdout" in item.get("description", "") and "0 bytes" in item.get("description", ""):
+            declared_empty_stdout[item["path"]] = {"report": path, "artifact_id": item.get("id"), "expected_sha256": item["sha256"], "description": item["description"]}
+for p in integration_receipts:
+    add(p.relative_to(ROOT).as_posix(), "<current-integration-validation-receipts>", "top-level integration-*.json excluding -before- history names", "current_integration_validation_receipt", strict=True)
+for path in ("course/reading-times.json", "course/reading-time-routes.json"):
+    add(path, "<final-publication-reading-time-metadata>", "explicit task root", "current_reading_time_metadata", strict=True)
+# The parent explicitly requested the current six reading owners' complete
+# evidence/history package. This one selected package is an explicit root;
+# no other old artifact directory is blanket added.
+for p in sorted((ROOT / "docs/reading-time-reviews/artifacts").rglob("*")):
+    if p.is_file():
+        add(p.relative_to(ROOT).as_posix(), "<reading-time-publication-proof-package>", "explicit task: all six owners' historical/current proofs", "requested_reading_time_proof_package", strict=True)
+for p in sorted((ROOT / "docs/reading-time-reviews").glob("*.reading-original-*.txt")):
+    add(p.relative_to(ROOT).as_posix(), "<reading-time-publication-proof-package>", "original top-level report snapshot", "requested_reading_time_history_snapshot", strict=True)
+bundle_manifest = ROOT / "docs/reading-time-reviews/inputs-18249322174e/manifest.json"
+bundle_manifest_path = bundle_manifest.relative_to(ROOT).as_posix()
+add(bundle_manifest_path, "docs/validation-artifacts/integration-reading-time.json", "portable_input_bundle", "explicit_portable_reading_input_manifest", strict=True)
+bundle_data = json.loads(bundle_manifest.read_text())
+for i, item in enumerate(bundle_data["files"]):
+    path = item["published_snapshot"]
+    add(path, bundle_manifest_path, "files." + str(i) + ".published_snapshot", "portable_reading_input_manifest_entry", strict=True)
+    p = ROOT / path
+    actual_sha = hashlib.sha256(p.read_bytes()).hexdigest() if p.is_file() else None
+    row = {"path": path, "provided_path_at_reading": item["provided_path_at_reading"], "expected_sha256": item["sha256"], "actual_sha256": actual_sha, "exists": p.is_file(), "sha256_matches": actual_sha == item["sha256"]}
+    portable_bundle_checks.append(row)
+    if actual_sha != item["sha256"]:
+        portable_bundle_digest_mismatches.append(row)
+direct = json.loads((OUT / "root-report-direct-dependencies.json").read_text())
+for row in direct["records"]:
+    add(row["path"], row["report"], row["kind"], "current_direct_" + row["kind"], strict=True)
+
+while pending:
+    path = pending.popleft()
+    if path in scanned:
+        continue
+    scanned.add(path)
+    p = ROOT / path
+    # Recursion is limited to JSON report/receipt documents and review-owned
+    # text evidence. Original fetched HTML/PDF and application sources are not
+    # treated as dependency manifests.
+    if p.suffix == ".json":
+        try:
+            explicit_strings(json.loads(p.read_text()), path)
+        except (ValueError, UnicodeError) as exc:
+            if path in declared_empty_stdout and p.stat().st_size == 0:
+                expected_non_json_stdout_artifacts.append({"path": path, "actual_bytes": 0, "actual_sha256": hashlib.sha256(p.read_bytes()).hexdigest(), "classification": "Report explicitly preserves empty stdout from a failed review probe; filename suffix does not assert valid JSON."} | declared_empty_stdout[path])
+            else:
+                parse_errors.append({"path": path, "type": "json", "error": str(exc)})
+    elif path.startswith(("docs/reader-reviews/", "docs/technical-reviews/", "docs/continuity-reviews/", "docs/reading-time-reviews/")) and p.suffix in (".md", ".txt", ".log"):
+        explicit_strings(p.read_text(errors="replace"), path)
+    if path.startswith(("docs/reader-reviews/artifacts/", "docs/technical-reviews/artifacts/", "docs/reading-time-reviews/artifacts/")) and p.suffix == ".py":
+        explicit_strings(p.read_text(errors="replace"), path)
+        if path in declared_source_snapshots or any(x in path for x in ("/repository/", "/code/", "first_execution/", "-source-", "source-", "repo-", "formal-run.py", "_pinned_capstone.py", "_hf_download.py")):
+            source_snapshots.append(path)
+        else:
+            replay_script(path)
+
+paths = sorted(reasons)
+checked = subprocess.run(["git", "check-ignore", "--stdin"], input="\n".join(paths) + "\n", text=True, capture_output=True)
+assert checked.returncode in (0, 1), checked.stderr
+ignored_paths = set(checked.stdout.splitlines())
+bytes_by_path = {path: (ROOT / path).stat().st_size for path in paths}
+hashes = {path: hashlib.sha256((ROOT / path).read_bytes()).hexdigest() for path in paths}
+untracked = [path for path in paths if path not in tracked]
+content = []
+for path in paths:
+    p = ROOT / path
+    magic = p.read_bytes()[:16]
+    if p.suffix in (".pt", ".pth", ".ckpt", ".safetensors") or magic.startswith(b"PK\x03\x04"):
+        content.append({"path": path, "bytes": bytes_by_path[path], "status": "binary_weight_or_archive_requires_inspection", "magic_hex": magic.hex()})
+    if p.suffix not in (".json", ".jsonl"):
+        continue
+    try:
+        data = json.loads(p.read_text()) if p.suffix == ".json" else [json.loads(x) for x in p.read_text().splitlines() if x]
+    except (ValueError, UnicodeError):
+        continue
+    arrays, model_containers = [], []
+    def numeric_count(v):
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            return 1
+        if isinstance(v, list):
+            return sum(numeric_count(x) for x in v)
+        return 0
+    def inspect(v, trail=()):
+        if isinstance(v, dict):
+            for k, x in v.items():
+                # Save counts/locators, never dump parameter values.
+                if re.search(r"(?:state_dict|model_state|(?:^|\.)weight$|(?:^|\.)bias$|tensors$|parameters$)", k, re.I) and isinstance(x, (dict, list)):
+                    count = sum(numeric_count(y) for y in x.values()) if isinstance(x, dict) else numeric_count(x)
+                    model_containers.append({"locator": ".".join(trail + (k,)), "numeric_values_in_lists": count, "keys_or_length": list(x)[:8] if isinstance(x, dict) else len(x)})
+                inspect(x, trail + (k,))
+        elif isinstance(v, list):
+            if v and all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in v):
+                arrays.append({"locator": ".".join(trail), "length": len(v), "type": "float" if any(type(x) == float for x in v) else "int"})
+            for i, x in enumerate(v):
+                if isinstance(x, (dict, list)):
+                    inspect(x, trail + (str(i),))
+    inspect(data)
+    largest = sorted(arrays, key=lambda x: x["length"], reverse=True)[:5]
+    if model_containers or bytes_by_path[path] > 1000000 or (largest and largest[0]["length"] > 300):
+        content.append({"path": path, "bytes": bytes_by_path[path], "top_level_keys": list(data)[:30] if isinstance(data, dict) else "list", "model_like_containers": model_containers, "largest_numeric_leaf_arrays": largest})
+
+unique = lambda rows: list({json.dumps(r, sort_keys=True, ensure_ascii=False): r for r in rows}.values())
+changed = [path for path, h in report_hashes.items() if hashlib.sha256((ROOT / path).read_bytes()).hexdigest() != h]
+result = {
+    "schema_version": 1,
+    "started_at_utc": STARTED,
+    "finished_at_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    "required_paths": paths,
+    "untracked_required_paths": untracked,
+    "bytes": {"required_total": sum(bytes_by_path.values()), "untracked_required_total": sum(bytes_by_path[p] for p in untracked), "by_path": bytes_by_path},
+    "reason_by_path": {p: [json.loads(r) for r in sorted(reasons[p])] for p in paths},
+    "sha256_by_path": hashes,
+    "missing": unique(missing),
+    "ignored": [{"path": p, "reasons": [json.loads(r) for r in sorted(reasons[p])]} for p in sorted(ignored_paths)],
+    "potential_replay_missing": unique(potential),
+    "nonrequired_absent_repository_mentions": unique(observations),
+    "directory_references_not_expanded": unique(directories),
+    "replay_literal_probes": unique(replay_probes),
+    "content_probe_candidates": content,
+    "parse_errors": parse_errors,
+    "expected_non_json_stdout_artifacts": expected_non_json_stdout_artifacts,
+    "excluded_runtime_weight_references": unique(excluded_weights),
+    "source_or_historical_python_snapshots_not_replay_checked": sorted(source_snapshots),
+    "portable_reading_input_bundle": {"manifest": bundle_manifest_path, "payload_file_count": len(portable_bundle_checks), "unique_payload_paths": len({r["path"] for r in portable_bundle_checks}), "manifest_plus_payload_file_count": len({r["path"] for r in portable_bundle_checks}) + 1, "digest_mismatches": portable_bundle_digest_mismatches, "checks": portable_bundle_checks},
+    "lfs": {
+        "referenced_existing_archives": [p for p in paths if p.startswith("assets/training/") and p.endswith(".tar.gz")],
+        "pages_workflow_fetches": ["assets/training/ultrafeedback-dpo-v1.tar.gz"],
+        "pages_workflow_path": ".github/workflows/pages.yml",
+        "mandatory_fetch_reason": "Existing Pages workflow explicitly fetches ultrafeedback-dpo-v1.tar.gz; referenced fact_finish_t_7/replay.py opens and hashes it. Other archive metadata references do not by themselves require fetching every archive for Pages.",
+        "new_archive_or_lfs_objects_created": False,
+        "note": "Archive files are already tracked through LFS and are not untracked staging candidates. This audit performs no LFS fetch/add/object mutation.",
+    },
+    "scope": {
+        "current_report_count": len(reports),
+        "current_reader_technical_report_count": len(primary_reports),
+        "supplemental_continuity_report_count": len(continuity_reports),
+        "supplemental_reading_time_report_count": len(reading_reports),
+        "current_integration_validation_receipt_count": len(integration_receipts),
+        "direct_records": direct["summary"]["current_direct_dependencies"],
+        "direct_unique_paths": direct["summary"]["unique_paths"],
+        "roots": ["docs/reader-reviews/*.json", "docs/technical-reviews/*.json", "docs/continuity-reviews/*.json (publication supplemental roots)", "docs/reading-time-reviews/integration-*.json (six current reports)", "docs/reading-time-reviews/artifacts/** and *.reading-original-*.txt (explicitly requested six-owner current/history proof package)", "docs/reading-time-reviews/inputs-18249322174e/manifest.json and its 600 explicit published_snapshot entries", "docs/validation-artifacts/integration-*.json (current top-level receipts excluding -before- history names; referenced history collected recursively)", "course/reading-times.json", "course/reading-time-routes.json"],
+        "recursive_scan": "Explicit repository-rooted paths in JSON keys/values and referenced review-owned md/txt/log/py; referenced directories are not blanket expanded; original fetched HTML/PDF and application source are not dependency manifests.",
+        "replay_scan": "AST static literal path expressions, common file-read helpers, and repository imports in referenced review artifacts/*.py. No replay executed. Existing literal inputs added; absent/dynamic expressions reported separately.",
+        "content_scan": "Parse every required JSON/JSONL, count numeric leaf arrays and parameter-like containers, inspect binary signatures. Candidates need human interpretation; no arbitrary natural-language path coverage or full dynamic-program analysis is claimed.",
+        "limitations": ["Working tree is actively changing; this is a timed snapshot, not final publication freeze.", "Runtime outputs/checkpoints outside the explicit repository path roots are not staging requirements.", "Historical git object references are provenance locators, not new working-tree dependencies.", "Dynamic f-strings, loop-generated filenames and function parameter values are not fully resolved.", "Output ignored audit files are receipts only and are not staging requirements.", "No Git staging, commit, push, site publication, model training, paid run, or new data/LFS object was performed."],
+        "reports_changed_during_probe": changed,
+        "initial_report_sha256": report_hashes,
+    },
+}
+target = OUT / "publication-required-paths.json"
+target.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n")
+print(json.dumps({"required_paths": len(paths), "untracked_required_paths": len(untracked), "bytes": result["bytes"]["required_total"], "untracked_bytes": result["bytes"]["untracked_required_total"], "missing": len(result["missing"]), "ignored": len(result["ignored"]), "potential_replay_missing": len(result["potential_replay_missing"]), "absent_repository_mentions": len(result["nonrequired_absent_repository_mentions"]), "content_candidates": len(content), "reports_changed_during_probe": changed}, ensure_ascii=False))

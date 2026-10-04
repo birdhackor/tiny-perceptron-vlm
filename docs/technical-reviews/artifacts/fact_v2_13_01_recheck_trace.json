@@ -1,0 +1,255 @@
+{
+  "command": "PYTHONPATH=. .venv/bin/python docs/technical-reviews/artifacts/fact_v2_13_01_recheck_trace.py",
+  "result": "Actual current run_dpo control flow traced twice. Train calls and fixed settings are identical for opposite evaluation-score sentinels; all calls use the 49 training rows. Baseline validation/test evaluation precedes branch training, with validation/test evaluation after each fixed branch.",
+  "environment": {
+    "python": "3.13.5",
+    "torch": "2.14.1+cpu",
+    "device": "cpu",
+    "scope": "control flow with train/eval leaves substituted; no training or quality reproduction"
+  },
+  "source_sha256": "2ccdd39e666bee64eeeddfa9df629af48f8db90fbff549818932cfb27f4db50a",
+  "inspected_functions": {
+    "run_dpo": "def run_dpo(ctx):\n    arithmetic = split_records(arithmetic_records(), seed=ctx.seed)\n    pairs = _preference_parts(arithmetic)\n    base = load_lm(ctx.dependency(\"style\", \"content.pt\"), ctx.device)\n    reference = copy.deepcopy(base).eval().requires_grad_(False)\n    reference_hash = _state_digest(reference.state_dict())\n    before = {split: _preference_evaluate(base, reference, pairs[split]) for split in (\"validation\", \"test\")}\n    results = {}\n    for name, beta in ((\"model\", 0.1), (\"beta1\", 1.0)):\n        seed(ctx.seed)\n        model = copy.deepcopy(base)\n        training = _dpo_train(model, reference, pairs[\"train\"], ctx, name, beta=beta)\n        results[name] = {\n            \"beta\": beta,\n            \"training\": training,\n            \"preference\": {\n                split: _preference_evaluate(model, reference, pairs[split]) for split in (\"validation\", \"test\")\n            },\n            \"arithmetic\": _evaluations(model, arithmetic),\n        }\n    if _state_digest(reference.state_dict()) != reference_hash:\n        raise ValueError(\"DPO changed frozen reference\")\n    # 另一支線保持事實不變，只比較是否遵守簡短格式，不把加法能力混成格式偏好。\n    format_pairs = {\n        split: [{**row, \"rejected\": row[\"chosen\"] + \"; answer complete\"} for row in values]\n        for split, values in pairs.items()\n    }\n    seed(ctx.seed)\n    formatted = copy.deepcopy(base)\n    format_training = _dpo_train(formatted, reference, format_pairs[\"train\"], ctx, \"format-model\", count=200)\n    return {\n        \"experiment\": \"dpo\",\n        \"sections\": [\"13.1\", \"13.2\", \"13.3\", \"13.4\", \"13.5\", \"13.6\", \"13.7\", \"13.9\", \"T.7\"],\n        \"data\": _save_splits(ctx, pairs),\n        \"before\": before,\n        \"runs\": results,\n        \"reference_sha256\": reference_hash,\n        \"reference_unchanged\": True,\n        \"format_only\": {\n            \"data\": _save_splits(ctx, format_pairs, name=\"format-pairs\"),\n            \"training\": format_training,\n            \"preference\": {\n                split: _preference_evaluate(formatted, reference, format_pairs[split])\n                for split in (\"validation\", \"test\")\n            },\n            \"arithmetic\": _evaluations(formatted, arithmetic),\n        },\n        \"ultrafeedback_pilot\": _natural_dpo_pilot(ctx),\n        \"scope\": \"same plain-arithmetic prompt as content SFT; DPO margins, generated correctness, length and format are reported separately\",\n    }\n",
+    "_dpo_train": "def _dpo_train(model, reference, records, ctx, name, beta=0.1, count=250):\n    examples = _pair_examples(records, model.config.max_length)\n    sampler = random.Random(ctx.seed)\n    effective = 0\n\n    def loss_fn(step):\n        nonlocal effective\n        selected = sampler.choices(examples, k=8)\n        scores = []\n        for side in (0, 1):\n            x, y, valid = (tensor.to(ctx.device) for tensor in pad_batch([pair[side] for pair in selected]))\n            policy = sequence_log_probability(model(x, valid=valid)[\"logits\"], y)\n            with torch.no_grad():\n                baseline = sequence_log_probability(reference(x, valid=valid)[\"logits\"], y)\n            effective += int((y != -100).sum())\n            scores.append((policy, baseline))\n        return dpo_loss(scores[0][0], scores[1][0], scores[0][1], scores[1][1], beta=beta)\n\n    training = fit(\n        model,\n        loss_fn,\n        ctx,\n        steps=_steps(ctx, count),\n        lr=0.001,\n        name=name,\n        metadata={\n            \"beta\": beta,\n            \"reference\": f\"{name}-reference.pt\",\n            \"data_sha256\": _digest(records),\n            \"schedule\": \"constant\",\n            \"lr\": 0.001,\n        },\n    )\n    save_checkpoint(\n        ctx.output / f\"{name}-reference.pt\",\n        reference,\n        step=0,\n        metadata={\"frozen_reference\": True, \"data_sha256\": _digest(records)},\n    )\n    training[\"effective_answer_tokens_both_sides\"] = effective\n    return training\n",
+    "_preference_evaluate": "@torch.no_grad()\ndef _preference_evaluate(model, reference, records):\n    model.eval()\n    rows = []\n    device = next(model.parameters()).device\n    for record, pair in zip(records, _pair_examples(records, model.config.max_length), strict=True):\n        scores = []\n        lengths = []\n        for x, y in pair:\n            valid = torch.ones_like(x, dtype=torch.bool)[None].to(device)\n            scores.append(\n                (\n                    float(\n                        sequence_log_probability(model(x[None].to(device), valid=valid)[\"logits\"], y[None].to(device))\n                    ),\n                    float(\n                        sequence_log_probability(\n                            reference(x[None].to(device), valid=valid)[\"logits\"], y[None].to(device)\n                        )\n                    ),\n                )\n            )\n            lengths.append(int((y != -100).sum()))\n        policy_margin = scores[0][0] - scores[1][0]\n        reference_margin = scores[0][1] - scores[1][1]\n        rows.append(\n            {\n                **record,\n                \"policy_chosen_logp\": scores[0][0],\n                \"policy_rejected_logp\": scores[1][0],\n                \"reference_margin\": reference_margin,\n                \"policy_margin\": policy_margin,\n                \"relative_margin\": policy_margin - reference_margin,\n                \"chosen_answer_tokens\": lengths[0],\n                \"rejected_answer_tokens\": lengths[1],\n            }\n        )\n    return {\n        \"records\": len(rows),\n        \"chosen_higher_absolute_probability\": sum(row[\"policy_margin\"] > 0 for row in rows),\n        \"relative_preference_improved\": sum(row[\"relative_margin\"] > 0 for row in rows),\n        \"mean_relative_margin\": sum(row[\"relative_margin\"] for row in rows) / len(rows),\n        \"samples\": rows,\n        \"note\": \"sequence sums include EOS; absolute likelihood and relative DPO preference are different metrics\",\n    }\n"
+  },
+  "traces": [
+    {
+      "score_sentinel": -1000000.0,
+      "events": [
+        {
+          "event": "preference_evaluate",
+          "split": "validation",
+          "rows": 8,
+          "score": -1000000.0
+        },
+        {
+          "event": "preference_evaluate",
+          "split": "test",
+          "rows": 7,
+          "score": -1000000.0
+        },
+        {
+          "event": "train_call",
+          "name": "model",
+          "rows": 49,
+          "beta": 0.1,
+          "requested_steps": 250
+        },
+        {
+          "event": "preference_evaluate",
+          "split": "validation",
+          "rows": 8,
+          "score": -1000000.0
+        },
+        {
+          "event": "preference_evaluate",
+          "split": "test",
+          "rows": 7,
+          "score": -1000000.0
+        },
+        {
+          "event": "arithmetic_evaluation",
+          "splits": [
+            "validation",
+            "test"
+          ]
+        },
+        {
+          "event": "train_call",
+          "name": "beta1",
+          "rows": 49,
+          "beta": 1.0,
+          "requested_steps": 250
+        },
+        {
+          "event": "preference_evaluate",
+          "split": "validation",
+          "rows": 8,
+          "score": -1000000.0
+        },
+        {
+          "event": "preference_evaluate",
+          "split": "test",
+          "rows": 7,
+          "score": -1000000.0
+        },
+        {
+          "event": "arithmetic_evaluation",
+          "splits": [
+            "validation",
+            "test"
+          ]
+        },
+        {
+          "event": "train_call",
+          "name": "format-model",
+          "rows": 49,
+          "beta": 0.1,
+          "requested_steps": 200
+        },
+        {
+          "event": "preference_evaluate",
+          "split": "validation",
+          "rows": 8,
+          "score": -1000000.0
+        },
+        {
+          "event": "preference_evaluate",
+          "split": "test",
+          "rows": 7,
+          "score": -1000000.0
+        },
+        {
+          "event": "arithmetic_evaluation",
+          "splits": [
+            "validation",
+            "test"
+          ]
+        }
+      ],
+      "train_calls": [
+        {
+          "event": "train_call",
+          "name": "model",
+          "rows": 49,
+          "beta": 0.1,
+          "requested_steps": 250
+        },
+        {
+          "event": "train_call",
+          "name": "beta1",
+          "rows": 49,
+          "beta": 1.0,
+          "requested_steps": 250
+        },
+        {
+          "event": "train_call",
+          "name": "format-model",
+          "rows": 49,
+          "beta": 0.1,
+          "requested_steps": 200
+        }
+      ]
+    },
+    {
+      "score_sentinel": 1000000.0,
+      "events": [
+        {
+          "event": "preference_evaluate",
+          "split": "validation",
+          "rows": 8,
+          "score": 1000000.0
+        },
+        {
+          "event": "preference_evaluate",
+          "split": "test",
+          "rows": 7,
+          "score": 1000000.0
+        },
+        {
+          "event": "train_call",
+          "name": "model",
+          "rows": 49,
+          "beta": 0.1,
+          "requested_steps": 250
+        },
+        {
+          "event": "preference_evaluate",
+          "split": "validation",
+          "rows": 8,
+          "score": 1000000.0
+        },
+        {
+          "event": "preference_evaluate",
+          "split": "test",
+          "rows": 7,
+          "score": 1000000.0
+        },
+        {
+          "event": "arithmetic_evaluation",
+          "splits": [
+            "validation",
+            "test"
+          ]
+        },
+        {
+          "event": "train_call",
+          "name": "beta1",
+          "rows": 49,
+          "beta": 1.0,
+          "requested_steps": 250
+        },
+        {
+          "event": "preference_evaluate",
+          "split": "validation",
+          "rows": 8,
+          "score": 1000000.0
+        },
+        {
+          "event": "preference_evaluate",
+          "split": "test",
+          "rows": 7,
+          "score": 1000000.0
+        },
+        {
+          "event": "arithmetic_evaluation",
+          "splits": [
+            "validation",
+            "test"
+          ]
+        },
+        {
+          "event": "train_call",
+          "name": "format-model",
+          "rows": 49,
+          "beta": 0.1,
+          "requested_steps": 200
+        },
+        {
+          "event": "preference_evaluate",
+          "split": "validation",
+          "rows": 8,
+          "score": 1000000.0
+        },
+        {
+          "event": "preference_evaluate",
+          "split": "test",
+          "rows": 7,
+          "score": 1000000.0
+        },
+        {
+          "event": "arithmetic_evaluation",
+          "splits": [
+            "validation",
+            "test"
+          ]
+        }
+      ],
+      "train_calls": [
+        {
+          "event": "train_call",
+          "name": "model",
+          "rows": 49,
+          "beta": 0.1,
+          "requested_steps": 250
+        },
+        {
+          "event": "train_call",
+          "name": "beta1",
+          "rows": 49,
+          "beta": 1.0,
+          "requested_steps": 250
+        },
+        {
+          "event": "train_call",
+          "name": "format-model",
+          "rows": 49,
+          "beta": 0.1,
+          "requested_steps": 200
+        }
+      ]
+    }
+  ],
+  "limitations": "Only current routing and absence of programmatic feedback into fixed settings are demonstrated. No claim about human choice history, withheld-until-end testing, GPU execution, or learned quality. The real training and model evaluations were not executed by this trace."
+}

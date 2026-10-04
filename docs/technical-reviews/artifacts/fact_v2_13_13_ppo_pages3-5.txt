@@ -1,0 +1,155 @@
+3    Clipped Surrogate Objective
+Let rt (θ) denote the probability ratio rt (θ) = πθπθ (a(at t| s| ts)t ) , so r(θold ) = 1. TRPO maximizes a
+                                                        old
+“surrogate” objective
+                                                                          h         i
+                           CP I              πθ (at | st )
+                          L     (θ) = Êt                    Ât = Êt rt (θ)Ât .                       (6)
+                                            πθold (at | st )
+
+The superscript CP I refers to conservative policy iteration [KL02], where this objective was pro-
+posed. Without a constraint, maximization of LCP I would lead to an excessively large policy
+update; hence, we now consider how to modify the objective, to penalize changes to the policy that
+move rt (θ) away from 1.
+   The main objective we propose is the following:
+                                    h                                               i
+                     LCLIP (θ) = Êt min(rt (θ)Ât , clip(rt (θ), 1 − , 1 + )Ât )           (7)
+
+where epsilon is a hyperparameter, say,  = 0.2. The motivation for this objective is as follows. The
+first term inside the min is LCP I . The second term, clip(rt (θ), 1 − , 1 + )Ât , modifies the surrogate
+objective by clipping the probability ratio, which removes the incentive for moving rt outside of the
+interval [1 − , 1 + ]. Finally, we take the minimum of the clipped and unclipped objective, so the
+final objective is a lower bound (i.e., a pessimistic bound) on the unclipped objective. With this
+scheme, we only ignore the change in probability ratio when it would make the objective improve,
+and we include it when it makes the objective worse. Note that LCLIP (θ) = LCP I (θ) to first order
+around θold (i.e., where r = 1), however, they become different as θ moves away from θold . Figure 1
+plots a single term (i.e., a single t) in LCLIP ; note that the probability ratio r is clipped at 1 − 
+or 1 +  depending on whether the advantage is positive or negative.
+
+                                                                            A<0
+                    CLIP   A>0
+                    L
+                                                                0       1− 1
+                                                                                            r
+
+
+
+
+                                            r
+                0            1 1+                                  LCLIP
+
+Figure 1: Plots showing one term (i.e., a single timestep) of the surrogate function LCLIP as a function of
+the probability ratio r, for positive advantages (left) and negative advantages (right). The red circle on each
+plot shows the starting point for the optimization, i.e., r = 1. Note that LCLIP sums many of these terms.
+
+    Figure 2 provides another source of intuition about the surrogate objective LCLIP . It shows how
+several objectives vary as we interpolate along the policy update direction, obtained by proximal
+policy optimization (the algorithm we will introduce shortly) on a continuous control problem. We
+can see that LCLIP is a lower bound on LCP I , with a penalty for having too large of a policy
+update.
+
+
+
+                                                      3
+              0.12                                                  Et[KLt]
+              0.10                                                  L CPI = Et[rtAt]
+              0.08                                                  Et[clip(rt, 1 , 1 + )At]
+              0.06                                                  L CLIP = Et[min(rtAt, clip(rt, 1   , 1 + )At)]
+              0.04
+              0.02
+              0.00
+              0.02
+                           0                 1
+                            Linear interpolation factor
+
+Figure 2: Surrogate objectives, as we interpolate between the initial policy parameter θold , and the updated
+policy parameter, which we compute after one iteration of PPO. The updated policy has a KL divergence of
+about 0.02 from the initial policy, and this is the point at which LCLIP is maximal. This plot corresponds
+to the first policy update on the Hopper-v1 problem, using hyperparameters provided in Section 6.1.
+
+
+4    Adaptive KL Penalty Coefficient
+Another approach, which can be used as an alternative to the clipped surrogate objective, or in
+addition to it, is to use a penalty on KL divergence, and to adapt the penalty coefficient so that we
+achieve some target value of the KL divergence dtarg each policy update. In our experiments, we
+found that the KL penalty performed worse than the clipped surrogate objective, however, we’ve
+included it here because it’s an important baseline.
+    In the simplest instantiation of this algorithm, we perform the following steps in each policy
+update:
+    • Using several epochs of minibatch SGD, optimize the KL-penalized objective
+                                                                                                   
+                      KLP EN               πθ (at | st )
+                     L        (θ) = Êt                    Ât − β KL[πθold (· | st ), πθ (· | st )]                 (8)
+                                          πθold (at | st )
+
+    • Compute d = Êt [KL[πθold (· | st ), πθ (· | st )]]
+         – If d < dtarg /1.5, β ← β/2
+         – If d > dtarg × 1.5, β ← β × 2
+The updated β is used for the next policy update. With this scheme, we occasionally see policy
+updates where the KL divergence is significantly different from dtarg , however, these are rare, and
+β quickly adjusts. The parameters 1.5 and 2 above are chosen heuristically, but the algorithm is
+not very sensitive to them. The initial value of β is a another hyperparameter but is not important
+in practice because the algorithm quickly adjusts it.
+
+
+5    Algorithm
+The surrogate losses from the previous sections can be computed and differentiated with a minor
+change to a typical policy gradient implementation. For implementations that use automatic dif-
+ferentation, one simply constructs the loss LCLIP or LKLP EN instead of LP G , and one performs
+multiple steps of stochastic gradient ascent on this objective.
+    Most techniques for computing variance-reduced advantage-function estimators make use a
+learned state-value function V (s); for example, generalized advantage estimation [Sch+15a], or the
+
+                                                            4
+finite-horizon estimators in [Mni+16]. If using a neural network architecture that shares parameters
+between the policy and value function, we must use a loss function that combines the policy
+surrogate and a value function error term. This objective can further be augmented by adding
+an entropy bonus to ensure sufficient exploration, as suggested in past work [Wil92; Mni+16].
+Combining these terms, we obtain the following objective, which is (approximately) maximized
+each iteration:
+                                                                                     
+                    LCLIP
+                      t
+                           +V F +S
+                                   (θ) = Êt LCLIP
+                                              t    (θ) − c1 LVt F (θ) + c2 S[πθ ](st ) ,         (9)
+
+where c1 , c2 are coefficients, and S denotes an entropy bonus, and LVt F is a squared-error loss
+(Vθ (st ) − Vttarg )2 .
+    One style of policy gradient implementation, popularized in [Mni+16] and well-suited for use
+with recurrent neural networks, runs the policy for T timesteps (where T is much less than the
+episode length), and uses the collected samples for an update. This style requires an advantage
+estimator that does not look beyond timestep T . The estimator used by [Mni+16] is
+                    Ât = −V (st ) + rt + γrt+1 + · · · + γ T −t+1 rT −1 + γ T −t V (sT )                 (10)
+where t specifies the time index in [0, T ], within a given length-T trajectory segment. Generalizing
+this choice, we can use a truncated version of generalized advantage estimation, which reduces to
+Equation (10) when λ = 1:
+                          Ât = δt + (γλ)δt+1 + · · · + · · · + (γλ)T −t+1 δT −1 ,                        (11)
+                          where δt = rt + γV (st+1 ) − V (st )                                            (12)
+A proximal policy optimization (PPO) algorithm that uses fixed-length trajectory segments is
+shown below. Each iteration, each of N (parallel) actors collect T timesteps of data. Then we
+construct the surrogate loss on these N T timesteps of data, and optimize it with minibatch SGD
+(or usually for better performance, Adam [KB14]), for K epochs.
+
+Algorithm 1 PPO, Actor-Critic Style
+ for iteration=1, 2, . . . do
+    for actor=1, 2, . . . , N do
+        Run policy πθold in environment for T timesteps
+        Compute advantage estimates Â1 , . . . , ÂT
+    end for
+    Optimize surrogate L wrt θ, with K epochs and minibatch size M ≤ N T
+    θold ← θ
+ end for
+
+
+6     Experiments
+6.1   Comparison of Surrogate Objectives
+First, we compare several different surrogate objectives under different hyperparameters. Here, we
+compare the surrogate objective LCLIP to several natural variations and ablated versions.
+        No clipping or penalty:                 Lt (θ) = rt (θ)Ât
+        Clipping:                               Lt (θ) = min(rt (θ)Ât , clip(rt (θ)), 1 − , 1 + )Ât
+        KL penalty (fixed or adaptive)          Lt (θ) = rt (θ)Ât − β KL[πθold , πθ ]
+
+
+                                                     5
+

@@ -1,0 +1,41 @@
+## 19.9 接上較快的做法，先檢查什麼？
+
+已經能騎的腳踏車換一條輕量鏈條，第一件事是確認踩一下仍帶動相同方向，而不是馬上比較繞公園用了幾秒。模型換attention後端或加入快取，也要先確認沒有改掉可讀前文與輸出規則。更快但回答不同，需要先弄清楚差異來自數值尾數、快取錯誤，還是實際換了計算問題。
+
+前置是[KV快取](16.md#16.3)、[GQA](16.md#16.4)、[SDPA](16.md#16.8)、[本成品的MoE與expert分派](19.md#19.2)與[推薦joint版本](19.md#19.4)。joint是文字、圖音共同訓練後的版本；它的MoE仍用可讀Python程式把每個位置交給選中的experts，沒有專用分派加速核心。KV cache儲存前文每層已算出的Key、Value，讓之後不必每次從頭計算；GQA讓多個Query頭共享較少組KV。本成品保留兩個Query頭與一組KV，快取較少，但這仍不代表整張GPU的所有記憶體跟著減半。
+
+```python
+import torch
+
+from tiny_perceptron.capstone import CapstoneModel
+
+torch.manual_seed(42)
+core = CapstoneModel().language
+core.eval()
+ids = torch.tensor([[1, 21, 22, 23, 24]])
+with torch.no_grad():
+    full = core(ids)["logits"][:, -1]
+    cache = core(ids[:, :3])["cache"]
+    cached = core(ids[:, 3:], cache=cache)["logits"][:, -1]
+print("最大分數差", (full - cached).abs().max().item(), "接近", torch.allclose(full, cached, atol=1e-4, rtol=1e-4))
+```
+
+五個ID是固定的純文字機制輸入，模型仍是隨機權重，沒有加入圖片或音訊。第一次整段計算；第二次先存前三個位置，再只送後二個位置，最後比較同一最後位置的264項候選分數。結果應接近True，最大差通常是浮點尾數；不能把這個單次例子當成多模態成品快取速度成績。
+
+正式多模態生成還必須把素材編碼一次、與前文一起prefill，再送新token；prefill就是首次處理完整前文並建快取。若每步又處理圖片、重算全部前文，就沒有完成這條效率路線。測試需比較完整原始生成ID與停止原因，單看解碼文字相同不夠。
+
+SDPA是attention運算介面，會依裝置、格式與形狀選擇後端；它不保證採用FlashAttention。本小模型可以用CPU FP32重跑正確性，GPU混合精度與Flash收益則需單獨核驗。本成品不會將不同experts的Python分派叫作已經有專用MoE加速核心。
+
+正式部署另載入推薦joint，從固定驗證資料每項任務取第一題，共12題，選取時沒有先看生成結果。每題最多生成16個新編號，完整保留這次生成的ID序列；其中可能因上限截斷，所以這是機制對照，不是又一次完整能力評分。full與cache的原始ID全部一致，同一歷史上的每步logits也全部在`atol=1e-4, rtol=1e-4`範圍內接近。[完整快取對照](https://github.com/birdhackor/tiny-perceptron-vlm/blob/1df335318bda03fd771807f66976953231d5a00b/docs/course-experiments/capstone-evidence/deployment/cache-consistency.json)保留兩條生成路徑與每步分數差，包含有圖片和聲音的任務。
+
+確認一致後，才量一個事先選好的短問句：「照抄數字15，只要答案。」同一個joint、同一張NVIDIA L4、FP32，兩路各暖機3次，再量10次；兩路都生成`DIRECT:15`與EOS，共10個新編號，每次原始ID都相同。GPU具體型號記在[部署總實報](https://github.com/birdhackor/tiny-perceptron-vlm/blob/1df335318bda03fd771807f66976953231d5a00b/docs/course-experiments/results/capstone_deployment.json)的`gpu`欄；下方逐次計時檔的`cuda:0`只表示裝置編號，不能單從它推斷型號。
+
+| 同一句短生成 | 10次實測的中位時間 |
+| --- | --- |
+| full，每步重算前文 | 68.054毫秒 |
+| cache，沿用前文KV | 59.978毫秒 |
+
+這個cache在該短句較快，但不是任意長度、任意硬體的速度保證。計時包含前文準備、裝置傳輸、貪婪生成與解碼，GPU在每次呼叫前後同步；不含載入權重、啟動、上傳下載或檔案核驗。這次生成對照沒有量記憶體峰值，不能把19.2前向／反向的峰值貼過來稱成快取記憶體。[逐次生成計時實報](https://github.com/birdhackor/tiny-perceptron-vlm/blob/1df335318bda03fd771807f66976953231d5a00b/docs/course-experiments/capstone-evidence/deployment/generation-benchmark.json)保留所有暖機與測量輸出、選題規則與範圍。
+
+練習只把最後ID24改成25，保留前三個位置不變，再比較兩路；應仍接近。接著若修改第一位置，就必須重建cache，因為這份快取儲存的是那一段前文，不是一份通用記憶。
+

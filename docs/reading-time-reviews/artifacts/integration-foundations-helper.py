@@ -1,0 +1,155 @@
+import hashlib
+import json
+import pathlib
+import sys
+
+ROOT = pathlib.Path("/workspace/tiny-perceptron-vlm")
+BASE = ROOT / "docs/reading-time-reviews"
+A = BASE / "artifacts"
+TASK = "/root/reading_time_foundations_fresh"
+shard = ROOT / "outputs/reading-time/shards/foundations.json"
+S = json.loads(shard.read_text())
+P = {p["page_id"]: p for p in S["pages"]}
+F = json.loads((ROOT / "outputs/reading-time/figures/manifest.json").read_text())["records"]
+R = json.loads((ROOT / "outputs/reading-time/rendered/manifest.json").read_text())["records"]
+R = {r["page_id"]: r for r in R}
+evidence = A / "integration-foundations-evidence.json"
+report = BASE / "integration-foundations.json"
+
+
+def sha(p):
+    return hashlib.sha256(p.read_bytes()).hexdigest()
+
+
+def get():
+    if evidence.exists():
+        return json.loads(evidence.read_text())
+    return {
+        "reviewer_task": TASK,
+        "frozen_shard_sha256": sha(shard),
+        "estimate_kind": "ai_estimate",
+        "scope": "61 assigned foundations pages only; fresh independent authored snapshot and website supplement reading. Chapter introductions read only their snapshots; index reads only authored introduction.",
+        "scope_exclusions": [
+            "installation/download",
+            "writing or executing code",
+            "exercise execution",
+            "training waits",
+            "additional prerequisite pages",
+            "full cited papers",
+        ],
+        "read_sequence": [],
+        "pages": {},
+        "figure_view_receipts": [],
+        "pending_issues": [],
+    }
+
+
+def save(e):
+    evidence.write_text(json.dumps(e, ensure_ascii=False, indent=2) + "\n")
+
+
+mode = sys.argv[1]
+if mode == "read":
+    e = get()
+    for id in sys.argv[2:]:
+        p = P[id]
+        path = ROOT / p["snapshot"]
+        actual = sha(path)
+        assert actual == p["source_sha256"]
+        print("\n===== FULL SNAPSHOT " + id + " sha256=" + actual + " =====\n" + path.read_text())
+        rec = {
+            "page_id": id,
+            "snapshot": p["snapshot"],
+            "source_sha256": actual,
+            "source_read_range": "entire file",
+            "source_lines": len(path.read_text().splitlines()),
+            "figures_sha256": p["figures_sha256"],
+            "supplement": None,
+        }
+        if id in R:
+            r = R[id]
+            sp = ROOT / r["supplement"]
+            assert sha(sp) == r["supplement_sha256"]
+            print("\n===== FULL RENDERED SUPPLEMENT " + id + " =====\n" + sp.read_text())
+            rec["supplement"] = r
+            paths = []
+            for label in ["authored_notebook_sha256", "executed_notebook_sha256"]:
+                found = [str(q.relative_to(ROOT)) for q in ROOT.glob("**/" + id + ".ipynb") if sha(q) == r[label]]
+                assert found, (id, label)
+                paths.append({"kind": label, "paths": found, "sha256": r[label]})
+            rec["notebook_hash_verification"] = paths
+        e["read_sequence"].append(rec)
+        e["pages"].setdefault(id, {})["read_receipt"] = rec
+    save(e)
+elif mode == "save":
+    entries = json.load(sys.stdin)
+    e = get()
+    pages = []
+    for row in entries:
+        id, mn, mx, summary, reason = row
+        assert id in P
+        p = P[id]
+        e["pages"].setdefault(id, {})["reader_summary"] = summary
+        e["pages"][id]["chosen_minutes"] = [mn, mx]
+        e["pages"][id]["reason"] = reason
+    save(e)
+    for p in S["pages"]:
+        q = e["pages"].get(p["page_id"], {})
+        if "chosen_minutes" not in q:
+            continue
+        mn, mx = q["chosen_minutes"]
+        pages.append(
+            {
+                "page_id": p["page_id"],
+                "minutes_min": mn,
+                "minutes_max": mx,
+                "reviewer_task": TASK,
+                "reason": q["reason"],
+                "source_sha256": p["source_sha256"],
+                "figures_sha256": p["figures_sha256"],
+            }
+        )
+    report.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "estimate_kind": "ai_estimate",
+                "reviewer_task": TASK,
+                "frozen_shard_sha256": sha(shard),
+                "evidence": "docs/reading-time-reviews/artifacts/integration-foundations-evidence.json",
+                "pages": pages,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n"
+    )
+elif mode == "figures":
+    e = get()
+    for id in sys.argv[2:]:
+        for path, expected in P[id]["figures_sha256"].items():
+            fr = next(f for f in F if f["source"] == path)
+            assert sha(ROOT / path) == expected == fr["source_sha256"]
+            assert sha(ROOT / fr["render"]) == fr["render_sha256"]
+            print("\n===== FULL SVG " + path + " =====\n" + (ROOT / path).read_text())
+            print("VERIFIED FIGURE RECORD", json.dumps(fr, ensure_ascii=False))
+    elif_placeholder = None
+elif mode == "view":
+    e = get()
+    for path in sys.argv[2:]:
+        fr = next(f for f in F if f["source"] == path)
+        assert sha(ROOT / path) == fr["source_sha256"]
+        assert sha(ROOT / fr["render"]) == fr["render_sha256"]
+        e["figure_view_receipts"].append(
+            {
+                "source": path,
+                "source_sha256": fr["source_sha256"],
+                "render": fr["render"],
+                "render_sha256": fr["render_sha256"],
+                "root_render_command": fr["command"],
+                "reviewer_view_command": 'tools.view_image({path:"' + str(ROOT / fr["render"]) + '"})',
+                "viewed_by": TASK,
+                "viewed_this_fresh_round": True,
+            }
+        )
+    save(e)

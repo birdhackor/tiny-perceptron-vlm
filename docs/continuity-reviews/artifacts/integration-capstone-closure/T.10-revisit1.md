@@ -1,0 +1,54 @@
+## T.10 用較小學生學教師，再與普通訓練比較
+
+先讀[18.1的教師訊號](chapters/18.md#18.1)、[18.6的文字單位對齊](chapters/18.md#18.6)。學生是實際要部署的較小模型，教師提供答案或候選比例；學生變小先由架構決定，教師訊號是否有幫助則要和同架構的普通訓練比較。這次已完成完整L4實跑，保留沒有提升、量化後退步與教師答錯的結果。
+
+本節還會把同一學生另存成`packed4`版本。先讀[17.2的量化刻度](chapters/17.md#17.2)：把浮點權重映成少量整數格子叫量化，按刻度近似還原叫反量化。`packed4`再按[17.8的打包規則](chapters/17.md#17.8)，把兩個四位元碼放進同一byte；刻度與其他浮點數仍另存。它縮小的是保存格式，不會減少學生的層數，本專案推論時仍先還原成FP32計算。
+
+重跑前先完成[T.4的完整直接SFT](#T.4)、[T.5的條件式風格](#T.5)與[T.8的MoE](#T.8)，讓預設`outputs/course-experiments/course-v1/`下的三個來源資料夾各有`model.pt`與`dataset.json`。風格使用條件式教師；MoE固定使用top-2、輔助係數0.01。工具核對原家族切分，缺權重或資料會停止。另取GSM8K固定200題包作完整短題診斷：
+
+```bash
+.venv/bin/python scripts/fetch_training_assets.py --asset gsm8k
+.venv/bin/python -m scripts.course_experiments.run --experiment distillation --device cpu
+.venv/bin/python scripts/infer.py outputs/course-experiments/course-v1/distillation/sft-w32-ce.pt --chat --prompt "color=red;shape=square;pitch=high;joint?" --tokens 24 --json
+.venv/bin/python scripts/infer.py outputs/course-experiments/course-v1/distillation/sft-w32-ce_kl.pt --chat --prompt "color=red;shape=square;pitch=high;joint?" --tokens 24 --json
+```
+
+第二條是全部11個學生支線、共3,900次更新的完整入口，CPU需要時間；有自己的CUDA環境可改`--device cuda`。本次正式數字來自L4，訓練、評估及本機保存合計約90.14秒，不包含環境啟動與HF上傳。輸出資料夾保存全部教師副本、學生、教師生成ID及logit快取，`result.json`含完整報告；主`model.pt`是寬32的屬性CE+KL學生，MoE與風格學生各用自己的名稱，不能混作同一個任務。
+
+屬性教師寬64、兩層、141,568參數，學生寬16或32、各一層，分別13,744／33,632參數。每個寬度各做三支：CE用真值、`teacher_hard`用實際教師greedy回答、`ce_kl`用一半CE加一半教師KL。T=2在雙方softmax前使用，KL內部只乘一次T²。三支同初始化、同題目抽樣計畫、batch16、學習率0.003，各400次更新。教師與學生共用264-ID byte詞表，白盒訊號對齊同一標準回答前文的有效位置，問題與PAD不直接計分。
+
+| 共同10道屬性留出題 | 完整匹配 | 回答NLL／69目標 | 模型tensor bytes |
+| --- | ---: | ---: | ---: |
+| 教師 | 5/10 | 0.5058 | 566,272 |
+| 寬16 CE／教師硬回答 | 各1/10 | 各1.1134 | 各54,976 |
+| 寬16 CE+KL | 1/10 | 1.2407 | 54,976 |
+| 寬32 CE／教師硬回答 | 各4/10 | 各0.4393 | 各134,528 |
+| 寬32 CE+KL | 4/10 | 0.5037 | 134,528 |
+| 同一寬32 KL學生packed4 | 3/10 | 0.5960 | 64,160 |
+
+每支屬性學生都讀44,985個回答與EOS目標，留出生成最多24個新token、greedy；表中各版EOS10/10、無非法控制ID。教師對45道訓練題全答對且正常EOS，所以本輪教師硬回答和真值ID相同，CE與硬目標學生權重也相同。KL沒有提高答對數，寬32與教師原始ID一致率雖由CE的3/10升到4/10，獨立真值仍各4/10。後兩條推論命令的標準答案是`square,high`，CE實際答`square,low`、KL答`square,high`；其他題也有反向變化，見[18.10](chapters/18.md#18.10)，不能只展示這一題宣布整體提升。
+
+白盒教師快取另花約0.049秒、占345,101 bytes，硬回答生成另花0.827秒；寬32學生更新時間約CE 2.859秒、KL 3.345秒。這輪匹配了更新與有效目標數，沒有匹配包括教師在內的總時間。一般硬回答長短不同，就算步數與抽題索引相同，有效目標數也可能改變，應讀每支`effective_supervised_tokens`而非自行假設。
+
+其餘兩個任務也有完整對照。風格185／28／27筆分家族，寬32的CE／硬回答／KL各300次更新、96,835個目標，算術內容都0/21，日期3/6，總內容3/27；JSON格式7/7有效、EOS27/27。教師同樣3/27，還在生成的185筆訓練硬回答中留下五個錯日期。模型學會模板沒有學會新算式，讀[18.11](chapters/18.md#18.11)時對照`{"answer": 10}`與`2+2=?`的真值4。
+
+MoE教師340,608參數，Dense學生33,632，兩支各300次更新、559,651個目標，只讀原409篇訓練故事前32篇；共同驗證51篇、最後測試52篇皆完整計NLL。測試共352個片段、41,914個目標：41,862個文字byte，加52篇故事各自末尾的EOS，教師／CE／KL代價2.3017／2.4601／2.3890；KL比CE低，仍重複寫`the`，原文下一24-byte續段匹配均0/52。這種匹配不等於開放故事創作評分，教師與學生的訓練篇數也不同；比較界線見[18.12](chapters/18.md#18.12)。
+
+GSM8K另外先掃200道完整原題，只兩道能連同真實chat前文及預留24個生成token放入128-token上下文，且真值加EOS也符合生成預算。其餘198題不截短、不計正確率；兩題要求算5小時與60天，教師卻答屬性片語，屬性任務的教師與本診斷的八支屬性學生均0/2、EOS2/2。`unseen-gsm8k-complete-prompts.json`保存選擇與完整題目，這是很小的域外失敗診斷，不是完整GSM8K benchmark。缺少可用完整題時工具會明示`not_run`與原因，不能列出0/0當成一次測試。
+
+多模態另接[11.5的圖片教師](chapters/11.md#11.5)與[12.12的聯合教師](chapters/12.md#12.12)。先用T.4的完整直接SFT來源，按固定實驗入口準備編碼器、接頭、圖片問答與聯合教師；這組命令需要自己的CUDA環境，順序不能跳過：
+
+```bash
+.venv/bin/python -m scripts.course_experiments.run --experiment encoders --device cuda
+.venv/bin/python -m scripts.course_experiments.run --experiment projector --device cuda
+.venv/bin/python -m scripts.course_experiments.run --experiment vqa --device cuda
+.venv/bin/python -m scripts.course_experiments.run --experiment joint --device cuda
+.venv/bin/python -m scripts.course_experiments.run --experiment multimodal_distillation --device cpu
+```
+
+前四步與T.6的獨立CLI配方不同，會在預設輸出根目錄建立依賴資料夾，`vqa/`與`joint/`各保存教師`model.pt`及`dataset.json`。圖片來源固定選160步的`all`支線，聯合來源400步；它們的正式測試分別9/12與12/12，仍應保留圖片來源的錯題和聯合來源驗證只有8/12的限制。若把前四條改成CPU，目前模態來源入口使用短排程檢查流程，會產生不同的教師，不能套用這些GPU教師成績。最後一條壓縮入口則在CPU也完整訓練四支350次更新的學生；要重現同一教師來源，需保留相同已訓練權重與原家族資料，單獨下載推論權重不足以重建訓練資料切分。
+
+多模態學生共36,096參數、144,384 bytes浮點數值，教師各145,664參數、582,656 bytes；圖片token由16改4，文字部分由寬64兩層改成寬32一層。每個任務的CE與CE+KL共用初始化與批次，batch4、lr=0.003、T=2，圖片各8,391個有效回答目標、聯合各16,104個。圖片36／12／12筆，最後12題、72個真值目標，CE與KL答對9/12及8/12；聯合24／12／12筆，最後12題、138個目標，答對8/12及6/12。四支都EOS12/12、無非法控制ID，並未因此保住全部能力。聯合KL學生遮圖後的12串生成ID完全相同，對方形仍答`circle`；遮音訊後整題由6/12降為3/12。[18.13](chapters/18.md#18.13)保存真實答案預測列、教師快取成本、逐題干預及可載入學生的命令；練習先核對相同答案ID，再核對相同測試分母，不能直接將長短不同的整段logits配對。
+
+[公開完整實報](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/course-experiments/results/distillation.json)的`results.tasks`分為`attributes`、`style_transfer`、`moe_to_dense`，各自的`teacher_test`與`runs`保存共同真值、原始ID、EOS、NLL與實際分母。浮點學生和packed學生的實跑檔案還有不同metadata與隨機狀態，純數值用`storage.tensor_bytes`比較；公開剔除訓練狀態後的檔案大小另量。部署packed版本仍反量化成FP32，沒有量低位元kernel加速。練習按相同`family`與`question`並排寬32 CE／KL的全部十題，記下新增正確與新增錯誤的題數，再核對總數仍各4/10；接著找出packed4把`blue`變成`ble`的一題，區分教師訊號與量化兩步的影響。
+

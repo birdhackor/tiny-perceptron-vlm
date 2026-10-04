@@ -1,0 +1,195 @@
+def _pair_examples(records, max_length):
+    examples = []
+    for row in records:
+        pair = tuple(
+            render_chat([{"role": "user", "content": row["prompt"]}, {"role": "assistant", "content": row[side]}])
+            for side in ("chosen", "rejected")
+        )
+        if any(len(x) > max_length for x, y in pair):
+            raise ValueError("DPO pair does not fit; crop explicitly before preparing examples")
+        examples.append(pair)
+    return examples
+
+
+def _dpo_train(model, reference, records, ctx, name, beta=0.1, count=250):
+    examples = _pair_examples(records, model.config.max_length)
+    sampler = random.Random(ctx.seed)
+    effective = 0
+
+    def loss_fn(step):
+        nonlocal effective
+        selected = sampler.choices(examples, k=8)
+        scores = []
+        for side in (0, 1):
+            x, y, valid = (tensor.to(ctx.device) for tensor in pad_batch([pair[side] for pair in selected]))
+            policy = sequence_log_probability(model(x, valid=valid)["logits"], y)
+            with torch.no_grad():
+                baseline = sequence_log_probability(reference(x, valid=valid)["logits"], y)
+            effective += int((y != -100).sum())
+            scores.append((policy, baseline))
+        return dpo_loss(scores[0][0], scores[1][0], scores[0][1], scores[1][1], beta=beta)
+
+    training = fit(
+        model,
+        loss_fn,
+        ctx,
+        steps=_steps(ctx, count),
+        lr=0.001,
+        name=name,
+        metadata={
+            "beta": beta,
+            "reference": f"{name}-reference.pt",
+            "data_sha256": _digest(records),
+            "schedule": "constant",
+            "lr": 0.001,
+        },
+    )
+    save_checkpoint(
+        ctx.output / f"{name}-reference.pt",
+        reference,
+        step=0,
+        metadata={"frozen_reference": True, "data_sha256": _digest(records)},
+    )
+    training["effective_answer_tokens_both_sides"] = effective
+    return training
+
+
+@torch.no_grad()
+def _preference_evaluate(model, reference, records):
+    model.eval()
+    rows = []
+    device = next(model.parameters()).device
+    for record, pair in zip(records, _pair_examples(records, model.config.max_length), strict=True):
+        scores = []
+        lengths = []
+        for x, y in pair:
+            valid = torch.ones_like(x, dtype=torch.bool)[None].to(device)
+            scores.append(
+                (
+                    float(
+                        sequence_log_probability(model(x[None].to(device), valid=valid)["logits"], y[None].to(device))
+                    ),
+                    float(
+                        sequence_log_probability(
+                            reference(x[None].to(device), valid=valid)["logits"], y[None].to(device)
+                        )
+                    ),
+                )
+            )
+            lengths.append(int((y != -100).sum()))
+        policy_margin = scores[0][0] - scores[1][0]
+        reference_margin = scores[0][1] - scores[1][1]
+        rows.append(
+            {
+                **record,
+                "policy_chosen_logp": scores[0][0],
+                "policy_rejected_logp": scores[1][0],
+                "reference_margin": reference_margin,
+                "policy_margin": policy_margin,
+                "relative_margin": policy_margin - reference_margin,
+                "chosen_answer_tokens": lengths[0],
+                "rejected_answer_tokens": lengths[1],
+            }
+        )
+    return {
+        "records": len(rows),
+        "chosen_higher_absolute_probability": sum(row["policy_margin"] > 0 for row in rows),
+        "relative_preference_improved": sum(row["relative_margin"] > 0 for row in rows),
+        "mean_relative_margin": sum(row["relative_margin"] for row in rows) / len(rows),
+        "samples": rows,
+        "note": "sequence sums include EOS; absolute likelihood and relative DPO preference are different metrics",
+    }
+
+
+def _natural_dpo_pilot(ctx):
+    raw = _asset_rows(ctx, "ultrafeedback-dpo", "train-first-100.jsonl")
+    records = []
+    for index, row in enumerate(raw):
+        answers = []
+        for side in ("chosen", "rejected"):
+            value = row[side]
+            text = (
+                next(message["content"] for message in reversed(value) if message["role"] == "assistant")
+                if isinstance(value, list)
+                else value
+            )
+            answers.append(_utf8_prefix(text, 120))
+        records.append(
+            {
+                "family": row.get("prompt_id", _digest(row["prompt"])),
+                "prompt": _utf8_prefix(row["prompt"], 120),
+                "chosen": answers[0],
+                "rejected": answers[1],
+                "source_row": index,
+                "source_record_sha256": _digest(row),
+            }
+        )
+    parts = split_records(records, seed=ctx.seed)
+    manifest = _save_splits(ctx, parts, name="ultrafeedback-excerpts")
+    chosen = [_conversation(row["prompt"], row["chosen"], row["family"]) for row in parts["train"]]
+    seed(ctx.seed)
+    model = new_lm(ctx, width=32, layers=1, max_length=256)
+    sft_training = fit_lm(model, chosen, ctx, mode="sft", steps=_steps(ctx, 80), batch_size=4, name="ultrafeedback-sft")
+    reference = copy.deepcopy(model).eval().requires_grad_(False)
+    training = _dpo_train(model, reference, parts["train"], ctx, "ultrafeedback-pilot", count=80)
+    return {
+        "source_records": len(raw),
+        "data": manifest,
+        "sft_training": sft_training,
+        "training": training,
+        "evaluation": {split: _preference_evaluate(model, reference, parts[split]) for split in ("validation", "test")},
+        "license": "MIT",
+        "scope": "UTF-8 excerpt data-path pilot; inherited whole-answer preference labels may not apply to cropped fragments",
+    }
+
+
+def run_dpo(ctx):
+    arithmetic = split_records(arithmetic_records(), seed=ctx.seed)
+    pairs = _preference_parts(arithmetic)
+    base = load_lm(ctx.dependency("style", "content.pt"), ctx.device)
+    reference = copy.deepcopy(base).eval().requires_grad_(False)
+    reference_hash = _state_digest(reference.state_dict())
+    before = {split: _preference_evaluate(base, reference, pairs[split]) for split in ("validation", "test")}
+    results = {}
+    for name, beta in (("model", 0.1), ("beta1", 1.0)):
+        seed(ctx.seed)
+        model = copy.deepcopy(base)
+        training = _dpo_train(model, reference, pairs["train"], ctx, name, beta=beta)
+        results[name] = {
+            "beta": beta,
+            "training": training,
+            "preference": {
+                split: _preference_evaluate(model, reference, pairs[split]) for split in ("validation", "test")
+            },
+            "arithmetic": _evaluations(model, arithmetic),
+        }
+    if _state_digest(reference.state_dict()) != reference_hash:
+        raise ValueError("DPO changed frozen reference")
+    # 另一支線保持事實不變，只比較是否遵守簡短格式，不把加法能力混成格式偏好。
+    format_pairs = {
+        split: [{**row, "rejected": row["chosen"] + "; answer complete"} for row in values]
+        for split, values in pairs.items()
+    }
+    seed(ctx.seed)
+    formatted = copy.deepcopy(base)
+    format_training = _dpo_train(formatted, reference, format_pairs["train"], ctx, "format-model", count=200)
+    return {
+        "experiment": "dpo",
+        "sections": ["13.1", "13.2", "13.3", "13.4", "13.5", "13.6", "13.7", "13.9", "T.7"],
+        "data": _save_splits(ctx, pairs),
+        "before": before,
+        "runs": results,
+        "reference_sha256": reference_hash,
+        "reference_unchanged": True,
+        "format_only": {
+            "data": _save_splits(ctx, format_pairs, name="format-pairs"),
+            "training": format_training,
+            "preference": {
+                split: _preference_evaluate(formatted, reference, format_pairs[split])
+                for split in ("validation", "test")
+            },
+            "arithmetic": _evaluations(formatted, arithmetic),
+        },
+        "ultrafeedback_pilot": _natural_dpo_pilot(ctx),
+        "scope": "same plain-arithmetic prompt as content SFT; DPO margins, generated correctness, length and format are reported separately",
+    }

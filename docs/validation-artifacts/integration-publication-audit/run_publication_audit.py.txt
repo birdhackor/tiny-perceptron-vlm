@@ -1,0 +1,45 @@
+"""Refresh read-only publication audit and command/source/output hash receipts."""
+import datetime
+import hashlib
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path.cwd()
+BASE = ROOT / "outputs/integration-runs"
+checks = [
+    ("audit_direct_dependencies.py", "publication-direct-audit", "root-report-direct-dependencies.json"),
+    ("publication_evidence_audit.py", "publication-evidence-audit", "publication-required-paths.json"),
+    ("publication_content_inspect.py", "publication-content-inspection", "publication-content-inspection.json"),
+]
+for source, stem, output in checks:
+    helper = BASE / source
+    command = [sys.executable, str(helper.relative_to(ROOT))]
+    started = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    run = subprocess.run(command, cwd=ROOT, capture_output=True, text=True)
+    stdout = BASE / (stem + ".stdout.txt")
+    stderr = BASE / (stem + ".stderr.txt")
+    stdout.write_text(run.stdout)
+    stderr.write_text(run.stderr)
+    receipt = {
+        "command": command,
+        "cwd": str(ROOT),
+        "started_at_utc": started,
+        "finished_at_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "exit_code": run.returncode,
+        "probe_source_path": str(helper.relative_to(ROOT)),
+        "probe_source_sha256": hashlib.sha256(helper.read_bytes()).hexdigest(),
+        "stdout_path": str(stdout.relative_to(ROOT)),
+        "stdout_sha256": hashlib.sha256(stdout.read_bytes()).hexdigest(),
+        "stderr_path": str(stderr.relative_to(ROOT)),
+        "stderr_sha256": hashlib.sha256(stderr.read_bytes()).hexdigest(),
+        "result_path": str((BASE / output).relative_to(ROOT)),
+    }
+    if (BASE / output).is_file():
+        receipt["result_sha256"] = hashlib.sha256((BASE / output).read_bytes()).hexdigest()
+    (BASE / (stem + "-receipt.json")).write_text(json.dumps(receipt, ensure_ascii=False, indent=2) + "\n")
+    print(source, "exit", run.returncode, run.stdout.strip(), flush=True)
+    if run.returncode:
+        print(run.stderr, file=sys.stderr)
+        raise SystemExit(run.returncode)

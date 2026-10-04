@@ -1,0 +1,586 @@
+"""Persist this reviewer's completed 19.9 judgment and evidence identities."""
+
+import hashlib
+import json
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[3]
+OUT = ROOT / "docs/technical-reviews/artifacts"
+PREFIX = "fact_v2_19_09_"
+
+
+def sha(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def evidence(source_id, locator, supports):
+    return {"source_id": source_id, "locator": locator, "supports": supports}
+
+
+def executed(expected, observed, details, denominators=None, tolerance=None):
+    result = {"method": "executed", "expected": expected, "observed": observed, "details": details}
+    if denominators is not None:
+        result["denominators"] = denominators
+    if tolerance is not None:
+        result["tolerance"] = tolerance
+    return result
+
+
+def claim(identifier, kind, statement, location, refs, artifacts, scope, verification=None):
+    result = {
+        "id": identifier,
+        "kind": kind,
+        "statement": statement,
+        "location": location,
+        "status": "verified",
+        "evidence": refs,
+        "artifact_ids": artifacts,
+        "scope": scope,
+    }
+    if verification is not None:
+        result["verification"] = verification
+    return result
+
+
+def main():
+    audit = json.loads((OUT / f"{PREFIX}audit.json").read_text())
+    environment = audit["environment"]
+    verify_command = ".venv/bin/python docs/technical-reviews/artifacts/fact_v2_19_09_verify.py"
+    source_command = ".venv/bin/python docs/technical-reviews/artifacts/fact_v2_19_09_sources.py"
+    artifact_specs = [
+        (
+            "a_audit",
+            "execution",
+            "audit.json",
+            "逐筆GPU紀錄及中位數核算、原樣正文程式、CPU重跑與prefill hooks",
+            verify_command,
+        ),
+        (
+            "a_weights",
+            "execution",
+            "weight-inspection.json",
+            "原joint與部署joint檔案hash、完整config/metadata與53張tensor的hash及逐值相等",
+            verify_command,
+        ),
+        (
+            "a_cpu_cache",
+            "execution",
+            "cpu-cache-consistency.json",
+            "本人本輪CPU實跑的12題完整ID、停止原因、167步分數差",
+            verify_command,
+        ),
+        (
+            "a_cpu_bench",
+            "execution",
+            "cpu-generation-benchmark.json",
+            "本人本輪CPU執行benchmark_generation；只核軟體與輸出，不替代L4時間",
+            verify_command,
+        ),
+        (
+            "a_receipts",
+            "execution",
+            "source-receipts.json",
+            "本輪HTTPS原始來源下載的完整bytes/SHA與三份固定commit JSON一致性",
+            source_command,
+        ),
+        (
+            "a_gpu_cache",
+            "source_snapshot",
+            "cache-consistency.json",
+            "固定GitHub commit原bytes複製；12題兩路完整生成ID與逐步比較",
+            None,
+        ),
+        (
+            "a_gpu_bench",
+            "source_snapshot",
+            "generation-benchmark.json",
+            "固定GitHub commit原bytes複製；完整config及兩路所有3暖機+10測量紀錄",
+            None,
+        ),
+        (
+            "a_deployment",
+            "source_snapshot",
+            "deployment-result.json",
+            "固定GitHub commit原bytes複製；L4/Python/Torch/seed/code hashes與總實報",
+            None,
+        ),
+        (
+            "a_gqa",
+            "source_snapshot",
+            "gqa-original-excerpt.txt",
+            "本人閱讀arXiv v3原PDF後保留2.1/2.2與相鄰page2原文",
+            None,
+        ),
+        (
+            "a_sdpa",
+            "source_snapshot",
+            "torch-original-excerpt.txt",
+            "本人親讀PyTorch v2.14.1 functional.py SDPA原始docstring，非來源库摘要",
+            None,
+        ),
+        (
+            "a_cache_docs",
+            "source_snapshot",
+            "cache-original-excerpt.txt",
+            "本人親讀Transformers v4.57.1官方KV cache解釋原文",
+            None,
+        ),
+        (
+            "a_body",
+            "source_snapshot",
+            "section.md",
+            "真正讀取的19.9未正規化正文snapshot；使用checker.sections切分",
+            None,
+        ),
+        ("a_verify_code", "code", "verify.py", "可重跑逐record/逐tensor/CPU驗證程式；weights留原binary路徑", None),
+        ("a_source_code", "code", "sources.py", "可重跑固定版本原始來源下載與原文摘錄程式", None),
+        ("a_report_code", "code", "report.py", "本人完成判斷後持久化本報告與hash的程式", None),
+    ]
+    artifacts = []
+    for identifier, kind, suffix, description, command in artifact_specs:
+        path = OUT / f"{PREFIX}{suffix}"
+        item = {
+            "id": identifier,
+            "kind": kind,
+            "path": str(path.relative_to(ROOT)),
+            "sha256": sha(path),
+            "description": description,
+        }
+        if command is not None:
+            item.update(command=command, environment=environment)
+            item["result"] = (
+                "HTTPS來源全數取得；三份固定GitHub commit JSON與本地逐byte相同；原文已本人閱讀"
+                if command == source_command
+                else "實際執行完成且全部assert通過；原樣snippet接近True；12題167步CPU完整ID/停止原因重現原GPU；GPU中位數重算相符"
+            )
+        artifacts.append(item)
+    sources = [
+        {
+            "id": "s_cache",
+            "kind": "official_docs",
+            "title": "Transformers Caching: causal representations and per-layer KV cache",
+            "url": "https://huggingface.co/docs/transformers/v4.57.1/en/cache_explanation",
+            "version": "Transformers v4.57.1 documentation, read 2026-10-04; fetched HTML SHA in a_receipts",
+            "verified": True,
+            "checked_original": True,
+            "accessed_on": "2026-10-04",
+            "authority_reason": "Hugging Face Transformers官方cache原理與介面文件，直接解釋causal K/V重用及位置規則。",
+            "inspection_note": "本人讀Caching開頭、Attention matrices與Cache class：causal前位置不受未來影響；每層K/V concat；只須新位置Query；cache_position沿既有長度增加。只引用這些敘述與concat式，不引用該頁將mask寫成乘法的簡寫attention式。未將Transformers Cache API當成本repo API。摘錄a_cache_docs。",
+        },
+        {
+            "id": "s_gqa",
+            "kind": "paper",
+            "title": "GQA: Training Generalized Multi-Query Transformer Models from Multi-Head Checkpoints",
+            "url": "https://arxiv.org/pdf/2305.13245v3",
+            "version": "arXiv:2305.13245v3, 2023-12-23",
+            "verified": True,
+            "checked_original": True,
+            "accessed_on": "2026-10-04",
+            "authority_reason": "Ainslie等原研究作者論文，定義Query分組及一KV端點並分開cache與模型成本。",
+            "inspection_note": "本人下載並讀原PDF第1-2頁2.1/2.2：每組Query共享一K、一V；GQA-1等於MQA；MHA→MQA的KV cache降低H倍。轉換需KV投影mean-pooling再uptraining，不支持任意重排訓練權重保功能。這節joint原先即2Q/1KV，沒有宣称本輪轉換或重現paper品質。原PDF SHA ba9094fe73db9bf515d47ae8b2d502fee9d8a6c7b1327e197ddb160f4c63b94a，摘錄a_gqa。",
+        },
+        {
+            "id": "s_sdpa",
+            "kind": "official_source",
+            "title": "PyTorch v2.14.1 scaled_dot_product_attention official function docstring",
+            "url": "https://raw.githubusercontent.com/pytorch/pytorch/v2.14.1/torch/nn/functional.py",
+            "version": "v2.14.1; local torch 2.14.1+cpu git 5c4886908584029761b579af026dcfb627c84070; full official source SHA 95ff403085bb179477a01df63acfddf59dfac0fb58829e99a9c8b5c2fe98899b",
+            "verified": True,
+            "checked_original": True,
+            "accessed_on": "2026-10-04",
+            "authority_reason": "PyTorch官方固定release原始碼中的SDPA API契約；本輪逐byte核對其與installed functional.py相同。",
+            "inspection_note": "本人讀6367起完整SDPA docstring：QK^T/sqrt(E)、bool True允許、dropout始終按參數作用、依inputs選實作與fused kernel限制、不同backend浮點結果可能不同。API呼叫不證Flash；不以CPU重跑證GPU後端/FP16/BF16性能。摘錄a_sdpa；installed一致性記於a_audit。",
+        },
+        {
+            "id": "s_memory",
+            "kind": "derivation",
+            "title": "Unexpanded KV storage versus complete GPU allocation",
+            "verified": True,
+            "details": "標準無padding KV數字儲存=2(K,V)×layers×batch×KVheads×positions×head_dim×element_bytes。本例2×2×1×1×3×32×4=1536 bytes，實際prefix tensors每層K,V皆[1,1,3,32]，a_audit量得1536。若同head_dim與位置改2KVheads，這一KV量會2倍；共享權重、其他activations、projectors、allocator與GPU context並未隨此量同比改變，故不能推出整GPU記憶體減半。原joint權重數字另為328128×4=1312512 bytes。",
+        },
+        {
+            "id": "s_execution",
+            "kind": "execution",
+            "title": "Fresh 19.9 CPU reproduction and full original-record audit",
+            "verified": True,
+            "artifact_id": "a_audit",
+        },
+    ]
+    code_specs = [
+        (
+            "s_capstone",
+            "tiny_perceptron/capstone.py",
+            "讀34-49 default_config、74-121 model/projector、285-306素材/前文、378-424完整生成與644-653 strict loader；原joint與export實際載入並逐tensor核對。",
+        ),
+        (
+            "s_attention",
+            "tiny_perceptron/attention.py",
+            "親讀attention_mask與CausalAttention.forward 48-74：offset、causal可見位置、concat與未擴張KV；比對時計算repeat_interleave再SDPA，非cache存重複head。",
+        ),
+        (
+            "s_model",
+            "tiny_perceptron/model.py",
+            "親讀TinyLM.forward 77-99：每層cache與offset、max_length拒絕超限、264-vocab output，位置和最後logit對齊。",
+        ),
+        (
+            "s_moe",
+            "tiny_perceptron/modern.py",
+            "親讀MoEFFN 56-87：router softmax/topk後逐expert Python loop，torch.where收token_rows與index_add分派；沒有專用expert dispatch kernel。",
+        ),
+        (
+            "s_deploy",
+            "scripts/course_experiments/capstone_deployment.py",
+            "親讀83-147 cache同history核對、205-269計時、272-345固定joint載入與first_by_task選題；本人CPU執行兩函式並逐筆核全部原GPUrecord。",
+        ),
+    ]
+    for identifier, path, note in code_specs:
+        sources.append(
+            {
+                "id": identifier,
+                "kind": "repository_code",
+                "title": path,
+                "path": path,
+                "sha256": sha(ROOT / path),
+                "version": "本人本輪讀取的全檔SHA；與正式部署result revision 6ffc653199a71ad83afcee24aa8a2388122771bd所錄code_sha256相同",
+                "verified": True,
+                "inspection_note": note,
+            }
+        )
+    claims = [
+        claim(
+            "c1",
+            "concept",
+            "KV cache保存已算過的各層前文K/V，causal生成可重用前位置並只算新增位置。",
+            "第2段『KV cache儲存前文每層已算出的Key、Value』及prefill段",
+            [
+                evidence(
+                    "s_cache",
+                    "Caching opening; Attention matrices per-layer concat equations; Cache class cache_position",
+                    "因果表示不被未來修改，逐層重用past K/V；new token仍計自己與past注意力",
+                )
+            ],
+            ["a_cache_docs"],
+            "無padding/packing的這條固定前文推論路線；eval、不變權重、相同位置/可見規則；不免去新位置attention與FFN。",
+        ),
+        claim(
+            "c2",
+            "concept",
+            "GQA保留多個Query頭共享較少KV；兩Query共一KV會省cache數字，但不能推出全GPU記憶體減半。",
+            "第2段『GQA讓多個Query頭共享較少組KV』與『整張GPU』限制",
+            [
+                evidence(
+                    "s_gqa",
+                    "PDF p2 section 2.2, GQA-1=MQA and H-fold KV cache reduction",
+                    "共享定義與一KV端點只縮KV cache",
+                ),
+                evidence(
+                    "s_memory",
+                    "2×layers×batch×KVheads×positions×head_dim×element bytes",
+                    "拆開cache數字和共享權重/其他分配",
+                ),
+            ],
+            ["a_gqa", "a_audit", "a_weights"],
+            "本成品用MQA端點；没有由MHA改checkpoint的實驗，不把cache比例外推到所有GPU分配。",
+        ),
+        claim(
+            "c3",
+            "concept",
+            "SDPA按輸入選可用實作，呼叫SDPA不保證FlashAttention，浮點backend差異須另檢查。",
+            "SDPA段『會依裝置、格式與形狀選擇後端』及CPU/GPU限制",
+            [
+                evidence(
+                    "s_sdpa",
+                    "functional.py v2.14.1 SDPA docstring: implementation selection, fused limitations, numerical accuracy",
+                    "自動選backend依inputs與其限制；結果可因浮點融合不同",
+                )
+            ],
+            ["a_sdpa", "a_audit"],
+            "2.14.1官方契約；本人CPU FP32只核正確性；沒有主張本joint實際GPU kernel為Flash，沒有代驗混合精度收益。",
+        ),
+        claim(
+            "c4",
+            "software",
+            "joint成品有2個Query頭、1個KV頭，MoE以可讀Python逐expert分派而無專用分派核心。",
+            "第2段及SDPA段『仍用可讀Python程式』『不會…專用MoE加速核心』",
+            [
+                evidence(
+                    "s_capstone",
+                    "default_config lines34-49; payload strict load",
+                    "heads=2 kv_heads=1 experts=4 top_k=2，與實際joint config同",
+                ),
+                evidence("s_attention", "forward lines52-68", "cache保存一KV頭、Query兩頭、比對時repeat"),
+                evidence("s_moe", "MoEFFN.forward lines67-87", "topk/torch.where/index_add在Python expert迴圈中分派"),
+            ],
+            ["a_audit", "a_weights"],
+            "只指本repo固定SHA的可讀實作；不推論大型MoE專用核心性能。",
+            executed(
+                "2Q/1KV，4 experts/top2，可讀分派",
+                "權重config匹配；53 tensor strict載入，CPU12題重跑成功；cache [1,1,3,32]每層",
+                "親讀並執行model與部署functions，讀actual payload而非猜檔名架構。",
+            ),
+        ),
+        claim(
+            "c5",
+            "numeric",
+            "正文隨機純文字五ID例比較同一最後位置的264分數，full與前三格cache+後兩格接近True。",
+            "Python區塊及『最後位置的264項候選分數』段",
+            [
+                evidence("s_model", "TinyLM.forward output and offset", "兩路取相同最後位置、候選維度264"),
+                evidence(
+                    "s_execution",
+                    "audit.verbatim_section_snippet_stdout; random_weight_numerical_examples.cases[0]",
+                    "原樣exec教材snippet與輸入shape/差異核對",
+                ),
+            ],
+            ["a_audit", "a_verify_code", "a_body"],
+            "seed42、隨機CapstoneModel.language、CPU FP32/eval/no_grad；沒有圖/音、不是joint性能或普遍等值證明。",
+            executed(
+                "shape=(1,264), allclose=True",
+                "最大差4.76837158203125e-7；原樣snippet印『接近 True』",
+                "固定[1,21,22,23,24]，full[:, -1]對prefix[:3]後cached[3:][:,-1]；未將手算當實跑。",
+                tolerance="torch.allclose atol=1e-4, rtol=1e-4；不要求bit相同",
+            ),
+        ),
+        claim(
+            "c6",
+            "numeric",
+            "只把最後ID24改25仍可重用不變的前三個位置cache，兩路接近。",
+            "末段練習第一句",
+            [
+                evidence(
+                    "s_execution", "audit.random_weight_numerical_examples.cases[1]", "實跑[1,21,22,23,25]沿用同prefix"
+                )
+            ],
+            ["a_audit"],
+            "同seed/weights/eval/FP32，只有suffix改；不支持前文變動也重用。",
+            executed(
+                "allclose=True且264分數",
+                "shape=(1,264)，最高差3.5762786865234375e-7",
+                "只改最後位置，full與cached比較同最後位置。",
+                tolerance="atol=rtol=1e-4",
+            ),
+        ),
+        claim(
+            "c7",
+            "concept",
+            "若第一位置改變，快取對應的前文變了，必須重建，不能當通用記憶重用。",
+            "末段『接著若修改第一位置，就必須重建cache』",
+            [
+                evidence(
+                    "s_cache",
+                    "Attention matrices causal past representations; concat equations",
+                    "cache的K/V由具體前文計算；變更past不再是同一表示",
+                ),
+                evidence(
+                    "s_execution",
+                    "audit.random_weight_numerical_examples.changed_first_id",
+                    "第一ID改2：stale最高差0.4098548889160156，重建後4.172325134277344e-7接近",
+                ),
+            ],
+            ["a_audit", "a_cache_docs"],
+            "cache與prefix、權重、positions/可見規則綁定；這次反例支援該規則，不聲稱每種prefix修改必定產生非零差。",
+        ),
+        claim(
+            "c8",
+            "software",
+            "多模態cache生成先準備素材與完整前文prefill，之後只送新token且不再投影圖音；比較必須保留完整ID及stop_reason。",
+            "『正式多模態生成還必須把素材編碼一次』與原始ID/停止原因段",
+            [
+                evidence(
+                    "s_capstone",
+                    "generate_trace lines379-424; modality_tensors285-296 and forward90-108",
+                    "素材在loop外一次生成；cache首呼叫有modality，後續token無modality；trace保存ID/EOS/stop",
+                ),
+                evidence(
+                    "s_execution",
+                    "audit.multimodal_prefill_instrumentation",
+                    "本人對image_color/audio/joint六組路徑hooks，cache投影各一次、後續input_positions=1",
+                ),
+            ],
+            ["a_audit", "a_cpu_cache"],
+            "本repo一image/一audio marker的單樣本無padding路線；full對照故意重算；raw文字不替代結構ID。",
+            executed(
+                "cache一次prefill並只送新token；圖音各只投影一次",
+                "image_color cache12步image_projector=1；audio cache12步audio_projector=1；joint cache16步兩projector各1；所有後續call長度1且不供素材",
+                "執行joint權重、掛model及projector hooks核實尺寸/offset/素材參數；完整records另保存。",
+            ),
+        ),
+        claim(
+            "c9",
+            "empirical",
+            "固定validation每任務首題12題、最多16新ID，full/cache所有原始ID一致，同history所有步logits在1e-4容差內。",
+            "正式部署段與『完整快取對照』固定commit連結",
+            [
+                evidence(
+                    "s_deploy",
+                    "cache_consistency83-147; run first_by_task332-338",
+                    "setdefault在生成前選每任務第一題，same-history逐步比較",
+                ),
+                evidence(
+                    "s_execution",
+                    "audit.gpu_record_audit and cpu_reproduction; complete GPU/CPU records",
+                    "原12題167步全核，GPU最高差5.0067901611328125e-6；CPU重現全ID與stop",
+                ),
+            ],
+            ["a_gpu_cache", "a_deployment", "a_audit", "a_cpu_cache", "a_weights"],
+            "joint原檔SHA8f7e8582…bd7c3b47、capstone-small-world-v2、seed42、L4 FP32的機制對照；5題截斷不當完整能力評分；CPU只重現正確性，不重測L4時間。",
+            executed(
+                "12題IDs全部一致且同history每步allclose",
+                "12/12完整IDs與stop一致；167/167步接近；7 EOS/5 max_new_tokens；CPU最高差6.67572021484375e-6也接近",
+                "核全部兩條trace與每步records；frozen dataset id/manifest/first_by_task都匹配，actual original及export逐53 tensor相同。",
+                {
+                    "validation_split_samples": 84,
+                    "selected_first_rows_per_task": 12,
+                    "seed": 42,
+                    "same_history_steps": 167,
+                    "max_new_tokens_per_row": 16,
+                    "eos_rows": 7,
+                    "truncated_rows": 5,
+                    "score_elements_per_step": 264,
+                },
+                "atol=rtol=1e-4；原GPU最高絕對差小於atol，CPU同容差",
+            ),
+        ),
+        claim(
+            "c10",
+            "empirical",
+            "短問句照抄15使用同joint/L4/FP32，full/cache各暖機3次量10次，所有次數均10新ID並DIRECT:15+EOS，兩路raw IDs一致。",
+            "短問句段及逐次計時固定commit連結",
+            [
+                evidence(
+                    "s_deploy",
+                    "benchmark_generation205-269 and predetermined style row340-345",
+                    "3 warmup+10 measured與同FP32 model，不更新權重；先選frozen first style row",
+                ),
+                evidence(
+                    "s_execution",
+                    "audit.gpu_generation_benchmark_audit; full26 original iteration records",
+                    "核13+13次完整IDs、EOS/stop/count與L4總報，CPU同函式實跑outputs匹配",
+                ),
+            ],
+            ["a_gpu_bench", "a_deployment", "a_audit", "a_cpu_bench", "a_weights"],
+            "只有一題67-token prompt、seed42 frozen validation、同權重；cuda:0僅裝置號，L4依總報gpu；不是普遍吞吐/品質或GPU新實測。",
+            executed(
+                "每mode3暖機+10測量，均10新token含EOS、DIRECT:15、IDs相同",
+                "26/26紀錄generated_ids=[76,81,90,77,75,92,66,57,61,2]、eos/stop_reason=eos；L4/FP32與jointSHA吻合；CPU執行同函式也相同且weights unchanged",
+                "逐次區分phase/iterations/秒陣列與完整trace，對照dataset first style row id691c9de656c01fa2df60，權重不變。",
+                {
+                    "prompts": 1,
+                    "prompt_tokens": 67,
+                    "warmup_per_mode": 3,
+                    "measured_per_mode": 10,
+                    "modes": 2,
+                    "new_ids_including_eos_per_call": 10,
+                    "measured_generated_ids_per_mode": 100,
+                    "optimizer_updates": 0,
+                    "seed": 42,
+                },
+            ),
+        ),
+        claim(
+            "c11",
+            "empirical",
+            "該短句10次L4量測中位數full=68.054ms、cache=59.978ms，cache在此配置較快。",
+            "二列生成時間表與下一段『該短句較快』",
+            [
+                evidence(
+                    "s_execution",
+                    "audit.gpu_generation_benchmark_audit.modes recomputed_median_milliseconds",
+                    "重算全部10次原秒陣列並與report median完全一致；三位小數換ms",
+                )
+            ],
+            ["a_audit", "a_gpu_bench", "a_deployment"],
+            "保存的當次L4 FP32數據支持單prompt較低中位數；本輪沒有GPU，CPU correctness執行不能驗GPU時間、長序列/其他硬體/Flash或memory收益。",
+            executed(
+                "full68.054ms/cache59.978ms",
+                "statistics.median原seconds×1000=68.05368149999858與59.97750799999935；round三位相符",
+                "排序10個measured秒，取第5/6項平均，不含3次warmup；完整記錄與代碼SHA來源查核。",
+                {
+                    "prompts": 1,
+                    "measured_seconds_per_mode": 10,
+                    "warmup_excluded_per_mode": 3,
+                    "new_ids_including_eos_per_call": 10,
+                    "device": "NVIDIA L4",
+                    "dtype": "float32",
+                },
+                "正文四捨五入3位ms，容許0.0005ms；保存中位值精確相同",
+            ),
+        ),
+        claim(
+            "c12",
+            "software",
+            "生成計時包含prompt準備、裝置传输、greedy生成/解碼，GPU每call前後同步；不含load/startup/HF/file驗證；沒有生成memory peak。",
+            "最後計時範圍段與19.2峰值不可移用限制",
+            [
+                evidence(
+                    "s_deploy",
+                    "benchmark_generation212-223,250-268",
+                    "權重核驗在timer外；sync→perf_counter→generate_trace→sync→差值，無generation allocator peak API",
+                ),
+                evidence("s_capstone", "generate_trace379-424", "prepare modality/prompt、.to與decode都在被量的call內"),
+            ],
+            ["a_gpu_bench", "a_audit", "a_cpu_bench"],
+            "完整短prompt生成wall time；檔案load與before/after權重核驗在外；不把training機制的allocator峰值當cache記憶體測得結果。",
+            executed(
+                "保存scope與實際程式區間一致；CPU可跑同function",
+                "CPU benchmark函式完整執行，outputs/weights unchanged；親讀GPU分支前後sync與timer範圍，正式JSON有scope/limitation且無generation memory peak",
+                "讀並執行相同hash的benchmark；CPU不執行CUDA同步分支，因此CUDA範圍由原碼與原GPU紀錄核對而非CPU性能推論。",
+            ),
+        ),
+    ]
+    report = {
+        "schema_version": 1,
+        "review_stage": "technical",
+        "lesson_id": "19.9",
+        "source": "course/chapters/19.md#19.9",
+        "reviewer_task": "/root/integration_technical_coordinator/fact_v2_19_09",
+        "reviewer_context": "fresh",
+        "source_sha256": sha(OUT / f"{PREFIX}section.md"),
+        "figure_sha256": {},
+        "verdict": "pass",
+        "prerequisites_read": [
+            "course/chapters/16.md#16.3",
+            "course/chapters/16.md#16.4",
+            "course/chapters/16.md#16.8",
+            "course/chapters/19.md#19.2",
+            "course/chapters/19.md#19.4",
+        ],
+        "claims": claims,
+        "sources": sources,
+        "artifacts": artifacts,
+        "issues": [],
+        "checks": {
+            "factual_accuracy": {
+                "status": "pass",
+                "details": "逐項核KV/GQA/SDPA原方法與本joint/MoE/多模態cache行為；未發現正文矛盾。",
+                "claim_ids": ["c1", "c2", "c3", "c4", "c7", "c8", "c9", "c10", "c12"],
+            },
+            "numeric_verification": {
+                "status": "pass",
+                "details": "原樣正文snippet maxdiff4.76837e-7 True；練習25為3.57628e-7 True；GPU12題167步完整核算並CPU重現；10次GPU中位68.054/59.978ms計算相符。",
+                "claim_ids": ["c5", "c6", "c9", "c10", "c11"],
+            },
+            "figure_consistency": {
+                "status": "not_applicable",
+                "details": "本人讀取的19.9正文沒有SVG/圖引用；本次不代審必要前置節的圖。",
+                "claim_ids": [],
+            },
+            "source_verification": {
+                "status": "pass",
+                "details": "本人直接下載/親讀GQA arXiv v3、Transformers v4.57.1官方cache頁、PyTorch v2.14.1官方源並驗installed SHA；固定GitHub commit三JSON逐byte匹配；本repo原碼完整SHA與GPU報錄相同。",
+                "claim_ids": ["c1", "c2", "c3", "c4", "c5", "c6", "c7", "c8", "c9", "c10", "c11", "c12"],
+            },
+            "limitations": {
+                "status": "pass",
+                "details": "分開random機制/actual joint、FP32CPU核對/L4既有性能、ID/文字、12題截斷/完整品質與KV儲存/整GPU分配。正式167步中5題max_new_tokens；單prompt10量測不外推；沒測cache memory或Flash/mixed precision。",
+                "claim_ids": ["c1", "c2", "c3", "c5", "c6", "c7", "c8", "c9", "c10", "c11", "c12"],
+            },
+        },
+    }
+    assert report["source_sha256"] == audit["source_sha256"]
+    (ROOT / "docs/technical-reviews/19.9.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
+    print("19.9: fresh technical review pass; 12 claims; 15 durable artifacts")
+
+
+if __name__ == "__main__":
+    main()

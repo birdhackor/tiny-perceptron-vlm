@@ -1,0 +1,516 @@
+{
+  "schema_version": 1,
+  "checked_at": "2026-10-02T21:56:31.312706+00:00",
+  "scope": "Five individual CLI operation checks with generated digits, original held-out media and bound raw LoRA adapters. Sample answers are not a new accuracy evaluation.",
+  "code_checkout_revision": "043041956999fecc9a495645b928c5c6ff998e93",
+  "manifest_sha256": "eba3b3e9dd36f3d723eb27f3acd9f7615d7ce7e8fa2fb94560ab3933394fc64a",
+  "public_sources": {
+    "style": {
+      "repo": "birdhackor/tiny-perceptron-course-models",
+      "revision": "23b58c077a2da2ec6b94f4902e88510c0364e3fc"
+    },
+    "lora": {
+      "repo": "birdhackor/tiny-perceptron-course-models",
+      "revision": "1bfb0ed028d3a980711a29cb38a993f58d127d02"
+    },
+    "ocr": {
+      "repo": "birdhackor/tiny-perceptron-course-models",
+      "revision": "ce803a4c1eb75c428397fc4a49352354d9c82e8e"
+    },
+    "real_modal": {
+      "repo": "birdhackor/tiny-perceptron-course-models",
+      "revision": "0c284d926ee729291fa023976fc03d9260db4068"
+    }
+  },
+  "environment": {
+    "python": "3.13.5",
+    "torch": "2.14.1+cpu",
+    "device": "cpu",
+    "threads": 1,
+    "numpy": "2.5.3",
+    "pillow": "12.3.0",
+    "soundfile": "0.14.0"
+  },
+  "verification_program": "\"\"\"Supplemental real-media/raw-adapter CLI checks after public model release.\"\"\"\nimport os\nos.environ[\"CUDA_VISIBLE_DEVICES\"] = \"\"\nos.environ[\"OMP_NUM_THREADS\"] = \"1\"\nos.environ[\"MKL_NUM_THREADS\"] = \"1\"\nimport hashlib\nimport json\nimport platform\nimport subprocess\nimport sys\nfrom datetime import datetime, timezone\nfrom pathlib import Path\n\nROOT = Path('/workspace/tiny-perceptron-vlm')\nsys.path.insert(0, str(ROOT))\nfrom scripts.check_course_models import run_command, save_evidence, validate_folder\nimport torch\ntorch.set_num_threads(1)\ntorch.manual_seed(0)\n\ndef digest(path):\n    return hashlib.sha256(Path(path).read_bytes()).hexdigest()\n\nmanifest_path = ROOT / 'docs/course-experiments/public-models.json'\nmodels = {x['id']: x for x in json.loads(manifest_path.read_text())['models']}\nfor ident in ('style', 'lora', 'ocr', 'real_modal'):\n    validate_folder(models[ident], ROOT / 'checkpoints/course' / ident)\n\nimage = ROOT / 'outputs/course-student/ocr-42.png'\nimage.parent.mkdir(parents=True, exist_ok=True)\nimport PIL\nimport numpy\nimport soundfile\nfrom scripts.prepare_ocr import draw_digits\ndraw_digits('42').save(image)\nmedia = ROOT / 'outputs/course-student/real-modal'\nfashion = media / 'vision-initial/images/fashion-train-00044-label-9.png'\nrecording = media / 'fsdd-initial/recordings/0_theo_5.wav'\nassert fashion.is_file() and recording.is_file(), 'Run the model-card asset fetch command first'\nformal_path = ROOT / 'docs/course-experiments/results/real_modal.json'\nformal = json.loads(formal_path.read_text())['results']\nfashion_row = next(row for row in formal['fashion-mnist']['data']['splits']['test']['records'] if row['family'] == fashion.name)\naudio_row = next(row for row in formal['fsdd']['data']['splits']['test']['records'] if row['family'] == recording.name)\nassert digest(fashion) == fashion_row['image_sha256']\nassert Path(audio_row['audio']).name == recording.name\ncommands = [\n    ('ocr-fixed-font', [sys.executable, 'scripts/infer_modal.py', 'checkpoints/course/ocr/model.pt', '--image', str(image), '--prompt', 'read digits', '--tokens', '5', '--device', 'cpu']),\n    ('fashion-heldout-image', [sys.executable, 'scripts/infer_modal.py', 'checkpoints/course/real_modal/fashion-mnist.pt', '--image', str(fashion), '--prompt', 'clothing?', '--tokens', '32', '--device', 'cpu']),\n    ('fsdd-heldout-recording', [sys.executable, 'scripts/infer_modal.py', 'checkpoints/course/real_modal/fsdd.pt', '--audio', str(recording), '--resample-audio', '--prompt', 'digit?', '--tokens', '32', '--device', 'cpu']),\n]\nfor style in ('concise', 'vivid'):\n    commands.append(('raw-lora-' + style, [sys.executable, 'scripts/infer.py', 'checkpoints/course/style/content.pt', '--adapter', 'checkpoints/course/lora/adapter-' + style + '.pt', '--chat', '--prompt', '2+2=?', '--tokens', '96', '--device', 'cpu', '--json']))\n\nproof = {\n    'schema_version': 1,\n    'checked_at': datetime.now(timezone.utc).isoformat(),\n    'scope': 'Five individual CLI operation checks with generated digits, original held-out media and bound raw LoRA adapters. Sample answers are not a new accuracy evaluation.',\n    'code_checkout_revision': subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=ROOT, capture_output=True, text=True, check=True).stdout.strip(),\n    'manifest_sha256': digest(manifest_path),\n    'public_sources': {k: {'repo': models[k]['repo'], 'revision': models[k]['revision']} for k in ('style', 'lora', 'ocr', 'real_modal')},\n    'environment': {'python': platform.python_version(), 'torch': str(torch.__version__), 'device': 'cpu', 'threads': 1, 'numpy': numpy.__version__, 'pillow': PIL.__version__, 'soundfile': soundfile.__version__},\n    'verification_program': Path(__file__).read_text(),\n    'source_sha256': {k: digest(ROOT / k) for k in ('scripts/infer.py', 'scripts/infer_modal.py', 'scripts/prepare_ocr.py', 'scripts/fetch_training_assets.py', 'tiny_perceptron/adapters.py', 'tiny_perceptron/multimodal.py', 'tiny_perceptron/tokenization.py')},\n    'input_selection_evidence': {'formal_report': str(formal_path.relative_to(ROOT)), 'formal_report_sha256': digest(formal_path), 'fashion_custom_test_record': fashion_row, 'audio_custom_test_record': audio_row, 'audio_scope': 'CLI starts from the original 8 kHz PCM16 recording and uses the declared resampling flag; the formal test record points to a derived 16 kHz FLOAT WAV, so its file hash is different.'},\n    'input_sha256': {str(p.relative_to(ROOT)): digest(p) for p in (image, fashion, recording)},\n    'checkpoint_sha256': {},\n    'commands': [],\n    'preparation': [\"python scripts/fetch_training_assets.py --asset fashion-mnist --asset fsdd --output outputs/course-student/real-modal\", \"from scripts.prepare_ocr import draw_digits; draw_digits('42').save('outputs/course-student/ocr-42.png')\"],\n}\nfor name, command in commands:\n    print('Checking', name, flush=True)\n    record = run_command(command)\n    record['example'] = name\n    if record['status'] == 'passed':\n        result = record['output']\n        if not all(k in result for k in ('answer', 'generated_ids', 'eos', 'invalid_special_tokens', 'valid_answer_tokens')):\n            record.update(status='failed', reason='Missing explicit generation report fields')\n        elif result['invalid_special_tokens'] or not result['valid_answer_tokens']:\n            record.update(status='failed', reason='Generated invalid structural token')\n    proof['commands'].append(record)\n    for p in (command[2], command[command.index('--adapter') + 1] if '--adapter' in command else None):\n        if p:\n            proof['checkpoint_sha256'][p] = digest(ROOT / p)\nproof['status'] = 'passed' if all(x['status'] == 'passed' for x in proof['commands']) else 'failed'\ntarget = save_evidence(ROOT / 'docs/course-experiments/student-checks', 'media-and-raw-adapter-cli', proof)\nprint(json.dumps({'status': proof['status'], 'evidence': str(target), 'outputs': {x['example']: x.get('output', {}) for x in proof['commands']}}, ensure_ascii=False))\nraise SystemExit(0 if proof['status'] == 'passed' else 1)\n",
+  "source_sha256": {
+    "scripts/infer.py": "58bdc7140661b5bdd54fb352089b1392a2b23be8ff5281bda052e9b596ad5817",
+    "scripts/infer_modal.py": "edd52dfedfb6d9fd4a3e9d16d20102ba8a728b269426caada959e9c3569f9269",
+    "scripts/prepare_ocr.py": "aedf003ab14cf292bd0f75c4f8e68ca6785a093c8d3d54ef520e46a5041548e9",
+    "scripts/fetch_training_assets.py": "7083b01b9794d628f3f6e9418339a8a5171e4981562a70397925f28c64605fb6",
+    "tiny_perceptron/adapters.py": "0c4dc1c61e250234781532c16bdfa6e5eb652441b773e6398a885568c20c7ac9",
+    "tiny_perceptron/multimodal.py": "298b165e3cdb56fdf5ce42e6e17eaf3d005b4954eb867fc5b9889eb3a3adf340",
+    "tiny_perceptron/tokenization.py": "00e3f221e62c98f93ca305817ce44191e33ef361b48d1e39fabf11a59edfd9e6"
+  },
+  "input_selection_evidence": {
+    "formal_report": "docs/course-experiments/results/real_modal.json",
+    "formal_report_sha256": "450ab9f82d9c3116b42ccbab7bd63f9f14c633259d14bf5ed88bbdb65dd4ac93",
+    "fashion_custom_test_record": {
+      "modality": "vision",
+      "image": "/course/course-v1/unpacked-assets/vision-initial/images/fashion-train-00044-label-9.png",
+      "question": "clothing?",
+      "answer": "Ankle boot",
+      "family": "fashion-train-00044-label-9.png",
+      "image_sha256": "fb07148928a520cb77de452af2cf79e12ca95cf0e2d0b43003bf5c5fe5cd6435"
+    },
+    "audio_custom_test_record": {
+      "modality": "audio",
+      "audio": "/course/course-v1/real_modal/resampled/0_theo_5.wav",
+      "question": "digit?",
+      "answer": "0",
+      "family": "0_theo_5.wav",
+      "derived_sha256": "92a0e6ce0f4664f22efdc01a1e9eae6aea8e348e5a913d01766b6df53e6e3f45"
+    },
+    "audio_scope": "CLI starts from the original 8 kHz PCM16 recording and uses the declared resampling flag; the formal test record points to a derived 16 kHz FLOAT WAV, so its file hash is different."
+  },
+  "input_sha256": {
+    "outputs/course-student/ocr-42.png": "70b59201b689d758fa9245a50c6180088b7fa1b070dfc38435ac7038e637ffb7",
+    "outputs/course-student/real-modal/vision-initial/images/fashion-train-00044-label-9.png": "fb07148928a520cb77de452af2cf79e12ca95cf0e2d0b43003bf5c5fe5cd6435",
+    "outputs/course-student/real-modal/fsdd-initial/recordings/0_theo_5.wav": "3638ff7ee910faebc5f8615f52ced44609bbfc5b650a1c0fa4579944094e3dd8"
+  },
+  "checkpoint_sha256": {
+    "checkpoints/course/ocr/model.pt": "ffbec1ca9affb7c53ea3133464f3b60a84c315cf2e4f8dadb108f8b3876a0dcf",
+    "checkpoints/course/real_modal/fashion-mnist.pt": "2c9a795b838fb06bb287ce704570588783d42470a71e51ddf444d3a34da545a8",
+    "checkpoints/course/real_modal/fsdd.pt": "a80abb51f06dc935e35f5fcede478474bf4ede11b9e250e16421abedecbb3fb5",
+    "checkpoints/course/style/content.pt": "57a49e9bcdfb1e411d9a64c683bae90ad1fba41072bace0f1bd68e0e1f3a35f6",
+    "checkpoints/course/lora/adapter-concise.pt": "a17192b40050ea891063a4e29255fee3c77783800be58b5187662853337703fa",
+    "checkpoints/course/lora/adapter-vivid.pt": "dd2525010901218db8bd90fa5ab0e863e10424b2bddb8ec13515bc4c49abbfbe"
+  },
+  "commands": [
+    {
+      "command": [
+        "/workspace/tiny-perceptron-vlm/.venv/bin/python",
+        "scripts/infer_modal.py",
+        "checkpoints/course/ocr/model.pt",
+        "--image",
+        "/workspace/tiny-perceptron-vlm/outputs/course-student/ocr-42.png",
+        "--prompt",
+        "read digits",
+        "--tokens",
+        "5",
+        "--device",
+        "cpu"
+      ],
+      "returncode": 0,
+      "stdout": "{\"task\": \"vision\", \"prompt\": \"read digits\", \"answer\": \"42\", \"generated_ids\": [60, 58, 2], \"eos\": true, \"invalid_special_tokens\": [], \"valid_answer_tokens\": true, \"generation_status\": \"eos\", \"input_sources\": {\"image\": {\"type\": \"file\", \"path\": \"/workspace/tiny-perceptron-vlm/outputs/course-student/ocr-42.png\", \"resized_to\": [16, 16]}}, \"visual_tokens\": 16, \"checkpoint_metadata\": {\"experiment\": \"model\", \"scope\": \"one/two digit strings in a fixed 5x7 font, not handwriting or documents\"}, \"note\": \"合成 scene/tone 是操作練習，不能當作真實圖片、數字語音或音效辨識的評估結果。\"}\n",
+      "stderr": "",
+      "stdout_sha256": "4564e96476d196a3ce580d72ab34d719789fb6ff66bbd33a89c5d07abd7fc6f7",
+      "output": {
+        "task": "vision",
+        "prompt": "read digits",
+        "answer": "42",
+        "generated_ids": [
+          60,
+          58,
+          2
+        ],
+        "eos": true,
+        "invalid_special_tokens": [],
+        "valid_answer_tokens": true,
+        "generation_status": "eos",
+        "input_sources": {
+          "image": {
+            "type": "file",
+            "path": "/workspace/tiny-perceptron-vlm/outputs/course-student/ocr-42.png",
+            "resized_to": [
+              16,
+              16
+            ]
+          }
+        },
+        "visual_tokens": 16,
+        "checkpoint_metadata": {
+          "experiment": "model",
+          "scope": "one/two digit strings in a fixed 5x7 font, not handwriting or documents"
+        },
+        "note": "合成 scene/tone 是操作練習，不能當作真實圖片、數字語音或音效辨識的評估結果。"
+      },
+      "status": "passed",
+      "example": "ocr-fixed-font"
+    },
+    {
+      "command": [
+        "/workspace/tiny-perceptron-vlm/.venv/bin/python",
+        "scripts/infer_modal.py",
+        "checkpoints/course/real_modal/fashion-mnist.pt",
+        "--image",
+        "/workspace/tiny-perceptron-vlm/outputs/course-student/real-modal/vision-initial/images/fashion-train-00044-label-9.png",
+        "--prompt",
+        "clothing?",
+        "--tokens",
+        "32",
+        "--device",
+        "cpu"
+      ],
+      "returncode": 0,
+      "stdout": "{\"task\": \"vision\", \"prompt\": \"clothing?\", \"answer\": \"Ankle boot\", \"generated_ids\": [73, 118, 115, 116, 109, 40, 106, 119, 119, 124, 2], \"eos\": true, \"invalid_special_tokens\": [], \"valid_answer_tokens\": true, \"generation_status\": \"eos\", \"input_sources\": {\"image\": {\"type\": \"file\", \"path\": \"/workspace/tiny-perceptron-vlm/outputs/course-student/real-modal/vision-initial/images/fashion-train-00044-label-9.png\", \"resized_to\": [16, 16]}}, \"visual_tokens\": 16, \"checkpoint_metadata\": {\"experiment\": \"fashion-mnist\", \"scope\": \"Inspect very small real-data training and custom held-out image/speaker evaluation.\"}, \"note\": \"合成 scene/tone 是操作練習，不能當作真實圖片、數字語音或音效辨識的評估結果。\"}\n",
+      "stderr": "",
+      "stdout_sha256": "9d8fdb95e3e918a9d31d4448d75b17329f2998e596d687ddaa958cc8285fca06",
+      "output": {
+        "task": "vision",
+        "prompt": "clothing?",
+        "answer": "Ankle boot",
+        "generated_ids": [
+          73,
+          118,
+          115,
+          116,
+          109,
+          40,
+          106,
+          119,
+          119,
+          124,
+          2
+        ],
+        "eos": true,
+        "invalid_special_tokens": [],
+        "valid_answer_tokens": true,
+        "generation_status": "eos",
+        "input_sources": {
+          "image": {
+            "type": "file",
+            "path": "/workspace/tiny-perceptron-vlm/outputs/course-student/real-modal/vision-initial/images/fashion-train-00044-label-9.png",
+            "resized_to": [
+              16,
+              16
+            ]
+          }
+        },
+        "visual_tokens": 16,
+        "checkpoint_metadata": {
+          "experiment": "fashion-mnist",
+          "scope": "Inspect very small real-data training and custom held-out image/speaker evaluation."
+        },
+        "note": "合成 scene/tone 是操作練習，不能當作真實圖片、數字語音或音效辨識的評估結果。"
+      },
+      "status": "passed",
+      "example": "fashion-heldout-image"
+    },
+    {
+      "command": [
+        "/workspace/tiny-perceptron-vlm/.venv/bin/python",
+        "scripts/infer_modal.py",
+        "checkpoints/course/real_modal/fsdd.pt",
+        "--audio",
+        "/workspace/tiny-perceptron-vlm/outputs/course-student/real-modal/fsdd-initial/recordings/0_theo_5.wav",
+        "--resample-audio",
+        "--prompt",
+        "digit?",
+        "--tokens",
+        "32",
+        "--device",
+        "cpu"
+      ],
+      "returncode": 0,
+      "stdout": "{\"task\": \"audio\", \"prompt\": \"digit?\", \"answer\": \"8\", \"generated_ids\": [64, 2], \"eos\": true, \"invalid_special_tokens\": [], \"valid_answer_tokens\": true, \"generation_status\": \"eos\", \"input_sources\": {\"audio\": {\"type\": \"file\", \"path\": \"/workspace/tiny-perceptron-vlm/outputs/course-student/real-modal/fsdd-initial/recordings/0_theo_5.wav\", \"subtype\": \"PCM_16\", \"sample_rate\": 16000, \"source_sample_rate\": 8000, \"source_samples\": 3311, \"effective_samples\": 6622, \"source_duration_seconds\": 0.413875, \"duration_seconds\": 0.413875, \"resampled\": true, \"resampling_method\": \"windowed-sinc, radius 16, cutoff min(1,target/source)\", \"amplitude_min\": -0.01727294921875, \"amplitude_max\": 0.025406930595636368, \"normalization\": \"integer PCM decoded to normalized floating point; no extra gain adjustment or clipping\"}}, \"visual_tokens\": 0, \"checkpoint_metadata\": {\"experiment\": \"fsdd\", \"scope\": \"Inspect very small real-data training and custom held-out image/speaker evaluation.\"}, \"note\": \"合成 scene/tone 是操作練習，不能當作真實圖片、數字語音或音效辨識的評估結果。\"}\n",
+      "stderr": "",
+      "stdout_sha256": "1f371c66978c5bfbb16af738494b24cd6a86eb23bd83969399bba83e1a4303af",
+      "output": {
+        "task": "audio",
+        "prompt": "digit?",
+        "answer": "8",
+        "generated_ids": [
+          64,
+          2
+        ],
+        "eos": true,
+        "invalid_special_tokens": [],
+        "valid_answer_tokens": true,
+        "generation_status": "eos",
+        "input_sources": {
+          "audio": {
+            "type": "file",
+            "path": "/workspace/tiny-perceptron-vlm/outputs/course-student/real-modal/fsdd-initial/recordings/0_theo_5.wav",
+            "subtype": "PCM_16",
+            "sample_rate": 16000,
+            "source_sample_rate": 8000,
+            "source_samples": 3311,
+            "effective_samples": 6622,
+            "source_duration_seconds": 0.413875,
+            "duration_seconds": 0.413875,
+            "resampled": true,
+            "resampling_method": "windowed-sinc, radius 16, cutoff min(1,target/source)",
+            "amplitude_min": -0.01727294921875,
+            "amplitude_max": 0.025406930595636368,
+            "normalization": "integer PCM decoded to normalized floating point; no extra gain adjustment or clipping"
+          }
+        },
+        "visual_tokens": 0,
+        "checkpoint_metadata": {
+          "experiment": "fsdd",
+          "scope": "Inspect very small real-data training and custom held-out image/speaker evaluation."
+        },
+        "note": "合成 scene/tone 是操作練習，不能當作真實圖片、數字語音或音效辨識的評估結果。"
+      },
+      "status": "passed",
+      "example": "fsdd-heldout-recording"
+    },
+    {
+      "command": [
+        "/workspace/tiny-perceptron-vlm/.venv/bin/python",
+        "scripts/infer.py",
+        "checkpoints/course/style/content.pt",
+        "--adapter",
+        "checkpoints/course/lora/adapter-concise.pt",
+        "--chat",
+        "--prompt",
+        "2+2=?",
+        "--tokens",
+        "96",
+        "--device",
+        "cpu",
+        "--json"
+      ],
+      "returncode": 0,
+      "stdout": "{\"answer\": \"3\", \"generated_ids\": [59, 2], \"eos\": true, \"invalid_special_tokens\": [], \"valid_answer_tokens\": true, \"generation_status\": \"eos\", \"adapter\": {\"path\": \"checkpoints/course/lora/adapter-concise.pt\", \"format_version\": \"lora-v1\", \"base_sha256\": \"4cf7b1e2182ad1edcc028480246baf2fe55d1fe54576c532c63505071b658d98\", \"base_sha256_verified\": true, \"scaling\": \"alpha/rank\", \"modules\": [{\"path\": \"blocks.0.attention.q\", \"rank\": 4, \"alpha\": 4, \"scale\": 1.0}, {\"path\": \"blocks.0.attention.v\", \"rank\": 4, \"alpha\": 4, \"scale\": 1.0}, {\"path\": \"blocks.0.attention.out\", \"rank\": 4, \"alpha\": 4, \"scale\": 1.0}, {\"path\": \"blocks.0.ffn.up\", \"rank\": 4, \"alpha\": 4, \"scale\": 1.0}, {\"path\": \"blocks.0.ffn.down\", \"rank\": 4, \"alpha\": 4, \"scale\": 1.0}, {\"path\": \"blocks.1.attention.q\", \"rank\": 4, \"alpha\": 4, \"scale\": 1.0}, {\"path\": \"blocks.1.attention.v\", \"rank\": 4, \"alpha\": 4, \"scale\": 1.0}, {\"path\": \"blocks.1.attention.out\", \"rank\": 4, \"alpha\": 4, \"scale\": 1.0}, {\"path\": \"blocks.1.ffn.up\", \"rank\": 4, \"alpha\": 4, \"scale\": 1.0}, {\"path\": \"blocks.1.ffn.down\", \"rank\": 4, \"alpha\": 4, \"scale\": 1.0}, {\"path\": \"output\", \"rank\": 4, \"alpha\": 4, \"scale\": 1.0}], \"base_checkpoint\": \"checkpoints/course/style/content.pt\"}}\n",
+      "stderr": "",
+      "stdout_sha256": "9e86e1f4e56f3e9ef7f4a0de8a5ed0364ca7ad45a4ed53b2a6e52e34390bd9be",
+      "output": {
+        "answer": "3",
+        "generated_ids": [
+          59,
+          2
+        ],
+        "eos": true,
+        "invalid_special_tokens": [],
+        "valid_answer_tokens": true,
+        "generation_status": "eos",
+        "adapter": {
+          "path": "checkpoints/course/lora/adapter-concise.pt",
+          "format_version": "lora-v1",
+          "base_sha256": "4cf7b1e2182ad1edcc028480246baf2fe55d1fe54576c532c63505071b658d98",
+          "base_sha256_verified": true,
+          "scaling": "alpha/rank",
+          "modules": [
+            {
+              "path": "blocks.0.attention.q",
+              "rank": 4,
+              "alpha": 4,
+              "scale": 1.0
+            },
+            {
+              "path": "blocks.0.attention.v",
+              "rank": 4,
+              "alpha": 4,
+              "scale": 1.0
+            },
+            {
+              "path": "blocks.0.attention.out",
+              "rank": 4,
+              "alpha": 4,
+              "scale": 1.0
+            },
+            {
+              "path": "blocks.0.ffn.up",
+              "rank": 4,
+              "alpha": 4,
+              "scale": 1.0
+            },
+            {
+              "path": "blocks.0.ffn.down",
+              "rank": 4,
+              "alpha": 4,
+              "scale": 1.0
+            },
+            {
+              "path": "blocks.1.attention.q",
+              "rank": 4,
+              "alpha": 4,
+              "scale": 1.0
+            },
+            {
+              "path": "blocks.1.attention.v",
+              "rank": 4,
+              "alpha": 4,
+              "scale": 1.0
+            },
+            {
+              "path": "blocks.1.attention.out",
+              "rank": 4,
+              "alpha": 4,
+              "scale": 1.0
+            },
+            {
+              "path": "blocks.1.ffn.up",
+              "rank": 4,
+              "alpha": 4,
+              "scale": 1.0
+            },
+            {
+              "path": "blocks.1.ffn.down",
+              "rank": 4,
+              "alpha": 4,
+              "scale": 1.0
+            },
+            {
+              "path": "output",
+              "rank": 4,
+              "alpha": 4,
+              "scale": 1.0
+            }
+          ],
+          "base_checkpoint": "checkpoints/course/style/content.pt"
+        }
+      },
+      "status": "passed",
+      "example": "raw-lora-concise"
+    },
+    {
+      "command": [
+        "/workspace/tiny-perceptron-vlm/.venv/bin/python",
+        "scripts/infer.py",
+        "checkpoints/course/style/content.pt",
+        "--adapter",
+        "checkpoints/course/lora/adapter-vivid.pt",
+        "--chat",
+        "--prompt",
+        "2+2=?",
+        "--tokens",
+        "96",
+        "--device",
+        "cpu",
+        "--json"
+      ],
+      "returncode": 0,
+      "stdout": "{\"answer\": \"3，像把兩組積木合在一起再數。\", \"generated_ids\": [59, 247, 196, 148, 237, 139, 151, 238, 146, 146, 237, 141, 177, 239, 189, 140, 239, 177, 149, 238, 164, 176, 237, 152, 144, 237, 164, 176, 236, 192, 136, 240, 189, 191, 237, 142, 149, 238, 157, 192, 235, 136, 138, 2], \"eos\": true, \"invalid_special_tokens\": [], \"valid_answer_tokens\": true, \"generation_status\": \"eos\", \"adapter\": {\"path\": \"checkpoints/course/lora/adapter-vivid.pt\", \"format_version\": \"lora-v1\", \"base_sha256\": \"4cf7b1e2182ad1edcc028480246baf2fe55d1fe54576c532c63505071b658d98\", \"base_sha256_verified\": true, \"scaling\": \"alpha/rank\", \"modules\": [{\"path\": \"blocks.0.attention.q\", \"rank\": 4, \"alpha\": 4, \"scale\": 1.0}, {\"path\": \"blocks.0.attention.v\", \"rank\": 4, \"alpha\": 4, \"scale\": 1.0}, {\"path\": \"blocks.0.attention.out\", \"rank\": 4, \"alpha\": 4, \"scale\": 1.0}, {\"path\": \"blocks.0.ffn.up\", \"rank\": 4, \"alpha\": 4, \"scale\": 1.0}, {\"path\": \"blocks.0.ffn.down\", \"rank\": 4, \"alpha\": 4, \"scale\": 1.0}, {\"path\": \"blocks.1.attention.q\", \"rank\": 4, \"alpha\": 4, \"scale\": 1.0}, {\"path\": \"blocks.1.attention.v\", \"rank\": 4, \"alpha\": 4, \"scale\": 1.0}, {\"path\": \"blocks.1.attention.out\", \"rank\": 4, \"alpha\": 4, \"scale\": 1.0}, {\"path\": \"blocks.1.ffn.up\", \"rank\": 4, \"alpha\": 4, \"scale\": 1.0}, {\"path\": \"blocks.1.ffn.down\", \"rank\": 4, \"alpha\": 4, \"scale\": 1.0}, {\"path\": \"output\", \"rank\": 4, \"alpha\": 4, \"scale\": 1.0}], \"base_checkpoint\": \"checkpoints/course/style/content.pt\"}}\n",
+      "stderr": "",
+      "stdout_sha256": "d373851af76f55c0ef0eb2ed1d3d4b5127a9e1decb72ea9c949adca82470b0a4",
+      "output": {
+        "answer": "3，像把兩組積木合在一起再數。",
+        "generated_ids": [
+          59,
+          247,
+          196,
+          148,
+          237,
+          139,
+          151,
+          238,
+          146,
+          146,
+          237,
+          141,
+          177,
+          239,
+          189,
+          140,
+          239,
+          177,
+          149,
+          238,
+          164,
+          176,
+          237,
+          152,
+          144,
+          237,
+          164,
+          176,
+          236,
+          192,
+          136,
+          240,
+          189,
+          191,
+          237,
+          142,
+          149,
+          238,
+          157,
+          192,
+          235,
+          136,
+          138,
+          2
+        ],
+        "eos": true,
+        "invalid_special_tokens": [],
+        "valid_answer_tokens": true,
+        "generation_status": "eos",
+        "adapter": {
+          "path": "checkpoints/course/lora/adapter-vivid.pt",
+          "format_version": "lora-v1",
+          "base_sha256": "4cf7b1e2182ad1edcc028480246baf2fe55d1fe54576c532c63505071b658d98",
+          "base_sha256_verified": true,
+          "scaling": "alpha/rank",
+          "modules": [
+            {
+              "path": "blocks.0.attention.q",
+              "rank": 4,
+              "alpha": 4,
+              "scale": 1.0
+            },
+            {
+              "path": "blocks.0.attention.v",
+              "rank": 4,
+              "alpha": 4,
+              "scale": 1.0
+            },
+            {
+              "path": "blocks.0.attention.out",
+              "rank": 4,
+              "alpha": 4,
+              "scale": 1.0
+            },
+            {
+              "path": "blocks.0.ffn.up",
+              "rank": 4,
+              "alpha": 4,
+              "scale": 1.0
+            },
+            {
+              "path": "blocks.0.ffn.down",
+              "rank": 4,
+              "alpha": 4,
+              "scale": 1.0
+            },
+            {
+              "path": "blocks.1.attention.q",
+              "rank": 4,
+              "alpha": 4,
+              "scale": 1.0
+            },
+            {
+              "path": "blocks.1.attention.v",
+              "rank": 4,
+              "alpha": 4,
+              "scale": 1.0
+            },
+            {
+              "path": "blocks.1.attention.out",
+              "rank": 4,
+              "alpha": 4,
+              "scale": 1.0
+            },
+            {
+              "path": "blocks.1.ffn.up",
+              "rank": 4,
+              "alpha": 4,
+              "scale": 1.0
+            },
+            {
+              "path": "blocks.1.ffn.down",
+              "rank": 4,
+              "alpha": 4,
+              "scale": 1.0
+            },
+            {
+              "path": "output",
+              "rank": 4,
+              "alpha": 4,
+              "scale": 1.0
+            }
+          ],
+          "base_checkpoint": "checkpoints/course/style/content.pt"
+        }
+      },
+      "status": "passed",
+      "example": "raw-lora-vivid"
+    }
+  ],
+  "preparation": [
+    "python scripts/fetch_training_assets.py --asset fashion-mnist --asset fsdd --output outputs/course-student/real-modal",
+    "from scripts.prepare_ocr import draw_digits; draw_digits('42').save('outputs/course-student/ocr-42.png')"
+  ],
+  "status": "passed"
+}

@@ -1,0 +1,36 @@
+from pathlib import Path
+import hashlib, json
+p=Path("docs/course-experiments/results/moe.json")
+d=json.loads(p.read_text())
+result={"result_path":str(p),"result_sha256":hashlib.sha256(p.read_bytes()).hexdigest(),"revision":d["revision"],"seed":d["seed"],"device":d["device"],"torch_version":d["torch_version"],"python_version":d["python_version"],"evidence_status":d["evidence_status"],"status":d["status"],"unfinished_schedules":d["unfinished_schedules"],"variant_count":len(d["results"]["variants"]),"variants":{},"code_hashes":{},"capacity_policy_keys":[]}
+for name,v in d["results"]["variants"].items():
+    result["variants"][name]={"model_config":v["model"]["config"],"training":{k:v["training"][k] for k in ["requested_steps","steps","optimizer_updates","status","auxiliary_weight"]},"validation_effective_tokens":v["heldout"]["validation"]["effective_tokens"],"validation_routing":v["validation_routing"]}
+for f in ["tiny_perceptron/modern.py","tiny_perceptron/model.py","scripts/course_experiments/architecture.py"]:
+    actual=hashlib.sha256(Path(f).read_bytes()).hexdigest()
+    result["code_hashes"][f]={"current_sha256":actual,"frozen_sha256":d["code_sha256"][f],"match":actual==d["code_sha256"][f]}
+fp=Path("/tmp/15.12-frozen-architecture.py")
+actual=hashlib.sha256(fp.read_bytes()).hexdigest()
+assert actual==d["code_sha256"]["scripts/course_experiments/architecture.py"]
+result["frozen_architecture_download_sha256"]=actual
+result["frozen_architecture_url"]="https://raw.githubusercontent.com/birdhackor/tiny-perceptron-vlm/"+d["revision"]+"/scripts/course_experiments/architecture.py"
+def find(x,path=""):
+    if isinstance(x,dict):
+        for k,v in x.items():
+            if any(t in k.lower() for t in ["capacity","drop","overflow","fallback","rerout"]):
+                result["capacity_policy_keys"].append(path+"."+k)
+            find(v,path+"."+k)
+    elif isinstance(x,list):
+        for i,v in enumerate(x):find(v,path+"["+str(i)+"]")
+find(d)
+assert len(result["variants"])==7
+assert result["capacity_policy_keys"]==[]
+for name,v in result["variants"].items():
+    assert v["training"]["steps"]==180
+    routing=v["validation_routing"]
+    if routing:
+        k=v["model_config"]["top_k"]
+        assert routing["effective_input_tokens"]==39256
+        for layer in routing["layers"]:
+            assert sum(layer["dispatch_counts"])==39256*k==layer["dispatch_denominator"]
+result["scope"]="只讀凍結原始結果與配置/實作版本核對；沒有重跑正式訓練，亦不把分派統計當已drop後的工作數。"
+print(json.dumps(result,ensure_ascii=False,indent=2))

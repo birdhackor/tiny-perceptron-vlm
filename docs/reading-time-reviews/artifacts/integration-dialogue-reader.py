@@ -1,0 +1,151 @@
+"""Audit helper: prints full assigned snapshots and hashes, never assigns minutes."""
+
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+ROOT = Path("/workspace/tiny-perceptron-vlm")
+STATE = ROOT / "docs/reading-time-reviews/artifacts/integration-dialogue-evidence.json"
+SHARD = ROOT / "outputs/reading-time/shards/dialogue.json"
+shard = json.loads(SHARD.read_text())
+pages = {p["page_id"]: p for p in shard["pages"]}
+rendered = {
+    r["page_id"]: r for r in json.loads((ROOT / "outputs/reading-time/rendered/manifest.json").read_text())["records"]
+}
+figures = {
+    r["source"]: r for r in json.loads((ROOT / "outputs/reading-time/figures/manifest.json").read_text())["records"]
+}
+
+
+def sha(path):
+    return hashlib.sha256((ROOT / path).read_bytes()).hexdigest()
+
+
+state = (
+    json.loads(STATE.read_text())
+    if STATE.exists()
+    else {
+        "reviewer_task": "/root/reading_time_dialogue_fresh",
+        "frozen_shard_sha256": sha(SHARD),
+        "frozen_inventory_sha256": shard["frozen_inventory_sha256"],
+        "estimate_kind": "ai_estimate",
+        "reader_profile": "數學不錯高中生或基本數學但不熟的大學生，無repo背景",
+        "scope_includes": [
+            "完整正文、表、公式、練習題目的理解",
+            "已展示示例程式與CPU輸出",
+            "SVG XML與root先渲染、本人本輪親看PNG",
+            "短暫理解思考與合理數學停頓",
+        ],
+        "scope_excludes": [
+            "安裝下載與環境配置實作",
+            "改寫或執行程式",
+            "練習實操",
+            "等待training",
+            "額外補前置頁",
+            "完整讀引用論文",
+        ],
+        "read_sequence": [],
+        "source_receipts": {},
+        "figure_view_receipts": {},
+        "manual_estimates": [],
+        "pending_issues": [],
+    }
+)
+mode = sys.argv[1]
+if mode in ("read", "record-read"):
+    for id in sys.argv[2:]:
+        p = pages[id]
+        assert sha(p["snapshot"]) == p["source_sha256"]
+        receipt = {
+            "page_id": id,
+            "snapshot": p["snapshot"],
+            "source_sha256": sha(p["snapshot"]),
+            "source_range": "complete authored snapshot",
+            "rendered": None,
+        }
+        if mode == "read":
+            print(
+                "\nPAGE", id, "COMPLETE_SOURCE_START\n" + (ROOT / p["snapshot"]).read_text() + "\nCOMPLETE_SOURCE_END"
+            )
+        r = rendered.get(id)
+        if r:
+            assert sha(r["supplement"]) == r["supplement_sha256"]
+            chapter = id.split(".")[0]
+            folder = chapter.zfill(2) if chapter.isdigit() else "0" + chapter
+            authored = f"notebooks/{folder}/{id}.ipynb"
+            executed = f"outputs/integration-notebooks/{folder}/{id}.ipynb"
+            assert sha(authored) == r["authored_notebook_sha256"], authored
+            assert sha(executed) == r["executed_notebook_sha256"], executed
+            receipt["rendered"] = {
+                **r,
+                "authored_notebook": authored,
+                "executed_notebook": executed,
+                "hash_verification": "all three actual files match manifest",
+            }
+            if mode == "read":
+                print(
+                    "COMPLETE_SUPPLEMENT_START\n" + (ROOT / r["supplement"]).read_text() + "\nCOMPLETE_SUPPLEMENT_END"
+                )
+        elif mode == "read":
+            print("NO_RENDERED_SUPPLEMENT")
+        state["source_receipts"][id] = receipt
+        state["read_sequence"].append(
+            {
+                "page_id": id,
+                "action": "full source and existing supplement read",
+                "source_sha256": receipt["source_sha256"],
+                "supplement_sha256": r["supplement_sha256"] if r else None,
+            }
+        )
+elif mode == "figure":
+    for source in sys.argv[2:]:
+        r = figures[source]
+        assert sha(source) == r["source_sha256"]
+        assert sha(r["render"]) == r["render_sha256"]
+        print("FIGURE_RECORD", json.dumps(r, ensure_ascii=False))
+        print("COMPLETE_XML_START\n" + (ROOT / source).read_text() + "\nCOMPLETE_XML_END")
+        state["figure_view_receipts"][source] = {
+            **r,
+            "xml_read": True,
+            "root_rendered_before_this_review": True,
+            "personally_viewed_this_round": False,
+        }
+elif mode == "viewed":
+    for source in sys.argv[2:]:
+        r = state["figure_view_receipts"][source]
+        r["personally_viewed_this_round"] = True
+        r["view_command"] = 'tools.view_image({path:"' + str(ROOT / r["render"]) + '"})'
+        state["read_sequence"].append(
+            {
+                "action": "personally viewed root-rendered PNG after full XML read",
+                "figure_source": source,
+                "render_sha256": r["render_sha256"],
+            }
+        )
+elif mode == "save":
+    for item in json.load(sys.stdin):
+        id = item["page_id"]
+        assert id in state["source_receipts"]
+        assert id not in [x["page_id"] for x in state["manual_estimates"]]
+        assert (
+            type(item["minutes_min"]) is int and item["minutes_min"] > 0 and item["minutes_max"] >= item["minutes_min"]
+        )
+        item.update(
+            {
+                "reviewer_task": state["reviewer_task"],
+                "source_sha256": state["source_receipts"][id]["source_sha256"],
+                "figures_sha256": pages[id]["figures_sha256"],
+            }
+        )
+        for source, h in item["figures_sha256"].items():
+            assert (
+                state["figure_view_receipts"][source]["personally_viewed_this_round"]
+                and state["figure_view_receipts"][source]["source_sha256"] == h
+            )
+        state["manual_estimates"].append(item)
+    print("SAVED_MANUAL_PAGES", len(state["manual_estimates"]))
+else:
+    raise ValueError(mode)
+STATE.parent.mkdir(parents=True, exist_ok=True)
+STATE.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n")

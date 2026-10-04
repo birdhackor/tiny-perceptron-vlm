@@ -1,0 +1,102 @@
+"""Record this reviewer's reads and hashes; never calculate reading estimates."""
+import hashlib
+import json
+from pathlib import Path
+import sys
+
+ROOT = Path('/workspace/tiny-perceptron-vlm')
+SHARD = ROOT / 'outputs/reading-time/shards/compression.json'
+EVIDENCE = ROOT / 'docs/reading-time-reviews/artifacts/integration-compression-evidence.json'
+REPORT = ROOT / 'docs/reading-time-reviews/integration-compression.json'
+TASK = '/root/reading_time_compression_fresh'
+
+def sha(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+shard = json.loads(SHARD.read_text())
+by_id = {p['page_id']: p for p in shard['pages']}
+if EVIDENCE.exists():
+    evidence = json.loads(EVIDENCE.read_text())
+else:
+    evidence = dict(schema_version=1, estimate_kind='ai_estimate', reviewer_task=TASK,
+        frozen_shard_sha256=sha(SHARD), frozen_inventory_sha256=shard['frozen_inventory_sha256'],
+        audience='數學不錯高中生或有基本但不熟數學的大學生；無 repo 背景。',
+        scope_included=['全部指定 frozen authored snapshots', '網站可見 code/CPU output supplements', '正文圖表', '理解練習題目', '短暫停下思考'],
+        scope_excluded=['安裝與下載', '自行修改或執行 code', '練習實操', '等待 training', '另補前置頁', '全文讀引用論文'],
+        independent_review='未讀其他估值、私人作者訊息或額外審查報告；公開 validation 正文照分配完整讀。',
+        read_sequence=[], figure_views=[], pages=[], unresolved=[])
+
+def save():
+    EVIDENCE.write_text(json.dumps(evidence, ensure_ascii=False, indent=2)+'\n')
+
+action = sys.argv[1]
+if action == 'read':
+    manifests = json.loads((ROOT/'outputs/reading-time/rendered/manifest.json').read_text())['records']
+    rendered = {r['page_id']: r for r in manifests}
+    for page_id in sys.argv[2:]:
+        p = by_id[page_id]
+        f = ROOT/p['snapshot']
+        digest = sha(f)
+        assert digest == p['source_sha256']
+        print(f'\n===== {page_id} SOURCE {p["snapshot"]} SHA {digest} =====\n')
+        print(f.read_text(), end='')
+        evidence['read_sequence'].append(dict(page_id=page_id, kind='source', path=p['snapshot'], source_sha256=digest, range='complete file, beginning through EOF', command='python docs/reading-time-reviews/artifacts/integration-compression-helper.py '+' '.join(sys.argv[1:])))
+        supplement = ROOT/f'outputs/reading-time/rendered/{page_id}.md'
+        if supplement.exists():
+            r = rendered[page_id]
+            assert sha(supplement) == r['supplement_sha256']
+            chapter = page_id.split('.')[0].zfill(2)
+            a = ROOT/f'notebooks/{chapter}/{page_id}.ipynb'
+            x = ROOT/f'outputs/integration-notebooks/{chapter}/{page_id}.ipynb'
+            assert sha(a) == r['authored_notebook_sha256'], (page_id,'authored notebook mismatch')
+            assert sha(x) == r['executed_notebook_sha256'], (page_id,'executed notebook mismatch')
+            print(f'\n===== {page_id} VISIBLE CODE/CPU OUTPUT; MANIFEST HASHES VERIFIED =====\n')
+            print(supplement.read_text(), end='')
+            evidence['read_sequence'].append(dict(kind='rendered_supplement', path=str(supplement.relative_to(ROOT)), range='complete file, beginning through EOF', **r))
+        else:
+            evidence['read_sequence'].append(dict(page_id=page_id, kind='rendered_supplement_absent', checked_path=str(supplement.relative_to(ROOT))))
+        save()
+elif action == 'read-range':
+    page_id,start,end = sys.argv[2],int(sys.argv[3]),int(sys.argv[4])
+    p = by_id[page_id]; f=ROOT/p['snapshot']; digest=sha(f)
+    assert digest==p['source_sha256']
+    lines=f.read_text().splitlines(keepends=True)
+    if end==0: end=len(lines)
+    assert 1<=start<=end<=len(lines)
+    print(f'===== {page_id} SOURCE lines {start}-{end} / {len(lines)} SHA {digest} =====')
+    print(''.join(lines[start-1:end]),end='')
+    evidence['read_sequence'].append(dict(page_id=page_id,kind='source',path=p['snapshot'],source_sha256=digest,range=f'lines {start}-{end}',total_lines=len(lines),command='python docs/reading-time-reviews/artifacts/integration-compression-helper.py '+' '.join(sys.argv[1:])))
+    save()
+elif action == 'figures':
+    fm={r['source']:r for r in json.loads((ROOT/'outputs/reading-time/figures/manifest.json').read_text())['records']}
+    for page_id in sys.argv[2:]:
+        for path,digest in by_id[page_id]['figures_sha256'].items():
+            r=fm[path]; f=ROOT/path; png=ROOT/r['render']
+            assert sha(f)==digest==r['source_sha256']
+            assert sha(png)==r['render_sha256']
+            print(f'\n===== {page_id} FIGURE XML {path}; SVG AND ROOT-RENDERED PNG HASH VERIFIED =====\n')
+            print(f.read_text(),end='')
+            print('\nPNG:',png,'SHA:',sha(png))
+            evidence['read_sequence'].append(dict(page_id=page_id,kind='figure_xml',path=path,range='complete XML',source_sha256=digest,root_render_manifest=r))
+            save()
+elif action == 'save-batch':
+    entries=json.loads(sys.stdin.read())
+    report=json.loads(REPORT.read_text()) if REPORT.exists() else dict(schema_version=1,estimate_kind='ai_estimate',pages=[])
+    for entry in entries:
+        page_id=entry['page_id']; p=by_id[page_id]
+        assert not any(x['page_id']==page_id for x in report['pages'])
+        assert isinstance(entry['minutes_min'],int) and entry['minutes_min']>0
+        assert isinstance(entry['minutes_max'],int) and entry['minutes_max']>=entry['minutes_min']
+        assert any(x['page_id']==page_id and x['kind']=='source' for x in evidence['read_sequence'])
+        summary=entry.pop('reader_summary')
+        report['pages'].append(dict(**entry,reviewer_task=TASK,source_sha256=p['source_sha256'],figures_sha256=p['figures_sha256']))
+        evidence['pages'].append(dict(page_id=page_id,reader_summary=summary,chosen_minutes_min=entry['minutes_min'],chosen_minutes_max=entry['minutes_max'],reason=entry['reason'],source_sha256=p['source_sha256'],figures_sha256=p['figures_sha256']))
+    REPORT.write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n'); save()
+    print('Saved manually chosen pages:',[x['page_id'] for x in entries])
+elif action == 'view-receipts':
+    entries=json.loads(sys.stdin.read())
+    for e in entries:
+        e['viewer_task']=TASK
+        e['statement']='root rendered this PNG earlier; I personally viewed the image in this reading round using tools.view_image.'
+        evidence['figure_views'].append(e)
+    save()

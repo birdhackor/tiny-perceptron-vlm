@@ -1,0 +1,189 @@
+URL: https://raw.githubusercontent.com/pytorch/pytorch/5c4886908584029761b579af026dcfb627c84070/torch/optim/sgd.py
+Version: 2.14.1+cpu; commit: 5c4886908584029761b579af026dcfb627c84070
+
+SGD; original lines 28-152
+   28: class SGD(Optimizer):
+   29:     def __init__(
+   30:         self,
+   31:         params: ParamsT,
+   32:         lr: float | Tensor = 1e-3,
+   33:         momentum: float = 0,
+   34:         dampening: float = 0,
+   35:         weight_decay: float | Tensor = 0,
+   36:         nesterov: bool = False,
+   37:         *,
+   38:         maximize: bool = False,
+   39:         foreach: bool | None = None,
+   40:         differentiable: bool = False,
+   41:         fused: bool | None = None,
+   42:     ) -> None:
+   43:         if isinstance(lr, Tensor) and lr.numel() != 1:
+   44:             raise ValueError("Tensor lr must be 1-element")
+   45:         if lr < 0.0:
+   46:             raise ValueError(f"Invalid learning rate: {lr}")
+   47:         if momentum < 0.0:
+   48:             raise ValueError(f"Invalid momentum value: {momentum}")
+   49:         if weight_decay < 0.0:
+   50:             raise ValueError(f"Invalid weight_decay value: {weight_decay}")
+   51: 
+   52:         defaults = {
+   53:             "lr": lr,
+   54:             "momentum": momentum,
+   55:             "dampening": dampening,
+   56:             "weight_decay": weight_decay,
+   57:             "nesterov": nesterov,
+   58:             "maximize": maximize,
+   59:             "foreach": foreach,
+   60:             "differentiable": differentiable,
+   61:             "fused": fused,
+   62:         }
+   63:         if nesterov and (momentum <= 0 or dampening != 0):
+   64:             raise ValueError("Nesterov momentum requires a momentum and zero dampening")
+   65:         super().__init__(params, defaults)
+   66: 
+   67:         if fused:
+   68:             self._step_supports_amp_scaling = True
+   69:             self._need_device_dtype_check_for_fused = True
+   70:             if differentiable:
+   71:                 raise RuntimeError("`fused` does not support `differentiable`")
+   72:             if foreach:
+   73:                 raise RuntimeError("`fused` and `foreach` cannot be `True` together.")
+   74: 
+   75:     def __setstate__(self, state):
+   76:         super().__setstate__(state)
+   77:         for group in self.param_groups:
+   78:             group.setdefault("nesterov", False)
+   79:             group.setdefault("maximize", False)
+   80:             group.setdefault("foreach", None)
+   81:             group.setdefault("differentiable", False)
+   82:             group.setdefault("fused", False)
+   83: 
+   84:     def _init_group(self, group, params, grads, momentum_buffer_list):
+   85:         has_sparse_grad = False
+   86: 
+   87:         for p in group["params"]:
+   88:             if p.grad is not None:
+   89:                 if group["fused"] and getattr(
+   90:                     self, "_need_device_dtype_check_for_fused", True
+   91:                 ):
+   92:                     _device_dtype_check_for_fused(p)
+   93:                     self._need_device_dtype_check_for_fused = False
+   94:                 params.append(p)
+   95:                 grads.append(p.grad)
+   96:                 if p.grad.is_sparse:
+   97:                     has_sparse_grad = True
+   98: 
+   99:                 if group["momentum"] != 0:
+  100:                     state = self.state[p]
+  101:                     momentum_buffer_list.append(state.get("momentum_buffer"))
+  102: 
+  103:         return has_sparse_grad
+  104: 
+  105:     @_use_grad_for_differentiable
+  106:     def step(self, closure=None):
+  107:         """Perform a single optimization step.
+  108: 
+  109:         Args:
+  110:             closure (Callable, optional): A closure that reevaluates the model
+  111:                 and returns the loss.
+  112:         """
+  113:         loss = None
+  114:         if closure is not None:
+  115:             with torch.enable_grad():
+  116:                 loss = closure()
+  117: 
+  118:         for group in self.param_groups:
+  119:             params: list[Tensor] = []
+  120:             grads: list[Tensor] = []
+  121:             momentum_buffer_list: list[Tensor | None] = []
+  122: 
+  123:             has_sparse_grad = self._init_group(
+  124:                 group, params, grads, momentum_buffer_list
+  125:             )
+  126: 
+  127:             sgd(
+  128:                 params,
+  129:                 grads,
+  130:                 momentum_buffer_list,
+  131:                 weight_decay=group["weight_decay"],
+  132:                 momentum=group["momentum"],
+  133:                 lr=group["lr"],
+  134:                 dampening=group["dampening"],
+  135:                 nesterov=group["nesterov"],
+  136:                 maximize=group["maximize"],
+  137:                 has_sparse_grad=has_sparse_grad,
+  138:                 foreach=group["foreach"],
+  139:                 fused=group["fused"],
+  140:                 grad_scale=getattr(self, "grad_scale", None),
+  141:                 found_inf=getattr(self, "found_inf", None),
+  142:             )
+  143: 
+  144:             if group["momentum"] != 0:
+  145:                 # update momentum_buffers in state
+  146:                 for p, momentum_buffer in zip(
+  147:                     params, momentum_buffer_list, strict=True
+  148:                 ):
+  149:                     state = self.state[p]
+  150:                     state["momentum_buffer"] = momentum_buffer
+  151: 
+  152:         return loss
+
+_single_tensor_sgd; original lines 322-379
+  322: def _single_tensor_sgd(
+  323:     params: list[Tensor],
+  324:     grads: list[Tensor],
+  325:     momentum_buffer_list: list[Tensor | None],
+  326:     grad_scale: Tensor | None,
+  327:     found_inf: Tensor | None,
+  328:     *,
+  329:     weight_decay: float,
+  330:     momentum: float,
+  331:     lr: float | Tensor,
+  332:     dampening: float,
+  333:     nesterov: bool,
+  334:     maximize: bool,
+  335:     has_sparse_grad: bool,
+  336: ) -> None:
+  337:     if grad_scale is not None or found_inf is not None:
+  338:         raise AssertionError("Expected grad_scale and found_inf to be None")
+  339: 
+  340:     if not torch.jit.is_scripting():
+  341:         lr = _to_scalar(lr)
+  342: 
+  343:     for i, param in enumerate(params):
+  344:         grad = grads[i] if not maximize else -grads[i]
+  345: 
+  346:         if weight_decay != 0:
+  347:             # Nested if is necessary to bypass jitscript rules
+  348:             if isinstance(weight_decay, Tensor):
+  349:                 if weight_decay.requires_grad:
+  350:                     # usually this is the differentiable path, which is why the param.clone() is needed
+  351:                     grad = grad.addcmul_(param.clone(), weight_decay)
+  352:                 else:
+  353:                     grad = grad.add(param, alpha=weight_decay)
+  354:             else:
+  355:                 grad = grad.add(param, alpha=weight_decay)
+  356: 
+  357:         if momentum != 0:
+  358:             buf = momentum_buffer_list[i]
+  359: 
+  360:             if buf is None:
+  361:                 buf = grad.detach().clone()
+  362:                 momentum_buffer_list[i] = buf
+  363:             else:
+  364:                 buf.mul_(momentum).add_(grad, alpha=1 - dampening)
+  365: 
+  366:             if nesterov:
+  367:                 grad = grad.add(buf, alpha=momentum)
+  368:             else:
+  369:                 grad = buf
+  370: 
+  371:         # Nested if is necessary to bypass jitscript rules
+  372:         if isinstance(lr, Tensor):
+  373:             if lr.requires_grad:
+  374:                 param.addcmul_(grad, lr, value=-1)
+  375:             else:
+  376:                 # pyrefly: ignore [bad-argument-type]
+  377:                 param.add_(grad, alpha=-lr)
+  378:         else:
+  379:             param.add_(grad, alpha=-lr)
