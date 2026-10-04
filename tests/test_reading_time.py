@@ -245,6 +245,8 @@ def test_export_uses_estimates_for_each_page_and_stops_before_writing_stale_data
     root, index, documents = source_tree
     monkeypatch.setattr(export_course, "ROOT", root)
     monkeypatch.setattr(export_course, "DOCUMENTS", documents)
+    # This test simulates the site builder; its optional distribution is not a CPU-test dependency.
+    monkeypatch.setattr(export_course, "version", lambda package: "0.0.0-test")
     (root / "course/lesson-index.json").write_text(json.dumps(index))
     (root / "notebooks/01").mkdir(parents=True)
     for item in index:
