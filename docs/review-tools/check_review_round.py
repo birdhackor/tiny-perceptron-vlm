@@ -10,11 +10,28 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 BASELINE = ROOT / "docs/course-experiments/review-round-baseline.json"
+ADDITIONS = ROOT / "docs/course-experiments/review-round-additions.json"
 FRONT_MATTER = ("README.md", "first-steps.md", "training.md", "glossary.md")
 
 
 def digest(raw):
     return hashlib.sha256(raw).hexdigest()
+
+
+def expected_inventory(baseline, additions):
+    """保留原審閱基準，新增範圍需另列；不製造不存在的舊報告。"""
+    original = set(baseline["records"])
+    if additions.get("baseline_revision") != baseline["baseline_revision"]:
+        raise ValueError("新增範圍必須對應保留的原基準版本")
+    sections = additions.get("sections", {})
+    if not isinstance(sections, dict) or original & set(sections):
+        raise ValueError("新增範圍必須是新小節，不能覆蓋原基準")
+    for lesson, item in sections.items():
+        if not re.fullmatch(r"[A-Z\d]+\.\d+", lesson) or not isinstance(item, dict):
+            raise ValueError("新增範圍需有明確小節編號與來源")
+        if not item.get("source", "").endswith(f"#{lesson}") or not item.get("reason", "").strip():
+            raise ValueError("新增範圍需列來源與新增理由")
+    return original | set(sections)
 
 
 def main():
@@ -23,6 +40,8 @@ def main():
     parser.add_argument("--output", type=Path, help="通過後才保存版本與身分核對紀錄")
     args = parser.parse_args()
     baseline = json.loads(BASELINE.read_bytes())
+    additions = json.loads(ADDITIONS.read_bytes())
+    expected = expected_inventory(baseline, additions)
     old_tasks = {r["reviewer_task"] for r in baseline["records"].values()}
     sources = sorted((ROOT / "course/chapters").glob("*.md"))
     sources += [ROOT / "course" / p for p in FRONT_MATTER]
@@ -65,8 +84,15 @@ def main():
                     errors.append(f"{lesson}/{stage}: 不是全新技術審閱背景")
                 item[stage] = {"reviewer_task": task, "report_sha256": digest(report_raw)}
             records.append(item)
-    if {r["lesson_id"] for r in records} != set(baseline["records"]):
-        errors.append("目前小節清單與本輪基準不同；需檢查新增／刪除的範圍")
+    if {r["lesson_id"] for r in records} != expected:
+        errors.append("目前小節清單與原基準加明列新增範圍不同；不能略過原節或未登記的新節")
+    for lesson, item in additions["sections"].items():
+        if not any(
+            f"{source.relative_to(ROOT).as_posix()}#{lesson}" == item["source"]
+            for source in sources
+            if re.search(rf"(?m)^## {re.escape(lesson)} ", source.read_text(encoding="utf-8"))
+        ):
+            errors.append(f"{lesson}: 新增範圍的来源與正文不一致")
     if tasks["reader"] & tasks["technical"]:
         errors.append("技術審閱沿用了本輪讀者審閱身分")
     if errors:
@@ -81,6 +107,7 @@ def main():
         "checkout_revision": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
         "baseline_revision": baseline["baseline_revision"],
         "baseline_sha256": digest(BASELINE.read_bytes()),
+        "additions_sha256": digest(ADDITIONS.read_bytes()),
         "verification_program_sha256": digest(Path(__file__).read_bytes()),
         "sections": len(records),
         "reader_tasks": len(tasks["reader"]),

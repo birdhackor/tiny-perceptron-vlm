@@ -41,6 +41,6 @@ python scripts/fetch_training_assets.py --asset all
 
 TinyStories／唐詩的`text` JSONL可用文字入口；UltraChat的`messages`、UltraFeedback的`chosen/rejected`與GSM8K的`question/answer`可對應SFT／偏好資料讀法。原始包保留上游格式，不替不同任務偷偷重寫標註；Fashion-MNIST、FSDD與安全比較資料須依對應章節明確轉換。
 
-自己開新實驗時，仍需按完整故事、詩、題目、圖片及近重複家族建立不洩漏的holdout。課程30組正式實驗已由配對入口建立各自的切分、轉換與指紋，詳見[實驗紀錄](../../docs/course-experiments/README.md)；包中的上游training身份與課程自訂留出側是兩件事。較偏好／較安全的回答不自動等於安全SFT正例。教材主線的離線小實驗仍用規則生成器，下載本資料不是執行222份Notebook的必要條件。
+自己開新實驗時，仍需按完整故事、詩、題目、圖片及近重複家族建立不洩漏的holdout。課程30組正式實驗已由配對入口建立各自的切分、轉換與指紋，詳見[實驗紀錄](../../docs/course-experiments/README.md)；包中的上游training身份與課程自訂留出側是兩件事。較偏好／較安全的回答不自動等於安全SFT正例。教材主線的離線小實驗仍用規則生成器，下載本資料不是執行各節Notebook的必要條件。
 
 若要重建同一快照，先解包全部資料，再執行`python scripts/build_training_assets.py --source data/training --output outputs/rebuilt-training-assets`；壓縮包不包含時間戳差異，可比對manifest SHA-256。每次實質改動發布新版本，不覆蓋v1。
