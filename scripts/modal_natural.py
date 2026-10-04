@@ -591,7 +591,7 @@ def execute_stage(stage, batch_id, run_id, revision, manifest_sha, options):
     if stage in ("baseline", "validation", "evaluate"):
         args.extend(["--split", "test" if stage == "evaluate" else "validation", "--max-new-tokens", "384"])
     if stage == "train":
-        args.extend(["--steps", str(options["steps"]), "--checkpoint-every", "25"])
+        args.extend(["--steps", str(options["steps"]), "--checkpoint-every", "25", "--learning-rate", "0.00003"])
     if stage == "external_ocr":
         args.extend(["--split", "test", "--max-new-tokens", "384"])
     if stage == "external_prepare":
