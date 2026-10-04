@@ -783,7 +783,7 @@ efficiency正式組先載入[T.4](#T.4)的`sft/model.pt`與同目錄`dataset.jso
 
 上述記憶體數字只計PyTorch在目前訓練程序中交給tensor使用的GPU空間。driver是GPU驅動程式，也就是讓作業系統與GPU溝通的軟體；它本身的用量不在這個數字中。PyTorch留著準備再用、當時沒有交給tensor的空間，稱為未使用的reserved空間，也不在其中。本輪另用Inductor這個PyTorch編譯工具，把運算轉成可執行的程式；這項工作由另一個獨立程序執行，該程序的用量沒有算進上述訓練峰值。
 
-後面以MiB列量，1 MiB是2²⁰ bytes。這個範圍可對照[2.14的max_memory_allocated文件](https://docs.pytorch.org/docs/2.14/generated/torch.cuda.max_memory_allocated.html)，不能把外層最後一次reset後的數字稱為整組實驗峰值。完整數字與原始採樣在[efficiency實報](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/course-experiments/results/efficiency.json)。
+後面以MiB列量，1 MiB是2²⁰ bytes。這個範圍可對照[2.14的max_memory_allocated文件](https://docs.pytorch.org/docs/2.14/generated/torch.cuda.memory.max_memory_allocated.html)，不能把外層最後一次reset後的數字稱為整組實驗峰值。完整數字與原始採樣在[efficiency實報](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/course-experiments/results/efficiency.json)。
 
 推論先暖機三次，在計時兩側等待GPU工作完成，量九次取中位數；訓練則略過前三步後取更新中位數。兩種工作範圍分開保存，不混成一個速度數字。
 
