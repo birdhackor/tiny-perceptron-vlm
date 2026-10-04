@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 import re
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -17,6 +18,7 @@ BASE = "https://github.com/" + REPO + ".git/info/lfs"
 MANIFEST = Path("docs/natural-assistant/v4/manifest.json")
 FROZEN_MANIFEST_SHA256 = "0c660490eb78bd82a8e092c2658646a6bae59c70058b6f5c2c944d138f732f60"
 OUTPUT = Path("outputs/natural-v4/lfs-broker")
+PENDING = Path("outputs/natural-v4/lfs-internal/pending.json")
 OUTPUT.mkdir(parents=True, exist_ok=True)
 manifest_bytes = MANIFEST.read_bytes()
 manifest_sha = hashlib.sha256(manifest_bytes).hexdigest()
@@ -43,14 +45,15 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 opener = urllib.request.build_opener(NoRedirect())
 
 
-def validate_repo_url(url):
+def validate_repo_url(url, allow_query=False):
     if not isinstance(url, str) or any(ord(c) <= 32 or ord(c) >= 127 for c in url):
         raise ValueError("Invalid repository verification endpoint")
     parsed = urlsplit(url)
     if (
         parsed.scheme != "https" or parsed.netloc != "github.com"
-        or parsed.query or parsed.fragment or "?" in url or "#" in url
-        or token in url or auth in url or auth.removeprefix("Basic ") in url
+        or parsed.fragment or "#" in url
+        or (not allow_query and (parsed.query or "?" in url))
+        or token in parsed.path or auth in parsed.path or auth.removeprefix("Basic ") in parsed.path
         or not parsed.path.startswith("/" + REPO + ".git/info/lfs/")
         or "%" in parsed.path or "\\" in parsed.path
         or any(segment in (".", "..", "") for segment in parsed.path.split("/")[1:])
@@ -59,21 +62,32 @@ def validate_repo_url(url):
     return parsed
 
 
+class LFSHTTPError(RuntimeError):
+    def __init__(self, status):
+        self.status = status
+        super().__init__("LFS action failed with HTTP " + str(status))
+
+
 def safe_open(req, timeout):
     try:
         return opener.open(req, timeout=timeout)
     except urllib.error.HTTPError as error:
         # HTTPError includes the request URL; do not expose a presigned capability.
-        raise RuntimeError("LFS action failed with HTTP " + str(error.code)) from None
+        raise LFSHTTPError(error.code) from None
     except urllib.error.URLError:
         raise RuntimeError("LFS action failed at the transport layer") from None
 
 
-def request(url, body):
-    validate_repo_url(url)
+def request(url, body, action_headers=None, allow_query=False, timeout=60):
+    validate_repo_url(url, allow_query=allow_query)
     payload = json.dumps(body).encode()
-    req = urllib.request.Request(url, data=payload, headers={"Authorization": auth, "Accept": "application/vnd.git-lfs+json", "Content-Type": "application/vnd.git-lfs+json"})
-    with safe_open(req, timeout=60) as response:
+    headers = {"Authorization": auth, "Accept": "application/vnd.git-lfs+json", "Content-Type": "application/vnd.git-lfs+json"}
+    if action_headers is not None:
+        if not isinstance(action_headers, dict) or any(not isinstance(name, str) or not isinstance(value, str) or "\r" in value or "\n" in value for name, value in action_headers.items()):
+            raise RuntimeError("Malformed private LFS action headers")
+        headers.update(action_headers)
+    req = urllib.request.Request(url, data=payload, headers=headers)
+    with safe_open(req, timeout=timeout) as response:
         raw = response.read(1024 * 1024 + 1)
         if len(raw) > 1024 * 1024:
             raise RuntimeError("LFS JSON response exceeds the three-object response limit")
@@ -152,14 +166,14 @@ def validate_upload(action, expected):
 
 
 phase = os.environ.get("BROKER_PHASE", "issue")
-if phase not in {"issue", "verify"}:
-    raise RuntimeError("BROKER_PHASE must be issue or verify")
+if phase not in {"issue", "await"}:
+    raise RuntimeError("BROKER_PHASE must be issue or await")
 
 
 if phase == "issue":
     batch = request(BASE + "/objects/batch", {"operation": "upload", "transfers": ["basic"], "objects": objects})
     selected = []
-    locators = []
+    pending = []
     for expected, item in zip(objects, exact_batch(batch), strict=True):
         if item.get("oid") != expected["oid"] or item.get("size") != expected["size"] or item.get("error"):
             raise RuntimeError("LFS batch did not authorize the exact three frozen objects")
@@ -168,10 +182,15 @@ if phase == "issue":
         if upload:
             upload = validate_upload(upload, expected)
         selected.append({**expected, "upload": upload})
-        if actions.get("verify"):
-            verify = actions["verify"]["href"]
-            validate_repo_url(verify)
-            locators.append({**expected, "href": verify})
+        verify = actions.get("verify")
+        if verify:
+            try:
+                validate_repo_url(verify["href"], allow_query=True)
+            except ValueError:
+                parsed = urlsplit(verify["href"])
+                diagnostic = {"verify_hostname": parsed.hostname, "verify_path": parsed.path if token not in parsed.path and auth.removeprefix("Basic ") not in parsed.path else "redacted", "query_keys": sorted({key for key, _ in parse_qsl(parsed.query, keep_blank_values=True) if token not in key and auth.removeprefix("Basic ") not in key})}
+                raise RuntimeError("Private verify action is outside the expected repository; safe_shape=" + json.dumps(diagnostic)) from None
+        pending.append({**expected, "verify": verify})
     private = json.dumps({"manifest_sha256": manifest_sha, "objects": selected}).encode()
     key, nonce = os.urandom(32), os.urandom(12)
     public = serialization.load_pem_public_key(Path(".github/natural-v4-transfer-public.pem").read_bytes())
@@ -179,21 +198,38 @@ if phase == "issue":
     encrypted = AESGCM(key).encrypt(nonce, private, manifest_sha.encode())
     encoded = {"manifest_sha256": manifest_sha, "wrapped_key": base64.b64encode(wrapped).decode(), "nonce": base64.b64encode(nonce).decode(), "ciphertext": base64.b64encode(encrypted).decode()}
     (OUTPUT / "encrypted-transfer.json").write_text(json.dumps(encoded) + "\n")
-    (OUTPUT / "verify-locators.json").write_text(json.dumps(locators) + "\n")
-    print(json.dumps({"status": "issued_encrypted_object_scoped_uploads", "object_count": len(selected), "verification_locator_count": len(locators), "manifest_sha256": manifest_sha, "no_github_token_exported": True}))
+    PENDING.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(PENDING, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as stream:
+        json.dump({"manifest_sha256": manifest_sha, "objects": pending}, stream)
+    os.chmod(PENDING, 0o600)
+    (OUTPUT / "verify-locators.json").unlink(missing_ok=True)
+    print(json.dumps({"status": "issued_encrypted_object_scoped_uploads", "object_count": len(selected), "private_verification_action_count": sum(bool(item["verify"]) for item in pending), "manifest_sha256": manifest_sha, "no_github_token_exported": True}))
 else:
-    locators = json.loads(os.environ["VERIFY_LOCATORS"])
-    expected_by_oid = {item["oid"]: item for item in objects}
-    if not isinstance(locators, list) or len(locators) > 3:
-        raise RuntimeError("Verification locators must be a list of at most three objects")
-    verified_oids = set()
-    for item in locators:
-        if not isinstance(item, dict) or item.get("oid") not in expected_by_oid or item["oid"] in verified_oids:
-            raise RuntimeError("Malformed or duplicate verification object")
-        verified_oids.add(item["oid"])
-        if {"oid": item["oid"], "size": item["size"]} != expected_by_oid[item["oid"]]:
-            raise RuntimeError("Verification does not match the frozen object")
-        request(item["href"], {"oid": item["oid"], "size": item["size"]})
+    pending = json.loads(PENDING.read_bytes())
+    if pending.get("manifest_sha256") != manifest_sha:
+        raise RuntimeError("Private pending actions differ from the frozen manifest")
+    waiting = exact_batch({"objects": pending["objects"]})
+    waiting = [item for item in waiting if item.get("verify")]
+    deadline = time.monotonic() + 600
+    while waiting:
+        remaining = []
+        for item in waiting:
+            if time.monotonic() >= deadline:
+                raise RuntimeError("Timed out waiting for the three local LFS object uploads")
+            action = item["verify"]
+            try:
+                request(action["href"], {"oid": item["oid"], "size": item["size"]}, action.get("header", {}), allow_query=True, timeout=min(60, max(1, deadline - time.monotonic())))
+            except LFSHTTPError as error:
+                if error.status not in {404, 409, 422}:
+                    raise
+                remaining.append(item)
+        waiting = remaining
+        if waiting:
+            print(json.dumps({"status": "awaiting_local_object_uploads", "remaining_object_count": len(waiting)}), flush=True)
+            if time.monotonic() >= deadline:
+                raise RuntimeError("Timed out waiting for the three local LFS object uploads")
+            time.sleep(min(10, deadline - time.monotonic()))
     batch = request(BASE + "/objects/batch", {"operation": "download", "transfers": ["basic"], "objects": objects})
     receipts = []
     for expected, item in zip(objects, exact_batch(batch), strict=True):
@@ -204,10 +240,13 @@ else:
         if parsed.scheme != "https" or parsed.username or parsed.password or parsed.fragment or parsed.port not in (None, 443):
             raise RuntimeError("LFS download action must use canonical HTTPS")
         headers = action.get("header", {})
-        if parsed.hostname != "github.com" and any(name.lower() in {"authorization", "proxy-authorization", "cookie"} for name in headers):
-            raise RuntimeError("Refusing an authentication header outside GitHub")
         if parsed.hostname == "github.com":
-            validate_repo_url(action["href"])
+            validate_repo_url(action["href"], allow_query=True)
+        elif parsed.hostname and (parsed.hostname.endswith(".amazonaws.com") or parsed.hostname.endswith(".githubusercontent.com")):
+            if token in json.dumps(action) or auth in json.dumps(action) or auth.removeprefix("Basic ") in json.dumps(action):
+                raise RuntimeError("Refusing to send the GitHub token to object storage")
+        else:
+            raise RuntimeError("LFS download host is outside GitHub object storage")
         req = urllib.request.Request(action["href"], headers=headers)
         digest, count = hashlib.sha256(), 0
         with safe_open(req, timeout=120) as response:
@@ -221,4 +260,5 @@ else:
         receipts.append({**expected, "download_sha256_verified": True})
     receipt = {"manifest_sha256": manifest_sha, "git_revision": os.environ["GITHUB_SHA"], "objects": receipts, "lfs_upload_completed_and_download_verified": True, "source_replay_scope": "locally verified fixed-source snapshots; GHA fresh Wikimedia replay returned HTTP429", "gpu_started": False}
     (OUTPUT / "upload-receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
+    PENDING.unlink()
     print(json.dumps(receipt))
