@@ -21,14 +21,18 @@ def read(relative):
 
 
 source = (ROOT / "course/chapters/19.md").read_bytes()
-section = source[source.index(b"## 19.12 "):]
+section = source[source.index(b"## 19.12 ") :]
 (OUT / "source-read.md").write_bytes(section)
 shortcode = re.search(rb"```python\n(.*?)```", section, re.S).group(1)
 (OUT / "shortcode.py").write_bytes(shortcode)
 environment = dict(os.environ, CUDA_VISIBLE_DEVICES="", OMP_NUM_THREADS="1")
 run = subprocess.run(
     [str(ROOT / ".venv/bin/python"), str(OUT / "shortcode.py")],
-    cwd=ROOT, env=environment, capture_output=True, text=True, check=True,
+    cwd=ROOT,
+    env=environment,
+    capture_output=True,
+    text=True,
+    check=True,
 )
 (OUT / "shortcode.stdout.txt").write_text(run.stdout)
 
@@ -88,7 +92,9 @@ def audit_file(relative, original=True):
     if original:
         assert seen == set(test)
     assert dict(by_task) == evidence["by_task"]
-    result = {name: sum(task[name] for task in by_task.values()) for name in ["count", "action_correct", "end_to_end_correct"]}
+    result = {
+        name: sum(task[name] for task in by_task.values()) for name in ["count", "action_correct", "end_to_end_correct"]
+    }
     assert all(result[name] == evidence[name] for name in result)
     return result | {"by_task": dict(by_task)}, evidence
 
@@ -126,8 +132,12 @@ assert sum(r["end_to_end_correct"] for r in nonrefusal) == 75
 assert all("不能提供他人密碼" not in r["action_trace"]["raw"] for r in nonrefusal)
 assert all(row["image"]["color"] == "green" for row in test.values() if row["task"] == "image_color")
 
-image_result, image = audit_file("docs/course-experiments/capstone-evidence/deployment/test-joint-image-swaps.json", original=False)
-audio_result, audio = audit_file("docs/course-experiments/capstone-evidence/deployment/test-joint-audio-swaps.json", original=False)
+image_result, image = audit_file(
+    "docs/course-experiments/capstone-evidence/deployment/test-joint-image-swaps.json", original=False
+)
+audio_result, audio = audit_file(
+    "docs/course-experiments/capstone-evidence/deployment/test-joint-audio-swaps.json", original=False
+)
 pairs = read("docs/course-experiments/capstone-evidence/deployment/test-joint-image-pairs.json")
 original_rows = {r["id"]: r for r in joint["records"]}
 swapped_rows = {r["id"]: r for r in image["records"]}
@@ -140,7 +150,13 @@ for pair in pairs["pairs"]:
     pair_counts[first["task"]]["count"] += 1
     pair_counts[first["task"]]["both_correct"] += both
 assert sum(v["both_correct"] for v in pair_counts.values()) == 27
-assert sum(original_rows[r["id"].removesuffix("-audio-swap")]["end_to_end_correct"] and r["end_to_end_correct"] for r in audio["records"]) == 18
+assert (
+    sum(
+        original_rows[r["id"].removesuffix("-audio-swap")]["end_to_end_correct"] and r["end_to_end_correct"]
+        for r in audio["records"]
+    )
+    == 18
+)
 
 cache = read("docs/course-experiments/capstone-evidence/deployment/cache-consistency.json")
 assert len(cache["records"]) == 12
@@ -155,7 +171,13 @@ for mode, value in bench["modes"].items():
     assert abs(statistics.median(measured) - value["median_seconds"]) < 1e-12
 
 generation_changes = {}
-for first, second in [("joint", "joint-int4"), ("joint", "joint-int8"), ("dpo", "dpo-int4"), ("dpo", "dpo-int8"), ("kd", "kd-int4")]:
+for first, second in [
+    ("joint", "joint-int4"),
+    ("joint", "joint-int8"),
+    ("dpo", "dpo-int4"),
+    ("dpo", "dpo-int8"),
+    ("kd", "kd-int4"),
+]:
     a = {r["id"]: r for r in records[first]["records"]}
     changed = []
     for b in records[second]["records"]:
@@ -190,4 +212,15 @@ audit = {
     "scope": "CPU inspection of saved evidence and exact short code; no training, GPU work, new model inference, or human reader study",
 }
 (OUT / "audit.json").write_text(json.dumps(audit, ensure_ascii=False, indent=2) + "\n")
-print(json.dumps({"stage_correct": {k: v["end_to_end_correct"] for k, v in results.items()}, "timings_ms": timings, "generation_changes": {k: len(v) for k, v in generation_changes.items()}, "source_sha256": audit["source_sha256"]}, ensure_ascii=False, indent=2))
+print(
+    json.dumps(
+        {
+            "stage_correct": {k: v["end_to_end_correct"] for k, v in results.items()},
+            "timings_ms": timings,
+            "generation_changes": {k: len(v) for k, v in generation_changes.items()},
+            "source_sha256": audit["source_sha256"],
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+)

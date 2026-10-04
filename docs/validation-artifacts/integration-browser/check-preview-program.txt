@@ -1,0 +1,37 @@
+import functools,hashlib,json,threading
+from http.server import ThreadingHTTPServer,SimpleHTTPRequestHandler
+from pathlib import Path
+from playwright.sync_api import sync_playwright
+ROOT=Path.cwd();site=ROOT/'outputs/integration-preview';out=ROOT/'outputs/integration-runs/browser-preview';out.mkdir(exist_ok=True)
+class Handler(SimpleHTTPRequestHandler):
+    def do_GET(self):
+        if self.path.startswith('/tiny-perceptron-vlm/'):
+            self.path=self.path.removeprefix('/tiny-perceptron-vlm')
+        super().do_GET()
+    def log_message(self,*args):pass
+server=ThreadingHTTPServer(('127.0.0.1',0),functools.partial(Handler,directory=str(site)));thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+ids=['7.17','7.18',*[f'13.{n}' for n in range(10,18)],*[f'19.{n}' for n in range(1,13)],'course','training','glossary','chapter-19']
+records=[];errors=[]
+try:
+    with sync_playwright() as p:
+        b=p.chromium.launch(executable_path='/usr/bin/chromium',args=['--no-sandbox']);page=b.new_page()
+        page.on('pageerror',lambda e:errors.append(str(e)))
+        for width,height in [(1440,1100),(390,844)]:
+            page.set_viewport_size({'width':width,'height':height})
+            for lesson in ids:
+                page.goto(f'http://127.0.0.1:{server.server_port}/{lesson}.html',wait_until='networkidle')
+                page.wait_for_function('Array.from(document.querySelectorAll("img.diagram")).every(x=>x.complete&&x.naturalWidth>0)')
+                sizes=page.locator('img.diagram').evaluate_all('(imgs)=>imgs.map(x=>({src:x.getAttribute("src"),width:x.getBoundingClientRect().width,naturalWidth:x.naturalWidth}))')
+                docwidth=page.evaluate('document.documentElement.scrollWidth')
+                assert docwidth<=width,(lesson,width,docwidth)
+                if width==1440:assert all(x['width']>600 for x in sizes),(lesson,sizes)
+                records.append({'page':lesson,'viewport':width,'document_width':docwidth,'diagrams':sizes,'cpu_outputs':page.locator('.output').count()})
+                if lesson in ['19.2','13.12'] and sizes:
+                    image=page.locator('img.diagram').first
+                    image.scroll_into_view_if_needed();page.screenshot(path=str(out/f'{lesson}-{width}.png'))
+        b.close()
+finally:
+    server.shutdown();server.server_close();thread.join()
+assert not errors,errors
+r={'scope':'Actual Chromium checks of all 22 added lesson pages plus their guide/intro pages at desktop and mobile viewport sizes. Every diagram loaded, desktop figures fill the content column, no document-wide overflow; this is a browser viewport test, not physical device testing.','records':records,'page_errors':errors,'build_info':json.loads((site/'build-info.json').read_text()),'screenshots':{p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(out.glob('*.png'))}}
+(out/'report.json').write_text(json.dumps(r,ensure_ascii=False,indent=2)+'\n');print(json.dumps({'page_checks':len(records),'all_desktop_diagrams_above_600px':True,'page_errors':errors}))
