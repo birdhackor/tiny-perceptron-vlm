@@ -91,12 +91,26 @@ FLEURS 一句旅遊敘述，可以有正確逐字稿，卻沒有「助手接下�
 
 只想試用成品，依[學生操作指引](STUDENT.md)即可；準備重新訓練或查看資料時，才需要這些快照。照片、OCR 與語音三包使用 Git LFS 保存，大型二進位檔不直接塞進一般 Git 歷史。聊天文字、標註和來源清單可直接讀 repo。
 
-先依學生操作指引第1、2步取得程式並建立`.venv-natural`。下面的指令都在專案根目錄執行，無須登入GitHub或Hugging Face。第一行`--list`只看清單與大小；第二行才下載三包；第三行`--verify`只重新核對已有的解包檔案。
+先依學生操作指引第1、2步取得程式並建立`.venv-natural`。下面的指令都在專案根目錄執行，無須登入GitHub或Hugging Face。第一條命令的`--list`只看清單與大小；第二條才下載三包；第三條的`--verify`只重新核對已有的解包檔案。行末的反斜線`\`表示同一條Bash命令接到下一行，複製時保留它。
 
 ```bash
-.venv-natural/bin/python scripts/fetch_natural_data.py --manifest docs/natural-assistant/v4/manifest.json --revision 9a61ecf524c9518f33f1501c28aa72997d4a82d0 --manifest-sha256 0c660490eb78bd82a8e092c2658646a6bae59c70058b6f5c2c944d138f732f60 --output data/natural-v4 --list
-.venv-natural/bin/python scripts/fetch_natural_data.py --manifest docs/natural-assistant/v4/manifest.json --revision 9a61ecf524c9518f33f1501c28aa72997d4a82d0 --manifest-sha256 0c660490eb78bd82a8e092c2658646a6bae59c70058b6f5c2c944d138f732f60 --output data/natural-v4
-.venv-natural/bin/python scripts/fetch_natural_data.py --manifest docs/natural-assistant/v4/manifest.json --revision 9a61ecf524c9518f33f1501c28aa72997d4a82d0 --manifest-sha256 0c660490eb78bd82a8e092c2658646a6bae59c70058b6f5c2c944d138f732f60 --output data/natural-v4 --verify
+.venv-natural/bin/python scripts/fetch_natural_data.py \
+  --manifest docs/natural-assistant/v4/manifest.json \
+  --revision 9a61ecf524c9518f33f1501c28aa72997d4a82d0 \
+  --manifest-sha256 0c660490eb78bd82a8e092c2658646a6bae59c70058b6f5c2c944d138f732f60 \
+  --output data/natural-v4 --list
+
+.venv-natural/bin/python scripts/fetch_natural_data.py \
+  --manifest docs/natural-assistant/v4/manifest.json \
+  --revision 9a61ecf524c9518f33f1501c28aa72997d4a82d0 \
+  --manifest-sha256 0c660490eb78bd82a8e092c2658646a6bae59c70058b6f5c2c944d138f732f60 \
+  --output data/natural-v4
+
+.venv-natural/bin/python scripts/fetch_natural_data.py \
+  --manifest docs/natural-assistant/v4/manifest.json \
+  --revision 9a61ecf524c9518f33f1501c28aa72997d4a82d0 \
+  --manifest-sha256 0c660490eb78bd82a8e092c2658646a6bae59c70058b6f5c2c944d138f732f60 \
+  --output data/natural-v4 --verify
 ```
 
 三包大小如下，使用MB（每MB為1,000,000 bytes）；解包大小按清單中的完整檔案bytes加總，含署名與授權文件，不含檔案系統額外占用：
@@ -107,7 +121,7 @@ FLEURS 一句旅遊敘述，可以有正確逐字稿，卻沒有「助手接下�
 | OCR文字圖片 | 59.75 MB | 62.38 MB | 961 |
 | 真人錄音 | 17.49 MB | 26.15 MB | 41 |
 
-合計下載約146.54 MB，解包檔案約160.68 MB。解包與下載暫存可能同時占用空間，另需保留程式、清單和模型快取的空間。檔案數包含NOTICE等文字，不等於圖片或錄音數。
+合計下載約146.54 MB，解包檔案約160.68 MB。各列分別四捨五入；合計則先加總原始bytes再換算，因此可能與表中已四捨五入的數字相加差0.01 MB。解包與下載暫存可能同時占用空間，另需保留程式、清單和模型快取的空間。檔案數包含NOTICE等文字，不等於圖片或錄音數。
 
 下載程式先核對固定版本清單，再核對壓縮包，最後逐檔核對解包後的大小與 SHA-256。Git LFS 指標檔只是一張告訴 Git「真正檔案在哪」的小紙條，不是圖片或錄音包本身；完整資料必須通過指紋檢查才能使用。
 

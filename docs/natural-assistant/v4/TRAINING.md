@@ -116,6 +116,8 @@ LoRA 加在語言注意力的 q、v 投影，rank 為 8，alpha 為 16；底座�
 | `train/provenance.json` | 核對底座、資料指紋及軟體配套。 |
 | `train/checkpoints/step-001039/`、`train/checkpoints/step-002077/` | 各自保存完成該步的修正、更新器狀態與進度，供驗證選版。 |
 
+`--checkpoint-every 25`保存的是供續訓使用的最近進度：每完成25的倍數步，更新`train/adapter/`；若距離上次這種存檔已滿60秒，也會在完成一次更新後保存。這個目錄會換成較新的完整版本，正常結束時還會再保存一次。因此它不代表每25步都留下獨立候選。`--checkpoint-steps 1039,2077`才另外保存上表兩份不可覆寫的候選，後續更新不會改動它們；最近進度用來恢復工作，兩份候選用來固定比較時刻。
+
 `optimizer_only_lora` 表示更新器範圍符合設定；修正張量的前後指紋檢查是否真的改變。凍結檢查比對底座幾個固定抽查位置，不能把抽查說成二十億個數全部逐位比較。這些檢查證明執行方式，回答品質仍由驗收決定。
 
 遇到時間上限或中斷，先讀最近完整檢查點的 `completed_steps`，未保存的更新不能恢復。只在未到目標總步數時續訓，保持相同底座、資料、rank、累積方式、種子與學習率，並另開 `resumed` 輸出目錄。
@@ -184,11 +186,81 @@ PENDING_CHECKPOINTS=$(
 
 選版前先約定哪些能力必須保留，以及可以接受哪些取捨。只看一個混合總分，可能讓讀字進步掩蓋聊天退步。候選按驗證判準決定，選定後保存權重、資料、生成設定與這次決定；教材作者的選版紀錄不能替代你自己跑出的結果。
 
-原底座也列在候選中；只有LoRA的回答都完整結束、符合各項保留門檻，且約定的綜合分數嚴格高於底座，才採用修正。本課兩份候選在照片題進步，卻未通過語音聊天保留與回答完整性要求，因此[驗證決定](selection.json)保留底座。具體對照集中在[20.8](../../../course/chapters/20.md#20.8)，這裡不重複完整成績。ASR在各個圖文候選中保持相同，使用同一份實際逐字稿；這次選版沒有把聽寫改善當成微調的效果。
+本次約定先檢查下列門檻。表中的「底座」指同一份驗證題上，未加修正的原模型；題數比較的是各項答對幾題，不能以其他用途的進步抵銷。
+
+| 檢查用途 | 修正候選必須滿足什麼？ |
+| --- | --- |
+| 回答停止情況 | 全部132份回答都實際以EOS結束，沒有截斷或停止原因不明。EOS是模型的結束符號；單看「已生成132份」還不夠。 |
+| 照片主描述、指定順序讀字 | 每項答對題數都至少與底座相同。 |
+| 照片可見事實、有無中文字、單區讀字、一般文字聊天 | 每項最多比底座少答對1題。 |
+| 正確文字問句聊天、真正ASR文字問句聊天 | 兩路各自的答對題數都至少與底座相同。 |
+
+通過門檻後，才比較判準中的綜合分數`primary`。正確率是答對題數除以該用途題數；先算五組能力，每組在綜合分數中占五分之一：
+
+| 能力組 | 怎麼算這組分數？ |
+| --- | --- |
+| 照片 | 28題主描述正確率與56題可見事實正確率的平均。 |
+| 有無中文字 | 18題的正確率。 |
+| 單區讀字 | 10題的正確率。 |
+| 指定順序讀字 | 3題完整逐字與順序都符合判準的正確率。 |
+| 聊天 | 9題一般文字聊天、4題正確文字問句聊天、4題真正ASR文字問句聊天，三個正確率的平均。 |
+
+再把五組分數相加除以5。這樣照片題數較多，也不會因為題多就占掉其他用途的比重。聽寫的字元錯誤率CER另行報告，不計入這個LoRA綜合分數；聊天組計的是助理能否回答問句。
+
+用一個假設算例練習：底座的五組分數若為`1/2、1、4/5、1/3、1`，綜合分數就是它們的平均，`109/150`，約72.67%。若某個候選把照片提高到`3/4`，卻把正確文字問句聊天從`4/4`降為`3/4`，另兩路聊天仍滿分，聊天組便是`(1＋3/4＋1) / 3 = 11/12`。其餘不變時，候選綜合分數是`19/25 = 76%`；分數雖高，仍因那一路聊天退步而不能選。這些是假設數字，並非本版成績。
+
+實際選版使用未四捨五入的分數比較：候選必須嚴格高於底座；符合門檻的候選中選分數最高者。兩個修正同分就選較早保存的候選；與底座同分，或沒有修正通過全部要求，都保留底座。小份驗證中一題就可能改變取捨，而且同照片的題目彼此相關，這個分數不能當成一般使用的成功率保證。
+
+本課兩份候選在照片題進步，卻未通過語音聊天保留與回答完整性要求，因此[驗證決定](selection.json)保留底座。具體對照集中在[20.8](../../../course/chapters/20.md#20.8)，這裡不重複完整成績。ASR在各個圖文候選中保持相同，使用同一份實際逐字稿；這次選版沒有把聽寫改善當成微調的效果。
 
 ## 7. 固定選定版本，再做最後測試
 
-確定不再改本版設定後，先保存指紋。教材本版已選底座，你自己重做則依自己的驗證決定。下面**假設你的驗證選中了1,039步候選**，示範如何固定那份修正；若選中2,077步，後續的`SELECTED_ADAPTER`都替換成那份實際路徑。若像教材一樣選中底座，保存底座版本、資料與驗證配方，最後命令省略`--adapter`。
+確定不再改本版設定後，先保存指紋。教材本版已選底座，你自己重做則依自己的驗證決定。若也保留底座，下面這段只用Python整理已生成的紀錄，不載入模型或使用GPU：
+
+```bash
+.venv-natural/bin/python - <<'PY'
+import json
+import shutil
+from hashlib import sha256
+from pathlib import Path
+
+manifest = Path("docs/natural-assistant/v4/manifest.json")
+validation = Path("outputs/natural-my-v4/validation/result.json")
+protocol = Path("docs/natural-assistant/v4/validation-protocol-lower-lr.json")
+record = json.loads(validation.read_text())
+assert record["status"] == "completed" and record["split"] == "validation"
+assert record["manifest_sha256"] == sha256(manifest.read_bytes()).hexdigest()
+configuration = {
+    key: record[key]
+    for key in (
+        "model", "model_revision", "asr_model", "asr_revision",
+        "device", "dtype", "min_pixels", "max_pixels", "max_tokens", "seed",
+        "manifest_sha256",
+    )
+}
+configuration.update(
+    selected_variant="base", adapter=None, max_new_tokens=384, do_sample=False,
+)
+snapshot = Path("outputs/natural-my-v4/chosen-base-before-test")
+snapshot.mkdir()
+for source in (manifest, validation, protocol):
+    shutil.copyfile(source, snapshot / source.name)
+(snapshot / "configuration.json").write_text(
+    json.dumps(configuration, ensure_ascii=False, indent=2) + "\n"
+)
+(snapshot / "files.sha256").write_text(
+    "".join(
+        f"{sha256(file.read_bytes()).hexdigest()}  {file.name}\n"
+        for file in sorted(snapshot.iterdir())
+    )
+)
+print(snapshot)
+PY
+```
+
+這會保存底座與ASR的實際revision、資料清單、驗證報告、判準及生成配方。`max_new_tokens=384`與`do_sample=False`對應第6步的固定生成方式；若你另改過生成設定，要保存自己的實際配方。目錄已存在時程式停止，避免覆寫先前決定。保存後，最後測試命令省略`--adapter`，只評估底座。
+
+若驗證採用修正，則保存那份權重的指紋。下面**假設你的驗證選中了1,039步候選**；若選中2,077步，後續的`SELECTED_ADAPTER`都替換成那份實際路徑：
 
 ```bash
 SELECTED_ADAPTER=outputs/natural-my-v4/train/checkpoints/step-001039
@@ -200,7 +272,7 @@ sha256sum \
   > outputs/natural-my-v4/chosen-before-test.sha256
 ```
 
-上例以選用LoRA的情況保存指紋。若選的是自己的中途檢查點或續訓版，換成那份實際路徑；若保留底座，則保存底座版本、資料與驗證配置並在最後命令省略`--adapter`。同時保存已約定的判準與完整生成設定。指紋確定的是同一組檔案，回答能力仍須讀取最後結果。
+上例以選用LoRA的情況保存指紋。若選的是自己的中途檢查點或續訓版，換成那份實際路徑，同時保存已約定的判準與完整生成設定。指紋確定的是同一組檔案，回答能力仍須讀取最後結果。下面命令沿用修正候選的示例；保留底座時刪去`--adapter "$SELECTED_ADAPTER"`這一行：
 
 ```bash
 .venv-natural/bin/python scripts/natural_assistant.py evaluate \

@@ -19,6 +19,9 @@ READING_PAGES = {
     "docs/curriculum.md": "curriculum.html",
     "docs/validation.md": "validation.html",
     "assets/training/README.md": "training-assets.html",
+    "docs/natural-assistant/v4/STUDENT.md": "natural-v4-student.html",
+    "docs/natural-assistant/v4/DATA.md": "natural-v4-data.html",
+    "docs/natural-assistant/v4/TRAINING.md": "natural-v4-training.html",
 }
 BOOTSTRAP = """# @title 準備本節的工具（首次執行）
 from pathlib import Path
