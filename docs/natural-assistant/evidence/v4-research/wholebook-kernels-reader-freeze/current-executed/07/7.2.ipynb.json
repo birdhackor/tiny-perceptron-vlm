@@ -1,0 +1,158 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 7.2 模型怎麼知道輪到誰？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "你把「1+1=?」發給模型後，它可能繼續寫問題，也可能開始回答；我們要在輸入末尾明確表示下一段由assistant說。[7.1](https://birdhackor.github.io/tiny-perceptron-vlm/7.1.html) 的訓練序列在回答前有assistant邊界，推論也要準備相同的結構，才能讓下一token問題對應到「回答首項」。這份生成用的前文常叫prompt。\n",
+    "\n",
+    "角色標記是 [6.6](https://birdhackor.github.io/tiny-perceptron-vlm/6.6.html) 的專用ID，不是把漢字「使用者」加進去就自動具有相同效果。當前ByteTokenizer約定BOS1、user3、EOS2、assistant4。問題內容仍按每byte加8編碼，結束問題後插EOS，再插assistant，讓模型站到回答起點。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:12:16.499333Z",
+     "iopub.status.busy": "2026-10-04T19:12:16.499139Z",
+     "iopub.status.idle": "2026-10-04T19:12:17.778959Z",
+     "shell.execute_reply": "2026-10-04T19:12:17.777991Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7fd674262610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:12:17.781616Z",
+     "iopub.status.busy": "2026-10-04T19:12:17.781307Z",
+     "iopub.status.idle": "2026-10-04T19:12:17.788916Z",
+     "shell.execute_reply": "2026-10-04T19:12:17.786033Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "[1, 3, 57, 51, 57, 69, 71, 2, 4]\n",
+      "最後邊界 4\n"
+     ]
+    }
+   ],
+   "source": [
+    "from tiny_perceptron.data import ByteTokenizer\n",
+    "\n",
+    "tok = ByteTokenizer()\n",
+    "question = \"1+1=?\"\n",
+    "prompt = [tok.bos_id, tok.user_id] + tok.encode(question) + [tok.eos_id, tok.assistant_id]\n",
+    "print(prompt)\n",
+    "print(\"最後邊界\", prompt[-1])\n",
+    "assert prompt[-1] == tok.assistant_id"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "輸入問題字串。清單的 `+` 表示按順序相接，不是逐項數字相加，輸出應為 `[1,3,57,51,57,69,71,2,4]`，共有九個token。最後的 `prompt[-1]` 取末項4，檢查它確實是assistant標記。這裡沒有輸入正確答案2，因為生成時它尚未知；模型應由尾端位置的logits預測回答第一token。\n",
+    "\n",
+    "為什麼問題結尾EOS與回答開始assistant都要保留？EOS告訴前一段結束，assistant指定下一段角色。兩個標記的功能不同，但都是訓練裡學過的前文。若訓練時使用一種邊界順序，推論突然換另一種，模型會遇到未按同樣方式練過的結構，不能只因為字義看得懂就保證它會接對。\n",
+    "\n",
+    "邊界也不保證答案內容正確。它表示「輪到回答」，不是告訴模型 `1+1` 的結果；真正數學行為來自訓練與可用能力。若模型只學過某種固定問題，很可能即使格式正確也不會解新題，要按 [7.12](https://birdhackor.github.io/tiny-perceptron-vlm/7.12.html) 檢查新組合。\n",
+    "\n",
+    "對多輪對話，prompt可以包含過去user與assistant內容，但當前末尾仍只放即將開始的assistant邊界，不把未知答句僞裝成已經出現的歷史。結束生成後再記錄完整assistant消息，下一輪繼續用同一render契約。我們現在只取單輪，讓九個ID的來源能逐個查回。\n",
+    "\n",
+    "練習只移除清單尾端的assistant ID，先預測末項變EOS2、模型當前位置對應問題結尾，而非我們指定的回答角色，再執行核對。原assert應失敗；這不是需要修掉的程序錯誤，而是檢查明確發現prompt不符合約定。恢復4後檢查再通過。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "7.2"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

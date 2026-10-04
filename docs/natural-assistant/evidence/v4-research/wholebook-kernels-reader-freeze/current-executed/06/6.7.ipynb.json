@@ -1,0 +1,156 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 6.7 一個 token 一定是一個完整字嗎？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "[6.3](https://birdhackor.github.io/tiny-perceptron-vlm/6.3.html) 印出的byte-level BPE片段有時看不懂。我們試着把每個token單獨decode，竟看到「�」；這未必表示原文壞了，可能只是切在一個UTF-8字的中間。像把一張照片切成小條，單條不等於完整圖案；必須先把足夠材料拼回，再按原編碼讀。\n",
+    "\n",
+    "[6.1](https://birdhackor.github.io/tiny-perceptron-vlm/6.1.html) 已分清Unicode字元與byte。「貓」的UTF-8有三byte，🙂有四byte，一個byte只有0到255的數，不自帶完整字義。BPE合併的邊界又按頻率決定，所以一個token可能覆蓋完整字、多個字，也可能只覆蓋某字的一部分byte，不能把token數直接翻譯成人看到的字數。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:11:45.224989Z",
+     "iopub.status.busy": "2026-10-04T19:11:45.224768Z",
+     "iopub.status.idle": "2026-10-04T19:11:46.679364Z",
+     "shell.execute_reply": "2026-10-04T19:11:46.678291Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7f718c65a610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:11:46.681512Z",
+     "iopub.status.busy": "2026-10-04T19:11:46.681238Z",
+     "iopub.status.idle": "2026-10-04T19:11:46.686378Z",
+     "shell.execute_reply": "2026-10-04T19:11:46.685642Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "全部bytes [232, 178, 147, 240, 159, 153, 130]\n",
+      "只看第一byte �\n",
+      "先拼完整再解碼 貓🙂\n"
+     ]
+    }
+   ],
+   "source": [
+    "raw = \"貓🙂\".encode()\n",
+    "print(\"全部bytes\", list(raw))\n",
+    "print(\"只看第一byte\", raw[:1].decode(\"utf-8\", errors=\"replace\"))\n",
+    "print(\"先拼完整再解碼\", raw.decode(\"utf-8\"))\n",
+    "assert raw.decode(\"utf-8\") == \"貓🙂\""
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "輸入完整原句並轉成bytes；Python字串的`.encode()`預設使用UTF-8，所以這裡不必另填編碼名稱。第一行應 `[232,178,147,240,159,153,130]`。前三個一起表示貓，後四個一起表示🙂。`raw[:1]` 只留232，UTF-8解碼器知道它是多byte字的開頭，卻沒有後續材料；`errors=\"replace\"` 遇不完整資料就用替代字符�顯示，因此第二行是�。沒有replace時，這段不完整材料會報Unicode解碼錯誤。\n",
+    "\n",
+    "第三行解完整七byte，還原貓🙂，assert通過。這說明第一次看到�是觀察方式造成的，不足以證明原始bytes已經被改壞。相反，若把這個�當成真正內容再存回，就已經用替代字符丟失了原來那部分資訊，之後拼接也不會恢復。應保留原bytes或完整token序列，不把臨時顯示的替代符號當原始資料。\n",
+    "\n",
+    "模型按token逐步生成時，也可能先生成字的一部分byte，下一步才補齊。用戶介面要考慮延後解碼或使用能保留未完成尾段的解碼器，不能每個片段獨立decode再把結果接起來。這些工程選擇來自同一個還原契約：完整的bytes序列才能按UTF-8解釋。\n",
+    "\n",
+    "本節直接切bytes讓邊界透明，不意味着所有BPE token只含一個byte。某個常見片段可能已經被合成一token，其內部含很多byte；我們關心的是不能保證每一個token都恰好落在完整Unicode字邊界。\n",
+    "\n",
+    "練習只把第二行的切片改成 `raw[:3]`，先預測剛好涵蓋完整貓，顯示貓；再試 `raw[:4]`，預測貓後接�，因為emoji只取到開頭一byte。最後完整decode仍應貓🙂，三次觀察用同一份原資料，便能定位問題在邊界而非內容。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "6.7"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

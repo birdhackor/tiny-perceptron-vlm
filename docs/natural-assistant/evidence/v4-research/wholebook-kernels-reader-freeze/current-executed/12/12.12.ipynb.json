@@ -1,0 +1,183 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 12.12 答案需要同時看圖和聽聲音時怎麼辦？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "給一張圓形圖和一段高音，要求回答「circle,high」。圖片可以告訴形狀，卻不能告訴音高；聲音告訴音高，卻沒有圖片形狀。這樣的任務讓兩種輸入各提供一項必需線索，避免模型靠單一模態完成全部答案。本節先檢查兩條路都接到文字代價。\n",
+    "\n",
+    "前置是[10.7圖片展開](https://birdhackor.github.io/tiny-perceptron-vlm/10.7.html)、[12.9聲音展開](https://birdhackor.github.io/tiny-perceptron-vlm/12.9.html)與[11.8按規則替換](https://birdhackor.github.io/tiny-perceptron-vlm/11.8.html)。模態modality指資訊來源的種類，這裡是圖與聲音。答案由兩個部分組成，聯合exact match要求兩部分同時正確；單項正確率則分別看形狀與音高。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:15:53.216035Z",
+     "iopub.status.busy": "2026-10-04T19:15:53.215838Z",
+     "iopub.status.idle": "2026-10-04T19:15:54.465045Z",
+     "shell.execute_reply": "2026-10-04T19:15:54.464208Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7fe8f0666610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:15:54.466860Z",
+     "iopub.status.busy": "2026-10-04T19:15:54.466618Z",
+     "iopub.status.idle": "2026-10-04T19:15:54.494773Z",
+     "shell.execute_reply": "2026-10-04T19:15:54.494043Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "圖路徑梯度 True\n",
+      "音路徑梯度 True\n"
+     ]
+    }
+   ],
+   "source": [
+    "import torch\n",
+    "from tiny_perceptron.data import ByteTokenizer\n",
+    "from tiny_perceptron.model import TinyLM, ModelConfig, masked_loss\n",
+    "from tiny_perceptron.multimodal import MultiModalLM, scene, tone\n",
+    "\n",
+    "torch.manual_seed(0)\n",
+    "tok = ByteTokenizer()\n",
+    "model = MultiModalLM(TinyLM(ModelConfig(width=8)))\n",
+    "prefix = [tok.bos_id, tok.user_id, tok.image_id, tok.audio_id, tok.eos_id, tok.assistant_id]\n",
+    "answer = tok.encode(\"circle,high\") + [tok.eos_id]\n",
+    "ids = torch.tensor(prefix + answer)\n",
+    "labels = torch.tensor([-100] * len(prefix) + answer)\n",
+    "out = model(ids, labels, image=scene(\"red\", \"circle\"), waveform=tone(440))\n",
+    "masked_loss(out[\"logits\"], out[\"labels\"]).backward()\n",
+    "print(\"圖路徑梯度\", model.image_projector.weight.grad.norm().item() > 0)\n",
+    "print(\"音路徑梯度\", model.audio_projector.weight.grad.norm().item() > 0)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "輸入同時有兩種標記與對應資料，人工目標circle,high遵守300Hz高低邊界。模型將圖片標記換16條特徵、聲音標記換11條特徵，再對完整展開序列做一次錯位。兩個接頭都在回答預測的計算鏈中，兩行通常True；不過梯度來自整個字串代價，不表示它已學會把形狀只歸圖、音高只歸聲。\n",
+    "\n",
+    "這段沒有更新參數，真正學習應包含circle,low、circle,high、square,low、square,high等組合，留新組合或新頻率位置用於測試。若圓形總搭高音，模型可能從圖片猜兩項，違背原本設計的聯合需求。\n",
+    "\n",
+    "訓練後做兩種替換：保持圖與問句、只換高低音，理想只改逗號後那項；保持聲音與問句、只換圓方圖，理想只改前項。再分別報告兩項與整串成功率。\n",
+    "\n",
+    "聯合任務的猜測基準比單項更難：形狀圓方各半、音高高低各半且獨立時，只猜circle,high約有四分之一整串正確；只猜對形狀但音高隨機，也不能叫成功融合。這裡獨立與平衡要由資料設計保證，如果所有圓圖都配高音，一個模態就可能推兩項。測量時保存每筆的形狀目標、音高目標和完整輸出，讓讀者知道錯誤集中哪一項。梯度兩條都非零只是證明計算能經過它們，真正語義分工要靠後續保持一項、替換另一項的測試來確認。\n",
+    "\n",
+    "[正式聯合實驗](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/course-experiments/results/joint.json)把三種顏色、兩種形狀與高低頻率獨立配齊。聯合階段用位移0、180／220／380／420Hz的24題教學，位移1、200／400Hz的12題驗證，位移2、260／340Hz的12題最後檢查。260與340Hz沒有參與這一階段更新，但先前音訊編碼器訓練已見過，不能說整條路徑從未見過這些頻率。它從直接SFT底座與兩個已訓練編碼器接起，全部開放400次，每次四題，共18,422個有效回答目標；同一批訓練探針代價從1.196降到約0.000051。\n",
+    "\n",
+    "最後原圖原聲音12/12整串正確，形狀與音高也各12/12。按同一批原題答案核對遮蔽結果如下；每組都有12題，不把缺失線索重新當作另一種形狀或音高真值。\n",
+    "\n",
+    "| 提供的線索 | 整串答對 | 形狀項答對 | 音高項答對 |\n",
+    "| --- | --- | --- | --- |\n",
+    "| 圖與聲音都有 | 12/12 | 12/12 | 12/12 |\n",
+    "| 圖片遮成空白 | 6/12 | 6/12 | 12/12 |\n",
+    "| 聲音改成靜音 | 6/12 | 12/12 | 6/12 |\n",
+    "| 兩者都遮蔽 | 3/12 | 6/12 | 6/12 |\n",
+    "\n",
+    "遮圖時形狀一律猜circle，音高仍按聲音答對；靜音時音高一律猜high，形狀仍按圖答對。兩者皆遮蔽就全答circle,high，四種平衡組合中只留下3/12。這像兩張各寫一項答案的卡片：拿走一張，另一張的內容仍讀得到，被拿走的那項只剩猜測。單看整串6/12不會知道丟了哪項，分項計數才呈現這次模型的分工。\n",
+    "\n",
+    "真正替換的結果又不同。逐題把圓換方、方換圓，同步改形狀真值，12題都正確改了逗號前的項目，逗號後音高保持不變；只把260換340Hz或反向換回，12題都正確改了音高，形狀保持不變。兩種替換各12/12，原題與替換題兩端都答對的配對也各12/12。這些成對回答支持它在這個小世界中使用兩種線索，比只看遮蔽後分數下降更明確；替換是在這批平衡題內重新配對，不是額外測了一套新圖形或新聲音。\n",
+    "\n",
+    "仍要保留驗證8/12這個較差結果：音高12/12，形狀只有8/12。測試全對不表示各個新位置都會答對，更不代表自然照片、真人語音或安全判斷已可靠。這次只有一個種子、12道測試組合；完整回答、分項與干預規則都應一起保存，讓成功與失敗都能被核對。\n",
+    "\n",
+    "練習先將錄音換200Hz，目標只改成circle,low；說明哪些輸入與答案部分保持不變，再執行核對兩條梯度路徑仍存在。要證明正確利用兩種資訊，仍需之後的實際回答測試。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "12.12"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

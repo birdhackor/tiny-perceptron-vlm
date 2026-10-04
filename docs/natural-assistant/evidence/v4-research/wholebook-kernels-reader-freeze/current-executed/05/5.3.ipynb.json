@@ -1,0 +1,157 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 5.3 更新方向怎麼累積？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "推車連續向前，遇到一小段反向推力時，不會立刻完全倒退。訓練參數也可以保留最近更新方向的一部分，讓反覆一致的意見累積。這種方法叫動量（momentum）。它與 [1.13](https://birdhackor.github.io/tiny-perceptron-vlm/1.13.html) 把多次梯度加進同一個 `.grad` 桶不同：這裡每輪的新梯度先算好，再由優化器保留過去方向的狀態。\n",
+    "\n",
+    "用v記錄方向，g是本輪梯度，更新規則為`新v=μ×舊v+g`，再`新w=舊w-η×新v`。μ是保留過去多少比例，η是[1.12](https://birdhackor.github.io/tiny-perceptron-vlm/1.12.html)的學習率。若μ=0.9，就保留舊方向九成再加這次梯度；如果μ=0，過去全部忘掉，回到只用本輪梯度的基本梯度下降。本節只追蹤這兩行累計規則如何改變方向與位置。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:11:07.774370Z",
+     "iopub.status.busy": "2026-10-04T19:11:07.773843Z",
+     "iopub.status.idle": "2026-10-04T19:11:09.394889Z",
+     "shell.execute_reply": "2026-10-04T19:11:09.393503Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7fe0fc566610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:11:09.397070Z",
+     "iopub.status.busy": "2026-10-04T19:11:09.396790Z",
+     "iopub.status.idle": "2026-10-04T19:11:09.401103Z",
+     "shell.execute_reply": "2026-10-04T19:11:09.400498Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "新梯度 1.0 保留方向 1.0 位置 -0.1\n",
+      "新梯度 1.0 保留方向 1.9 位置 -0.29\n",
+      "新梯度 -1.0 保留方向 0.71 位置 -0.361\n"
+     ]
+    }
+   ],
+   "source": [
+    "velocity = 0.0\n",
+    "position = 0.0\n",
+    "for gradient in [1.0, 1.0, -1.0]:\n",
+    "    velocity = 0.9 * velocity + gradient\n",
+    "    position -= 0.1 * velocity\n",
+    "    print(\"新梯度\", gradient, \"保留方向\", round(velocity, 3), \"位置\", round(position, 3))"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "輸入是我們指定的三個梯度1、1、-1，不是從模型測出的資料。v與w最初都0。第一步v=1，位置-0.1；第二步v=0.9+1=1.9，位置-0.29；第三步雖新梯度為-1，v仍為 `0.9×1.9-1=0.71`，位置繼續下降到-0.361。打印的三列把當前意見、歷史合成與真正參數移動分開，`round` 只是方便顯示。\n",
+    "\n",
+    "第三步最值得觀察：當前代價的梯度已轉向，動量卻暫時延續先前方向。這可能幫助穿過小抖動，也可能讓參數越過谷底後還前進過頭。因而動量並不保證每一步的當下代價都下降，要與學習率一起看訓練曲線。μ靠近1時記憶較長，同時反轉也較慢。\n",
+    "\n",
+    "優化器通常為每個參數格保存自己的v，而不是整張表共享一個方向；這一狀態會影響下次更新，所以中斷接續訓練時只存w不夠，[5.7](https://birdhackor.github.io/tiny-perceptron-vlm/5.7.html) 會介紹存檔。基本梯度下降沒有這份歷史，但Adam還會保存更多資訊，下一節再拆開。\n",
+    "\n",
+    "這個數值演算只說明如何合成給定梯度，不知道哪個位置纔是目標，也沒有訓練語言模型。不能從位置越來越負推斷質量越來越好；如果要說代價下降，仍需額外定義代價並真的計算。\n",
+    "\n",
+    "練習只把保留係數0.9改成0，先手算三位置為-0.1、-0.2、-0.1，再執行核對。第三步立即反向，因為沒有過去推力。最後試0.5，應得到v為1、1.5、-0.25：同樣的梯度序列，保留強度決定什麼時候轉彎。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "5.3"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

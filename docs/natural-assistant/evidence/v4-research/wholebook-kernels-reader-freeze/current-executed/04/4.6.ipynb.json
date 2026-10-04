@@ -1,0 +1,285 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 4.6 隱藏向量怎麼變成下一字的分數？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "經過注意力讀取前文，再由[前饋網路FFN](https://birdhackor.github.io/tiny-perceptron-vlm/4.4.html)逐位置混合特徵後，每個位置仍只是一排數，例如八個特徵。讀者卻要看到「下一字是貓還是狗」，所以還需要把這排內部資訊轉換成每個候選字的分數。這個最後的加權配方通常叫輸出層，或語言模型head；此處的head指輸出功能，與 [3.7](https://birdhackor.github.io/tiny-perceptron-vlm/3.7.html) 的注意力head不同，要按上下文區分。\n",
+    "\n",
+    "字表有V個候選、位置表示有D特徵，就用一個D到V的Linear，為每個候選準備一套配方。隱含在中間計算中的向量常叫隱藏表示（hidden representation），並不是隱藏祕密，只是還沒有轉成最終預測。Linear原理見 [2.3](https://birdhackor.github.io/tiny-perceptron-vlm/2.3.html)，原始分數logits與機率區別見 [1.7](https://birdhackor.github.io/tiny-perceptron-vlm/1.7.html)。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:10:26.330403Z",
+     "iopub.status.busy": "2026-10-04T19:10:26.330099Z",
+     "iopub.status.idle": "2026-10-04T19:10:27.818680Z",
+     "shell.execute_reply": "2026-10-04T19:10:27.815319Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7f8dd9572610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:10:27.827235Z",
+     "iopub.status.busy": "2026-10-04T19:10:27.826982Z",
+     "iopub.status.idle": "2026-10-04T19:10:27.855836Z",
+     "shell.execute_reply": "2026-10-04T19:10:27.852624Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "torch.Size([1, 3, 20])\n",
+      "第一位置的前五個候選分數 tensor([-0.8175, -0.0243, -0.1253, -0.8118, -0.0484], grad_fn=<SliceBackward0>)\n",
+      "各位置最高分ID tensor([[10, 17,  7]])\n"
+     ]
+    }
+   ],
+   "source": [
+    "import torch\n",
+    "from tiny_perceptron.model import TinyLM, ModelConfig\n",
+    "\n",
+    "torch.manual_seed(42)\n",
+    "model = TinyLM(ModelConfig(vocab_size=20, width=8))\n",
+    "ids = torch.tensor([[1, 2, 3]])\n",
+    "logits = model(ids)[\"logits\"]\n",
+    "print(logits.shape)\n",
+    "print(\"第一位置的前五個候選分數\", logits[0, 0, :5])\n",
+    "print(\"各位置最高分ID\", logits.argmax(dim=-1))\n",
+    "assert logits.shape == (1, 3, 20)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "輸入是一筆三位置的ID，字表大小`vocab_size=20`，每位置內部寬度8。`TinyLM`把查字向量表、加位置、重複計算單元block、最後正規化、輸出層接好。[block](https://birdhackor.github.io/tiny-perceptron-vlm/4.5.html)包含讀前文的注意力與逐位置混合特徵的FFN；[正規化](https://birdhackor.github.io/tiny-perceptron-vlm/4.3.html)則調整各位置的數值尺度。回傳字典中的`\"logits\"`就是分數表。形狀`[1,3,20]`表示一筆、三個預測位置、每位置二十候選。程式印的五個數只是第一位置二十個候選的一部分。\n",
+    "\n",
+    "這三個位置在回答不同的下一字問題：第0位置讀到`[1]`後猜下一編號，第1位置讀到`[1,2]`後猜下一編號，第2位置讀到`[1,2,3]`後猜下一編號。圖中每列左邊是該位置可讀的前文，箭頭右邊是它的20個候選分數；綠色最後一列才使用了目前提供的全部前文。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 3,
+   "metadata": {
+    "cellView": "form",
+    "course_figure": {
+     "alt": "三個輸入位置各有不同前文與下一字分數",
+     "name": "foundations_prediction_positions"
+    },
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:10:27.857501Z",
+     "iopub.status.busy": "2026-10-04T19:10:27.857302Z",
+     "iopub.status.idle": "2026-10-04T19:10:27.870843Z",
+     "shell.execute_reply": "2026-10-04T19:10:27.867471Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "image/svg+xml": [
+       "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 600 475\" role=\"img\" aria-labelledby=\"title desc\">\n",
+       "<title id=\"title\">三個輸入位置各有一份下一字分數</title>\n",
+       "<desc id=\"desc\">輸入編號為1、2、3。位置0只讀到1，位置1讀到1和2，位置2讀到1、2和3；每個位置都給20個候選編號打分。這是原有三個位置的三份預測，續寫時先從最後位置的分數選一個新編號。</desc>\n",
+       "<style>text{font-family:\"Noto Sans CJK TC\",\"Microsoft JhengHei\",sans-serif;fill:#172b4d;text-anchor:middle}.arrow{stroke:#466b97;stroke-width:3;fill:none}</style>\n",
+       "<defs><marker id=\"next\" markerWidth=\"8\" markerHeight=\"8\" refX=\"7\" refY=\"4\" orient=\"auto\"><path d=\"M0 0L8 4L0 8\" fill=\"#466b97\"/></marker></defs>\n",
+       "<rect width=\"600\" height=\"475\" fill=\"white\"/>\n",
+       "<text x=\"300\" y=\"39\" font-size=\"30\">輸入1、2、3：每個位置各問一題</text>\n",
+       "<text x=\"180\" y=\"80\" font-size=\"25\">可以讀到的前文</text>\n",
+       "<text x=\"445\" y=\"80\" font-size=\"25\">下一編號的分數</text>\n",
+       "<g>\n",
+       "<rect x=\"24\" y=\"99\" width=\"552\" height=\"84\" rx=\"12\" fill=\"#eef5ff\"/>\n",
+       "<text x=\"75\" y=\"132\" font-size=\"23\">位置0</text>\n",
+       "<text x=\"190\" y=\"153\" font-size=\"32\">[1]</text>\n",
+       "<path class=\"arrow\" d=\"M290 145H330\" marker-end=\"url(#next)\"/>\n",
+       "<text x=\"445\" y=\"134\" font-size=\"27\">候選0到19</text>\n",
+       "<text x=\"445\" y=\"165\" font-size=\"24\">各有一個分數</text>\n",
+       "</g>\n",
+       "<g transform=\"translate(0 100)\">\n",
+       "<rect x=\"24\" y=\"99\" width=\"552\" height=\"84\" rx=\"12\" fill=\"#eef5ff\"/>\n",
+       "<text x=\"75\" y=\"132\" font-size=\"23\">位置1</text>\n",
+       "<text x=\"190\" y=\"153\" font-size=\"32\">[1, 2]</text>\n",
+       "<path class=\"arrow\" d=\"M290 145H330\" marker-end=\"url(#next)\"/>\n",
+       "<text x=\"445\" y=\"134\" font-size=\"27\">候選0到19</text>\n",
+       "<text x=\"445\" y=\"165\" font-size=\"24\">各有一個分數</text>\n",
+       "</g>\n",
+       "<g transform=\"translate(0 200)\">\n",
+       "<rect x=\"24\" y=\"99\" width=\"552\" height=\"84\" rx=\"12\" fill=\"#d7f5e6\" stroke=\"#26875b\" stroke-width=\"2\"/>\n",
+       "<text x=\"75\" y=\"132\" font-size=\"23\">位置2</text>\n",
+       "<text x=\"190\" y=\"153\" font-size=\"32\">[1, 2, 3]</text>\n",
+       "<path class=\"arrow\" d=\"M290 145H330\" marker-end=\"url(#next)\"/>\n",
+       "<text x=\"445\" y=\"134\" font-size=\"27\">候選0到19</text>\n",
+       "<text x=\"445\" y=\"165\" font-size=\"24\">各有一個分數</text>\n",
+       "</g>\n",
+       "<text x=\"300\" y=\"428\" font-size=\"26\">續寫：先從綠色那列選1個新編號</text>\n",
+       "<text x=\"300\" y=\"460\" font-size=\"24\">加回輸入後，再計算下一次的分數</text>\n",
+       "</svg>"
+      ],
+      "text/plain": [
+       "<IPython.core.display.SVG object>"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    }
+   ],
+   "source": [
+    "# @title 本節圖解\n",
+    "from IPython.display import SVG, display\n",
+    "\n",
+    "display(SVG(filename=str(root / \"course/figures/foundations_prediction_positions.svg\")))"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "`argmax(dim=-1)`沿每位置的候選軸取最大值位置，所以結果是`[1,3]`，每個原有輸入位置各有一個最偏好的ID。它們是上述三道題各自的猜測；續寫時先用最後位置的分數選一個新ID，接到`[1,2,3]`後面，再重算更長前文的分數，才得到下一個新ID。這些初始化分數可能有正有負、總和不為1，仍不是機率。若想按比例抽樣，要先沿最後軸softmax；若要計算答案代價，則使用原始logits而不先softmax，交叉熵的含義見[1.8](https://birdhackor.github.io/tiny-perceptron-vlm/1.8.html)。\n",
+    "\n",
+    "本節的分數表有三個軸，不能原樣套進1.8的二軸接口。要把每個位置看成一題，將 `[1,3,20]` 整理為 `[3,20]`，答案也由 `[1,3]` 整理為 `[3]`。假設已知這三道題的下一字答案依序是2、3、4，可在原程式後加上：\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 4,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:10:27.872941Z",
+     "iopub.status.busy": "2026-10-04T19:10:27.872755Z",
+     "iopub.status.idle": "2026-10-04T19:10:27.877042Z",
+     "shell.execute_reply": "2026-10-04T19:10:27.875938Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "三題平均代價 3.335638999938965\n"
+     ]
+    }
+   ],
+   "source": [
+    "import torch.nn.functional as F\n",
+    "\n",
+    "target = torch.tensor([[2, 3, 4]])\n",
+    "scores_for_questions = logits.reshape(-1, logits.shape[-1])\n",
+    "answers_for_questions = target.reshape(-1)\n",
+    "print(\"三題平均代價\", F.cross_entropy(scores_for_questions, answers_for_questions).item())"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "`reshape` 只整理數字的排列形狀，不改值或題目順序；它的參數 `-1` 表示按總格數自動算出題數，這裡是3。`logits.shape[-1]` 取最後候選軸的大小20，讓每題仍有完整的候選分數；字表改成25時這裡也自動用25。交叉熵將第0、1、2列分別與答案2、3、4比較，取三題平均；目前初始化下約為3.336。完整序列如何建立這份答案，下一節[4.7](https://birdhackor.github.io/tiny-perceptron-vlm/4.7.html)會再拆開。\n",
+    "\n",
+    "模型沒訓練，最大分ID不表示它已經知道下一字。此時的實驗目的在核對「八個內部特徵怎樣變成二十個候選分數」。若字表有20個項目，合法ID是0到19，輸入20就超出範圍；輸出層大小也要與編碼表一致，否則某些字沒有分數，或多出不能解碼的候選。\n",
+    "\n",
+    "這裡選不共享權重的簡單起點：輸入embedding是[按ID查起始向量的工具](https://birdhackor.github.io/tiny-perceptron-vlm/2.1.html)，輸出Linear則為候選打分，兩者各有一張可調數字表。它們一個負責提供起始特徵，一個負責給候選分數，功能不同；後續可能讓兩者共用權重來省參數，但不能只因形狀相似就預設已經共享。\n",
+    "\n",
+    "練習把 `vocab_size` 從20改成25，保留輸入ID不動，先預測輸出 `[1,3,25]`，再改檢查核對。最高分ID可能變，因為模型重新初始化；真正可確定的是候選軸增加五格。若要觀察參數成本，再印 `model.description()[\"parameters\"]`，比較加入字表候選需要保存更多數字。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "4.6"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

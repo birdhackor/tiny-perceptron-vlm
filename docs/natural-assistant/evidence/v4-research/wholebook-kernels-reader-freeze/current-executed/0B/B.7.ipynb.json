@@ -1,0 +1,191 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# B.7 工具選擇怎樣才算可靠？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "模型會寫TOOL，不代表它知道什麼時候需要工具；每一題都選TOOL也能在純計算考卷上得到漂亮分數。我們需要混合不同任務，分別查哪些題漏用了工具、哪些題多用了工具，以及缺資訊時是否有求助。前置是[B.6選卡訓練](https://birdhackor.github.io/tiny-perceptron-vlm/B.6.html)和[1.2留出未見資料](https://birdhackor.github.io/tiny-perceptron-vlm/1.2.html)。本節先用人工結果學會讀分母，再讀實際模型的測試。\n",
+    "\n",
+    "下面六筆是刻意構造的成績，並非模型實測。gold是依[B.5策略](https://birdhackor.github.io/tiny-perceptron-vlm/B.5.html)標好的合適動作；predicted是假設生成的動作。我們把「需要工具卻沒選」與「不需要工具卻選了」分開數，避免只看一個總分。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:14:03.147679Z",
+     "iopub.status.busy": "2026-10-04T19:14:03.147440Z",
+     "iopub.status.idle": "2026-10-04T19:14:04.409130Z",
+     "shell.execute_reply": "2026-10-04T19:14:04.408610Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7f3bcaa66610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:14:04.411738Z",
+     "iopub.status.busy": "2026-10-04T19:14:04.411453Z",
+     "iopub.status.idle": "2026-10-04T19:14:04.419833Z",
+     "shell.execute_reply": "2026-10-04T19:14:04.417664Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "動作選對 3 / 6\n",
+      "需要工具卻沒選 1 / 2\n",
+      "不需要工具卻選了 1 / 4\n"
+     ]
+    }
+   ],
+   "source": [
+    "gold = [\"TOOL\", \"TOOL\", \"DIRECT\", \"DIRECT\", \"ASK\", \"ASK\"]\n",
+    "predicted = [\"TOOL\", \"DIRECT\", \"TOOL\", \"DIRECT\", \"ASK\", \"DIRECT\"]\n",
+    "correct = sum(a == b for a, b in zip(gold, predicted, strict=True))\n",
+    "needed = sum(a == \"TOOL\" for a in gold)\n",
+    "missed = sum(a == \"TOOL\" and b != \"TOOL\" for a, b in zip(gold, predicted, strict=True))\n",
+    "not_needed = len(gold) - needed\n",
+    "extra = sum(a != \"TOOL\" and b == \"TOOL\" for a, b in zip(gold, predicted, strict=True))\n",
+    "print(\"動作選對\", correct, \"/\", len(gold))\n",
+    "print(\"需要工具卻沒選\", missed, \"/\", needed)\n",
+    "print(\"不需要工具卻選了\", extra, \"/\", not_needed)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "輸入兩份同長清單，`zip(..., strict=True)`逐筆配對，長度不同會報錯；sum把每次成立的True算作1。應得到動作選對3/6、漏選1/2、多選1/4。多選的分母是所有不該用工具的四題，包含DIRECT與ASK，不能拿全部六題作同一個比例。只印出TOOL是選擇紀錄，尚未真正執行工具；真正呼叫次數與[B.4](https://birdhackor.github.io/tiny-perceptron-vlm/B.4.html)的完整任務成功率仍須另量。\n",
+    "\n",
+    "正式選卡實驗把同一對數字的加法、照抄、解釋及工具狀態變化，放在同一個題目家族。家族先分成訓練、驗證與最後測試；同一筆問題不能在兩邊重複。訓練用來更新，驗證用來觀察，最後測試只在配方固定後核對，不按它的結果選步數或重訓。另一組未見問法則專門檢查：只換措辭，原本的選擇是否仍成立。因為題目來自有限模板，這些仍是受控的自然語言小世界，不能外推為任意問題的工具判斷能力。\n",
+    "\n",
+    "這輪選卡器有143,616個參數，也就是模型中可調數字的總個數；文字寬64、兩層、兩個注意力頭，上下文最多160個位元組位置。數字範圍0至9，交換順序仍屬同一家族：1加2與2加1放一起；1加1這種相同數字也保留。先從0搭配0至9得到10組，再從1搭配1至9得到9組，依此數到9搭配9的1組，共10＋9＋⋯＋1＝55個家族。\n",
+    "\n",
+    "每個家族都有以下四種任務；每個問法再配計算器可用、停用兩種system狀態。原問法每家族共有4種任務×2個問法×2種工具狀態＝16筆，未見問法診斷則是4×1×2＝8筆。\n",
+    "\n",
+    "| 任務 | 原問法數／新問法數 | 工具可用的標準卡 | 工具停用的標準卡 |\n",
+    "| --- | --- | --- | --- |\n",
+    "| 求加法的精確數值 | 2／1 | TOOL | ASK |\n",
+    "| 用積木等方式解釋加法 | 2／1 | DIRECT | DIRECT |\n",
+    "| 照抄給出的兩個數字 | 2／1 | DIRECT | DIRECT |\n",
+    "| 報價，尚未提供購買數量 | 2／1 | ASK | ASK |\n",
+    "\n",
+    "例如「單價 1 元，運費 2 元，總價多少？」在這份報價流程中還缺購買數量，標為ASK。55個家族分成44／5／6個家族，因此得到44×16＝704、5×16＝80、6×16＝96筆訓練、驗證、最後測試。1與2的家族事先指定放在最後測試；每個數字值仍可能在其他訓練家族出現，所以測的是未見的組合，不是全新的數字種類。\n",
+    "\n",
+    "固定seed 42、每批24筆、學習率0.003，模型從隨機權重更新900次。seed是重現隨機抽樣的起點，見[1.14](https://birdhackor.github.io/tiny-perceptron-vlm/1.14.html)；每批是一次更新抽取的題數，見[5.2](https://birdhackor.github.io/tiny-perceptron-vlm/5.2.html)；學習率是調整數字的步長，見[5.14](https://birdhackor.github.io/tiny-perceptron-vlm/5.14.html)。同一題會在不同更新中重複讀取，累計計分121,297個有效答案位置，包含動作字母與EOS，與[B.6的五個位置](https://birdhackor.github.io/tiny-perceptron-vlm/B.6.html)是同一種單位，不是121,297份不同回答。在這台CPU上，訓練約35.55秒、完整實驗約39.41秒；時間只供這次環境參考，不是GPU速度比較。配方事先固定，看到測試結果後沒有重訓或改參數。\n",
+    "\n",
+    "| 核對項目 | 同問法、未見數字對 | 未見問法診斷 |\n",
+    "| --- | --- | --- |\n",
+    "| 動作選對 | 96/96 | 42/48 |\n",
+    "| 應使用工具且選中TOOL | 12/12 | 0/6 |\n",
+    "| 不該使用工具卻選TOOL | 0/84 | 0/42 |\n",
+    "| 計算器停用卻選TOOL | 0/48 | 0/24 |\n",
+    "| 永遠選DIRECT的對照 | 48/96 | 24/48 |\n",
+    "| 永遠選TOOL的對照 | 12/96 | 6/48 |\n",
+    "\n",
+    "表的第一列與最後兩個對照都以全部題數作分母。每個原問法家族有兩道「計算器可用的加法題」該選TOOL，六家族共12道；其餘96−12＝84道不該選。每家族16筆中有一半停用工具，所以停用分母為6×8＝48。診斷每家族只有一個新加法問法，因此相應分母變成6、48−6＝42與6×4＝24。這些子集有重疊，不能把各列分母相加當另一份考卷。\n",
+    "\n",
+    "例如測試題「1 加 2 等於多少？」在system只寫「計算器可用。」時生成TOOL；把system換成「計算器停用。」就生成ASK。這輪訓練將工作策略放進示範答案，system只提供工具狀態，與[B.6](https://birdhackor.github.io/tiny-perceptron-vlm/B.6.html)為了說明資料欄位而人工寫出完整規則的短例不同。同一數字對的解釋與照抄題則生成DIRECT。這支持有限句型內已學到區分，不能證明模型先估算了自己算術答對的機率。\n",
+    "\n",
+    "未見問法診斷沿用六個測試家族，但每種任務換一個新模板，各搭配可用、停用兩種狀態，共48題。計算器可用時，「幫我把 1 與 2 相加，給我答案。」卻生成ASK。六道應用工具的題全部如此；42/48的總分其實掩蓋了工具選擇在這個新問法上完全失敗。缺資訊的判定也遵守人工訂出的「報價先取得購買數量」規則，沒有測量模型是否能推導零單價等特例。\n",
+    "\n",
+    "ASK只是本輪的一張卡，模型沒有產生「請補數量」或「請啟用工具」的完整解釋。資料另記求助原因，方便人查標註，不能把那些人寫的原因當成模型回答。\n",
+    "\n",
+    "完整[實測報告](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/course-experiments/results/tool_choice.json)保留每題問題、工具狀態、標準動作與實際生成；[實驗程式](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/scripts/course_experiments/tool_choice.py)保留資料建立與切分方法。分數只評選卡，不含新JSON參數生成、工具運算或最後答案。即使選卡全對，也不能接用[B.4](https://birdhackor.github.io/tiny-perceptron-vlm/B.4.html)另一份模型的19/20成績，拼成一個沒有實際跑過的端到端成功率。\n",
+    "\n",
+    "練習只把predicted第二筆DIRECT改成TOOL。先預測動作選對變4/6、漏選變0/2、多選仍1/4，再執行核對。最後解釋為何總分提高仍不等於完全可靠：一題還多用了工具，另一題應求助卻直接答了。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "B.7"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

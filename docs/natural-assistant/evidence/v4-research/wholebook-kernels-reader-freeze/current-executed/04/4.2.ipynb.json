@@ -1,0 +1,213 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 4.2 怎麼保留原本的資訊？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "你收到一份草稿，編輯建議只修第二句。如果每次都把整份內容全部重寫，新方法暫時失誤時就可能丟掉原本有用的部分。模型也可以留一條直接帶著原表示的主路線，另外計算一份修正，最後把它加回去。這叫殘差連接（residual connection）：輸出是原輸入加上新修正，而不是要求每個分支都重新創造全部資訊。\n",
+    "\n",
+    "寫成 `y=x+f(x)`，x是文字序列中某一位置已有的表示：用一排特徵數字記錄該位置的線索，背景可看 [4.1](https://birdhackor.github.io/tiny-perceptron-vlm/4.1.html)。本節先把這一排簡化成 `[1,2]`；兩格都屬於同一個位置，並不是兩個位置各有一格。表示的「寬度」就是這排特徵的格數，這裡為2。f是注意力或另一種計算產生的修正，兩邊形狀必須相同才能逐格相加。先用f(x)=2x看清數值：修正為 `[2,4]`，結果 `[3,6]`。這個例子故意簡單，但已經展現「分支計算」與「直接保留」兩條路。\n",
+    "\n",
+    "下圖左邊 `[1,2]` 分成兩路：上路乘2得到橘框 `[2,4]`，下路直接保留 `[1,2]`。兩支箭頭到加號才合流，右邊逐格相加得到 `[3,6]`。底下敏感度1與2相加為3，對應稍後程式的梯度，不是把兩份答案代價相加。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:10:15.818207Z",
+     "iopub.status.busy": "2026-10-04T19:10:15.818048Z",
+     "iopub.status.idle": "2026-10-04T19:10:17.043019Z",
+     "shell.execute_reply": "2026-10-04T19:10:17.041946Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7f48d855a610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "cellView": "form",
+    "course_figure": {
+     "alt": "殘差的直接路與修正路",
+     "name": "foundations_residual"
+    },
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:10:17.044961Z",
+     "iopub.status.busy": "2026-10-04T19:10:17.044731Z",
+     "iopub.status.idle": "2026-10-04T19:10:17.055584Z",
+     "shell.execute_reply": "2026-10-04T19:10:17.054409Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "image/svg+xml": [
+       "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"680\" height=\"360\" viewBox=\"0 0 680 360\" role=\"img\" aria-labelledby=\"title desc\"><title id=\"title\">保留原表示，再加上修正</title><desc id=\"desc\">輸入一與二走兩路，直接路保存一與二，修正路乘二變成二與四，兩路相加得到三與六。直接路的敏感度一加修正路二，合成三。</desc><defs><marker id=\"arrow\" markerWidth=\"8\" markerHeight=\"8\" refX=\"6\" refY=\"4\" orient=\"auto\"><path d=\"M0 0L8 4L0 8\" fill=\"#334155\"/></marker></defs><rect width=\"680\" height=\"360\" rx=\"12\" fill=\"#f8fafc\"/>\n",
+       "<g font-family=\"sans-serif\" fill=\"#0f172a\" text-anchor=\"middle\"><text x=\"340\" y=\"32\" font-size=\"23\">原表示有一條直接保留的路</text><rect x=\"30\" y=\"128\" width=\"160\" height=\"66\" rx=\"8\" fill=\"#dbeafe\" stroke=\"#2563eb\"/><text x=\"110\" y=\"170\" font-size=\"29\">x = [1, 2]</text><rect x=\"270\" y=\"60\" width=\"165\" height=\"70\" rx=\"8\" fill=\"#ffedd5\" stroke=\"#c2410c\"/><text x=\"352\" y=\"88\" font-size=\"18\">修正 f(x) = 2x</text><text x=\"352\" y=\"117\" font-size=\"28\">[2, 4]</text><circle cx=\"495\" cy=\"160\" r=\"25\" fill=\"#fff\" stroke=\"#334155\"/><text x=\"495\" y=\"170\" font-size=\"31\">+</text><rect x=\"550\" y=\"128\" width=\"112\" height=\"66\" rx=\"8\" fill=\"#dcfce7\" stroke=\"#16a34a\"/><text x=\"606\" y=\"169\" font-size=\"27\">[3, 6]</text>\n",
+       "<g fill=\"none\" stroke=\"#334155\" stroke-width=\"3\" marker-end=\"url(#arrow)\"><path d=\"M190 160H220V95H258\"/><path d=\"M435 95H495V124\"/><path d=\"M190 160H230V245H495V198\"/><path d=\"M525 160H541\"/></g><text x=\"348\" y=\"236\" font-size=\"25\">直接保留 [1, 2]</text><text x=\"340\" y=\"300\" font-size=\"22\">每格結果 = 原值 + 修正</text><text x=\"340\" y=\"332\" font-size=\"22\">每格敏感度 = 直接路 1 + 修正路 2 = 3</text></g></svg>"
+      ],
+      "text/plain": [
+       "<IPython.core.display.SVG object>"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    }
+   ],
+   "source": [
+    "# @title 本節圖解\n",
+    "from IPython.display import SVG, display\n",
+    "\n",
+    "display(SVG(filename=str(root / \"course/figures/foundations_residual.svg\")))"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 3,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:10:17.057101Z",
+     "iopub.status.busy": "2026-10-04T19:10:17.056947Z",
+     "iopub.status.idle": "2026-10-04T19:10:17.071514Z",
+     "shell.execute_reply": "2026-10-04T19:10:17.070277Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "結果 tensor([3., 6.])\n",
+      "對輸入的敏感度 tensor([3., 3.])\n"
+     ]
+    }
+   ],
+   "source": [
+    "import torch\n",
+    "\n",
+    "x = torch.tensor([1.0, 2.0], requires_grad=True)\n",
+    "correction = 2 * x\n",
+    "y = x + correction\n",
+    "y.sum().backward()\n",
+    "print(\"結果\", y.detach())\n",
+    "print(\"對輸入的敏感度\", x.grad)\n",
+    "assert torch.equal(x.grad, torch.tensor([3.0, 3.0]))"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "輸入x是兩特徵向量並追蹤梯度。`y.sum()` 把兩個輸出加成一個數，只為測總輸出對x的敏感度，不是本章訓練文字時的答案代價。它對每格x的導數為3：一條直接路的敏感度1，加上修正路的2。這與 [1.10](https://birdhackor.github.io/tiny-perceptron-vlm/1.10.html) 的鏈式法則相容；同一輸入走不同路影響最終結果，兩路影響要相加。`detach` 只讓顯示結果不附求導關係，沒有改變值。\n",
+    "\n",
+    "程式會印出下面兩行；`tensor(...)` 是數字容器的顯示格式，`3.` 表示3.0。`torch.equal` 檢查兩個tensor的形狀和值是否完全相同，這裡回傳 `True`，所以 `assert` 通過且不再印出東西；若檢查結果為 `False`，則會出現 `AssertionError` 並停止。\n",
+    "\n",
+    "```text\n",
+    "結果 tensor([3., 6.])\n",
+    "對輸入的敏感度 tensor([3., 3.])\n",
+    "```\n",
+    "\n",
+    "所以殘差常有助原有資訊沿直接路傳到後續層，也讓求導時的梯度沿計算關係反向傳回較早的層。這是兩種不同方向：資訊從輸入算到結果，敏感度則從結果回查輸入。即使修正分支暫時接近0，主路仍能帶上已有內容，導數也仍有那份直接的1。它不保證訓練不會失敗，也不是把所有輸入永久保存成可還原原文；後面還會有其他計算。但它讓每層學習「在現有表示上補哪些資訊」，比強制整個表示通過一條新分支更容易保持連續。\n",
+    "\n",
+    "有時公式寫導數 `I+df/dx`，I叫單位矩陣，代表每個特徵沿直接路原樣傳遞：自己的改動影響自己一倍，不影響別格。對目前不需要交叉特徵的例子，只需看每格1+2=3，就已掌握這個I的用途，不必先修完矩陣微積分。\n",
+    "\n",
+    "這裡相加的是同一個位置的兩份表示，不是兩個loss相加，也不是將不同句子混為一筆。[3.4](https://birdhackor.github.io/tiny-perceptron-vlm/3.4.html) 的注意力按讀取比例混合各個允許位置的value，為當前位置帶回新資訊；用作殘差的修正分支時，輸出還必須與原當前表示有同樣的特徵格數，才能相加。下一步會在這種路線上控制各位置數值的尺度。\n",
+    "\n",
+    "練習只把 `correction = 2*x` 改成 `0*x`，先預測結果等於 `[1,2]`，敏感度為 `[1,1]`，再把檢查改成這個新梯度核對。修正不提供任何變化，主路仍完整工作，這正是保留路線最容易驗證的情況。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "4.2"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

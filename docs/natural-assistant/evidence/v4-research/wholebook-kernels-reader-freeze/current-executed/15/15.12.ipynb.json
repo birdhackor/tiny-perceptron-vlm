@@ -1,0 +1,165 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 15.12 Expert 容量不夠怎麼辦？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "如果六個token都選同一位expert，這位可以無限制接收嗎？本教材的小型CPU實作會處理所有選中的工作，稱為dropless：選中後不因負載多而丟棄。但有些大型系統為了固定工作緩衝區大小，會設定每位expert最多接幾筆。當實際工作超過這個capacity（容量上限），必須另定處理規則，不能悄悄忽略後面的token。\n",
+    "\n",
+    "前置是[top-k工作選擇](https://birdhackor.github.io/tiny-perceptron-vlm/15.4.html)與[負載計數](https://birdhackor.github.io/tiny-perceptron-vlm/15.8.html)。例如六個token、兩位expert、top-1，平均每位應有三筆工作。若將容量設為平均的約三分之二，每位只能接兩筆。實際選擇是 `[0,0,0,1,0,0]`，工作數 `[5,1]`：第一位超過三筆，第二位雖有空間，並不表示那三筆已自動轉給它。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:17:30.918329Z",
+     "iopub.status.busy": "2026-10-04T19:17:30.918109Z",
+     "iopub.status.idle": "2026-10-04T19:17:33.207382Z",
+     "shell.execute_reply": "2026-10-04T19:17:33.206484Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7ff24284a610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:17:33.218199Z",
+     "iopub.status.busy": "2026-10-04T19:17:33.217680Z",
+     "iopub.status.idle": "2026-10-04T19:17:33.243396Z",
+     "shell.execute_reply": "2026-10-04T19:17:33.236544Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "每位容量 2\n",
+      "工作次數 [5, 1]\n",
+      "超出筆數 [3, 0]\n",
+      "總超出 3\n"
+     ]
+    }
+   ],
+   "source": [
+    "import math\n",
+    "import torch\n",
+    "\n",
+    "chosen = torch.tensor([0, 0, 0, 1, 0, 0])\n",
+    "tokens, experts, k = len(chosen), 2, 1\n",
+    "capacity_factor = 2 / 3\n",
+    "capacity = math.ceil(capacity_factor * tokens * k / experts)\n",
+    "counts = torch.bincount(chosen, minlength=experts)\n",
+    "overflow = (counts - capacity).clamp(min=0)\n",
+    "print(\"每位容量\", capacity)\n",
+    "print(\"工作次數\", counts.tolist())\n",
+    "print(\"超出筆數\", overflow.tolist())\n",
+    "print(\"總超出\", overflow.sum().item())"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "`tokens*k`是全部分派筆數，除以expert數是平均工作量；capacity_factor把這個平均放大或縮小，`ceil`向上取整，因為容量只能是整數。`clamp(min=0)`把負數改成零：第二位只有一筆，`1-2=-1`表示有餘裕，不應算成負的溢出。輸出容量2、工作 `[5,1]`、超出 `[3,0]`、總超出3。\n",
+    "\n",
+    "這個程式只計數，沒有丟工作，也沒有改模型。真正加入容量政策時，至少有三種選擇：drop跳過超出的expert貢獻；fallback讓另一條預設路徑處理；reroute嘗試送往下一位expert。後兩者需要定義新的選擇與合併規則；第一種也要交代被跳過的token是否仍走[殘差路徑](https://birdhackor.github.io/tiny-perceptron-vlm/4.2.html)，也就是保留原輸入並加上本層變化的路徑、訓練誤差如何計算。不能只把超額輸出設成零就當作所有語意已解決。\n",
+    "\n",
+    "容量是每位個別的限制。即使總容量足夠，路由不均仍可能溢出；本例將capacity_factor設為1，總容量六筆，但第一位需要五筆、容量只有三，仍超出兩筆。這正是平衡路由不只影響參數使用，也影響系統能否順利處理工作的原因。報告結果時要同時列實際超額率與答案品質。這裡超額率定義為「總超出筆數除以總分派筆數tokens×k」，原例為3/6=50%。不要用跳過工作換到的速度冒充相同計算。\n",
+    "\n",
+    "這個容量公式可對照[Switch Transformer第2.2節、式3](https://arxiv.org/pdf/2101.03961v3)，但本次七組訓練沒有啟用固定expert容量、丟棄或重送。即使[15.8](https://birdhackor.github.io/tiny-perceptron-vlm/15.8.html)的某位負載偏高，模型仍處理選中的工作。因此實報沒有「drop率降低」或「fallback改善」的成績；不能把上述手算超出率標成已訓練模型的實測。\n",
+    "\n",
+    "練習只把capacity_factor改成1，先預測capacity為3、overflow為 `[2,0]`；再改成2，預測capacity為6、無溢出。重跑核對後說明：容量變大不改router的選擇，只改有多少工作能留在原路徑。主教材仍採dropless，所以這些容量數字是設計分析，不是已啟用的丟棄政策。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "15.12"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

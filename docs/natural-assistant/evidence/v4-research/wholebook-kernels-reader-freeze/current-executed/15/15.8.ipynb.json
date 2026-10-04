@@ -1,0 +1,206 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 15.8 為什麼 token 都跑去同一位 expert？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "準備三位expert，並不保證它們都得到工作。router如果一開始稍微偏向第一位，就可能讓它接到更多token、得到更多學習機會；其他兩位很少更新，表現差距又讓router繼續偏向第一位。這種只使用少數甚至一位expert的狀態叫routing collapse（路由塌縮）。要診斷它，不能只看模型宣告有幾位expert，還要數實際選擇。\n",
+    "\n",
+    "前置是[top-k比例與索引](https://birdhackor.github.io/tiny-perceptron-vlm/15.4.html)。這裡固定使用top-1，讓十二個token都有相同分數 `[8,0,0]`，明確製造偏斜，不靠某次隨機訓練碰巧發生。softmax後第一位的比例約0.9993，其餘各0.0003；十二筆選擇都會落在索引0，實際工作數為 `[12,0,0]`。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:17:56.737727Z",
+     "iopub.status.busy": "2026-10-04T19:17:56.737514Z",
+     "iopub.status.idle": "2026-10-04T19:17:57.989892Z",
+     "shell.execute_reply": "2026-10-04T19:17:57.988887Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7f943025e610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:17:57.991948Z",
+     "iopub.status.busy": "2026-10-04T19:17:57.991711Z",
+     "iopub.status.idle": "2026-10-04T19:17:58.006964Z",
+     "shell.execute_reply": "2026-10-04T19:17:58.005377Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "分數優勢 8.0\n",
+      "平均比例 [0.9993000030517578, 0.0003000000142492354, 0.0003000000142492354]\n",
+      "工作次數 [12, 0, 0]\n",
+      "分數優勢 0.1\n",
+      "平均比例 [0.35589998960494995, 0.32199999690055847, 0.32199999690055847]\n",
+      "工作次數 [12, 0, 0]\n"
+     ]
+    }
+   ],
+   "source": [
+    "import torch\n",
+    "\n",
+    "for advantage in (8.0, 0.1):\n",
+    "    scores = torch.tensor([[advantage, 0.0, 0.0]]).repeat(12, 1)\n",
+    "    prob = scores.softmax(-1)\n",
+    "    chosen = prob.topk(1, dim=-1).indices\n",
+    "    counts = torch.bincount(chosen.flatten(), minlength=3)\n",
+    "    print(\"分數優勢\", advantage)\n",
+    "    print(\"平均比例\", prob.mean(0).round(decimals=4).tolist())\n",
+    "    print(\"工作次數\", counts.tolist())"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "`repeat(12,1)`把一列分數重複十二次。`flatten`將十二列一欄的索引攤成清單，`bincount`數每個非負整數出現幾次；`minlength=3`保留未被選中的expert欄位，不讓它們從報告消失。優勢8時平均比例約 `[0.9993,0.0003,0.0003]`，工作次數為 `[12,0,0]`。\n",
+    "\n",
+    "第二輪把優勢降到0.1，平均比例變成約 `[0.3559,0.3220,0.3220]`，看起來已接近均勻；工作次數卻仍是 `[12,0,0]`。原因是top-1只看排名，第一位每次還是最大。這個對照非常重要：平均router機率與實際負載是不同統計。負載可用各位被選次數除以總選擇次數，這裡依然是 `[1,0,0]`，不是上面的三項機率。\n",
+    "\n",
+    "均勻負載也不等於品質最好；某些輸入確實可能更適合某位expert。但如果所有種類的token長期集中在同一位，其他參數沒有發揮作用，系統還可能因單位工作過多而塞住。因此應同時記錄不同時間、不同資料類型的選擇分布和任務誤差。這個受控反例只證明偏斜如何形成與如何辨識，沒有宣稱真實訓練一定會塌縮。\n",
+    "\n",
+    "下面的實測會提到「輔助項」：它是訓練時額外加入、用來鼓勵router較均衡分派工作的誤差。「輔助係數」決定把這個額外項乘上多少，再加到文字預測誤差上；係數0表示這次沒有把它加入訓練目標。完整公式留到下一節[15.9](https://birdhackor.github.io/tiny-perceptron-vlm/15.9.html)。\n",
+    "\n",
+    "實測top-1、輔助係數0的第二層，四位在全部有效驗證輸入上收到 `[8536,25630,4875,215]` 筆，占39,256筆的 `[21.74%,65.29%,12.42%,0.55%]`，完整比較見[15.13](https://birdhackor.github.io/tiny-perceptron-vlm/15.13.html)。這是偏斜使用，卻還不是全部工作都去一位。可再用「負載熵」把份額的分散程度概括成一個數字：每位的份額f各算 `-f*log(f)`，再把各項相加。這裡log是自然對數，問「約2.718的數e取幾次方會得到f」，Python用 `math.log(f)`計算。份額為0的項直接記0，不呼叫 `log(0)`；份額越接近0，這一項的貢獻也越接近0。\n",
+    "\n",
+    "例如四位均勻時各占0.25，`log(0.25)`約-1.3863，各項為 `-0.25×(-1.3863)=0.3466`，四項合計約1.3863，也就是 `log(4)`。用熵除以這個均勻值，便把均勻負載記成1。若份額為 `[1,0,0,0]`，第一項因 `log(1)=0`而為0，其餘按零份額規則也為0，合計與正規化結果都是0。這兩端分別表示全去一位與整體份額均勻。\n",
+    "\n",
+    "下面用實際次數重算，避免只拿四捨五入的百分比代入。`fractions`把各次數除以總次數，得到份額；`terms`逐項計算上述貢獻，`if f > 0 else 0.0`處理零份額；最後相加並除以四位均勻時的熵，印出0.64755。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 3,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:17:58.009588Z",
+     "iopub.status.busy": "2026-10-04T19:17:58.009386Z",
+     "iopub.status.idle": "2026-10-04T19:17:58.013941Z",
+     "shell.execute_reply": "2026-10-04T19:17:58.012853Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "0.64755\n"
+     ]
+    }
+   ],
+   "source": [
+    "import math\n",
+    "\n",
+    "counts = [8536, 25630, 4875, 215]\n",
+    "fractions = [count / sum(counts) for count in counts]\n",
+    "terms = [-f * math.log(f) if f > 0 else 0.0 for f in fractions]\n",
+    "print(round(sum(terms) / math.log(len(counts)), 5))"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "這個熵彙整整份驗證集，不保證每一批、每一類文字都均勻；不同批各自集中到不同expert，也可能加總成高熵。報告因此保留各位次數、平均機率與逐批輔助項的加權平均值。這個平均先把每批的輔助項乘上該批有效輸入數，全部相加後再除以有效輸入總數；有效輸入較多的批次占比較大。閱讀結果時應一起看這些統計。加上輔助目標後會怎樣，接著看[15.9](https://birdhackor.github.io/tiny-perceptron-vlm/15.9.html)。\n",
+    "\n",
+    "練習只把第二個expert的分數也設成0.2，也就是每列 `[0.1,0.2,0]`。先預測十二筆改送索引1，而非自動平均分給三位，再執行核對。接著用兩組不同分數各重複六列，你應能用bincount看見 `[6,6,0]`。分散工作需要不同輸入產生不同排名，不能只讓每一列的比例更平坦。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "15.8"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

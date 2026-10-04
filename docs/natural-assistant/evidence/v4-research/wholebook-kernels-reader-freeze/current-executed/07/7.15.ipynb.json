@@ -1,0 +1,164 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 7.15 學會新任務會忘記舊任務嗎？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "一個模型先學會補完顏色句，再只練算術問答；算術改善後，顏色任務可能退步。兩任務使用同一套可調參數，學習新任務會改到舊任務依賴的數，並不會自動為舊規則留一個永遠不動的隔間。這種舊能力下降叫遺忘（forgetting），明顯時常稱災難性遺忘。能不能發生與程度多大，要用前後測量確認。\n",
+    "\n",
+    "實驗至少記錄A、B兩個任務的微調前後表現。只看B_after無法知道A有沒有變差；只看A_after也不知道退步是新訓練造成，還是原先A根本沒學會。先按 [7.13](https://birdhackor.github.io/tiny-perceptron-vlm/7.13.html) 固定兩組任務與規則，再用同樣生成設置測兩個checkpoint，保存完整四格記錄。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:12:06.899662Z",
+     "iopub.status.busy": "2026-10-04T19:12:06.899445Z",
+     "iopub.status.idle": "2026-10-04T19:12:08.155747Z",
+     "shell.execute_reply": "2026-10-04T19:12:08.154020Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7f9d62a5e610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:12:08.158050Z",
+     "iopub.status.busy": "2026-10-04T19:12:08.157806Z",
+     "iopub.status.idle": "2026-10-04T19:12:08.163872Z",
+     "shell.execute_reply": "2026-10-04T19:12:08.162538Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "固定A題 ['紅色物體是圓。請接續：紅色物體是', '藍色物體是方。請接續：藍色物體是']\n",
+      "固定B題 ['1+1=?', '2+1=?']\n",
+      "待填實測 {'微調前': {'A舊任務': None, 'B新任務': None}, '只訓練B後': {'A舊任務': None, 'B新任務': None}}\n"
+     ]
+    }
+   ],
+   "source": [
+    "measurements = {\n",
+    "    \"微調前\": {\"A舊任務\": None, \"B新任務\": None},\n",
+    "    \"只訓練B後\": {\"A舊任務\": None, \"B新任務\": None},\n",
+    "}\n",
+    "a_questions = [\"紅色物體是圓。請接續：紅色物體是\", \"藍色物體是方。請接續：藍色物體是\"]\n",
+    "b_questions = [\"1+1=?\", \"2+1=?\"]\n",
+    "print(\"固定A題\", a_questions)\n",
+    "print(\"固定B題\", b_questions)\n",
+    "print(\"待填實測\", measurements)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "輸入兩份固定評估題清單與四格表。None表示尚未測量，不是0分，也不是模型拒答；這段只是建立可記錄的比較接口，沒有在背後訓練模型，所以不填假成績。A問題明確提供前文規則、B是算術，實際任務還應保存正確答案與評分約定，而不只留問句。\n",
+    "\n",
+    "真正流程是先訓練得到基模、在A/B各測一次，保存checkpoint；再從它接續只用B資料更新，保存新checkpoint，再測同一A/B題。訓練操作與狀態保存見 [5.7](https://birdhackor.github.io/tiny-perceptron-vlm/5.7.html)、[7.11](https://birdhackor.github.io/tiny-perceptron-vlm/7.11.html)，不能新建隨機模型冒充「同一模型繼續」。評估題應從訓練例之外留出，別把這幾道固定題也不斷用來更新。\n",
+    "\n",
+    "若B從0.4升0.8、A從0.9跌0.6，纔出現我們想觀察的「新提升伴隨舊下降」；這些數字只是讀表例子，實際應由兩模型量測。若A仍0.9，就不能先入為主聲稱必有遺忘；若兩者都下降，可能新訓練流程有問題。四格讓多種變化都可辨識。\n",
+    "\n",
+    "還要區分可見的輸出風格變化與內容能力下降。模型可能從續寫變成解釋回答，使舊任務的格式指標變差；應同時檢查 [7.13](https://birdhackor.github.io/tiny-perceptron-vlm/7.13.html) 的內容與格式，才能決定是否真的丟失規則。只有一個總分，容易把這些現象混成同一種忘記。\n",
+    "\n",
+    "本課實跑使用的A是[7.12的屬性問答](https://birdhackor.github.io/tiny-perceptron-vlm/7.12.html)，B則是0到7的短加法題。從同一份A基模接續，只用49筆B題更新500次後，A的十題最後檢查由5題答對降至0題。原本應回答`circle`的屬性題，這時甚至會生成`9`並正常結束；舊任務的內容表現確實變差，不只是多加一句禮貌話。\n",
+    "\n",
+    "但不能把這份結果寫成「新能力學好了，代價是忘掉舊能力」。B在七題最後檢查仍是0題答對，雖然它的平均代價已從7.05820降至4.57756，訓練側代價也降了。這次看到的是舊任務退步，而新任務還沒有在未教過的加法組合上成功。加法兩個加數對調仍放在同一家族，所以`2+3`教過、`3+2`答對不會被算成獨立新組合。下一節把舊題混回來，再看兩邊完整的成績。\n",
+    "\n",
+    "練習給A評估清單新增一題，但不加入B訓練資料。先預測此代碼仍只擴大待測清單、四格仍None，再執行核對。你改變的是觀察範圍，不是模型訓練；真實重測時兩個checkpoint都要用更新後同一清單，不能一方多一道難題。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "7.15"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

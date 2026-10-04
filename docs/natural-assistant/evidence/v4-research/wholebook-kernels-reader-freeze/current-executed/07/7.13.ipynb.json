@@ -1,0 +1,163 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 7.13 後續改動要和什麼比？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "模型回傳 `{\"answer\":3}`，格式整齊且能讀成JSON，但1+1答案仍錯。後續改風格、加入拒答行為或壓縮模型時，若只看輸出像不像格式，可能忽略內容退步。我們需要先保存固定題目、生成設置與判讀規則，把不同面向分開記成基準，再觀察每個改動影響哪裡。\n",
+    "\n",
+    "這裡JSON是一種結構化資料文字，`json.loads` 把它解析成Python值。格式分數問「符合約定的對象形狀嗎」，內容分數問「答案與獨立正確規則一致嗎」。適當表達不確定則是另一面向：若題目所需資訊沒給，是否明確指出缺什麼，而不是憑空補一個確定答案。當前1+1資訊完整，先只計前兩項。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:12:02.229323Z",
+     "iopub.status.busy": "2026-10-04T19:12:02.229128Z",
+     "iopub.status.idle": "2026-10-04T19:12:03.459221Z",
+     "shell.execute_reply": "2026-10-04T19:12:03.457640Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7f8c62c66610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:12:03.462222Z",
+     "iopub.status.busy": "2026-10-04T19:12:03.461976Z",
+     "iopub.status.idle": "2026-10-04T19:12:03.468402Z",
+     "shell.execute_reply": "2026-10-04T19:12:03.467143Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "{'格式符合': True, '1+1內容正確': False}\n"
+     ]
+    }
+   ],
+   "source": [
+    "import json\n",
+    "\n",
+    "reply = '{\"answer\": 3}'\n",
+    "parsed = json.loads(reply)\n",
+    "scores = {\n",
+    "    \"格式符合\": isinstance(parsed, dict) and set(parsed) == {\"answer\"} and type(parsed[\"answer\"]) is int,\n",
+    "    \"1+1內容正確\": parsed.get(\"answer\") == 2,\n",
+    "}\n",
+    "print(scores)\n",
+    "assert scores[\"格式符合\"] and not scores[\"1+1內容正確\"]"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "輸入reply是示意回答字串，不是現場模型生成。解析後得到字典，`isinstance(parsed, dict)` 檢查它是不是字典；這裡只接受恰好一個answer字段且值為整數。`type(value)` 取得值的類型，`type(value) is int` 要求它的類型確實是Python整數。JSON的 `true`、`false` 會解碼為表示真假的 `True`、`False`，這裡不把它們當作整數答案；若改用 `isinstance(value, int)`，它們卻也會通過，因此這裡需要更嚴格的檢查。`set(parsed)` 取得鍵集合，`get` 取answer欄位，若沒有則返回None；字典背景見 [W.2](https://birdhackor.github.io/tiny-perceptron-vlm/first-steps.html#W.2)。輸出格式True、內容False，最後檢查確認這兩種結果可以同時發生。\n",
+    "\n",
+    "評估規則應在比較前寫明，例如算術用精確數值、分類用合法標籤；對開放式回答，可能需要多種合理答案或分項審讀，不一定只用字串完全相同。若只把所有表現加成一個總分，格式提升可能抵消事實退步；保存指標向量，也就是幾個分項數字，能保留這種行為差異。\n",
+    "\n",
+    "基準還要保存產生回答時的條件。tokenizer是把文字切成處理單位、轉成識別編號（ID）的工具，要記工具種類並保存它使用的字表，也就是處理單位與編號的對照，以及編碼規則。checkpoint是保存模型可調數字、供之後重新載入的檔案，要記路徑並保留當次檔案，不能只寫「最好模型」。生成溫度是控制抽選候選時有多集中於高分項的設定，要記實際數值；本專案推論工具把0定義為每次選最高分候選。再保存完整輸入題目與程式版本，才有辦法重做同一比較。\n",
+    "\n",
+    "不同修改共享同樣任務與資源約定，才能解釋是模型行為改了，還是題目換了。[5.10](https://birdhackor.github.io/tiny-perceptron-vlm/5.10.html) 提醒，反覆拿來選改動的這份基準會成為開發資料；最終成績仍需另外保留未參與選擇的test，不能無限用同一題微調再宣稱獨立進步。\n",
+    "\n",
+    "不要把結構有效自動等同安全或正確。JSON裡的answer可以錯誤，禮貌句子也可以提供不準確資訊；要按具體任務定義每個評判項。反過來，內容正確但格式不合要求也可能無法被應用讀入，兩個面向都有實際用途。\n",
+    "\n",
+    "本課後續實驗保留的屬性基準是[T.4實跑](https://birdhackor.github.io/tiny-perceptron-vlm/training.html#T.4)的`sft/model.pt`，也就是[7.12](https://birdhackor.github.io/tiny-perceptron-vlm/7.12.html)那條從零練900次的模型，不是較好的`pretrain-sft.pt`。它在最後檢查只答對5／10，因此後續改動要對照這個實際起點，不能先假定舊能力已經滿分。原始報告每題保存問題、標準答案、生成ID、答案完全匹配與EOS；之後做新任務或壓縮時，沿用完整固定題目再量一次，才能看見哪些面向改善、哪些退步。\n",
+    "\n",
+    "練習只把reply的3改成2，先預測格式仍True、內容變True，舊斷言應失敗，再執行核對並改成兩個都True的檢查。再把字段answer改名result，內容數字雖2，格式契約與字段讀取都不符；分別解釋這兩項失敗，讓評估規則可被追蹤。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "7.13"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

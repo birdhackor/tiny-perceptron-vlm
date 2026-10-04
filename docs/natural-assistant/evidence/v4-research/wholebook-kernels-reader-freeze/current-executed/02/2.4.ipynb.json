@@ -1,0 +1,270 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 2.4 為什麼需要非線性？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "如果一套配方只能把輸入乘權重再相加，多接一套配方是否就能做到更多事？不一定。假設第一套把x變成2x，第二套再乘3，合起來仍只是6x。即使中間用了多個特徵、加了偏移，兩層純Linear仍可合成一層Linear。這不是說多層程序沒執行，而是它能表示的規則沒有離開同一類加權配方。\n",
+    "\n",
+    "有些規則需要輸入處於不同區域時做不同處理。比如我們要量「離零有多遠」，x=-2與x=2都應輸出2，x=0輸出0；任何單一的 `y=k*x+b` 都不能把這三點同時連上。因此需要一個會拐彎的運算，叫非線性（nonlinearity）。常用的ReLU會保留正數、把負數改成0：`ReLU(x)=max(0,x)`；它也叫激活函數（activation），表示夾在層與層之間的數值轉換，不是模型有意識地被激活。\n",
+    "\n",
+    "下面用 [2.3](https://birdhackor.github.io/tiny-perceptron-vlm/2.3.html) 的Linear建立兩條中間線索x與-x，再看「直接相加」和「負的先清零再相加」會差多少。輸入三筆，分別為-2、0、2，每筆一特徵。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:09:49.746098Z",
+     "iopub.status.busy": "2026-10-04T19:09:49.745893Z",
+     "iopub.status.idle": "2026-10-04T19:09:51.033333Z",
+     "shell.execute_reply": "2026-10-04T19:09:51.032003Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7fe28846e610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:09:51.036305Z",
+     "iopub.status.busy": "2026-10-04T19:09:51.036027Z",
+     "iopub.status.idle": "2026-10-04T19:09:51.050933Z",
+     "shell.execute_reply": "2026-10-04T19:09:51.049960Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "tensor([[-2.,  2.],\n",
+      "        [ 0., -0.],\n",
+      "        [ 2., -2.]], grad_fn=<MmBackward0>)\n",
+      "純線性 tensor([0., 0., 0.], grad_fn=<SqueezeBackward1>)\n",
+      "加ReLU tensor([2., 0., 2.], grad_fn=<SqueezeBackward1>)\n"
+     ]
+    }
+   ],
+   "source": [
+    "import torch\n",
+    "from torch import nn\n",
+    "from torch.nn import functional as F\n",
+    "\n",
+    "a = nn.Linear(1, 2, bias=False)\n",
+    "b = nn.Linear(2, 1, bias=False)\n",
+    "with torch.no_grad():\n",
+    "    a.weight.copy_(torch.tensor([[1.0], [-1.0]]))\n",
+    "    b.weight.copy_(torch.tensor([[1.0, 1.0]]))\n",
+    "x = torch.tensor([[-2.0], [0.0], [2.0]])\n",
+    "hidden = a(x)\n",
+    "linear = b(hidden)\n",
+    "curved = b(F.relu(hidden))\n",
+    "combined = x @ (b.weight @ a.weight).T\n",
+    "print(hidden)\n",
+    "print(\"純線性\", linear.squeeze(-1))\n",
+    "print(\"加ReLU\", curved.squeeze(-1))\n",
+    "assert torch.allclose(linear, combined)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "`with torch.no_grad():` 暫停這個縮排區塊裡的求導記錄，讓我們用 `copy_` 手動填入權重；它只影響填表的兩行，離開區塊後仍會記錄模型計算。求導是計算參數變動對結果有多敏感，這個操作範圍可詳讀 [1.12](https://birdhackor.github.io/tiny-perceptron-vlm/1.12.html)；本節沒有求導或更新，只比較指定權重能算出哪些規則。\n",
+    "\n",
+    "`bias=False` 省去偏移，讓例子只看權重。`hidden` 依序是 `[-2,2]`、`[0,0]`、`[2,-2]`。直接交給b，每列兩數相加，三個輸出全為0；合成權重 `b.weight @ a.weight` 也是0。`squeeze(-1)` 只去掉長度1的最後軸，方便印成一排三個結果。畫面中的 `tensor(...)` 是數值容器的顯示格式，先核對方括號裡的數字；有些零會顯示為 `-0.`，在本例的數值比較中仍等於 0。附帶的 `grad_fn=<MmBackward0>` 或 `grad_fn=<SqueezeBackward1>` 是工具保存的計算記錄標記，分別表示矩陣相乘或去掉軸的運算，並不改變這裡列出的數字。\n",
+    "\n",
+    "最後的 `torch.allclose` 逐格比較 `linear` 與 `combined` 是否在容許的小數誤差內相同，相符時回傳 `True`，也就是「成立」。`assert` 要求這個比較成立：通過時不印字，所以正常執行只看到前面三次列印；不成立時會報 `AssertionError` 並停止程式。這次檢查通過，配合合成權重的計算，核對了兩層純線性在這組輸入上與一層相同。\n",
+    "\n",
+    "加入 `F.relu` 後，三列變成 `[0,2]`、`[0,0]`、`[2,0]`，相加得到 `[2,0,2]`，正好表現距離零的大小。斜率描述輸入增加一單位時，輸出改變多少：左段輸入從-2增加到0，輸出從2降到0，每增加1就減少1；右段輸入從0增加到2，輸出從0升到2，每增加1就增加1。左右兩段的斜率分別為-1與1，一個固定加權的Linear無法同時表示這兩種變化。實際模型可以增加中間的特徵數，也可以選用其他非線性轉換，但這個三點例子已把「多層配方」與「增加能拐彎的規則」分清。\n",
+    "\n",
+    "下面把輸入排成橫向，把對應輸出的大小畫成縱向。左圖的三個藍點都在0；右圖的三個橘點是2、0、2，連起來呈V字形。兩邊使用同一組權重，差別是右邊先把中間特徵的負數清零，再交給下一層相加。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 3,
+   "metadata": {
+    "cellView": "form",
+    "course_figure": {
+     "alt": "相同權重加入ReLU前後的輸出形狀",
+     "name": "foundations_nonlinearity"
+    },
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:09:51.053679Z",
+     "iopub.status.busy": "2026-10-04T19:09:51.053479Z",
+     "iopub.status.idle": "2026-10-04T19:09:51.064498Z",
+     "shell.execute_reply": "2026-10-04T19:09:51.063286Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "image/svg+xml": [
+       "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 800 570\" role=\"img\" aria-labelledby=\"title desc\">\n",
+       "  <title id=\"title\">本例加上ReLU，輸出從直線變成V形</title>\n",
+       "  <desc id=\"desc\">同一組手動指定權重。橫軸輸入依序為負二、零、二。左圖直接相加，三個輸出都是零；右圖先用ReLU把負的中間特徵清零再相加，輸出依序為二、零、二，等於離零的距離。沒有訓練或參數更新。</desc>\n",
+       "  <style>text{font-family:\"Noto Sans CJK TC\",\"Microsoft JhengHei\",\"PingFang TC\",sans-serif;fill:#172b4d}.axis{stroke:#466b97;stroke-width:2}.grid{stroke:#d8e2ef;stroke-width:1;stroke-dasharray:5 5}.blue{fill:#2563b8}.orange{fill:#b6530f}</style>\n",
+       "  <defs><marker id=\"axis-arrow\" markerWidth=\"7\" markerHeight=\"7\" refX=\"6\" refY=\"3.5\" orient=\"auto\"><path d=\"M0 0L7 3.5L0 7\" fill=\"#466b97\"/></marker></defs>\n",
+       "  <rect width=\"800\" height=\"570\" fill=\"#fff\"/>\n",
+       "  <text x=\"400\" y=\"36\" text-anchor=\"middle\" font-size=\"28\">本例加上ReLU，輸出從直線變成V形</text>\n",
+       "  <rect x=\"30\" y=\"65\" width=\"350\" height=\"450\" rx=\"12\" fill=\"#f5f9ff\" stroke=\"#bccfe5\"/>\n",
+       "  <rect x=\"420\" y=\"65\" width=\"350\" height=\"450\" rx=\"12\" fill=\"#fff8f0\" stroke=\"#ddc4a6\"/>\n",
+       "  <text x=\"205\" y=\"105\" text-anchor=\"middle\" font-size=\"26\">直接相加</text>\n",
+       "  <text x=\"595\" y=\"105\" text-anchor=\"middle\" font-size=\"26\">負數清零後再相加</text>\n",
+       "  <text x=\"205\" y=\"150\" text-anchor=\"middle\" font-size=\"24\">輸出</text>\n",
+       "  <text x=\"595\" y=\"150\" text-anchor=\"middle\" font-size=\"24\">輸出</text>\n",
+       "  <path class=\"grid\" d=\"M80 210H350 M470 210H740\"/>\n",
+       "  <path class=\"axis\" d=\"M205 390V175\" marker-end=\"url(#axis-arrow)\"/>\n",
+       "  <path class=\"axis\" d=\"M80 380H350\" marker-end=\"url(#axis-arrow)\"/>\n",
+       "  <path class=\"axis\" d=\"M595 390V175\" marker-end=\"url(#axis-arrow)\"/>\n",
+       "  <path class=\"axis\" d=\"M470 380H740\" marker-end=\"url(#axis-arrow)\"/>\n",
+       "  <text x=\"178\" y=\"220\" text-anchor=\"end\" font-size=\"24\">2</text>\n",
+       "  <text x=\"568\" y=\"220\" text-anchor=\"end\" font-size=\"24\">2</text>\n",
+       "  <path d=\"M100 380H310\" stroke=\"#2563b8\" stroke-width=\"5\" fill=\"none\"/>\n",
+       "  <path d=\"M490 210L595 380L700 210\" stroke=\"#b6530f\" stroke-width=\"5\" fill=\"none\"/>\n",
+       "  <circle cx=\"100\" cy=\"380\" r=\"7\" fill=\"#2563b8\"/>\n",
+       "  <circle cx=\"205\" cy=\"380\" r=\"7\" fill=\"#2563b8\"/>\n",
+       "  <circle cx=\"310\" cy=\"380\" r=\"7\" fill=\"#2563b8\"/>\n",
+       "  <circle cx=\"490\" cy=\"210\" r=\"7\" fill=\"#b6530f\"/>\n",
+       "  <circle cx=\"595\" cy=\"380\" r=\"7\" fill=\"#b6530f\"/>\n",
+       "  <circle cx=\"700\" cy=\"210\" r=\"7\" fill=\"#b6530f\"/>\n",
+       "  <text class=\"blue\" x=\"100\" y=\"354\" text-anchor=\"middle\" font-size=\"26\">0</text>\n",
+       "  <text class=\"blue\" x=\"205\" y=\"354\" text-anchor=\"middle\" font-size=\"26\">0</text>\n",
+       "  <text class=\"blue\" x=\"310\" y=\"354\" text-anchor=\"middle\" font-size=\"26\">0</text>\n",
+       "  <text class=\"orange\" x=\"490\" y=\"190\" text-anchor=\"middle\" font-size=\"26\">2</text>\n",
+       "  <text class=\"orange\" x=\"595\" y=\"354\" text-anchor=\"middle\" font-size=\"26\">0</text>\n",
+       "  <text class=\"orange\" x=\"700\" y=\"190\" text-anchor=\"middle\" font-size=\"26\">2</text>\n",
+       "  <text x=\"100\" y=\"421\" text-anchor=\"middle\" font-size=\"24\">−2</text>\n",
+       "  <text x=\"205\" y=\"421\" text-anchor=\"middle\" font-size=\"24\">0</text>\n",
+       "  <text x=\"310\" y=\"421\" text-anchor=\"middle\" font-size=\"24\">2</text>\n",
+       "  <text x=\"490\" y=\"421\" text-anchor=\"middle\" font-size=\"24\">−2</text>\n",
+       "  <text x=\"595\" y=\"421\" text-anchor=\"middle\" font-size=\"24\">0</text>\n",
+       "  <text x=\"700\" y=\"421\" text-anchor=\"middle\" font-size=\"24\">2</text>\n",
+       "  <text x=\"330\" y=\"455\" text-anchor=\"end\" font-size=\"24\">輸入</text>\n",
+       "  <text x=\"720\" y=\"455\" text-anchor=\"end\" font-size=\"24\">輸入</text>\n",
+       "  <text x=\"205\" y=\"494\" text-anchor=\"middle\" font-size=\"24\">三個輸出都是0</text>\n",
+       "  <text x=\"595\" y=\"494\" text-anchor=\"middle\" font-size=\"24\">三個輸出是2、0、2</text>\n",
+       "  <text x=\"400\" y=\"550\" text-anchor=\"middle\" font-size=\"22\">同一組指定權重；圖中的數字來自正文三筆輸入</text>\n",
+       "</svg>"
+      ],
+      "text/plain": [
+       "<IPython.core.display.SVG object>"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    }
+   ],
+   "source": [
+    "# @title 本節圖解\n",
+    "from IPython.display import SVG, display\n",
+    "\n",
+    "display(SVG(filename=str(root / \"course/figures/foundations_nonlinearity.svg\")))"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "非線性增加可表達的規則，不保證訓練一定找到好規則，也不保證新資料表現更好。參數更多、規則更多時，仍要按 [1.2](https://birdhackor.github.io/tiny-perceptron-vlm/1.2.html) 留驗證資料。這裡沒有訓練，只是親手設定兩套權重說明什麼計算是可能的。\n",
+    "\n",
+    "練習只把最後輸入2改成3，先預測純線性仍0、ReLU輸出3，再執行核對。接著把 `F.relu(hidden)` 改成 `hidden`，確認它退回純線性結果。這兩次操作讓你定位真正改變行為的是哪一行，而不是看到層數增加就猜能力也必然增加。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "2.4"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

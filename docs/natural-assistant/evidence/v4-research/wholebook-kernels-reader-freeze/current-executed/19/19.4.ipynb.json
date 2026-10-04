@@ -1,0 +1,265 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 19.4 怎麼確認下一階段真的接著上一階段學？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "一位學生讀完課文再練習回答，和另一位學生直接練習回答，都可能得到好看的結果。但若我們想研究「讀書後再練習」這條路，就必須確認練習的人確實是剛讀完的那位。整合模型也是如此：各章獨立實驗的權重不能因為檔名都叫`model.pt`，就被當成同一個成品接續長大。\n",
+    "\n",
+    "前置是[為何分預訓練與後訓練](https://birdhackor.github.io/tiny-perceptron-vlm/7.17.html)、[只學回答位置](https://birdhackor.github.io/tiny-perceptron-vlm/7.3.html)、[儲存訓練狀態](https://birdhackor.github.io/tiny-perceptron-vlm/5.7.html)與[本成品的Dense／MoE選擇](https://birdhackor.github.io/tiny-perceptron-vlm/19.2.html)；偏好分支的兩份模型角色另見[後訓練角色地圖](https://birdhackor.github.io/tiny-perceptron-vlm/13.17.html)。checkpoint是某一時刻的權重及相關狀態快照。本成品固定架構與tokenizer，先pretrain，再載入那份權重做SFT；後面的模態與偏好階段，也儲存自己讀進來的父檔案指紋。指紋是從檔案bytes算出的摘要，用來辨認實際讀的是哪一份檔案，不是替模型加能力。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:20:20.745685Z",
+     "iopub.status.busy": "2026-10-04T19:20:20.745433Z",
+     "iopub.status.idle": "2026-10-04T19:20:22.075287Z",
+     "shell.execute_reply": "2026-10-04T19:20:22.074393Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7f6b26c5e610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "cellView": "form",
+    "course_figure": {
+     "alt": "同一份語言核心依序讀文字、練回答、接素材與調偏好，每站留下一份快照",
+     "name": "capstone_pipeline"
+    },
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:20:22.078681Z",
+     "iopub.status.busy": "2026-10-04T19:20:22.078134Z",
+     "iopub.status.idle": "2026-10-04T19:20:22.091082Z",
+     "shell.execute_reply": "2026-10-04T19:20:22.090363Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "image/svg+xml": [
+       "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 920 610\" role=\"img\" aria-labelledby=\"title desc\">\n",
+       "  <title id=\"title\">同一位小助理接續學習，每站留下可核對的快照</title>\n",
+       "  <desc id=\"desc\">凍結資料家族後，同一語言核心先預訓練，再監督式微調，接圖片與聲音；再從joint分出DPO偏好比較支線。每站保存權重與父檔案指紋並重做同一驗證。本輪依驗證選joint為推薦成品，DPO分支保留退步。PPO是另外的概念支線，學生與量化另有部署比較；箭頭不保證能力提升。</desc>\n",
+       "  <style>text{font-family:\"Noto Sans CJK TC\",\"Microsoft JhengHei\",\"PingFang TC\",sans-serif;fill:#172b4d}.title{font-size:28px;font-weight:600}.main{font-size:25px}.small{font-size:22px}</style>\n",
+       "  <defs><marker id=\"arrow\" markerWidth=\"9\" markerHeight=\"9\" refX=\"8\" refY=\"4.5\" orient=\"auto\"><path d=\"M0 0L9 4.5L0 9\" fill=\"#496a93\"/></marker></defs>\n",
+       "  <rect width=\"920\" height=\"610\" fill=\"#fff\"/>\n",
+       "  <text x=\"460\" y=\"42\" text-anchor=\"middle\" class=\"title\">同一核心接續學，每站留下快照</text>\n",
+       "  <rect x=\"35\" y=\"70\" width=\"850\" height=\"64\" rx=\"12\" fill=\"#f4f6fa\" stroke=\"#8199be\"/>\n",
+       "  <text x=\"460\" y=\"111\" text-anchor=\"middle\" class=\"main\">先凍結資料家族：訓練／驗證／最後檢查</text>\n",
+       "  <rect x=\"35\" y=\"169\" width=\"390\" height=\"100\" rx=\"12\" fill=\"#e8f1ff\" stroke=\"#8199be\"/>\n",
+       "  <text x=\"230\" y=\"207\" text-anchor=\"middle\" class=\"main\">① 預訓練：讀短文字</text>\n",
+       "  <text x=\"230\" y=\"246\" text-anchor=\"middle\" class=\"small\">保存權重 A</text>\n",
+       "  <path d=\"M429 219H489\" fill=\"none\" stroke=\"#496a93\" stroke-width=\"3\" marker-end=\"url(#arrow)\"/>\n",
+       "  <rect x=\"500\" y=\"169\" width=\"385\" height=\"100\" rx=\"12\" fill=\"#e8f1ff\" stroke=\"#8199be\"/>\n",
+       "  <text x=\"692\" y=\"207\" text-anchor=\"middle\" class=\"main\">② SFT：練習理想回答</text>\n",
+       "  <text x=\"692\" y=\"246\" text-anchor=\"middle\" class=\"small\">讀 A → 保存 B＋A 的指紋</text>\n",
+       "  <path d=\"M692 274V307\" fill=\"none\" stroke=\"#496a93\" stroke-width=\"3\" marker-end=\"url(#arrow)\"/>\n",
+       "  <rect x=\"500\" y=\"318\" width=\"385\" height=\"100\" rx=\"12\" fill=\"#e0f3e8\" stroke=\"#8199be\"/>\n",
+       "  <text x=\"692\" y=\"356\" text-anchor=\"middle\" class=\"main\">③ Joint：文字＋圖＋音</text>\n",
+       "  <text x=\"692\" y=\"395\" text-anchor=\"middle\" class=\"small\">讀 B → 保存 C（本輪推薦）</text>\n",
+       "  <path d=\"M495 368H434\" fill=\"none\" stroke=\"#496a93\" stroke-width=\"3\" stroke-dasharray=\"7 5\" marker-end=\"url(#arrow)\"/>\n",
+       "  <rect x=\"35\" y=\"318\" width=\"390\" height=\"100\" rx=\"12\" fill=\"#fff0d8\" stroke=\"#8199be\"/>\n",
+       "  <text x=\"230\" y=\"356\" text-anchor=\"middle\" class=\"main\">④ DPO：偏好比較支線</text>\n",
+       "  <text x=\"230\" y=\"395\" text-anchor=\"middle\" class=\"small\">讀 C → 保存 D＋固定參照</text>\n",
+       "  <rect x=\"35\" y=\"454\" width=\"850\" height=\"73\" rx=\"12\" fill=\"#f4f6fa\" stroke=\"#8199be\"/>\n",
+       "  <text x=\"460\" y=\"485\" text-anchor=\"middle\" class=\"main\">每站都重做同一能力檢查，改善與退步一起保留</text>\n",
+       "  <text x=\"460\" y=\"515\" text-anchor=\"middle\" class=\"small\">最終工具程式：驗證請求 → 執行 → 交回同一核心</text>\n",
+       "  <text x=\"460\" y=\"564\" text-anchor=\"middle\" class=\"small\">PPO：另學一條更新方法　　學生／量化：另選部署版本</text>\n",
+       "  <text x=\"460\" y=\"596\" text-anchor=\"middle\" class=\"small\">本輪依驗證選 C；偏好支線的退步也留在教材。</text>\n",
+       "</svg>"
+      ],
+      "text/plain": [
+       "<IPython.core.display.SVG object>"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    }
+   ],
+   "source": [
+    "# @title 本節圖解\n",
+    "from IPython.display import SVG, display\n",
+    "\n",
+    "display(SVG(filename=str(root / \"course/figures/capstone_pipeline.svg\")))"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "先從一筆資料看兩種教法的差別。下面只建立隨機Dense模型並各計一次誤差，不執行完整成品訓練。Dense示範每層只有一組前饋規則；正式成品則用MoE的多組expert與路由。短程式省去分派，是為了只看「哪些位置要學」，不能把它的模型誤當正式MoE權重。\n",
+    "\n",
+    "`build_dataset()`依固定規則產生資料，回傳`splits`與資料清單manifest；`splits[\"train\"]`是訓練記錄串列，`_`表示此處暫不使用第二個回傳值。每筆記錄用`task`標任務、`user`放問題、`answer`放示範回答。`next(...)`取第一筆`style`記錄，下面也印出那筆問答，讓你能知道誤差在量什麼。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 3,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:20:22.092859Z",
+     "iopub.status.busy": "2026-10-04T19:20:22.092687Z",
+     "iopub.status.idle": "2026-10-04T19:20:22.129796Z",
+     "shell.execute_reply": "2026-10-04T19:20:22.129142Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "問題 照抄數字29，只要答案。 示範回答 DIRECT:29\n",
+      "預訓練 有效目標 43 誤差有限 True\n",
+      "SFT 有效目標 10 誤差有限 True\n"
+     ]
+    }
+   ],
+   "source": [
+    "import torch\n",
+    "\n",
+    "from tiny_perceptron.capstone import CapstoneModel, build_dataset, default_config, prepare_batch\n",
+    "from tiny_perceptron.data import IGNORE\n",
+    "from tiny_perceptron.model import masked_loss\n",
+    "\n",
+    "torch.manual_seed(42)\n",
+    "splits, _ = build_dataset()\n",
+    "row = next(row for row in splits[\"train\"] if row[\"task\"] == \"style\")\n",
+    "print(\"問題\", row[\"user\"], \"示範回答\", row[\"answer\"])\n",
+    "model = CapstoneModel(default_config(dense=True))\n",
+    "for pretrain in (True, False):\n",
+    "    batch, labels = prepare_batch([row], pretrain=pretrain)\n",
+    "    result = model(**batch)\n",
+    "    loss = masked_loss(result[\"logits\"], labels)\n",
+    "    print(\"預訓練\" if pretrain else \"SFT\", \"有效目標\", int((labels != IGNORE).sum()), \"誤差有限\", bool(loss.isfinite()))"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "本例問題是「照抄數字29，只要答案。」，示範是`DIRECT:29`。`prepare_batch`把它轉成模型輸入字典`batch`與下一位置的目標編號`labels`；`**batch`將字典各欄展開成模型的具名參數，例如輸入編號`ids`。`result[\"logits\"]`是每個位置對候選編號的分數，`masked_loss`只計沒有被忽略的位置。\n",
+    "\n",
+    "預訓練版本把短文字裡每個下一byte都當目標；SFT版本提供對話前文，只把回答及結束編號當目標，因此本例的有效目標數分別是43與10。IGNORE是「這個位置不計回答誤差」的標記，不是從模型視野刪掉前文。兩行應印出有限誤差，這只證明資料與計分接得上，不表示預訓練更有效，也不比較兩種不同目標的loss高低。\n",
+    "\n",
+    "本小世界的預訓練材料把訓練家族的題目與標準回答接成短文字，不放對話角色，逐個下一byte學習。它沒有讀完大型網路語料，也不是用兩套全然不同內容來證明預訓練的好處；這輪主要演示同一個模型如何接續改變學習目標。正式流程每站會另測同一份能力矩陣，讓我們知道哪一站改善了哪項能力、又傷到哪項。\n",
+    "\n",
+    "正式流程使用固定資料版本`capstone-small-world-v2`、種子42與NVIDIA L4。前三站沿同一核心接續訓練，DPO則從joint接出比較分支；每站都評估同一份84題驗證資料。\n",
+    "\n",
+    "| 階段 | 從哪裡接續 | 這一站練什麼 | 完成更新 | 驗證整題正確 |\n",
+    "| --- | --- | --- | ---: | ---: |\n",
+    "| 預訓練 | 隨機權重 | 不帶角色的文字續寫 | 300 | 0／84 |\n",
+    "| SFT | 預訓練權重 | 文字對話中的助理回答 | 1,400 | 42／84 |\n",
+    "| joint | SFT權重 | 文字、圖片、聲音與聯合示範 | 600 | 75／84 |\n",
+    "| DPO比較分支 | joint權重 | 比較偏好回答，並重練示範 | 100 | 71／84 |\n",
+    "\n",
+    "前三站都在交叉熵之外加入係數0.01的路由平衡項，避免少數專家獨占工作。實際學習目標數依序是364,409、647,067、249,100，包含反覆抽到的下一byte或EOS位置，不是不同文章數。DPO的41,403個目標只計重練示範的交叉熵位置，沒有包含policy與固定reference評分偏好回答的全部計算，不能把它與前三站直接當成等成本預算。\n",
+    "\n",
+    "表中的「整題正確」要求完整動作字串、內容或參數與EOS符合預期；工具題還要讀回結果並回答正確。預訓練為什麼0／84？像把題目和答案讀熟，還沒有練習「老師問完後，輪到我用指定格式回答」。例如「4+4等於多少？」得到`多4孔。算回算23`，並沒有產生計算器動作。這只說明本輪文字續寫尚未學會對話協定，不能推成所有文字續寫能力都為零。\n",
+    "\n",
+    "SFT的42／84則由42題文字全部正確、42題模態全部錯誤組成，不是每種能力都有一半成功率。joint後文字仍42／42，模態變33／42；九次失敗全是圖片形狀，[19.6](https://birdhackor.github.io/tiny-perceptron-vlm/19.6.html)會拆開看。DPO反而降到71／84，因此「最後更新的檔案」不必然是較好的成品，選擇理由見[19.8](https://birdhackor.github.io/tiny-perceptron-vlm/19.8.html)。\n",
+    "\n",
+    "怎樣確認這些階段真的接在一起？以SFT接入joint為例，比較[SFT實報](https://github.com/birdhackor/tiny-perceptron-vlm/blob/1df335318bda03fd771807f66976953231d5a00b/docs/course-experiments/results/capstone_sft.json)的`results.inference_export.sha256`，與[joint實報](https://github.com/birdhackor/tiny-perceptron-vlm/blob/1df335318bda03fd771807f66976953231d5a00b/docs/course-experiments/results/capstone_joint.json)的`results.parent_checkpoint_sha256`；應比較完整64字元，不能只看檔名或指紋開頭。本輪兩者相同，其他接續階段也通過同樣核對。這證明載入了指定父檔，能力則另由考題確認。從隨機權重開始的第一站沒有父檔，欄位為空值。\n",
+    "\n",
+    "完整條件、檔案大小與計時保留在[預訓練實報](https://github.com/birdhackor/tiny-perceptron-vlm/blob/1df335318bda03fd771807f66976953231d5a00b/docs/course-experiments/results/capstone_pretrain.json)、上述SFT／joint實報及[DPO實報](https://github.com/birdhackor/tiny-perceptron-vlm/blob/1df335318bda03fd771807f66976953231d5a00b/docs/course-experiments/results/capstone_preference.json)。逐站驗證用來決定成品，當時尚未開啟最後90題；定版後的各項能力統一見[19.12](https://birdhackor.github.io/tiny-perceptron-vlm/19.12.html)。推論檔與完整續訓狀態的用途則在[19.11](https://birdhackor.github.io/tiny-perceptron-vlm/19.11.html)分開說明。\n",
+    "\n",
+    "練習將選取`row`那行的`\"style\"`改成`\"concept\"`。固定資料下，問題會是「用3和6說明加法。」，示範是`DIRECT:把兩個數合起來`；先預測目標數會變長，再核對預訓練53個、SFT29個，誤差仍有限。較長回答增加有效目標，但合併批次仍應把有效位置的誤差相加，再除以有效位置總數，不能讓補齊的空格影響分母，詳見[5.2的長短答案算例](https://birdhackor.github.io/tiny-perceptron-vlm/5.2.html)。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "19.4"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

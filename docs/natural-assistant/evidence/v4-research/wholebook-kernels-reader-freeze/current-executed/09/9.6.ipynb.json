@@ -1,0 +1,172 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 9.6 如何避免過度拒絕？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "一個助手遇到任何問題都說不行，在「應拒絕」的測驗上可能得滿分，但也無法處理正常請求。這像門禁把所有人都擋在外面：的確沒有人非法進入，合法使用者也進不去。本節把這兩種結果各自算清楚，避免用單一拒絕率宣稱成功。\n",
+    "\n",
+    "前置是[9.4的授權成對題](https://birdhackor.github.io/tiny-perceptron-vlm/9.4.html)與[W.3的tensor和平均](https://birdhackor.github.io/tiny-perceptron-vlm/first-steps.html#W.3)。我們有四題，依序是應拒絕、可完成、應拒絕、可完成。理想結果不是「多拒絕」，而是把拒絕用在正確位置。用`should_refuse`記應有行為，`actually_refuse`記模型觀察結果，就能按兩種題目分組。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:13:22.539844Z",
+     "iopub.status.busy": "2026-10-04T19:13:22.539643Z",
+     "iopub.status.idle": "2026-10-04T19:13:23.808542Z",
+     "shell.execute_reply": "2026-10-04T19:13:23.807482Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7f3fc475e610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:13:23.811279Z",
+     "iopub.status.busy": "2026-10-04T19:13:23.811016Z",
+     "iopub.status.idle": "2026-10-04T19:13:23.821351Z",
+     "shell.execute_reply": "2026-10-04T19:13:23.818062Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "該拒絕的拒絕比例 1.0\n",
+      "正常題未拒絕比例 0.0\n"
+     ]
+    }
+   ],
+   "source": [
+    "import torch\n",
+    "\n",
+    "should_refuse = torch.tensor([True, False, True, False])\n",
+    "actually_refuse = torch.ones(4, dtype=torch.bool)\n",
+    "refusal_rate = actually_refuse[should_refuse].float().mean()\n",
+    "completion_rate = (~actually_refuse[~should_refuse]).float().mean()\n",
+    "print(\"該拒絕的拒絕比例\", refusal_rate.item())\n",
+    "print(\"正常題未拒絕比例\", completion_rate.item())"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "輸入`torch.ones(4)`先指定四格全為1；`dtype`是資料型別的設定，`torch.bool`表示每格以布林值`True`或`False`保存，因此這裡的四個1都成為`True`，代表故障助手全部拒絕。`actually_refuse[should_refuse]`只取第1、3題的結果；這裡用布林清單選擇位置。`float().mean()`把兩個True變成1、1再平均，輸出1.0。這個分母是兩個應拒絕題，不是所有四題。\n",
+    "\n",
+    "第二個式子先用`~should_refuse`選擇第2、4題，再用外面的`~`把「拒絕」反成「未拒絕」。取出的是兩個True，反轉後是False、False，輸出0.0。這個分母是兩個正常題。把兩行並排，我們就看見滿分拒絕與零分正常功能同時存在。\n",
+    "\n",
+    "本例把「未拒絕」當成最簡完成條件，所以輸出標題刻意寫「未拒絕比例」。真實評估還要讀回答是否確實完成需求、內容是否正確；一句「好呀」沒有拒絕，卻也不一定有用。可以延續[8.5的格式與內容檢查](https://birdhackor.github.io/tiny-perceptron-vlm/8.5.html)，在正常題裡再算完成率，而不是把所有非拒絕字句都算成功。\n",
+    "\n",
+    "把分母帶到實測時，也要分開看。盒子行為測驗有17道最後檢查題，都是沒有用來教模型的留出題。其中三題未授權，按規則應拒絕；其餘14題應正常完成，包含授權允許三題、已給球數三題、缺球數而應澄清三題、確認正確算式一題、修正錯誤算式一題，以及讀取文件顏色三題。這裡的「正常完成」也包含適當澄清，不只直接給數字。\n",
+    "\n",
+    "[9.8](https://birdhackor.github.io/tiny-perceptron-vlm/9.8.html)會統一交代兩份版本的訓練設定。先按這17道行為題各自的責任看結果：\n",
+    "\n",
+    "| 模型 | 應拒絕題出現拒絕句 | 正常題完整答案匹配 | 正常題出現拒絕句 |\n",
+    "| --- | ---: | ---: | ---: |\n",
+    "| 訓練前起點 | 0／3 | 0／14 | 0／14 |\n",
+    "| 只教盒子行為 | 3／3 | 12／14 | 0／14 |\n",
+    "| 盒子行為混入加法 | 3／3 | 13／14 | 0／14 |\n",
+    "\n",
+    "這裡的拒絕判讀只是搜尋本次固定句中的`無法提供`，不是真實安全分類器。完整內容則核對答案ID：編碼工具把預期回答表示成一串數字編號，ID就是其中的編號；生成序列要與預期序列完整相同才算匹配。EOS是回答結束的特殊標記，用來表示停止輸出，與答案內容另行檢查，標記用途可回看[6.6](https://birdhackor.github.io/tiny-perceptron-vlm/6.6.html)。這17題各版都有生成EOS。訓練前完全不拒絕，正常題也一題都沒完成，正好說明「零過度拒絕」可以和「零功能」同時存在。\n",
+    "\n",
+    "普通加法則是另一份測驗，不屬於這17道行為題；[9.8](https://birdhackor.github.io/tiny-perceptron-vlm/9.8.html)會把兩種測驗並列。比較各項能力時，保留自己的題目與分母，不能把加法答錯當成拒絕正常請求，也不能用行為題的匹配率代替加法成績。\n",
+    "\n",
+    "另一個極端是一律不拒絕。把四個觀察結果全設False，該拒絕組得0、正常題未拒絕得1；它與一律拒絕恰好相反。兩種極端若只報某一組，都能挑出滿分，卻沒有一種符合任務。分組表的用途就是讓兩項責任同時可見。還要說明每組幾題：2/2與200/200雖同為1.0，支持的穩定程度不同。如果某組沒有題，比例沒有分母，不應當成0或1隨意填；應補測或寫明未測。\n",
+    "\n",
+    "練習把`actually_refuse`改成`torch.tensor([True, False, True, False])`。先預測兩行都是1.0，再重跑核對。接著故意把第一項改False，手算應拒絕題只剩1/2通過，因此第一行0.5、第二行仍1.0。你就能知道新增失敗發生在什麼類別，避免總平均掩蓋邊界失誤或過度拒絕。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "9.6"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

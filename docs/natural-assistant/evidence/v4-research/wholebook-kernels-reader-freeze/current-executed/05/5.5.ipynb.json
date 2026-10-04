@@ -1,0 +1,158 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 5.5 怎麼獨立控制權重衰減？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "如果訓練只追求眼前答案，某些權重可能越長越大。我們可以額外讓每步把權重稍微縮小，稱權重衰減（weight decay）。它像給放大的旋鈕一份輕微回拉，不表示把所有參數立刻清零，也不代替答案梯度。想要多強的回拉，應能和 [5.4](https://birdhackor.github.io/tiny-perceptron-vlm/5.4.html) 的Adam自適應縮放分開控制。\n",
+    "\n",
+    "一種傳統做法是在代價加上權重平方的懲罰，叫L2懲罰；求導後會把與權重大小成比例的一項加進梯度。若接Adam，這個合併梯度還會進入m、v歷史再被縮放，回拉大小便受那些歷史影響。AdamW改用分開的規則：先將w乘 `1-ηλ`，再減去Adam方向的步子。η是學習率，λ是衰減強度，所以縮小幅度由它們直接決定。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:11:13.534051Z",
+     "iopub.status.busy": "2026-10-04T19:11:13.533893Z",
+     "iopub.status.idle": "2026-10-04T19:11:15.090339Z",
+     "shell.execute_reply": "2026-10-04T19:11:15.088442Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7fe3a426a610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:11:15.093680Z",
+     "iopub.status.busy": "2026-10-04T19:11:15.093258Z",
+     "iopub.status.idle": "2026-10-04T19:11:16.597982Z",
+     "shell.execute_reply": "2026-10-04T19:11:16.597217Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "tensor([1.9600])\n"
+     ]
+    }
+   ],
+   "source": [
+    "import torch\n",
+    "from torch import nn\n",
+    "\n",
+    "w = nn.Parameter(torch.tensor([2.0]))\n",
+    "optimizer = torch.optim.AdamW([w], lr=0.1, weight_decay=0.2)\n",
+    "w.grad = torch.zeros_like(w)\n",
+    "optimizer.step()\n",
+    "print(w.detach())\n",
+    "assert torch.allclose(w.detach(), torch.tensor([1.96]))"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "輸入參數w=2，學習率0.1，衰減0.2。我們故意給任務梯度0，讓這次只觀察衰減。`torch.zeros_like(w)` 建立同形狀的零梯度tensor；`step()` 後w變 `2×(1-0.1×0.2)=1.96`。它沒有因為任務梯度為0就維持2，最後檢查可核對縮小量0.04。\n",
+    "\n",
+    "這裡的0梯度和沒有梯度還不同。在本段PyTorch的AdamW實現裡，若 `.grad=None`，該參數本次會被跳過；若有一份零梯度，優化器知道它參與了這一輪，仍可應用衰減。不要把 [1.13](https://birdhackor.github.io/tiny-perceptron-vlm/1.13.html) 清梯度的None與實際算出0梯度當同一狀態，它們會影響是否更新。\n",
+    "\n",
+    "衰減不是讓loss一定下降的保證。某個大權重若真的對答案有用，縮小它可能讓任務loss暫時變高；我們採用它，是想控制複雜度與數值大小，再用驗證資料判斷是否對新題更好。驗證資料是沒有參與權重更新、用來比較設定的一組題目，與計算任務梯度的訓練題分開；選定衰減強度後，還要用另留的測試題做最後檢查，分組原則見[1.2](https://birdhackor.github.io/tiny-perceptron-vlm/1.2.html)。衰減強度太大也可能讓模型學不動，所以報告實驗時要同時記錄學習率與weight_decay。\n",
+    "\n",
+    "也不一定所有參數都衰減。[2.3的偏移bias](https://birdhackor.github.io/tiny-perceptron-vlm/2.3.html)是不看輸入也會加在加權和上的數字；[4.3的正規化縮放](https://birdhackor.github.io/tiny-perceptron-vlm/4.3.html)則在整理尺度後，替各特徵乘上可學習的倍率。模型有時把這些參數另分一組，設定不同的衰減強度，但選擇規則必須明確，不能看名字類似就預設所有實現一致。當前只有一格w，避免參數分組把一步算式遮住。\n",
+    "\n",
+    "練習只把weight_decay改為0，先預測零任務梯度下w維持2，再跑核對，並將預期值改為2。接着保留衰減0.2、把 `w.grad` 改為None，觀察這份實現同樣不改w。兩次實驗各回答一個問題：衰減開沒開，以及參數有沒有進入本輪更新。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "5.5"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

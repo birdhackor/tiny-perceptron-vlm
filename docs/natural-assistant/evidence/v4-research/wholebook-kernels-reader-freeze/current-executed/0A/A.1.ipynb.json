@@ -1,0 +1,168 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# A.1 給幾個例子能改變回答嗎？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "你對模型說「請把3轉成另一個數字」，它不知道你想翻倍、平方還是換成代碼。如果先給「1→2、2→4」兩個例子，至少提供了本次想要的規律與輸出格式。模型權重完全不動，輸入卻已不同：它現在可以讀例子再回答。這種靠當前前文提供任務線索的現象叫in-context learning（上下文學習）。前置是[提示怎樣改變回答](https://birdhackor.github.io/tiny-perceptron-vlm/8.2.html)，context就是這次模型能看到的文字與其他輸入。\n",
+    "\n",
+    "沒有示例、只給任務叫zero-shot；多給幾個示例叫few-shot。「shot」在這裡數的是提示中的例子，不是訓練步數。若把例子換成「1→3、2→6」，我們預期同樣的3可能轉成9而不是6；答案差異來自本次輸入條件，不代表權重記住了一個新的永久法則。對有限例子還可能有多種解讀，所以真實回答不能只靠人的推測。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:13:32.045998Z",
+     "iopub.status.busy": "2026-10-04T19:13:32.045756Z",
+     "iopub.status.idle": "2026-10-04T19:13:33.364901Z",
+     "shell.execute_reply": "2026-10-04T19:13:33.363940Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7fbabbf5a610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:13:33.368819Z",
+     "iopub.status.busy": "2026-10-04T19:13:33.368357Z",
+     "iopub.status.idle": "2026-10-04T19:13:33.374471Z",
+     "shell.execute_reply": "2026-10-04T19:13:33.373359Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "無例子： 請依本次規則回答：3→?\n",
+      "兩例子： 示例：1→2；2→4。\n",
+      "請依本次規則回答：3→?\n",
+      "換規則： 示例：1→3；2→6。\n",
+      "請依本次規則回答：3→?\n"
+     ]
+    }
+   ],
+   "source": [
+    "question = \"請依本次規則回答：3→?\"\n",
+    "examples = [\"1→2\", \"2→4\"]\n",
+    "zero = question\n",
+    "few = \"示例：\" + \"；\".join(examples) + \"。\\n\" + question\n",
+    "changed = \"示例：1→3；2→6。\\n\" + question\n",
+    "print(\"無例子：\", zero)\n",
+    "print(\"兩例子：\", few)\n",
+    "print(\"換規則：\", changed)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "輸入是一個問題與兩條示例字串，`join`用分號把例子接起來，`\\n`換行後才放真正問題。輸出三份提示，前兩份問題相同，第三份只替換示例規則。這個程式沒有載入模型，也沒有證明模型輸出6或9；它將要比較的輸入清楚展開，讓我們先檢查「改了什麼」。不要用一個自己寫的翻倍函數代替模型回答，否則測到的是規則程式，不是上下文學習。\n",
+    "\n",
+    "若用可用模型做比較，應保持同一權重、同樣生成設定與問題，記錄原始提示和回答，再換示例。示例的排序、標籤、數值分布都可能影響結果；也應包含新數值或新組合，避免只考「複製提示裡已經出現的答案」。[訓練對話SFT](https://birdhackor.github.io/tiny-perceptron-vlm/7.11.html)則會更新權重，是另一件事。把例子從prompt移除，模型不會因這次讀過它們就必然繼續遵循。\n",
+    "\n",
+    "課程實測另讓一個小模型真正學過「加上本次偏移量，再取個位數」的ASCII示例。ASCII是一套從0到127的基本字元編號，包含英文字母、數字與常見符號；UTF-8保存這些字元時，每個字元只用一個byte。下面正式提示用`->`兩個符號表示箭頭，與前面示例的一個`→`字元不同，不能把兩份提示的編碼混為一談。輸入數值按家族分成六個訓練、一個驗證、一個最後檢查家族；最後檢查只用數值3，不能當成廣泛的上下文學習評測。同一份已訓練權重、每次取最高分token，實際得到：\n",
+    "\n",
+    "| 本次提供的示例 | 應答 | 真實生成 |\n",
+    "| --- | --- | --- |\n",
+    "| 沒有示例 | `UNKNOWN` | `UNKNOWN` |\n",
+    "| `0->2;1->3` | `5` | `9` |\n",
+    "| 改成 `0->5;1->6` | `8` | `9` |\n",
+    "| 交換成 `1->3;0->2` | `5` | `8` |\n",
+    "\n",
+    "三份有示例的回答都錯，交換順序還改變輸出。這次確實改了輸入，也確實讓模型生成；結果沒有支持它已學會依新示例運用規則。四份完整提示、原始ID與EOS保存在[正式報告的ICL紀錄](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/course-experiments/results/rag.json)，不要把前面的人造翻倍示例當作這份成績。\n",
+    "\n",
+    "練習只把examples兩項順序交換，保留question不變。先預測打印的規則仍是兩個翻倍示例，但排列不同；執行核對。如果之後做真實模型實驗，先寫下你預期答案是否應相同，再保存兩份實際回答。這能分清「人在例子裡看見相同規則」和「模型確實對順序穩定」兩個觀察。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "A.1"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

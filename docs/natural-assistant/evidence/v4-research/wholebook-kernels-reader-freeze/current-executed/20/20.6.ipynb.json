@@ -1,0 +1,272 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 20.6 保留底座，怎麼只學一小份修正？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "你想修改一本書裡某些用法，不一定要把每一頁重印。LoRA讓原有矩陣照常運算，在旁邊加上一條可以學的小修正。它省下需要更新與保存的數字，但原底座仍是計算的一部分。\n",
+    "\n",
+    "先回看[8.8的兩張小矩陣](https://birdhackor.github.io/tiny-perceptron-vlm/8.8.html)與[8.13的縮放約定](https://birdhackor.github.io/tiny-perceptron-vlm/8.13.html)。原矩陣W將輸入轉成結果；修正路線先經A，縮到較少的中間格，再經B回到所需尺寸，最後加回原結果。中間格數叫rank，常寫r；alpha控制修正的縮放，本例使用alpha/r。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:21:00.519977Z",
+     "iopub.status.busy": "2026-10-04T19:21:00.519675Z",
+     "iopub.status.idle": "2026-10-04T19:21:02.300764Z",
+     "shell.execute_reply": "2026-10-04T19:21:02.295362Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7f9cfc24e610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "cellView": "form",
+    "course_figure": {
+     "alt": "同一輸入經固定原矩陣與可更新的A、B兩路，在輸出端相加",
+     "name": "natural_base_adapter"
+    },
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:21:02.313988Z",
+     "iopub.status.busy": "2026-10-04T19:21:02.313648Z",
+     "iopub.status.idle": "2026-10-04T19:21:02.357796Z",
+     "shell.execute_reply": "2026-10-04T19:21:02.348001Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "image/svg+xml": [
+       "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 720 1200\" role=\"img\" aria-labelledby=\"title desc\">\n",
+       "  <title id=\"title\">固定原矩陣，分支學修正</title>\n",
+       "  <desc id=\"desc\">同一份輸入 x 分成兩條計算路。灰色路的原矩陣 W 數字固定，但照常運算，得到 Wx。藍色路先通過可學矩陣 A 縮小維度，再通過可學矩陣 B 形成輸出維度，修正結果乘上 α/r。兩路在加號會合，輸出 Wx + (α/r)BAx。訓練時只更新 A、B；r 是中間的小維度，α/r 控制修正的大小。</desc>\n",
+       "  <style>\n",
+       "    text{font-family:\"Noto Sans CJK TC\",\"Microsoft JhengHei\",\"PingFang TC\",sans-serif;fill:#172b4d;text-anchor:middle;font-size:34px}\n",
+       "    .title{font-size:38px;font-weight:600}\n",
+       "    .main{font-size:36px;font-weight:500}\n",
+       "    .fixed-text{fill:#374151}\n",
+       "    .learn-text{fill:#164b88}\n",
+       "    .edge{fill:none;stroke-width:4;stroke-linejoin:round;stroke-linecap:round}\n",
+       "    .fixed{stroke:#6b7280}\n",
+       "    .learn{stroke:#2c67b1}\n",
+       "  </style>\n",
+       "  <defs>\n",
+       "    <marker id=\"fixed-arrow\" markerUnits=\"userSpaceOnUse\" markerWidth=\"14\" markerHeight=\"14\" refX=\"14\" refY=\"7\" orient=\"auto\"><path d=\"M0 0L14 7L0 14Z\" fill=\"#6b7280\"/></marker>\n",
+       "    <marker id=\"learn-arrow\" markerUnits=\"userSpaceOnUse\" markerWidth=\"14\" markerHeight=\"14\" refX=\"14\" refY=\"7\" orient=\"auto\"><path d=\"M0 0L14 7L0 14Z\" fill=\"#2c67b1\"/></marker>\n",
+       "    <marker id=\"out-arrow\" markerUnits=\"userSpaceOnUse\" markerWidth=\"14\" markerHeight=\"14\" refX=\"14\" refY=\"7\" orient=\"auto\"><path d=\"M0 0L14 7L0 14Z\" fill=\"#398064\"/></marker>\n",
+       "  </defs>\n",
+       "  <rect width=\"720\" height=\"1200\" fill=\"#fff\"/>\n",
+       "  <text x=\"360\" y=\"58\" class=\"title\">固定原矩陣，分支學修正</text>\n",
+       "\n",
+       "  <rect x=\"214\" y=\"100\" width=\"292\" height=\"90\" rx=\"16\" fill=\"#fff2dc\" stroke=\"#b97723\" stroke-width=\"3\"/>\n",
+       "  <text x=\"360\" y=\"157\" class=\"main\">同一份輸入 x</text>\n",
+       "  <path d=\"M360 190V232\" class=\"edge\" stroke=\"#697586\"/>\n",
+       "  <path d=\"M360 232H184V284\" class=\"edge fixed\" marker-end=\"url(#fixed-arrow)\"/>\n",
+       "  <path d=\"M360 232H536V284\" class=\"edge learn\" marker-end=\"url(#learn-arrow)\"/>\n",
+       "  <circle cx=\"360\" cy=\"232\" r=\"6\" fill=\"#697586\"/>\n",
+       "\n",
+       "  <rect x=\"40\" y=\"296\" width=\"288\" height=\"258\" rx=\"16\" fill=\"#f1f3f5\" stroke=\"#86909d\" stroke-width=\"3\"/>\n",
+       "  <text x=\"184\" y=\"350\" class=\"main fixed-text\">原矩陣 W</text>\n",
+       "  <text x=\"184\" y=\"408\" class=\"fixed-text\">數字固定</text>\n",
+       "  <text x=\"184\" y=\"466\" class=\"fixed-text\">照常運算</text>\n",
+       "  <text x=\"184\" y=\"526\" class=\"main fixed-text\">得到 Wx</text>\n",
+       "\n",
+       "  <rect x=\"392\" y=\"296\" width=\"288\" height=\"144\" rx=\"16\" fill=\"#eaf2ff\" stroke=\"#2162b2\" stroke-width=\"3\"/>\n",
+       "  <text x=\"536\" y=\"350\" class=\"main learn-text\">可學矩陣 A</text>\n",
+       "  <text x=\"536\" y=\"408\" class=\"learn-text\">先縮小維度</text>\n",
+       "  <path d=\"M536 440V496\" class=\"edge learn\" marker-end=\"url(#learn-arrow)\"/>\n",
+       "\n",
+       "  <rect x=\"392\" y=\"508\" width=\"288\" height=\"144\" rx=\"16\" fill=\"#eaf2ff\" stroke=\"#2162b2\" stroke-width=\"3\"/>\n",
+       "  <text x=\"536\" y=\"562\" class=\"main learn-text\">可學矩陣 B</text>\n",
+       "  <text x=\"536\" y=\"620\" class=\"learn-text\">形成輸出維度</text>\n",
+       "  <path d=\"M536 652V708\" class=\"edge learn\" marker-end=\"url(#learn-arrow)\"/>\n",
+       "\n",
+       "  <rect x=\"392\" y=\"720\" width=\"288\" height=\"144\" rx=\"16\" fill=\"#eaf2ff\" stroke=\"#2162b2\" stroke-width=\"3\"/>\n",
+       "  <text x=\"536\" y=\"770\" class=\"learn-text\">縮放修正</text>\n",
+       "  <text x=\"536\" y=\"828\" class=\"learn-text\">乘上 α/r</text>\n",
+       "\n",
+       "  <path d=\"M184 554V906H314\" class=\"edge fixed\" marker-end=\"url(#fixed-arrow)\"/>\n",
+       "  <path d=\"M536 864V906H406\" class=\"edge learn\" marker-end=\"url(#learn-arrow)\"/>\n",
+       "  <circle cx=\"360\" cy=\"906\" r=\"34\" fill=\"#e6f4ed\" stroke=\"#398064\" stroke-width=\"3\"/>\n",
+       "  <text x=\"360\" y=\"922\" style=\"font-size:48px;fill:#246544\">＋</text>\n",
+       "  <path d=\"M360 940V976\" class=\"edge\" stroke=\"#398064\" marker-end=\"url(#out-arrow)\"/>\n",
+       "\n",
+       "  <rect x=\"44\" y=\"988\" width=\"632\" height=\"132\" rx=\"16\" fill=\"#e6f4ed\" stroke=\"#398064\" stroke-width=\"3\"/>\n",
+       "  <text x=\"360\" y=\"1040\" class=\"main\">輸出</text>\n",
+       "  <text x=\"360\" y=\"1100\" style=\"font-size:38px\">Wx + (α/r)BAx</text>\n",
+       "  <text x=\"360\" y=\"1170\">訓練時只更新 A、B</text>\n",
+       "</svg>"
+      ],
+      "text/plain": [
+       "<IPython.core.display.SVG object>"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    }
+   ],
+   "source": [
+    "# @title 本節圖解\n",
+    "from IPython.display import SVG, display\n",
+    "\n",
+    "display(SVG(filename=str(root / \"course/figures/natural_base_adapter.svg\")))"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "先真的更新一個四項輸入、三項輸出的層：\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 3,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:21:02.363206Z",
+     "iopub.status.busy": "2026-10-04T19:21:02.362962Z",
+     "iopub.status.idle": "2026-10-04T19:21:05.261678Z",
+     "shell.execute_reply": "2026-10-04T19:21:05.260495Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "可更新數字 14\n",
+      "原矩陣完全未變 True\n",
+      "修正B真的改變 True\n"
+     ]
+    }
+   ],
+   "source": [
+    "import torch\n",
+    "from torch import nn\n",
+    "from tiny_perceptron.alignment import LoRALinear\n",
+    "\n",
+    "torch.manual_seed(42)\n",
+    "layer = LoRALinear(nn.Linear(4, 3), rank=2, alpha=2)\n",
+    "base_before = layer.base.weight.detach().clone()\n",
+    "branch_before = layer.b.detach().clone()\n",
+    "optimizer = torch.optim.SGD([p for p in layer.parameters() if p.requires_grad], lr=0.1)\n",
+    "loss = layer(torch.ones(1, 4)).square().mean()\n",
+    "loss.backward()\n",
+    "optimizer.step()\n",
+    "print(\"可更新數字\", sum(p.numel() for p in layer.parameters() if p.requires_grad))\n",
+    "print(\"原矩陣完全未變\", torch.equal(base_before, layer.base.weight))\n",
+    "print(\"修正B真的改變\", not torch.equal(branch_before, layer.b))"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "一筆輸入的四個值都是1。輸出的平方平均作為代價，讓這次練習試著把輸出靠近0；它不是圖片或文字任務。SGD是這次使用的更新方法；`loss.backward()`算出梯度，`optimizer.step()`按照學習率0.1更新交給它的參數。`detach().clone()`留下獨立的舊值，才能在更新後比較。A有2×4＝8個數，B有3×2＝6個數，所以可更新數字是14；後兩項是True。\n",
+    "\n",
+    "更新器只接收`requires_grad`為True的參數。固定原矩陣表示它的數字不更新，不是把那條路關掉；回答的代價仍要經過底座的計算，才能告訴修正應該怎麼改。本章在圖文底座的語言注意力q與v投影加上rank 8、alpha 16的修正，視覺底座與語音辨識器ASR不因這一步重新訓練。完整微調的學習率固定為0.00003；上方的小層例子用0.1追蹤一次更新，兩者是不同規模、不同目標的練習。\n",
+    "\n",
+    "放到完整底座時，這次可更新的修正共有1,605,632個數字，約佔含修正後模型的0.0754%。保存成單份修正權重檔約6.44 MB；它不包含完整底座，也不是包含更新器狀態的續訓包。實際更新範圍只有LoRA，112個修正張量的前後指紋都改變，底座記錄中的幾個抽查位置前後未變；這是抽查，沒有宣稱把二十億個底座數字全數逐位比較。小例子幫我們看懂兩條路，[完整訓練核對](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/natural-assistant/evidence/v4-runtime/train-37217452291/training-audit-summary.json)則確認程式真的按這個範圍更新，回答品質仍需另驗。\n",
+    "\n",
+    "練習把rank改成1，也把alpha改成1，保留相同的alpha/r縮放。A與B共4＋3＝7個數；原矩陣仍應不變。這只說明可調數字變少，還不能判斷自然任務的品質。下一節會找出真正指導這些數字學習的答案位置。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "20.6"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

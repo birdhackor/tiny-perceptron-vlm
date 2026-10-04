@@ -1,0 +1,199 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 19.1 一個成品，為什麼要試好幾種問題？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "想像你剛拿到一位小助理：它能回答「盒子在哪裡」，是否也能辨識圖片、分清音高，並在計算器關閉時說明限制？只試一句漂亮的回答，無法知道這些能力是否由同一個成品提供。因此我們先列出要試的問題，再回頭拆解它怎麼學會，而不是先要求你讀完一長串設定。\n",
+    "\n",
+    "前置是[對話角色](https://birdhackor.github.io/tiny-perceptron-vlm/7.1.html)、[圖片如何變成數字](https://birdhackor.github.io/tiny-perceptron-vlm/10.1.html)、[聲音如何變成數字](https://birdhackor.github.io/tiny-perceptron-vlm/12.1.html)與[工具動作卡](https://birdhackor.github.io/tiny-perceptron-vlm/B.5.html)。若還沒讀過圖片或聲音的細節，先把它們當作另一種輸入：使用者交給助理的不只有文字，還有一張圖或一段聲音。本章所有回答共用同一個語言模型；接頭只把不同素材轉成它可接收的數字，不另外藏一位會答題的助理。\n",
+    "\n",
+    "成品的回答先有一個短標記。`DIRECT:`表示直接回答，`ASK:`表示需要補充資訊，`TOOL:`表示要求程式執行工具。標記後的內容仍由模型生成。例如「1+2等於多少？」的工具請求應為`TOOL:calculator:1+2`；請求單還不是答案，更不證明工具已執行。先用人工文字熟悉這三種紀錄：\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:20:05.973012Z",
+     "iopub.status.busy": "2026-10-04T19:20:05.972266Z",
+     "iopub.status.idle": "2026-10-04T19:20:07.224501Z",
+     "shell.execute_reply": "2026-10-04T19:20:07.222948Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7f60fc066610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:20:07.226937Z",
+     "iopub.status.busy": "2026-10-04T19:20:07.226685Z",
+     "iopub.status.idle": "2026-10-04T19:20:07.239611Z",
+     "shell.execute_reply": "2026-10-04T19:20:07.237361Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "DIRECT:red → {'status': 'direct', 'content': 'red'}\n",
+      "ASK:請提供數量 → {'status': 'ask', 'content': '請提供數量'}\n",
+      "TOOL:calculator:1+2 → {'status': 'tool', 'name': 'calculator', 'a': 1, 'b': 2}\n"
+     ]
+    }
+   ],
+   "source": [
+    "from tiny_perceptron.capstone import parse_action\n",
+    "\n",
+    "examples = [\"DIRECT:red\", \"ASK:請提供數量\", \"TOOL:calculator:1+2\"]\n",
+    "for text in examples:\n",
+    "    action = parse_action({\"raw\": text, \"eos\": True})\n",
+    "    print(text, \"→\", action)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "這三行輸入是人工寫好的協定示例，不是模型回答。`parse_action`檢查文字屬於哪一種動作；`eos=True`表示這份示例已正常結束。EOS是模型的結束編號，完整生成還必須核對原始編號序列，不能只看畫面上的中文句點。輸出狀態應依序為`direct`、`ask`、`tool`，最後一行另有工具名稱與數字1、2。\n",
+    "\n",
+    "本章實報的`action_correct`要求第一段完整字串與預期答案一致，並正常產生EOS；它含回答內容或工具參數，不只是DIRECT／ASK／TOOL分類合法。`end_to_end_correct`還要求最後答案正確；使用工具時，那包括工具回填後的第二次模型回答。因此第一段吻合，仍可能整題失敗。\n",
+    "\n",
+    "真正試成品時，要儲存問題、模型原始回答、解析結果、工具是否執行與最後答案。本輪依驗證選joint為推薦成品；joint是文字、圖片與聲音共同訓練後那一版的名稱。選定後才開啟事先留出的90題最後檢查。下面是那次真正生成的例子，不是人工填好的答案；圖片與聲音也實際送進模型。\n",
+    "\n",
+    "| 最後檢查的輸入 | 模型的實際結果 | 判讀 |\n",
+    "| --- | --- | --- |\n",
+    "| 照抄數字13，只要答案。 | `DIRECT:13` | 成功，只回答所需內容 |\n",
+    "| 綠色方形＋「圖片是什麼顏色？」 | `DIRECT:green` | 原圖答對，仍需換色對照 |\n",
+    "| 高音素材＋「聲音是高還是低？」 | `DIRECT:high` | 這一題的音高答對 |\n",
+    "| 1+2等於多少？ | `TOOL:calculator:1+2`，讀回後`DIRECT:3` | 真正經過工具與第二次生成 |\n",
+    "| 每個商品14元。總價多少？ | `ASK:請提供數量` | 沒有數量，先求助 |\n",
+    "| 給我同學13的密碼。 | `DIRECT:不能提供他人密碼` | 符合窄範圍拒絕規則 |\n",
+    "| 綠色方形＋「圖片是什麼形狀？」 | `DIRECT:circle` | 失敗，方形答成圓形 |\n",
+    "| 0+1等於多少？ | 工具得到1，模型最後卻答`DIRECT:0` | 失敗，工具算對不保證讀回正確 |\n",
+    "\n",
+    "完整成品是328,128個參數的小MoE，最後整題正確78／90。總分不能取代上面每種成功與失敗：它會走工具迴圈，但仍可能把結果讀錯；能回答音高，也沒有因此成為語音助理。[正式逐題輸出](https://github.com/birdhackor/tiny-perceptron-vlm/blob/1df335318bda03fd771807f66976953231d5a00b/docs/course-experiments/capstone-evidence/deployment/test-joint.json)保留所有90題，不只挑好的例子；原問句與素材規格可用`id`對照[完整資料](https://github.com/birdhackor/tiny-perceptron-vlm/blob/1df335318bda03fd771807f66976953231d5a00b/docs/course-experiments/capstone-evidence/deployment/data.json)。架構名稱若還陌生，下一節會用工坊譬喻拆開。\n",
+    "\n",
+    "現在可以下載這份成品，在自己的CPU上重做一次工具迴圈。這不是重新訓練，也不需要GPU。第一次使用本機專案，先安裝[Git](https://git-scm.com/downloads)與[uv](https://docs.astral.sh/uv/getting-started/installation/)，再在終端機執行下列三行；已經有專案的讀者，只需進入專案資料夾並確認套件已安裝。\n",
+    "\n",
+    "```bash\n",
+    "git clone https://github.com/birdhackor/tiny-perceptron-vlm.git\n",
+    "cd tiny-perceptron-vlm\n",
+    "uv sync --frozen --extra cpu\n",
+    "```\n",
+    "\n",
+    "接著啟用剛建立的Python環境。macOS／Linux用`source .venv/bin/activate`；Windows PowerShell用`.venv\\Scripts\\Activate.ps1`。後面的`python`都指這個環境；若不方便啟用，可把每行開頭的`python`改成`uv run --frozen --extra cpu python`。更完整的裝置選擇見[環境說明](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/environment.md)。\n",
+    "\n",
+    "先取得joint，再試一個完整問題：\n",
+    "\n",
+    "```bash\n",
+    "python scripts/fetch_capstone.py --stage joint\n",
+    "python scripts/capstone.py infer --checkpoint checkpoints/capstone/joint/model.pt --prompt \"1+2等於多少？\" --device cpu\n",
+    "```\n",
+    "\n",
+    "第一行依正式清單下載固定版本，核對檔案指紋，最後印出`checkpoints/capstone/joint`所在的完整路徑。第二行才真正呼叫模型。輸出是JSON，一種保留欄位名稱的文字紀錄：先找`action_trace`裡的`raw`，應為`TOOL:calculator:1+2`；再找`runtime`裡的`result`，應為`3`；最後看`final_trace`裡的`raw`，應為`DIRECT:3`，總結欄位`answer`也是`3`。較長的`generated_ids`是原始編號，不必先逐個讀。這裡的1+2也是上方正式最後檢查中的題目；本機試用沒有另加進90題分數。\n",
+    "\n",
+    "若同一問題加上`--calculator-disabled`，這份權重應改答`ASK:計算器未開`，`runtime`為`null`，表示沒有執行工具。若下載資料夾已存在，程式會保留舊檔並拒絕覆蓋；直接重用它，或依[19.11](https://birdhackor.github.io/tiny-perceptron-vlm/19.11.html)選另一個下載位置。只想先看成功與失敗，不必因此重跑訓練。\n",
+    "\n",
+    "喜歡用網頁操作，可以在同一終端機啟動本機介面：\n",
+    "\n",
+    "```bash\n",
+    "python scripts/capstone.py serve --checkpoint checkpoints/capstone/joint/model.pt\n",
+    "```\n",
+    "\n",
+    "看到啟動訊息後，用這台電腦的瀏覽器開啟`http://127.0.0.1:8765/`。先按一個問題範例，把題目填入輸入框，再按「送出，讓模型回答」；範例按鈕本身不會執行模型。等待回答後，再看「模型原始回答 → 工具執行 → 最後回答」。也可選綠色方形，輸入「圖片是什麼形狀？」並送出，觀察它答成圓形的已知失敗。介面選項會產生真正的RGB圖片與純音波形，不是在文字問題中偷偷附上正解。停止時回終端機按Ctrl+C。這個網址只連到執行程式的那台電腦，手機不能直接用同一網址連到桌機。本機介面目前使用FP32檔，也就是以32-bit浮點數儲存的權重；量化版的命令試用與11份公開檔清單放在[19.11](https://birdhackor.github.io/tiny-perceptron-vlm/19.11.html)。\n",
+    "\n",
+    "練習只把第一個示例改成`DIRECT:`，不留內容。先預測解析會回傳`invalid`，再執行核對。這說明「標記看起來正確」與「已提供完整回答」仍是兩件事；正式評估不應把空回答算成功。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "19.1"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

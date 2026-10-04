@@ -1,0 +1,243 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 20.7 題目和答案都在輸入裡，模型究竟練哪一段？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "老師出題「桌上有幾隻貓」，希望你學會回答「兩隻」。練習紙上同時有題目和答案，不表示你要學著把題目也當回答抄一遍。訓練對話時，同樣要分清可以讀的線索與應該學的輸出。\n",
+    "\n",
+    "[7.3](https://birdhackor.github.io/tiny-perceptron-vlm/7.3.html)已介紹回答遮罩。遮罩是一份計分標記：這些位置的預測計入代價，其他位置不直接計分。問題、歷史與圖片仍供模型讀取；我們把監督集中在指定助手回答與正常結束。這種照示範回答繼續訓練的方式，叫SFT（supervised fine-tuning，監督式微調）。\n",
+    "\n",
+    "下圖用最短的Q與A示意。第一個答案A由它前面的助理邊界位置預測，接著由A的位置預測結束。圖畫的是這個小例子的輸入與目標，不是把完整Qwen圖片輸入假定成六格。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:21:06.831331Z",
+     "iopub.status.busy": "2026-10-04T19:21:06.831132Z",
+     "iopub.status.idle": "2026-10-04T19:21:08.386396Z",
+     "shell.execute_reply": "2026-10-04T19:21:08.384794Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7f1360346610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "cellView": "form",
+    "course_figure": {
+     "alt": "問題仍可讀取，只有助手答案A與結束符號的目標計入代價",
+     "name": "natural-v4-answer-mask"
+    },
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:21:08.391122Z",
+     "iopub.status.busy": "2026-10-04T19:21:08.390887Z",
+     "iopub.status.idle": "2026-10-04T19:21:08.400290Z",
+     "shell.execute_reply": "2026-10-04T19:21:08.399530Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "image/svg+xml": [
+       "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 760 720\" role=\"img\" aria-labelledby=\"title desc\">\n",
+       "  <title id=\"title\">問題留在輸入，只有答案與結束的目標計分</title>\n",
+       "  <desc id=\"desc\">手寫Q到A的六格小例子。輸入依次是起始、使用者、Q、結束、助理、A。已右移的目標只有最後兩格A與結束有效；助理邊界所在輸入位置預測第一個答案A。它不是完整圖文模型的序列長度。</desc>\n",
+       "  <defs><marker id=\"arrow\" markerWidth=\"10\" markerHeight=\"10\" refX=\"8\" refY=\"5\" orient=\"auto\"><path d=\"M0 0L10 5L0 10Z\" fill=\"#2563eb\"/></marker></defs>\n",
+       "  <rect width=\"760\" height=\"720\" rx=\"24\" fill=\"#f8fafc\"/>\n",
+       "  <g font-family=\"Noto Sans CJK TC,Noto Sans CJK SC,sans-serif\" fill=\"#17243b\" text-anchor=\"middle\">\n",
+       "    <text x=\"380\" y=\"53\" font-size=\"34\" font-weight=\"700\">問題留在輸入，答案才計分</text>\n",
+       "    <text x=\"380\" y=\"102\" font-size=\"30\">手寫 Q → A 小例子</text>\n",
+       "    <text x=\"380\" y=\"153\" font-size=\"32\">模型讀取的輸入 X</text>\n",
+       "    <g font-size=\"31\">\n",
+       "      <rect x=\"37\" y=\"174\" width=\"106\" height=\"84\" rx=\"12\" fill=\"#ffffff\" stroke=\"#93a3b8\" stroke-width=\"2\"/><text x=\"90\" y=\"226\">起始</text>\n",
+       "      <rect x=\"151\" y=\"174\" width=\"106\" height=\"84\" rx=\"12\" fill=\"#ffffff\" stroke=\"#93a3b8\" stroke-width=\"2\"/><text x=\"204\" y=\"226\">使用者</text>\n",
+       "      <rect x=\"265\" y=\"174\" width=\"106\" height=\"84\" rx=\"12\" fill=\"#ffffff\" stroke=\"#93a3b8\" stroke-width=\"2\"/><text x=\"318\" y=\"226\">Q</text>\n",
+       "      <rect x=\"379\" y=\"174\" width=\"106\" height=\"84\" rx=\"12\" fill=\"#ffffff\" stroke=\"#93a3b8\" stroke-width=\"2\"/><text x=\"432\" y=\"226\">結束</text>\n",
+       "      <rect x=\"493\" y=\"174\" width=\"106\" height=\"84\" rx=\"12\" fill=\"#ffffff\" stroke=\"#2563eb\" stroke-width=\"3\"/><text x=\"546\" y=\"226\">助理</text>\n",
+       "      <rect x=\"607\" y=\"174\" width=\"106\" height=\"84\" rx=\"12\" fill=\"#ffffff\" stroke=\"#2563eb\" stroke-width=\"3\"/><text x=\"660\" y=\"226\">A</text>\n",
+       "    </g>\n",
+       "    <text x=\"380\" y=\"325\" font-size=\"32\">下一項目標 Y（已右移）</text>\n",
+       "    <g font-size=\"33\">\n",
+       "      <rect x=\"37\" y=\"351\" width=\"106\" height=\"84\" rx=\"12\" fill=\"#e2e8f0\"/><text x=\"90\" y=\"403\">—</text>\n",
+       "      <rect x=\"151\" y=\"351\" width=\"106\" height=\"84\" rx=\"12\" fill=\"#e2e8f0\"/><text x=\"204\" y=\"403\">—</text>\n",
+       "      <rect x=\"265\" y=\"351\" width=\"106\" height=\"84\" rx=\"12\" fill=\"#e2e8f0\"/><text x=\"318\" y=\"403\">—</text>\n",
+       "      <rect x=\"379\" y=\"351\" width=\"106\" height=\"84\" rx=\"12\" fill=\"#e2e8f0\"/><text x=\"432\" y=\"403\">—</text>\n",
+       "      <rect x=\"493\" y=\"351\" width=\"106\" height=\"84\" rx=\"12\" fill=\"#dbeafe\" stroke=\"#2563eb\" stroke-width=\"3\"/><text x=\"546\" y=\"403\">A</text>\n",
+       "      <rect x=\"607\" y=\"351\" width=\"106\" height=\"84\" rx=\"12\" fill=\"#dbeafe\" stroke=\"#2563eb\" stroke-width=\"3\"/><text x=\"660\" y=\"403\">結束</text>\n",
+       "    </g>\n",
+       "    <path d=\"M546 263V285\" fill=\"none\" stroke=\"#2563eb\" stroke-width=\"3\" marker-end=\"url(#arrow)\"/>\n",
+       "    <path d=\"M660 263V285\" fill=\"none\" stroke=\"#2563eb\" stroke-width=\"3\" marker-end=\"url(#arrow)\"/>\n",
+       "    <text x=\"380\" y=\"484\" font-size=\"31\" fill=\"#1d4ed8\">第一個答案由前面的助理邊界預測</text>\n",
+       "    <rect x=\"37\" y=\"516\" width=\"676\" height=\"137\" rx=\"16\" fill=\"#ffffff\" stroke=\"#cbd5e1\" stroke-width=\"2\"/>\n",
+       "    <text x=\"380\" y=\"563\" font-size=\"30\">灰色：不直接算這格的代價</text>\n",
+       "    <text x=\"380\" y=\"613\" font-size=\"30\">藍色：答案 A 與結束都要學</text>\n",
+       "    <text x=\"380\" y=\"691\" font-size=\"28\">本圖不是完整圖文模型的序列長度。</text>\n",
+       "  </g>\n",
+       "</svg>"
+      ],
+      "text/plain": [
+       "<IPython.core.display.SVG object>"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    }
+   ],
+   "source": [
+    "# @title 本節圖解\n",
+    "from IPython.display import SVG, display\n",
+    "\n",
+    "display(SVG(filename=str(root / \"course/figures/natural-v4-answer-mask.svg\")))"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 3,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:21:08.403244Z",
+     "iopub.status.busy": "2026-10-04T19:21:08.402964Z",
+     "iopub.status.idle": "2026-10-04T19:21:08.413229Z",
+     "shell.execute_reply": "2026-10-04T19:21:08.412824Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "輸入位置數 6\n",
+      "計分目標數 2\n",
+      "第一個計分目標的位置 4\n",
+      "計分目標ID [73, 2]\n"
+     ]
+    }
+   ],
+   "source": [
+    "from tiny_perceptron.data import render_chat\n",
+    "\n",
+    "x, y = render_chat(\n",
+    "    [\n",
+    "        {\"role\": \"user\", \"content\": \"Q\"},\n",
+    "        {\"role\": \"assistant\", \"content\": \"A\"},\n",
+    "    ]\n",
+    ")\n",
+    "active = y != -100\n",
+    "first = active.nonzero()[0].item()\n",
+    "print(\"輸入位置數\", len(x))\n",
+    "print(\"計分目標數\", active.sum().item())\n",
+    "print(\"第一個計分目標的位置\", first)\n",
+    "print(\"計分目標ID\", y[active].tolist())"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "`render_chat`使用本教材的小型byte編碼，Q與A各佔一格。它給出六格輸入，計分目標有兩格：A與結束符號；第一格有效目標在從0起算的位置4。`-100`表示這份目標不直接計代價，它不是輸入字表中的文字ID，也沒有刪掉問題。這個右移關係可回看[7.4](https://birdhackor.github.io/tiny-perceptron-vlm/7.4.html)。\n",
+    "\n",
+    "真正圖文資料要由底座配套的處理器與對話模板編碼。處理器把圖片轉成模型能接收的尺寸與位置；模板整理角色與回答邊界。中文字數不等於編碼長度，圖片位置也不是普通文字。如果長度截斷把完整答案或結束切掉，模型學到的就不是原本示範，所以訓練前要逐筆核對有效目標與保留範圍。\n",
+    "\n",
+    "本次2,077道訓練題編碼後，共有39,436個有效目標位置，包含最後助手答案及模板後綴。每題讀兩次，實際訓練合計計分78,872個位置。這是在數編碼後的預測目標，不是78,872個中文字或獨立答案；問題與歷史仍供模型讀取，但沒有因此加入這個計分總數。\n",
+    "\n",
+    "練習把答案A改成AB。有效目標應從2增加到3，問題仍在輸入裡。現在我們知道如何選出訓練要計分的目標；下一節會把「真的更新」與「可以交付」分開。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "20.7"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

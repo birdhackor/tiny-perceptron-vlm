@@ -1,0 +1,178 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 5.7 訓練中斷怎麼接續？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "遊戲存檔不僅要記角色在哪，還要記揹包和任務進度。訓練存檔也一樣：只存模型權重能做預測，但若想下一步接着同樣方式學，還需要優化器的歷史、已走步數、學習率計劃、文字編碼規則與隨機狀態。這樣的完整狀態快照叫checkpoint（檢查點），不是把一份文字改副檔名就能代替。\n",
+    "\n",
+    "[5.3](https://birdhackor.github.io/tiny-perceptron-vlm/5.3.html)、[5.4](https://birdhackor.github.io/tiny-perceptron-vlm/5.4.html) 已看到相同梯度在不同歷史下會有不同更新，所以遺漏歷史可能讓接續路線改變。本例真的先走一小步，再保存與重載；輸入只有一筆三字ID，CPU很快就能完成。字表用metadata另存，因為只記字表大小不足以知道每個ID代表什麼。\n",
+    "\n",
+    "這裡沿用[4.7的完整文字模型與答案對齊](https://birdhackor.github.io/tiny-perceptron-vlm/4.7.html)。`TinyLM`是接字模型，`ModelConfig`記錄其設定：字表5項、每位置8特徵、最多8位置。`torch.tensor`把數字清單存成可計算的資料，軸背景見[W.3](https://birdhackor.github.io/tiny-perceptron-vlm/first-steps.html#W.3)。按本次字表，x的 `[1,2,3]`是「狗看貓」，y的 `[2,3,4]`是「看貓，」，逐位置要求看到狗猜看、看到看猜貓、看到貓猜逗號。`model(x)[\"logits\"]`取得一筆、三位置、每位置五個候選的原始分數；`masked_loss`把這些分數與y的下一字答案比較，得到平均猜錯代價，本例沒有忽略位置。`.parameters()`列出模型的可調數字，交給更新工具處理。\n",
+    "\n",
+    "本例的AdamW沿用Adam的梯度方向m、平方大小v與步數歷史，另外把[5.5的權重衰減](https://birdhackor.github.io/tiny-perceptron-vlm/5.5.html)獨立控制；所以恢復時仍須帶回這些更新記錄，不能只恢復模型數值。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:11:21.496323Z",
+     "iopub.status.busy": "2026-10-04T19:11:21.496146Z",
+     "iopub.status.idle": "2026-10-04T19:11:22.657348Z",
+     "shell.execute_reply": "2026-10-04T19:11:22.656321Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7f9e66742610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:11:22.659650Z",
+     "iopub.status.busy": "2026-10-04T19:11:22.659351Z",
+     "iopub.status.idle": "2026-10-04T19:11:24.120899Z",
+     "shell.execute_reply": "2026-10-04T19:11:24.119589Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "保存步數 1 字表 ['。', '狗', '看', '貓', '，']\n"
+     ]
+    }
+   ],
+   "source": [
+    "import tempfile\n",
+    "from pathlib import Path\n",
+    "import torch\n",
+    "from tiny_perceptron.model import TinyLM, ModelConfig, masked_loss\n",
+    "from tiny_perceptron.training import save_checkpoint, load_checkpoint\n",
+    "\n",
+    "torch.manual_seed(42)\n",
+    "model = TinyLM(ModelConfig(vocab_size=5, width=8, max_length=8))\n",
+    "optimizer = torch.optim.AdamW(model.parameters(), lr=0.01)\n",
+    "x, y = torch.tensor([[1, 2, 3]]), torch.tensor([[2, 3, 4]])\n",
+    "masked_loss(model(x)[\"logits\"], y).backward()\n",
+    "optimizer.step()\n",
+    "with tempfile.TemporaryDirectory() as directory:\n",
+    "    path = Path(directory) / \"state.pt\"\n",
+    "    save_checkpoint(path, model, optimizer, step=1, metadata={\"chars\": [\"。\", \"狗\", \"看\", \"貓\", \"，\"]})\n",
+    "    loaded, payload = load_checkpoint(path, restore_rng=True)\n",
+    "    restored_optimizer = torch.optim.AdamW(loaded.parameters(), lr=0.01)\n",
+    "    restored_optimizer.load_state_dict(payload[\"optimizer\"])\n",
+    "    assert torch.equal(model(x)[\"logits\"], loaded(x)[\"logits\"])\n",
+    "    for candidate, opt in [(model, optimizer), (loaded, restored_optimizer)]:\n",
+    "        opt.zero_grad()\n",
+    "        masked_loss(candidate(x)[\"logits\"], y).backward()\n",
+    "        opt.step()\n",
+    "    assert torch.equal(model(x)[\"logits\"], loaded(x)[\"logits\"])\n",
+    "    print(\"保存步數\", payload[\"step\"], \"字表\", payload[\"metadata\"][\"chars\"])"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "`TemporaryDirectory` 建立測試資料夾，離開縮排區自動清除；`Path` 用途見 [W.7](https://birdhackor.github.io/tiny-perceptron-vlm/first-steps.html#W.7)。`save_checkpoint` 保存模型設定與權重、optimizer狀態、步數和隨機資訊，metadata是額外自訂資料。重載後先確認同輸入得到完全相同分數，再各自更新一步比較，兩次檢查都應通過；輸出步數1與五字對照表。\n",
+    "\n",
+    "`load_checkpoint` 用檔內設定重建模型，並把參數加載進去；`restore_rng=True` 還恢復隨機數狀態。優化器則需另建並調用 `load_state_dict`，不能只建一個新AdamW就認為歷史也回來。字表metadata也不是自動產生文字工具，要按存下的約定重建編碼與解碼。正式訓練還要保存資料抽樣位置與排程設定，保證下一批題也相同。\n",
+    "\n",
+    "這個例子沒有dropout，也沒有隨機抽題，適合逐數檢查下一步。dropout是在訓練中隨機將部分中間數值設成零的操作；若有這類隨機行為，還須控制隨機狀態才能比較，詳見[5.17](https://birdhackor.github.io/tiny-perceptron-vlm/5.17.html)。更大訓練也可能有非確定性運算，也就是相同設定下仍因運算順序等原因產生微小差異，不能保證所有儲存數字完全相同，應另外定義可接受的續訓驗證。此處只加載自己剛生成的存檔，正式使用同樣只加載可信來源。\n",
+    "\n",
+    "我們也在GPU上另做了有隨機抽題的接續實驗：先定好總共80步的學習率計畫，一路跑完；另一條路在第40步保存權重、更新工具和隨機狀態，重載後再跑第41到80步。最後逐項比較兩份權重，最大差為0。這項結果支持的是這份小模型和這次排程的接續，不是所有GPU計算都必然逐位相同。尤其不能在重載後偷偷換成新的總步數計畫，卻仍要求它走出原來的路線；排程也是存檔的一部分。這個80步接續檢查和[T.4的600步文字訓練](https://birdhackor.github.io/tiny-perceptron-vlm/training.html#T.4)是分開的實驗。\n",
+    "\n",
+    "練習只註釋掉 `restored_optimizer.load_state_dict(...)`，先預測第一次重載預測檢查仍通過、第二次更新後可能不相同，再執行核對。權重成功恢復與訓練狀態完整恢復是兩個層次，第二個檢查才會發現漏掉的歷史。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "5.7"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

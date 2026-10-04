@@ -1,0 +1,161 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 18.8 如何學習整個分佈？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "學生第一名與教師一樣，是否就學會教師的分布？如果學生給貓、狗各50%，教師給80%、20%，第一名的平手處理可能選到貓，比例仍明顯不同。我們需要一個比較整個分布的誤差，而且它要說明「以誰的偏好當權重」。前置是[軟目標與log](https://birdhackor.github.io/tiny-perceptron-vlm/18.4.html)、[欄位對齊](https://birdhackor.github.io/tiny-perceptron-vlm/18.6.html)與[凍結教師](https://birdhackor.github.io/tiny-perceptron-vlm/18.7.html)。\n",
+    "\n",
+    "常用KL divergence（KL散度）寫成 `KL(p||q)=Σ p_i(log p_i-log q_i)`，p是教師比例，q是學生比例，i逐一走過同一詞表的候選。以p=`[0.8,0.2]`、q=`[0.5,0.5]`，兩項約0.3760與-0.1833，總和0.1927。單項可以負，整體分布差非負；兩邊完全相同時是0。反過來KL(q||p)則以學生比例加權，是另一種誤差，不能隨意交換方向。\n",
+    "\n",
+    "兩邊要讀同一段已知回答前文、預測同一個下一token，這種用已知前文餵入的方式稱teacher forcing。不能讓教師自由生成「貓」的前文、學生生成「狗」的前文，再按位置盲比。同時只計算有效回答位置，提示與PAD不直接算KL。PAD是把較短序列補到共同長度的占位token，不是實際回答；這些位置的labels設為-100，讓本節函式不計它們的直接誤差。回顧[哪些位置應該學](https://birdhackor.github.io/tiny-perceptron-vlm/7.3.html)。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:20:01.117069Z",
+     "iopub.status.busy": "2026-10-04T19:20:01.116520Z",
+     "iopub.status.idle": "2026-10-04T19:20:02.511250Z",
+     "shell.execute_reply": "2026-10-04T19:20:02.507979Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7fd34003e610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:20:02.513826Z",
+     "iopub.status.busy": "2026-10-04T19:20:02.513471Z",
+     "iopub.status.idle": "2026-10-04T19:20:02.529404Z",
+     "shell.execute_reply": "2026-10-04T19:20:02.528503Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "KL 0.1927\n",
+      "學生分數梯度 [[[0.0, 0.0], [-0.15000000596046448, 0.15000000596046448], [-0.15000000596046448, 0.15000000596046448]]]\n",
+      "教師梯度 None\n"
+     ]
+    }
+   ],
+   "source": [
+    "import torch\n",
+    "from tiny_perceptron.alignment import distillation_kl\n",
+    "\n",
+    "student = torch.zeros(1, 3, 2, requires_grad=True)\n",
+    "p = [0.8, 0.2]\n",
+    "teacher = torch.tensor([[p, p, p]]).log().requires_grad_()\n",
+    "labels = torch.tensor([[-100, 0, 1]])\n",
+    "loss = distillation_kl(student, teacher, labels, temperature=1.0)\n",
+    "loss.backward()\n",
+    "print(\"KL\", round(loss.item(), 4))\n",
+    "print(\"學生分數梯度\", student.grad.round(decimals=4).tolist())\n",
+    "print(\"教師梯度\", teacher.grad)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "輸入形狀是一段、三位置、兩候選。`p`是兩個候選的機率清單；`[p,p,p]`把同一分布列在三個位置，再包一層`[[p,p,p]]`表示只有一段，所以建立的tensor是`(1,3,2)`。`.log()`逐格把機率轉成自然對數，最後設為可求梯度。學生零分數softmax後各0.5；教師log p的softmax還原p。labels第一項-100表示忽略，後兩項表示有效回答；這個KL函數只用labels決定哪些格有效，不按標準答案索引挑教師機率。輸出KL0.1927，學生第一位置梯度 `[0,0]`，其餘各 `[-0.15,0.15]`，因為只平均兩個有效位置。教師梯度None：故意給教師輸出requires_grad，用來驗證helper仍會斷開目標路徑。\n",
+    "\n",
+    "helper內部調用PyTorch `kl_div`時，先傳學生log機率，再傳教師機率，順序和公式字面p、q順序不同，勿憑引數位置猜方向。[蒸餾溫度](https://birdhackor.github.io/tiny-perceptron-vlm/18.5.html)若不是1，兩邊先除T形成分布，這個helper還乘T²；外層不用再乘。忽略位置只沒有直接KL，作為前文仍能影響後續特徵與學生的間接學習。Hinton原文使用軟目標交叉熵，計算`CE(p,q)=−Σ p_i log q_i`。教師自身的熵是`H(p)=−Σ p_i log p_i`，用教師自己的機率衡量分布的不確定程度。本例約0.5004：把0.8與0.2各乘自己的負log再相加。由前面的KL式展開，可得`KL(p||q)=CE(p,q)−H(p)`；本例0.1927約等於0.6931−0.5004。教師固定時H(p)不隨學生q變動，扣掉這個常數不改變學生梯度，所以兩種誤差對學生的更新方向相同。這個代數關係沒有把forward KL變成[18.1提及的MiniLLM](https://birdhackor.github.io/tiny-perceptron-vlm/18.1.html)的reverse KL。\n",
+    "\n",
+    "練習只把labels第一項-100改成0。先預測三格都有效，因各格分布相同，平均KL仍0.1927；每格梯度變 `[-0.1,0.1]`，再執行核對。有效格數改變分母與梯度，並不是把忽略位置隱藏成看不見的輸入。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "18.8"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

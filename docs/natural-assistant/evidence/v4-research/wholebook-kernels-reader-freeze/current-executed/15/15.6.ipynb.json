@@ -1,0 +1,226 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 15.6 Token 怎麼送出再排回來？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "原本輸入三個token，輸出也應保留三列、順序不變。但MoE會先按expert分組工作，工作完成的順序可能是「第2列、第0列、又一份第2列」。如果照完成順序直接排成輸出，就把詞的位置弄亂；如果同一列被兩位expert處理時後者覆蓋前者，又會丟失[加權合併](https://birdhackor.github.io/tiny-perceptron-vlm/15.5.html)的其中一份。送出時需要記住來源列號，收回時按列號相加。\n",
+    "\n",
+    "用三筆已經乘好router比例的貢獻來看：來源列號是 `[2,0,2]`，貢獻向量分別為 `[1,1]`、`[2,2]`、`[3,3]`。先建立三列全零的結果。第一筆加到第2列，第二筆加到第0列，第三筆再次加到第2列；最後第0列 `[2,2]`，第1列 `[0,0]`，第2列 `[4,4]`。原列號從0開始，數字2表示第三列。\n",
+    "\n",
+    "下圖左側按完成順序列出三份貢獻，箭頭依「列0或列2」送往右側原token位置。兩條箭頭匯入列2表示相加，不是覆蓋；列1沒有箭頭，這個刻意省略工作的例子中保持全零。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:17:52.030683Z",
+     "iopub.status.busy": "2026-10-04T19:17:52.030516Z",
+     "iopub.status.idle": "2026-10-04T19:17:53.285091Z",
+     "shell.execute_reply": "2026-10-04T19:17:53.284139Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7f66f006a610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "cellView": "form",
+    "course_figure": {
+     "alt": "列2的兩份貢獻相加，收回後恢復原token順序",
+     "name": "architecture_dispatch_example"
+    },
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:17:53.289013Z",
+     "iopub.status.busy": "2026-10-04T19:17:53.288773Z",
+     "iopub.status.idle": "2026-10-04T19:17:53.296999Z",
+     "shell.execute_reply": "2026-10-04T19:17:53.296129Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "image/svg+xml": [
+       "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 840 330\" role=\"img\" aria-labelledby=\"title desc\">\n",
+       "<title id=\"title\">三筆expert貢獻依原token列號相加</title><desc id=\"desc\">來源列2的兩筆貢獻1,1與3,3相加為4,4；來源列0收到2,2；來源列1沒有收到任何貢獻。</desc>\n",
+       "<style>text{font-family:\"Noto Sans CJK TC\",\"Microsoft JhengHei\",sans-serif;fill:#172b4d} .box{fill:#eef5ff;stroke:#8da8ca;stroke-width:2} .arrow{fill:none;stroke:#466b97;stroke-width:2}</style>\n",
+       "<defs><marker id=\"arrow\" markerWidth=\"8\" markerHeight=\"8\" refX=\"7\" refY=\"4\" orient=\"auto\"><path d=\"M0 0L8 4L0 8\" fill=\"#466b97\"/></marker></defs>\n",
+       "<rect width=\"840\" height=\"330\" fill=\"white\"/>\n",
+       "<text x=\"420\" y=\"30\" font-size=\"22\" text-anchor=\"middle\">完成順序不同，結果仍按原列號相加</text>\n",
+       "<text x=\"120\" y=\"66\" font-size=\"17\" text-anchor=\"middle\">已乘好router比例的貢獻</text>\n",
+       "<text x=\"430\" y=\"66\" font-size=\"17\" text-anchor=\"middle\">依來源列號送回</text>\n",
+       "<text x=\"710\" y=\"66\" font-size=\"17\" text-anchor=\"middle\">原token順序</text>\n",
+       "<rect class=\"box\" x=\"25\" y=\"86\" width=\"210\" height=\"48\" rx=\"8\"/><text x=\"130\" y=\"116\" font-size=\"18\" text-anchor=\"middle\">列2：[1, 1]</text>\n",
+       "<rect class=\"box\" x=\"25\" y=\"150\" width=\"210\" height=\"48\" rx=\"8\"/><text x=\"130\" y=\"180\" font-size=\"18\" text-anchor=\"middle\">列0：[2, 2]</text>\n",
+       "<rect class=\"box\" x=\"25\" y=\"214\" width=\"210\" height=\"48\" rx=\"8\"/><text x=\"130\" y=\"244\" font-size=\"18\" text-anchor=\"middle\">列2：[3, 3]</text>\n",
+       "<rect class=\"box\" x=\"600\" y=\"86\" width=\"215\" height=\"48\" rx=\"8\"/><text x=\"708\" y=\"116\" font-size=\"18\" text-anchor=\"middle\">列0：[2, 2]</text>\n",
+       "<rect class=\"box\" x=\"600\" y=\"150\" width=\"215\" height=\"48\" rx=\"8\"/><text x=\"708\" y=\"180\" font-size=\"18\" text-anchor=\"middle\">列1：[0, 0]</text>\n",
+       "<rect x=\"600\" y=\"214\" width=\"215\" height=\"48\" rx=\"8\" fill=\"#d7f5e6\" stroke=\"#26875b\" stroke-width=\"2\"/><text x=\"708\" y=\"244\" font-size=\"18\" text-anchor=\"middle\">列2：[4, 4]</text>\n",
+       "<path class=\"arrow\" d=\"M235 110L330 110L490 238L600 238\" marker-end=\"url(#arrow)\"/>\n",
+       "<path class=\"arrow\" d=\"M235 174L315 174L510 110L600 110\" marker-end=\"url(#arrow)\"/>\n",
+       "<path class=\"arrow\" d=\"M235 238L600 238\" marker-end=\"url(#arrow)\"/>\n",
+       "<text x=\"425\" y=\"280\" font-size=\"17\" text-anchor=\"middle\">列2： [1, 1] + [3, 3] = [4, 4]</text>\n",
+       "<text x=\"420\" y=\"313\" font-size=\"15\" text-anchor=\"middle\">本例刻意不提供列1的工作；覆蓋會只留下列2最後一筆 [3, 3]</text>\n",
+       "</svg>"
+      ],
+      "text/plain": [
+       "<IPython.core.display.SVG object>"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    }
+   ],
+   "source": [
+    "# @title 本節圖解\n",
+    "from IPython.display import SVG, display\n",
+    "\n",
+    "display(SVG(filename=str(root / \"course/figures/architecture_dispatch_example.svg\")))"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 3,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:17:53.299497Z",
+     "iopub.status.busy": "2026-10-04T19:17:53.299330Z",
+     "iopub.status.idle": "2026-10-04T19:17:53.306175Z",
+     "shell.execute_reply": "2026-10-04T19:17:53.305595Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "相加結果 [[2.0, 2.0], [0.0, 0.0], [4.0, 4.0]]\n",
+      "覆蓋結果 [[2.0, 2.0], [0.0, 0.0], [3.0, 3.0]]\n"
+     ]
+    }
+   ],
+   "source": [
+    "import torch\n",
+    "\n",
+    "rows = torch.tensor([2, 0, 2])\n",
+    "contributions = torch.tensor([[1.0, 1.0], [2.0, 2.0], [3.0, 3.0]])\n",
+    "result = torch.zeros(3, 2)\n",
+    "result.index_add_(0, rows, contributions)\n",
+    "print(\"相加結果\", result.tolist())\n",
+    "overwritten = torch.zeros(3, 2)\n",
+    "for row, value in zip(rows, contributions):\n",
+    "    overwritten[row] = value\n",
+    "print(\"覆蓋結果\", overwritten.tolist())"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "`index_add_`沿指定軸依索引累加；第一個引數0指列方向，rows給每筆的目的列，contributions給要加的向量。名稱尾端 `_` 表示它直接修改result，沒有另外建立回傳結果。第一行應是 `[[2,2],[0,0],[4,4]]`。後面的迴圈刻意用賦值，第三筆取代第一筆，所以第二行最後一列只有 `[3,3]`。這個反例讓我們看見，同樣完成三筆工作，合併方式錯了仍會丟數字。\n",
+    "\n",
+    "前面的「送出」通常用索引選出某位expert負責的輸入列，稱為dispatch；這裡的「依原列號加回」稱為combine。rows記錄的是token身份，不是expert身份。即使同一expert收到很多token，它的每一份輸出仍要回到各自來源列；同一token被多位選中，才會有多筆回到同列。\n",
+    "\n",
+    "本例第1列保持零，是因為我們沒有給它任何貢獻；不是說正常MoE應忽略第二個token。本教材使用dropless，意思是所有選中的工作都會執行，不因某位expert太忙而丟棄。有容量上限的設計則要另外處理溢出，後面[容量不足](https://birdhackor.github.io/tiny-perceptron-vlm/15.12.html)會區分這件事。現在先確保分組與收回沒有改變原有的計算內容。\n",
+    "\n",
+    "正式訓練用的`MoEFFN`也先找出各expert的來源列，僅執行被選中的expert，再以`index_add_`合併。這是一個方便閱讀的Python分派迴圈，並未使用專用稀疏GPU核心。同批故事要補成相同長度才能組成整齊的輸入表，這個動作叫padding，補入的佔位符號叫PAD，可回看[有效輸入位置](https://birdhackor.github.io/tiny-perceptron-vlm/15.4.html)。目前expert的運算仍受到這張補齊後的表的形狀影響，沒有因為統計忽略PAD就自動跳過它們的工作。路由統計排除這些佔位；[輔助損失](https://birdhackor.github.io/tiny-perceptron-vlm/15.9.html)也排除它們，這是鼓勵分派較均衡的額外訓練項，避免把補齊工作算成真實輸入的負載。它是否值得使用，要同時看[15.11](https://birdhackor.github.io/tiny-perceptron-vlm/15.11.html)的實測成本與[15.13](https://birdhackor.github.io/tiny-perceptron-vlm/15.13.html)的品質，不能由資料流畫得正確就推論已加速。\n",
+    "\n",
+    "練習把rows改成 `[1,0,1]`，先預測第1列變成 `[4,4]`、第2列全零，再重跑兩條路徑。接著交換第一筆與第三筆的排列，核對相加結果不變，但覆蓋結果變成 `[1,1]`。正確合併不應依完成先後而漏掉一份貢獻。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "15.6"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

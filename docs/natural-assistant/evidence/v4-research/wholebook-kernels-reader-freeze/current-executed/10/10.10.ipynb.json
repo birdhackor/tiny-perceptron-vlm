@@ -1,0 +1,162 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 10.10 正確描述怎麼比其他描述更接近？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "上一節能算出圖文相似度，接下來需要告訴模型哪一對正確。對每張圖，把批次中的所有文字當候選，正確描述的直欄編號當答案；猜錯的代價就能推動正確直欄分數上升、其他直欄下降。這稱為對比學習，因為學習發生在正確配對與其他候選的比較中。\n",
+    "\n",
+    "前置是[10.9相似度矩陣](https://birdhackor.github.io/tiny-perceptron-vlm/10.9.html)、[1.8交叉熵](https://birdhackor.github.io/tiny-perceptron-vlm/1.8.html)與[1.12梯度下降更新](https://birdhackor.github.io/tiny-perceptron-vlm/1.12.html)。本例兩張圖的正確文字依序在直欄0、1。溫度tau是分數除數，設0.5會把差異放大；這裡用於學習候選配對，不能直接把它當生成回答的抽樣設置。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:14:29.533643Z",
+     "iopub.status.busy": "2026-10-04T19:14:29.533264Z",
+     "iopub.status.idle": "2026-10-04T19:14:30.723686Z",
+     "shell.execute_reply": "2026-10-04T19:14:30.722812Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7f4ac026e610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:14:30.726046Z",
+     "iopub.status.busy": "2026-10-04T19:14:30.725812Z",
+     "iopub.status.idle": "2026-10-04T19:14:30.737440Z",
+     "shell.execute_reply": "2026-10-04T19:14:30.734804Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "代價 0.0181\n",
+      "梯度 tensor([[-0.0180,  0.0180],\n",
+      "        [ 0.0180, -0.0180]])\n"
+     ]
+    }
+   ],
+   "source": [
+    "import torch\n",
+    "from torch.nn import functional as F\n",
+    "\n",
+    "scores = torch.tensor([[2.0, 0.0], [0.0, 2.0]], requires_grad=True)\n",
+    "targets = torch.arange(2)\n",
+    "loss = F.cross_entropy(scores / 0.5, targets)\n",
+    "loss.backward()\n",
+    "print(\"代價\", round(loss.item(), 4))\n",
+    "print(\"梯度\", scores.grad)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "輸入是人工配對分數，不是上一節餘弦結果：正配對2、錯配對0，暫時直接將scores視為可調整數字。`arange(2)`產生[0,1]，指定每橫列正確直欄。交叉熵先把分數轉成候選機率，再懲罰正確直欄機率不足。輸出代價約0.0181，梯度約`[[-0.0180,0.0180],[0.0180,-0.0180]]`。\n",
+    "\n",
+    "梯度為負的位置是正確直欄。梯度下降用舊值減去步長乘梯度，因此負梯度會讓它上升；錯配對收到正梯度，下次更新會降低分數。若實際scores來自圖和文字編碼器，梯度會繼續傳回兩者，調整它們產生的向量方向。這段只算一次梯度，不執行訓練更新。\n",
+    "\n",
+    "還有一個資料陷阱：兩張圖都是紅圓、描述也都「紅圓」，第二段文字對第一張圖其實也成立。若仍只把對角線視為正確，就會把真實正確配對當成負例，稱為假負例。可改成允許多個正確描述的目標，或在這個入門任務先選屬性不同的配對。不能只因文字在另一直欄就斷言它錯。\n",
+    "\n",
+    "正式實驗每批恰好取六種不同描述，各自隨機選一張訓練位置的對應圖，因此沒有把同一句描述的另一版本硬當成錯誤卡。模型共5,568個參數，種子42、學習率0.003、更新250次；圖仍按位移−2、−1、0訓練，位移1驗證、位移2最後測試。每輪六對，總共抽到1,500對，不是1,500張彼此獨立的新圖片。這裡的單向訓練只計算「每張圖從文字候選選描述」的交叉熵，兩個編碼器仍一起更新；反向任務則是每段文字從圖片候選選圖。單向版本的固定訓練小批代價由2.0853降至0.00390。在同一組位移2的六張最後測試圖上，圖片找文字從更新前1/6變成更新後6/6；更新後位移1的驗證圖則是5/6。這個低訓練代價與留出測試成功都有實際權重更新支持；它的限制仍是相同六類、相同生成器與少量新位置。\n",
+    "\n",
+    "若以0.1步長更新手設分數，正配對2減去0.1×(-0.018)約變2.0018，錯配對0減0.1×0.018約變-0.0018，兩者差距增大。因為起點已相當偏向正配對，代價與梯度都小；若兩個候選直欄起初同分，模型更不確定，信號會不同。這讓「升高正配對」不只是一句口號，而是可從梯度符號追到數字。真正共同編碼器的參數還會同時影響多個分數，因此更新後需重新算矩陣，不應只在報表上把對角線加大就叫訓練完成。\n",
+    "\n",
+    "練習把`targets = torch.arange(2)`改成`targets = torch.tensor([1, 0])`，仍保持目標是tensor。先預測非對角直欄會收到負梯度，且代價大幅提高，再執行核對。這個改動等於把正確配對告訴模型反了，而非合理增強；它說明標籤錯位會直接把學習方向帶反。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "10.10"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

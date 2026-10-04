@@ -1,0 +1,174 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 11.5 哪些文字層需要一起調整？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "只訓練接頭改動小，但有時語言模型還需要適應新的視覺上下文。我們可以開放最後一層，也可以開放所有參數。選擇範圍像修一間房子：只改門把、改一面牆、全部翻修，成本和影響不同。本節先算各方案會動多少數字，不用成本數值替代效果比較。\n",
+    "\n",
+    "前置是[11.2參數凍結與優化器](https://birdhackor.github.io/tiny-perceptron-vlm/11.2.html)及[4.5一個模型區塊](https://birdhackor.github.io/tiny-perceptron-vlm/4.5.html)。區塊block是一次注意力與特徵處理等運算組成的層；最後一個block最靠近輸出。partial指本例只開放它和圖片接頭，all則開放整個包裝模型，包括語言、視覺與聲音部分。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:15:28.275173Z",
+     "iopub.status.busy": "2026-10-04T19:15:28.274988Z",
+     "iopub.status.idle": "2026-10-04T19:15:30.005866Z",
+     "shell.execute_reply": "2026-10-04T19:15:30.002692Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7fcd3446e610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:15:30.010840Z",
+     "iopub.status.busy": "2026-10-04T19:15:30.010611Z",
+     "iopub.status.idle": "2026-10-04T19:15:30.030685Z",
+     "shell.execute_reply": "2026-10-04T19:15:30.029705Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "projector 136\n",
+      "partial 976\n",
+      "all 8296\n"
+     ]
+    }
+   ],
+   "source": [
+    "from tiny_perceptron.model import TinyLM, ModelConfig\n",
+    "from tiny_perceptron.multimodal import MultiModalLM\n",
+    "\n",
+    "model = MultiModalLM(TinyLM(ModelConfig(width=8)))\n",
+    "for mode in [\"projector\", \"partial\", \"all\"]:\n",
+    "    model.requires_grad_(mode == \"all\")\n",
+    "    model.image_projector.requires_grad_(True)\n",
+    "    if mode == \"partial\":\n",
+    "        model.language.blocks[-1].requires_grad_(True)\n",
+    "    count = sum(p.numel() for p in model.parameters() if p.requires_grad)\n",
+    "    print(mode, count)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "輸入同一個寬度8模型，每輪先重設全部開關，再開放該方案需要的部分，避免上輪的狀態殘留。`[-1]`選最後一個block，`numel`數所有允許梯度的數字。當前預設配置輸出projector 136、partial 976、all 8296。最後一個數量包括未在圖片任務中使用的聲音參數；允許梯度不等於每筆都會收到梯度，這點仍需按[11.2](https://birdhackor.github.io/tiny-perceptron-vlm/11.2.html)檢查實際路徑。\n",
+    "\n",
+    "這些數量說明訓練成本起點。以32位元浮點數保存，每個參數本身約4位元組；還要加梯度與優化器狀態，AdamW通常另外保存兩組歷史數字，因此訓練記憶體不只參數本身。各參數組是否真的分配狀態取決於有沒有收到梯度，不能機械用一個倍數報告所有實際用量。\n",
+    "\n",
+    "更多自由度可能幫助新接口，也可能把原來的文字能力改變。公平比較需同樣訓練資料、總有效回答位置或時間預算，並另測純文字任務。[有效回答位置](https://birdhackor.github.io/tiny-perceptron-vlm/7.5.html)指目標標籤未被忽略、實際計入猜錯代價的位置，問句與補齊位置通常不計入。例如一份例子有3個計入代價的回答位置，用它訓練10次就提供30個位置；控制這個總數，有助於比較方案是否接受相近的學習量。只看到all參數多，不足以斷言它最好；只看到projector便宜，也不代表它一定夠用。\n",
+    "\n",
+    "正式實驗從[11.3已更新的接頭](https://birdhackor.github.io/tiny-perceptron-vlm/11.3.html)複製相同起點，分別再更新160次，每次抽四題，學習率0.003、種子42。只訓接頭、接頭加最後文字區塊、全部開放三種版本，抽同樣圖文題，都是3,830個有效回答目標；結果如下。全部開放的參數數量仍包括這個圖片任務沒有輸入的聲音零件，不表示那些零件也都更新了。\n",
+    "\n",
+    "| 開放範圍 | 可訓練參數 | 驗證答對／12 | 最後測試答對／12 |\n",
+    "| --- | ---: | ---: | ---: |\n",
+    "| 圖片接頭 | 1,088 | 3 | 3 |\n",
+    "| 接頭＋最後文字區塊 | 50,816 | 10 | 12 |\n",
+    "| 全部 | 145,664 | 12 | 9 |\n",
+    "\n",
+    "只訓接頭的六道顏色題全錯，形狀題3/6；全部開放則顏色6/6、形狀3/6，三個方形都答成circle。最後文字區塊版本這批12題全對，但它的驗證還有兩道錯題，樣本也很少，不能據此定出所有模型的最佳凍結範圍。參數最多的版本沒有最高測試分，正是要看新題、不能只看訓練代價的原因。\n",
+    "\n",
+    "本表的中間方案一律稱「接頭＋最後文字區塊」。固定實驗工具把它記為`partial`，但一般`train.py --freeze partial`開的是首末文字區塊：兩層模型會開兩個區塊，仍不等於開放所有參數。要重跑本表，使用[T.6的固定實驗入口](https://birdhackor.github.io/tiny-perceptron-vlm/training.html#T.6)；該節也列出一般CLI的範圍，讓名稱相同的兩份配方各自有清楚用途。\n",
+    "\n",
+    "partial在這個預設模型裡只開放一個語言block，所以976減136=840，是新增語言區塊的數字數，不是新增訓練樣本數。若語言模型有四層，最後一層仍只有一層參數；all則開放更多層。訓練開始前還要用實際輸入檢查梯度：all名義開放聲音編碼器，純圖片批次沒有波形，它不一定收到訓練信號。參數統計提供配置成本，實際更新記錄提供發生事實，兩者並排才不會把沒有用到的模塊說成也學了新任務。\n",
+    "\n",
+    "練習把ModelConfig加`layers=2`，先預測projector仍136，因為寬度沒變；partial仍只開最後一層，all則多一個語言block。重跑核對，再說出為什麼層數增加沒有自動讓接頭矩陣變大。這個對照把寬度、深度與可訓練範圍三個不同選擇分開了。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "11.5"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

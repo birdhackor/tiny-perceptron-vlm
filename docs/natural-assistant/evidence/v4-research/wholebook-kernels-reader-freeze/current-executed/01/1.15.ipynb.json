@@ -1,0 +1,159 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 1.15 同一模型為什麼會寫出不同答案？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "[1.14](https://birdhackor.github.io/tiny-perceptron-vlm/1.14.html) 用相同的機率表、不同隨機種子得到不同文字。除了抽樣過程，選答案的規則也會改結果。比如一個候選機率0.8，另外兩個各0.1：每次都選最高者，就很穩定；按機率抽取，偶爾也會選另兩個。這些改變可以發生在模型參數完全不動的時候，因此比較訓練前後表現，需要同時固定生成設定。\n",
+    "\n",
+    "總選最高分的方法叫 greedy，中文常叫貪婪選取；`argmax` 回傳最大值所在的位置。按分配抽選則叫 sampling，也就是抽樣。貪婪不代表答案一定正確，抽樣也不代表一定有創意；它們只是如何使用同一份預測的不同方式。還有一個常見旋鈕叫溫度（temperature），會先把原始分數除以正數T，再按 [1.7](https://birdhackor.github.io/tiny-perceptron-vlm/1.7.html) 的softmax換成機率。\n",
+    "\n",
+    "分數是 `[3,1,0]` 時，T=1保留原分數；T=0.5 等於放大差距，換成 `[6,2,0]`，最高候選更佔優勢。T=2則縮小差距成 `[1.5,0.5,0]`，分配更平均。這裡「溫度」是一個借來的名字，不表示電腦或模型有物理熱量。推論是使用目前參數替輸入算出候選分數；生成時反覆做這件事，再選出下一字。溫度改的是這時使用的機率分配，不是把已學參數更新成別的數字。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:09:19.977848Z",
+     "iopub.status.busy": "2026-10-04T19:09:19.977703Z",
+     "iopub.status.idle": "2026-10-04T19:09:21.600918Z",
+     "shell.execute_reply": "2026-10-04T19:09:21.596996Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7f874024a610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:09:21.604682Z",
+     "iopub.status.busy": "2026-10-04T19:09:21.604373Z",
+     "iopub.status.idle": "2026-10-04T19:09:21.614707Z",
+     "shell.execute_reply": "2026-10-04T19:09:21.613805Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "0.5 tensor([0.9796, 0.0179, 0.0024])\n",
+      "1.0 tensor([0.8438, 0.1142, 0.0420])\n",
+      "2.0 tensor([0.6285, 0.2312, 0.1402])\n",
+      "greedy的候選ID 0\n"
+     ]
+    }
+   ],
+   "source": [
+    "import torch\n",
+    "\n",
+    "z = torch.tensor([3.0, 1.0, 0.0])\n",
+    "for temperature in [0.5, 1.0, 2.0]:\n",
+    "    probability = (z / temperature).softmax(dim=0)\n",
+    "    print(temperature, probability)\n",
+    "print(\"greedy的候選ID\", z.argmax().item())"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "輸入 z 是三個候選分數，每次迴圈換一個溫度。輸出的最高候選機率依序約為0.980、0.844、0.629；同時最後一個候選從約0.002變成0.042再到0.140。每行仍加總為1。`argmax` 最後印0，因為3是最高分；只要溫度為正，除以它不會改變排序，所以這三種溫度的greedy結果都相同。\n",
+    "\n",
+    "溫度必須大於0。非常小的正數讓抽樣越來越集中於最高者，但不是把T直接設成0，後者無法做除法。當多個候選並列最高，即使溫度趨近零也不能說它自動只有一個唯一選擇；程式的取最大規則還要處理並列。這些細節提醒我們，公式描述分配，實際選字另有規則。\n",
+    "\n",
+    "高溫度會讓低分字更常出現，可能增加多樣性，也可能增加不通順結果；低溫度可能反覆輸出常見句，仍不保證事實正確。若換設定後看起來更禮貌、更多話，不能立刻說模型學會新風格，可能只是抽樣時常選了另一條路。訓練與推論設定的比較要分開記錄。\n",
+    "\n",
+    "練習只把最後一個分數0改成2，先預測它仍低於第一個，但會得到更高機率；再執行核對。三行最高候選機率約為0.867、0.665、0.506，而greedy仍選ID0。若想確認差別來自溫度，就保持z固定；若想比較兩個模型，就保持溫度和選取方式固定。你現在已能把「模型怎樣給分」與「怎樣挑字」分別解釋。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "1.15"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

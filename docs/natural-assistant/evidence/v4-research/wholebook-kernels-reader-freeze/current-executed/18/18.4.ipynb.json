@@ -1,0 +1,161 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 18.4 第一名以外的選項有什麼價值？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "學生目前給候選 `[4,3,100]`的機率 `[0.5,0.4,0.1]`，教師給 `[0.7,0.2,0.1]`。如果只保留教師第一名4，目標就是 `[1,0,0]`，會要求學生把3和100都壓低；保留完整分布則說明教師仍給3一些份量，對100的0.1與學生一致。前置是[文字與分布訊號](https://birdhackor.github.io/tiny-perceptron-vlm/18.1.html)，以及[機率與log](https://birdhackor.github.io/tiny-perceptron-vlm/first-steps.html#W.4)。\n",
+    "\n",
+    "只指定正確候選的目標叫hard target（硬目標），用比例描述各候選的目標叫soft target（軟目標）。這些比例不必表示答案數值距離，也不是「3只差1，所以一定給20%」；它們來自教師的語言模型與當下前文。本例只是用固定數字展示額外訊息，不能推論所有教師都知道數字相近程度。\n",
+    "\n",
+    "交叉熵（cross entropy，CE）把目標比例乘上學生機率的負log，再加總。硬目標只有第一項，誤差 `-log(0.5)≈0.6931`；軟目標則為 `0.7×0.6931+0.2×0.9163+0.1×2.3026≈0.8987`。兩種目標不同，這兩個誤差不能直接拿來排名方法。更有用的是觀察它們指引學生怎樣調整。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:19:49.300716Z",
+     "iopub.status.busy": "2026-10-04T19:19:49.298911Z",
+     "iopub.status.idle": "2026-10-04T19:19:50.808686Z",
+     "shell.execute_reply": "2026-10-04T19:19:50.807756Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7fe9b055e610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:19:50.810729Z",
+     "iopub.status.busy": "2026-10-04T19:19:50.810446Z",
+     "iopub.status.idle": "2026-10-04T19:19:50.819536Z",
+     "shell.execute_reply": "2026-10-04T19:19:50.818981Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "硬目標 CE 0.6931 分數梯度 [-0.5, 0.4000000059604645, 0.10000000149011612]\n",
+      "教師分布 CE 0.8987 分數梯度 [-0.20000000298023224, 0.20000000298023224, -0.0]\n"
+     ]
+    }
+   ],
+   "source": [
+    "import torch\n",
+    "\n",
+    "q = torch.tensor([0.5, 0.4, 0.1])\n",
+    "targets = [(\"硬目標\", torch.tensor([1.0, 0.0, 0.0])), (\"教師分布\", torch.tensor([0.7, 0.2, 0.1]))]\n",
+    "for name, target in targets:\n",
+    "    logits = q.log().detach().clone().requires_grad_()\n",
+    "    loss = -(target * logits.log_softmax(0)).sum()\n",
+    "    loss.backward()\n",
+    "    print(name, \"CE\", round(loss.item(), 4), \"分數梯度\", logits.grad.round(decimals=4).tolist())"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "輸入q是學生當下比例，取log作為一組可產生相同比例的分數；`log_softmax`穩定地取得各候選log機率。建立logits時，`.detach()`切斷與前面計算的求導關係；本例q原本沒有記錄求導，這一步只是明確保留數值。`.clone()`再將數值複製到獨立資料，`.requires_grad_()`把副本設為接下來可求導的輸入。`backward()`讓我們看到這份分數自己的[梯度](https://birdhackor.github.io/tiny-perceptron-vlm/first-steps.html#W.6)，也就是微調分數如何影響誤差。每次重建logits，避免兩條路的梯度累加。\n",
+    "\n",
+    "輸出硬目標CE0.6931，梯度約 `[-0.5,0.4,0.1]`；教師CE0.8987，梯度 `[-0.2,0.2,0]`。沿梯度反方向更新會提高負梯度候選分數、降低正梯度候選。硬目標對3與100都推低；軟目標對100梯度為零，因為學生這項比例已經與教師一致。額外的分布不只讓報告更長，它會改變學習方向和強度。\n",
+    "\n",
+    "教師也可能偏錯。若它對3給最高機率，學生會被教著提高錯誤候選，所以真值與行為評估仍需要獨立保留。這個單位置實驗不證明某個學生會提升整段回答品質，也沒有表示學生一定能完全複製教師。\n",
+    "\n",
+    "正式軟目標保留的是教師讀同一份標準回答前文時、每個有效位置的264個候選logits；即使greedy已選錯第一名，其他候選比例仍可不同。屬性教師這份快取檔占345,101 bytes，生成硬回答的檔則保留逐筆ID。這是兩種實際保存的資訊；下一節會對同一列教師與學生分數使用溫度，沒有把標準答案換成教師自由續寫的前文。\n",
+    "\n",
+    "練習只將教師分布改成 `[0.2,0.7,0.1]`。先預測梯度變 `[0.3,-0.3,0]`，最大推高方向變成候選3，再執行核對。它保留一樣的欄位與機率總和，卻把教師偏好改向錯誤候選，讓你看見「資訊更多」與「資訊正確」需要分開判斷。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "18.4"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

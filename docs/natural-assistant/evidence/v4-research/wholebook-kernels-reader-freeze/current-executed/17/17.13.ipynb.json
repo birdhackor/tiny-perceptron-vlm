@@ -1,0 +1,168 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 17.13 極端值為什麼讓其他值難表示？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "四個特徵 `[0.1,0.2,0.3,100]`共用一個四位元刻度，前三個會不會全消失？對稱量化為容納100，scale設成100/7約14.2857；前三個除以它都接近零，結果確實全落到整數0。這種少數比其他值大很多的數字叫outlier（極端值）。前置是[共用刻度的取捨](https://birdhackor.github.io/tiny-perceptron-vlm/17.5.html)和[固定範圍截斷](https://birdhackor.github.io/tiny-perceptron-vlm/17.12.html)。\n",
+    "\n",
+    "可以先將數值限制在-1至1，再按這個範圍量化，稱clipping（截斷）。此時scale變1/7，前三個能保留更細資訊，但100被改成1，再也還原不到100。必須分開報多數小值的誤差與極值誤差；如果只把還原結果與「截斷後的輸入」比較，就會隱藏截斷本身損失的99。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:18:55.515279Z",
+     "iopub.status.busy": "2026-10-04T19:18:55.515073Z",
+     "iopub.status.idle": "2026-10-04T19:18:57.840129Z",
+     "shell.execute_reply": "2026-10-04T19:18:57.839093Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7f6eb026a610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:18:57.855663Z",
+     "iopub.status.busy": "2026-10-04T19:18:57.855360Z",
+     "iopub.status.idle": "2026-10-04T19:18:57.879422Z",
+     "shell.execute_reply": "2026-10-04T19:18:57.877062Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "截斷 False 還原 [0.0, 0.0, 0.0, 100.0]\n",
+      "小值MAE 0.2 極值差 0.0 全部MAE 0.15\n",
+      "截斷 True 還原 [0.1429000049829483, 0.1429000049829483, 0.2856999933719635, 1.0]\n",
+      "小值MAE 0.0381 極值差 99.0 全部MAE 24.7786\n"
+     ]
+    }
+   ],
+   "source": [
+    "import torch\n",
+    "from tiny_perceptron.quantization import quantize_symmetric\n",
+    "\n",
+    "x = torch.tensor([0.1, 0.2, 0.3, 100.0])\n",
+    "for clip in (False, True):\n",
+    "    source = x.clamp(-1, 1) if clip else x\n",
+    "    q, scale = quantize_symmetric(source, bits=4)\n",
+    "    restored = q.float() * scale\n",
+    "    error = (x - restored).abs()\n",
+    "    print(\"截斷\", clip, \"還原\", restored.round(decimals=4).tolist())\n",
+    "    print(\n",
+    "        \"小值MAE\",\n",
+    "        round(error[:3].mean().item(), 4),\n",
+    "        \"極值差\",\n",
+    "        round(error[-1].item(), 4),\n",
+    "        \"全部MAE\",\n",
+    "        round(error.mean().item(), 4),\n",
+    "    )"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "兩種方法使用同一個原始x。`source`只決定量化時看哪個範圍，算誤差時都使用 `x-restored`，這是關鍵一行。`error[:3]`挑前三個小值，`error[-1]`挑極值，讓兩種代價都出現在報告。沒有截斷時還原 `[0,0,0,100]`，小值MAE0.2、極值差0、全部MAE0.15。\n",
+    "\n",
+    "截斷後還原約 `[0.1429,0.1429,0.2857,1]`，小值MAE約0.0381，極值差99，全部MAE約24.7786。小值精度明顯改善，但全部平均反而大幅變差。不能挑其中一欄就宣布方法勝出；極值在任務中是噪音還是重要特徵，會影響哪種取捨合理。這個實驗沒有任務模型，只展示數值代價。\n",
+    "\n",
+    "如果極值有實際用途，其他選擇包括縮小共享scale的分組，或讓敏感位置維持較高精度；但它們也會增加附加資訊或運算成本。選截斷門檻時，先用[17.12的校準資料](https://birdhackor.github.io/tiny-perceptron-vlm/17.12.html)估計會遇到的數值範圍。驗證資料是未拿來更新模型權重、但可用來比較不同門檻設定的題目；觀察各設定的輸出與任務品質後，再選門檻。最後另用不參與校準或門檻選擇的獨立測試題評估，分組原則見[1.2](https://birdhackor.github.io/tiny-perceptron-vlm/1.2.html)。不能為了某個誤差表好看就把大值刪掉，也不能用最後測試題反覆挑出最漂亮的設定。\n",
+    "\n",
+    "練習只把最後100改成2，保持截斷範圍不變。先預測截斷後的極值差從99降為1，而小值還原仍相同；不截斷的scale則變2/7，小值不再全歸零。重跑核對小值MAE約0.0667與0.0381。你應能指出改善來自「極值大小或刻度」的哪一個改動。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "17.13"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

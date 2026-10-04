@@ -1,0 +1,166 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 15.1 Dense 的計算方式是什麼？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "一句話有兩個token，和一句話有四個token，模型是否需要兩倍的權重？答案取決於我們是否分清「儲存規則」與「使用規則」。這裡的token是文字切分後的單位；每個單位進入模型時是一列特徵數字。先看[混合位置後的特徵處理](https://birdhackor.github.io/tiny-perceptron-vlm/4.4.html)：注意力讓不同位置交換訊息，接著每個位置各自通過同一個小型前饋網路（Feed-Forward Network，FFN）。\n",
+    "\n",
+    "Dense在本章指每個token都使用同一組完整FFN，沒有先挑選某幾組權重。例如FFN先把兩個特徵擴成三個，經啟動函數，再收回兩個。第一張表有 `2×3=6` 個權重，第二張有 `3×2=6` 個，共12個。不論處理兩列還是四列，這兩張表都不會多一份；但四列要做四次相同種類的計算，因此工作量比兩列多。共享參數意味著用同一規則，並不是所有位置只計算一次。\n",
+    "\n",
+    "下列程式直接指定兩張表，不需訓練就能追蹤輸出。`relu`把負值改成零、保留正值，是兩次矩陣乘法之間的非線性步驟。這裡不加bias，也就是沒有額外常數，讓參數數量恰好符合上面的12。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:17:22.112525Z",
+     "iopub.status.busy": "2026-10-04T19:17:22.112318Z",
+     "iopub.status.idle": "2026-10-04T19:17:23.744273Z",
+     "shell.execute_reply": "2026-10-04T19:17:23.743129Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7f26c425e610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:17:23.755927Z",
+     "iopub.status.busy": "2026-10-04T19:17:23.754799Z",
+     "iopub.status.idle": "2026-10-04T19:17:23.767642Z",
+     "shell.execute_reply": "2026-10-04T19:17:23.765801Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "輸出 [[4.0, 5.0], [5.0, 4.0]]\n",
+      "token數 2 權重數 12\n",
+      "輸出 [[4.0, 5.0], [5.0, 4.0], [4.0, 5.0], [5.0, 4.0]]\n",
+      "token數 4 權重數 12\n"
+     ]
+    }
+   ],
+   "source": [
+    "import torch\n",
+    "\n",
+    "up = torch.tensor([[1.0, 0.0, 1.0], [0.0, 1.0, 1.0]])\n",
+    "down = torch.tensor([[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]])\n",
+    "\n",
+    "\n",
+    "def ffn(x):\n",
+    "    return torch.relu(x @ up) @ down\n",
+    "\n",
+    "\n",
+    "x = torch.tensor([[1.0, 2.0], [2.0, 1.0]])\n",
+    "for batch in (x, torch.cat([x, x], dim=0)):\n",
+    "    print(\"輸出\", ffn(batch).tolist())\n",
+    "    print(\"token數\", len(batch), \"權重數\", up.numel() + down.numel())"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "`@`的規則是每列輸入對上權重表的每一欄，同位置先相乘、再相加，產生該欄的一個結果。第一列 `[1,2]`乘up時，三欄分別算 `1×1+2×0=1`、`1×0+2×1=2`、`1×1+2×1=3`，得到 `[1,2,3]`。都為正所以relu不改它；再乘down，兩欄分別算 `1×1+2×0+3×1=4`、`1×0+2×1+3×1=5`，得到 `[4,5]`。第二列用同一規則得到 `[5,4]`。第一次輸出是這兩列，第二次則重複兩遍；兩次印出的權重數都為12。`torch.cat`沿列方向把輸入接起來，沒有複製模型；`numel`只數表中的元素，不數輸出與中間特徵。\n",
+    "\n",
+    "後續的Mixture of Experts（MoE，專家混合）會準備多組FFN，讓每個token只選其中少數組。現在這個Dense規則是比較基準：要知道MoE省掉什麼，先知道Dense對每列完整計算了哪些東西。不能從「Dense只存一套」推論它一定用較少計算，也不能從token增加推論參數跟著增加；輸入長度、參數容量、工作量是三個不同量。\n",
+    "\n",
+    "接著把基準真的拿去學文字。[T.8](https://birdhackor.github.io/tiny-perceptron-vlm/training.html#T.8)的MoE實驗中，寬度64的Dense有兩層，每層FFN中間寬度256，含bias共33,088個參數，整個模型共141,568個。它更新180次後，51篇驗證故事的代價2.29999，52篇最後檢查2.32093；不是上述12個權重的玩具程式。留出代價與完整目標數會在[15.13](https://birdhackor.github.io/tiny-perceptron-vlm/15.13.html)並排，讓這個基準有真正的品質與成本記錄。\n",
+    "\n",
+    "練習把兩個輸入各重複三遍，執行前預測共有六列輸出、仍然12個權重。核對後，再手算第一列結果。若增加的只是列數，FFN的每列規則保持不變；若要讓FFN變寬，則必須連兩張權重表的形狀一起改。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "15.1"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

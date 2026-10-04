@@ -1,0 +1,168 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 11.6 對齊和 SFT 能合併嗎？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "一種訓練方案先用圖片描述連接視覺與語言，再用問答教任務；另一種直接用問答，同時學習接頭與應答。前者像先學字詞再讀問句，後者像在完整對話中一起學。哪種更好要看基礎能力與資料，不能讓前者多花一倍訓練量後只說順序比較優越。\n",
+    "\n",
+    "前置是[11.3描述對齊](https://birdhackor.github.io/tiny-perceptron-vlm/11.3.html)、[11.4圖片問答](https://birdhackor.github.io/tiny-perceptron-vlm/11.4.html)與[7.3有效學習位置](https://birdhackor.github.io/tiny-perceptron-vlm/7.3.html)。SFT是使用人工目標回答的有監督微調；描述對齊也可使用相同文字預測代價，只是任務目標與可訓練範圍不同。總預算要把兩階段都加進去，不能把第一階段當免費準備。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:15:31.433015Z",
+     "iopub.status.busy": "2026-10-04T19:15:31.432837Z",
+     "iopub.status.idle": "2026-10-04T19:15:33.240659Z",
+     "shell.execute_reply": "2026-10-04T19:15:33.240161Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7f6bfbf5a610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:15:33.243311Z",
+     "iopub.status.busy": "2026-10-04T19:15:33.242994Z",
+     "iopub.status.idle": "2026-10-04T19:15:33.248255Z",
+     "shell.execute_reply": "2026-10-04T19:15:33.247262Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "兩階段 {'描述對齊': 4000, '問答微調': 6000} 總有效位置 10000 符合預算 True\n",
+      "直接問答 {'描述對齊': 0, '問答微調': 10000} 總有效位置 10000 符合預算 True\n"
+     ]
+    }
+   ],
+   "source": [
+    "budget = 10000\n",
+    "plans = {\n",
+    "    \"兩階段\": {\"描述對齊\": 4000, \"問答微調\": 6000},\n",
+    "    \"直接問答\": {\"描述對齊\": 0, \"問答微調\": 10000},\n",
+    "}\n",
+    "for name, plan in plans.items():\n",
+    "    total = sum(plan.values())\n",
+    "    print(name, plan, \"總有效位置\", total, \"符合預算\", total == budget)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "輸入是一張計劃表，數字表示參與目標代價的回答位置數量，不是樣本筆數。`plans`是字典：冒號左邊是方案名稱，右邊是這個方案的階段表；階段表也是字典，用階段名稱對應數量。`plans.items()`逐次提供一對「方案名稱、階段表」，`for name, plan`分別用name與plan接收這一對。第一輪name是`\"兩階段\"`，plan是`{\"描述對齊\": 4000, \"問答微調\": 6000}`；第二輪才換成直接問答的表。\n",
+    "\n",
+    "`plan.values()`只取當前表的兩個數量，`sum()`把它們合計。輸出兩方案總數都是10000、符合預算True。兩階段分4000與6000，直接方案全給問答。這個程式沒有模型，沒有收斂曲線，完成的是實驗前的公平預算核對。\n",
+    "\n",
+    "若描述平均短、問答平均長，相同步數不一定有相同位置數量；應由實際標籤中非-100的數量計費，如[8.3](https://birdhackor.github.io/tiny-perceptron-vlm/8.3.html)的例子。也可以固定總執行時間比較，但要報告每方案實際用了多少有效位置與哪些參數，因為不同方案計算成本可能不同。\n",
+    "\n",
+    "兩方案還要從同一份初始模型出發，結束後回答同一批未參與訓練的圖片題，例如給一張保留的方塊圖，問「方塊是什麼顏色？」，用該圖的正確顏色核對。這批題目檢查新學的圖片問答能力。\n",
+    "\n",
+    "另外共用一批純文字題，例如「只回答yes」，目標答案是`yes`，不提供圖片。先用訓練前模型回答這批題並記錄正確率，再對照兩方案微調後的正確率，觀察原有的純文字回答能力是否退步；這就是本節的「文字保留」。保留檢查要包含基礎模型原本能答對的題目，才看得出學新能力後是否仍會做。兩類評估題都留在訓練之外，兩方案使用相同題目與判分規則。\n",
+    "\n",
+    "兩階段通常把第一階段接頭權重帶進第二階段；直接方案沒有這一步，但其全部10000位置都在問答學習。它們比較的是預算分配與訓練路徑，不只是把同一批資料文件換個名字。上面的預算表沒有執行這些評估，能力變化仍須在實際訓練後測量。\n",
+    "\n",
+    "兩階段還涉及交接內容。第一階段產生更新後的接頭，第二階段應從這份狀態繼續，而不是誤從隨機接頭重新開始；否則你花了4000位置卻沒有把學到的東西帶過去。另一方面，第二階段若開放語言層，需在記錄中注明與第一階段不同的範圍。比較時保存每階段起點、終點和有效位置計數，就能重現所謂先對齊再問答的含義。直接問答方案則只有一個起點與一個階段，它可能也通過問答學會對齊，但要由答案測試證明。\n",
+    "\n",
+    "正式結果把「接頭描述300步＋全部開放問答160步」當兩階段：前段14,408個、後段3,830個有效回答目標，共18,238個。直接問答從相同直接SFT底座、相同已訓練編碼器與未對齊接頭出發，全部開放，只用問答更新；累計到18,256個目標時停止，共762步，最後一批比預算多18個。這是按有效目標匹配到最後一批的比較，不是按步數或秒數完全相同。\n",
+    "\n",
+    "最後12道新位置題，兩階段9/12，直接問答10/12；兩者驗證都是12/12。這次先對齊沒有觀察到優勢，直接版本也仍把兩道方形答成circle。一題差距不能推出直接路線普遍較好，也不能把前段描述0/6當成那14,408個目標完全沒有影響。此次直接版本沒有另列純文字留出成績，所以這個比較只支持圖片問答結論；不能從10/12推論它更會保住舊文字功能。後面的文字保留對照使用另四個確實量過的版本。\n",
+    "\n",
+    "練習把對齊預算4000改2000，先預測問答需從6000改8000才能維持10000，再修改核對True。若只改第一項就輸出總數8000、False，計劃已不再匹配。提出「對齊佔20%可能夠嗎」是可測試假設，不能從這張預算表直接讀出答案。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "11.6"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

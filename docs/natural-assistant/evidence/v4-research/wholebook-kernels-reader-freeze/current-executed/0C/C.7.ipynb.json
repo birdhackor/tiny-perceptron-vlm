@@ -1,0 +1,275 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# C.7 Reward 怎麼改變輸出機率？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "模型只在兩個答案間選擇：動作0代表答3，動作1代表答4。起初兩者分數都是0，機率各0.5；這次選動作1，驗證得到reward=1。若平常參考獎勵baseline=0.5，這次比參考好0.5，就希望提高答4的機率。前置是[可驗證獎勵](https://birdhackor.github.io/tiny-perceptron-vlm/C.6.html)、[機率與log](https://birdhackor.github.io/tiny-perceptron-vlm/first-steps.html#W.4)和[梯度更新](https://birdhackor.github.io/tiny-perceptron-vlm/first-steps.html#W.6)。本節只追蹤兩個可調分數的一次更新。\n",
+    "\n",
+    "輸出分布稱policy（策略），這裡就是「答3或答4各有多大機率」。reward減baseline叫advantage，表示這次比參考好或差多少。對選到的動作，令誤差為 `-(reward-baseline)*logp(action)`。當advantage為正，降低這個誤差就會提高所選動作的log機率；當它為負，方向相反。這種用回饋調整動作機率的方法叫policy gradient（策略梯度）。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:14:24.534592Z",
+     "iopub.status.busy": "2026-10-04T19:14:24.534297Z",
+     "iopub.status.idle": "2026-10-04T19:14:25.877111Z",
+     "shell.execute_reply": "2026-10-04T19:14:25.875817Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7f08a915a610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:14:25.879641Z",
+     "iopub.status.busy": "2026-10-04T19:14:25.879329Z",
+     "iopub.status.idle": "2026-10-04T19:14:25.889393Z",
+     "shell.execute_reply": "2026-10-04T19:14:25.888362Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "梯度 [0.25, -0.25]\n",
+      "新分數 [-0.02500000037252903, 0.02500000037252903]\n",
+      "前機率 [0.5, 0.5]\n",
+      "後機率 [0.487503, 0.512497]\n"
+     ]
+    }
+   ],
+   "source": [
+    "import torch\n",
+    "\n",
+    "logits = torch.tensor([0.0, 0.0], requires_grad=True)\n",
+    "action = 1\n",
+    "reward, baseline = 1.0, 0.5\n",
+    "before = logits.detach().softmax(0)\n",
+    "loss = -(reward - baseline) * logits.log_softmax(0)[action]\n",
+    "loss.backward()\n",
+    "with torch.no_grad():\n",
+    "    updated = logits - 0.1 * logits.grad\n",
+    "    after = updated.softmax(0)\n",
+    "print(\"梯度\", logits.grad.tolist())\n",
+    "print(\"新分數\", updated.tolist())\n",
+    "print(\"前機率\", before.tolist())\n",
+    "print(\"後機率\", [round(p, 6) for p in after.tolist()])"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "`detach()`取出數值相同、但不再追蹤梯度的tensor；`before`用這些分數算出更新前機率，只供前後比較，不參與後面的梯度計算。`log_softmax(0)`在兩個候選間算log機率，`[action]`只取這次選的動作1。reward與baseline是固定Python數字，不對驗證器反向傳播。`backward`得到梯度 `[0.25,-0.25]`；用步幅0.1減掉梯度，分數約成 `[-0.025,0.025]`。機率從 `[0.5,0.5]`變成 `[0.487503,0.512497]`，因此答4稍微更可能，不是一次就變100%。\n",
+    "\n",
+    "最後的`[round(p, 6) for p in after.tolist()]`逐一取出更新後的機率，四捨五入到小數點後六位，再放進一份新串列，只改列印方式。\n",
+    "\n",
+    "下圖的橫箭頭追蹤分數更新，兩條向下箭頭各自將更新前後的分數轉成機率；清單順序固定為答3、答4。答4分數增加0.025後，機率只增約0.012497，不是把分數變動直接當成機率變動。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 3,
+   "metadata": {
+    "cellView": "form",
+    "course_figure": {
+     "alt": "用回饋算梯度、更新分數，再核對答4機率稍升",
+     "name": "architecture_policy_update"
+    },
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:14:25.891343Z",
+     "iopub.status.busy": "2026-10-04T19:14:25.891167Z",
+     "iopub.status.idle": "2026-10-04T19:14:25.900446Z",
+     "shell.execute_reply": "2026-10-04T19:14:25.899617Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "image/svg+xml": [
+       "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 900 390\" role=\"img\" aria-labelledby=\"title desc\">\n",
+       "<title id=\"title\">答4得到較好回饋後的一次策略更新</title>\n",
+       "<desc id=\"desc\">動作0答3、動作1答4。選到動作1且reward為1、baseline為0.5，梯度為0.25與負0.25。原分數0、0減去0.1倍梯度後成為負0.025與0.025，答4機率從0.5增至0.512497。</desc>\n",
+       "<defs><marker id=\"arrow\" viewBox=\"0 0 10 10\" refX=\"9\" refY=\"5\" markerWidth=\"8\" markerHeight=\"8\" orient=\"auto\"><path d=\"M0 0L10 5L0 10Z\" fill=\"#4e6d96\"/></marker></defs>\n",
+       "<style>text{font-family:\"Noto Sans CJK TC\",\"Microsoft JhengHei\",sans-serif;fill:#172b4d}.label{font-size:20px}.small{font-size:17px}</style>\n",
+       "<rect width=\"900\" height=\"390\" fill=\"#fff\"/>\n",
+       "<text x=\"450\" y=\"32\" text-anchor=\"middle\" font-size=\"24\">答3 / 答4：一次更新的分數與機率</text>\n",
+       "<text x=\"450\" y=\"64\" text-anchor=\"middle\" class=\"small\">選到動作1（答4）；reward=1，baseline=0.5，advantage=0.5</text>\n",
+       "<rect x=\"30\" y=\"102\" width=\"245\" height=\"91\" rx=\"12\" fill=\"#edf3ff\" stroke=\"#839bbd\"/>\n",
+       "<text x=\"152\" y=\"135\" text-anchor=\"middle\" class=\"label\">原分數 logits</text>\n",
+       "<text x=\"152\" y=\"169\" text-anchor=\"middle\" class=\"label\">[0, 0]</text>\n",
+       "<path d=\"M275 147L334 147\" stroke=\"#4e6d96\" stroke-width=\"3\" marker-end=\"url(#arrow)\"/>\n",
+       "<rect x=\"340\" y=\"97\" width=\"220\" height=\"102\" rx=\"12\" fill=\"#fff2e5\" stroke=\"#bb915c\"/>\n",
+       "<text x=\"450\" y=\"132\" text-anchor=\"middle\" class=\"small\">梯度 [0.25, −0.25]</text>\n",
+       "<text x=\"450\" y=\"171\" text-anchor=\"middle\" class=\"small\">分數 − 0.1×梯度</text>\n",
+       "<path d=\"M560 147L614 147\" stroke=\"#4e6d96\" stroke-width=\"3\" marker-end=\"url(#arrow)\"/>\n",
+       "<rect x=\"620\" y=\"102\" width=\"250\" height=\"91\" rx=\"12\" fill=\"#e8f6ed\" stroke=\"#7a9e85\"/>\n",
+       "<text x=\"745\" y=\"135\" text-anchor=\"middle\" class=\"label\">新分數 logits</text>\n",
+       "<text x=\"745\" y=\"169\" text-anchor=\"middle\" class=\"label\">[−0.025, 0.025]</text>\n",
+       "<path d=\"M152 193L152 254\" stroke=\"#4e6d96\" stroke-width=\"3\" marker-end=\"url(#arrow)\"/>\n",
+       "<path d=\"M745 193L745 254\" stroke=\"#4e6d96\" stroke-width=\"3\" marker-end=\"url(#arrow)\"/>\n",
+       "<text x=\"208\" y=\"229\" class=\"small\">softmax</text>\n",
+       "<text x=\"800\" y=\"229\" class=\"small\">softmax</text>\n",
+       "<rect x=\"30\" y=\"260\" width=\"245\" height=\"86\" rx=\"12\" fill=\"#edf3ff\" stroke=\"#839bbd\"/>\n",
+       "<text x=\"152\" y=\"294\" text-anchor=\"middle\" class=\"small\">原機率（答3，答4）</text>\n",
+       "<text x=\"152\" y=\"326\" text-anchor=\"middle\" class=\"label\">[0.5, 0.5]</text>\n",
+       "<rect x=\"620\" y=\"260\" width=\"250\" height=\"86\" rx=\"12\" fill=\"#e8f6ed\" stroke=\"#7a9e85\"/>\n",
+       "<text x=\"745\" y=\"294\" text-anchor=\"middle\" class=\"small\">新機率（答3，答4）</text>\n",
+       "<text x=\"745\" y=\"326\" text-anchor=\"middle\" class=\"label\">[0.487503, 0.512497]</text>\n",
+       "<text x=\"450\" y=\"378\" text-anchor=\"middle\" class=\"small\">reward高於baseline，所選答4機率稍微提高；不是一次變成100%。</text>\n",
+       "</svg>"
+      ],
+      "text/plain": [
+       "<IPython.core.display.SVG object>"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    }
+   ],
+   "source": [
+    "# @title 本節圖解\n",
+    "from IPython.display import SVG, display\n",
+    "\n",
+    "display(SVG(filename=str(root / \"course/figures/architecture_policy_update.svg\")))"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "這個程式直接調整兩個分數，沒有訓練語言模型；action也人工固定，沒有真的採樣。一般模型需先依policy抽出回答，得到回饋，再透過這類誤差信號更新產生分數的權重。baseline是回饋的參考值，合適的估計可減少採樣造成的波動；它不是正確答案，也不是把reward硬改成較高分。單次樣本可能不足以代表整體行為，所以不能用這次機率上升宣告訓練成功。\n",
+    "\n",
+    "若回饋來自可檢查的真值或測試，這類訓練常稱RLVR（Reinforcement Learning with Verifiable Rewards，可驗證獎勵的強化學習）。它與[測試時多花算力](https://birdhackor.github.io/tiny-perceptron-vlm/C.5.html)不同：本例確實改了分數，一般訓練會改權重。完成後仍應在[獨立測試題](https://birdhackor.github.io/tiny-perceptron-vlm/5.10.html)檢查成功率、生成長度與評分漏洞，避免只學會迎合驗證器。\n",
+    "\n",
+    "正式組另外訓練一個小策略，直接讀三個0至5的整數。例如數字2用六格`[0,0,1,0,0,0]`表示，只有它對應的一格是1，其餘是0，這叫one-hot；三個數各用六格，再接在一起就是18格輸入。中間層把它們混合成48個可學特徵，再算出17種動作的分數；這些中間數字叫隱藏格，線性層怎麼混合可回看[2.3](https://birdhackor.github.io/tiny-perceptron-vlm/2.3.html)。前16種動作分別答0至15，最後一種列舉全部候選，兩種評分方式見[C.6](https://birdhackor.github.io/tiny-perceptron-vlm/C.6.html)。這個小策略與前面的兩個語言模型分開。\n",
+    "\n",
+    "嚴格與弱reward兩支複製同一份隨機起點，各用167道訓練題，每批真抽64個動作。REINFORCE是這裡所用的策略梯度方法：用抽到動作的log機率與回饋估計更新方向；前面的兩分數算例則把動作人工固定，只追蹤一次更新。正式組再把梯度交給AdamW決定各參數的更新；它會累積過去梯度、調整各格步幅，並把權重衰減另行處理，方法分別見[5.4](https://birdhackor.github.io/tiny-perceptron-vlm/5.4.html)與[5.5](https://birdhackor.github.io/tiny-perceptron-vlm/5.5.html)。學習率0.003、更新1,200次，各實際抽76,800個訓練動作。\n",
+    "\n",
+    "回饋不反向傳播，advantage使用抽到的reward減當下參考值。這個baseline在每批之後更新為「舊值乘0.95，加上本批平均回饋乘0.05」，供下一批參考；所以它會慢慢跟著最近回饋移動。另有0.005熵項：熵衡量候選機率分散程度，同樣17種候選全部均分時最大，全部集中一項時為0。把熵乘0.005後從訓練代價扣除，是為了鼓勵策略不要過早只押一種動作，不保證因此答對。這次確實更新策略權重，並保存兩份`policy-*.pt`，不只是前面的手寫單次分數移動。\n",
+    "\n",
+    "同一24道新題在訓練前後各有一次最高機率選擇，並各抽16個動作。最高機率的分母是24題；抽樣分母是384個動作，仍只有24道不同題目：\n",
+    "\n",
+    "| 策略狀態 | 最高機率動作嚴格正確 | 抽樣嚴格正確 | 抽樣弱代理分 | 抽樣列舉動作 |\n",
+    "| --- | --- | --- | --- | --- |\n",
+    "| 兩支相同起點 | 1/24 | 23/384 | 62/384 | 39/384 |\n",
+    "| 嚴格reward更新後 | 0/24 | 0/384 | 0/384 | 0/384 |\n",
+    "| 弱reward更新後 | 0/24 | 0/384 | 384/384 | 384/384 |\n",
+    "\n",
+    "嚴格支線最後一批訓練抽樣reward為39/64，新題仍全部失敗，沒有支持算術泛化改善。例如`(0+3)+3=?`的真值6，它最高機率選7，16次實際抽樣也都選7。弱支線則用列舉把代理分推滿，沒有產生合格答案。訓練reward變高或真正發生梯度更新，都還需要用新題檢查能力。\n",
+    "\n",
+    "這個策略選一個預定動作，沒有自回歸生成token；報告`effective_tokens=0`與`sampled_actions=76,800`各有自己的單位。它示範有限動作的policy gradient與評分漏洞，沒有替兩個語言模型做RL。可見步驟、多數一致和高reward更不能單獨作為內部推理忠實的證據。\n",
+    "\n",
+    "練習只把reward改成0，baseline仍0.5。先預測advantage變負、梯度改為 `[-0.25,0.25]`，更新後動作1機率下降到約0.487503，再執行核對。請用「本次比參考差」說明方向，而不是把所有非負reward都理解成應該提高機率。\n",
+    "\n",
+    "**選讀：重做本附錄的固定實驗。** 先按[W.1](https://birdhackor.github.io/tiny-perceptron-vlm/first-steps.html#W.1)在專案根目錄準備Python環境，並按[T.1](https://birdhackor.github.io/tiny-perceptron-vlm/training.html#T.1)安裝Git LFS。以下入口使用固定公開資料包，完整重做短答與步驟的監督式微調（SFT，也就是學習示範回答）、多候選評估，以及有限策略的兩種回饋比較：\n",
+    "\n",
+    "```bash\n",
+    "git lfs install --local\n",
+    "git lfs pull --include='assets/training/gsm8k-v1.tar.gz' --exclude=''\n",
+    "python scripts/course_experiments/run.py --experiment reasoning --device cpu\n",
+    "```\n",
+    "\n",
+    "CPU執行完整排程，有自己的CUDA環境才改`--device cuda`；上文正式數字來自NVIDIA L4顯示卡。結果保存於`outputs/course-experiments/course-v1/reasoning/`，可用報告中的資料切分與各項分母核對。語言模型和有限動作策略是不同產物：`policy-*.pt`不是TinyLM權重，不能交給語言模型的推論入口。入口還包含公開長紀錄的資料通路檢查；本附錄的算術能力分數只使用上文合成的留出題。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "C.7"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

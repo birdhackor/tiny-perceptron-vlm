@@ -1,0 +1,164 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 7.11 預訓練模型怎麼學會對話？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "預訓練讓模型從一般文字學續寫，SFT則繼續用正確對話示範，讓assistant邊界後出現合適回答。架構仍是 [4.6](https://birdhackor.github.io/tiny-perceptron-vlm/4.6.html) 的TinyLM，目標仍是交叉熵；改變的是資料分佈、角色前文與哪些答案計入代價。只把prompt加一句「請回答」，沒有更新參數，不屬於這個訓練過程。\n",
+    "\n",
+    "[7.1](https://birdhackor.github.io/tiny-perceptron-vlm/7.1.html) 已建立對話表示，[7.3](https://birdhackor.github.io/tiny-perceptron-vlm/7.3.html) 已選有效回答目標，現在將兩筆問答組batch，按 [7.7](https://birdhackor.github.io/tiny-perceptron-vlm/7.7.html) 的valid提供讀取許可，再把代價傳回參數。本節先確認數據到梯度的接口；研究微調時，要明確載入已保存的基模。也可以刻意從隨機起點只用對話示範訓練，作為另一條基準，兩種起點應分開記錄。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:11:57.270466Z",
+     "iopub.status.busy": "2026-10-04T19:11:57.270207Z",
+     "iopub.status.idle": "2026-10-04T19:11:58.621024Z",
+     "shell.execute_reply": "2026-10-04T19:11:58.619482Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7fac8424e610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:11:58.624812Z",
+     "iopub.status.busy": "2026-10-04T19:11:58.624504Z",
+     "iopub.status.idle": "2026-10-04T19:11:58.660699Z",
+     "shell.execute_reply": "2026-10-04T19:11:58.659648Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "batch形狀 torch.Size([2, 10]) 有效答案 4\n",
+      "問答接口代價 5.337442874908447\n"
+     ]
+    }
+   ],
+   "source": [
+    "import torch\n",
+    "from tiny_perceptron.data import toy_conversations, render_chat, pad_batch\n",
+    "from tiny_perceptron.model import TinyLM, ModelConfig, masked_loss\n",
+    "\n",
+    "torch.manual_seed(42)\n",
+    "examples = [render_chat(messages) for messages in toy_conversations()[:2]]\n",
+    "x, y, valid = pad_batch(examples)\n",
+    "model = TinyLM(ModelConfig(width=8))\n",
+    "loss = masked_loss(model(x, valid=valid)[\"logits\"], y)\n",
+    "loss.backward()\n",
+    "print(\"batch形狀\", x.shape, \"有效答案\", (y != -100).sum().item())\n",
+    "print(\"問答接口代價\", loss.item())"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "`toy_conversations` 是專案的合成加法小世界，前兩筆問題0+0與0+1、回答0與1，ASCII答案各一byte加EOS，所以有效目標共4。`pad_batch` 回傳X、Y與有效輸入表，模型處理兩筆每筆10位置，輸出每位置264個byte/結構候選。最後loss為正，backward有梯度，說明串接成功；這段沒有optimizer.step，尚未進行新訓練。\n",
+    "\n",
+    "真正微調要加載基模checkpoint與匹配tokenizer，恢復需要的訓練狀態，再用問答資料更新。checkpoint契約見 [5.7](https://birdhackor.github.io/tiny-perceptron-vlm/5.7.html)，腳本操作見[訓練配方](https://birdhackor.github.io/tiny-perceptron-vlm/training.html)。例如以 `--task sft --checkpoint checkpoints/text.pt --train` 選擇問答任務並啓用更新，步數與資料來源需按預算記錄。不是隻更換任務名字就自動擁有問答能力。\n",
+    "\n",
+    "微調前後要用固定題與生成設置，分別記錄回答內容、格式與舊能力，不能拿初始隨機模型的一次loss和新模型不同問題的回答直接比較。SFT可能讓已有知識更容易被調動，也會把錯誤示範學進去；[7.14](https://birdhackor.github.io/tiny-perceptron-vlm/7.14.html) 將檢查錯答案如何影響代價。\n",
+    "\n",
+    "本例不要求GPU或下載預訓練權重，先把小CPU的資料接口練好。進一步長訓練是同一路線上的更多更新，不需要重新定義shift、mask或字表。若舊模型tokenizer與當前數據ID不同，應先解決映射，不能靠訓練希望它自己理解新編號。\n",
+    "\n",
+    "我們已實跑兩條獨立路線。第一條從隨機模型開始，只用45筆屬性問答更新900次；第二條先把這45筆的問題與答案接成文字、練250次續寫，保存後再以對話角色與回答遮罩微調900次。第二條並沒有沿用前章的故事模型，也沒有先得到廣泛知識；它只在同一批小世界材料上多做了一個文字階段。兩條對話階段都用同樣寬度64、兩層、種子42、每批16筆與學習率0.003，最後用同一組留出題比較，見[7.12](https://birdhackor.github.io/tiny-perceptron-vlm/7.12.html)。因為第二條多了250次文字更新，成績差異不能全當成「預訓練形式本身」的因果效果；要隔離它，還需另外匹配總訓練預算。\n",
+    "\n",
+    "練習複製其中一筆消息，把assistant答案0改成3，再render並印有效目標ID。先預測原0的byte48加8=56變成3的51加8=59，EOS仍2；其他角色與問題不變。核對後恢復正確答案，避免把演示錯誤當正式訓練資料。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "7.11"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

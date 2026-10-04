@@ -1,0 +1,166 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 8.3 權重能學到穩定風格嗎？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "每次提問都加上「請用生活比喻」有些麻煩。我們能否把這種習慣教進模型，讓它在沒有特別提醒時也常用貼切的例子？這與[8.2的改提示](https://birdhackor.github.io/tiny-perceptron-vlm/8.2.html)不同：提示只改這次上下文，訓練則會更新權重，改變往後的預測偏好。本節先解決最前面的事：什麼資料才能把風格教得清楚？\n",
+    "\n",
+    "前置是[7.3只學回答位置](https://birdhackor.github.io/tiny-perceptron-vlm/7.3.html)與[7.11對話微調](https://birdhackor.github.io/tiny-perceptron-vlm/7.11.html)。回顧一下，有監督微調（SFT）把人寫好的回答當目標，讓模型在相同上下文下提高目標文字的機率。它不另裝一顆名叫「活潑」的旋鈕；活潑寫法會透過那些實際目標字詞進入訓練。問題內容若同時改變，就很難知道訓練後的差異來自文風還是新知識。\n",
+    "\n",
+    "因此先準備兩套內容配對的回答。同一題「2+2=?」，簡短版寫「4」，生動版寫「4，就像兩雙筷子共有四根」。兩版的事實答案一致，但用字長短不同。這樣比較仍未完全消除所有差異，至少能避免用一套算術題與另一套故事題冒充風格對照。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:12:51.582676Z",
+     "iopub.status.busy": "2026-10-04T19:12:51.582468Z",
+     "iopub.status.idle": "2026-10-04T19:12:52.903844Z",
+     "shell.execute_reply": "2026-10-04T19:12:52.902711Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7f9a9a352610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:12:52.907206Z",
+     "iopub.status.busy": "2026-10-04T19:12:52.906943Z",
+     "iopub.status.idle": "2026-10-04T19:12:52.920637Z",
+     "shell.execute_reply": "2026-10-04T19:12:52.918723Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "簡短 總位置 10 學習位置 2\n",
+      "生動 總位置 46 學習位置 38\n"
+     ]
+    }
+   ],
+   "source": [
+    "from tiny_perceptron.data import render_chat\n",
+    "\n",
+    "question = \"2+2=?\"\n",
+    "answers = {\"簡短\": \"4\", \"生動\": \"4，就像兩雙筷子共有四根。\"}\n",
+    "for style, answer in answers.items():\n",
+    "    inputs, labels = render_chat(\n",
+    "        [\n",
+    "            {\"role\": \"user\", \"content\": question},\n",
+    "            {\"role\": \"assistant\", \"content\": answer},\n",
+    "        ]\n",
+    "    )\n",
+    "    print(style, \"總位置\", len(inputs), \"學習位置\", int((labels != -100).sum()))"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "輸入是兩筆相同提問、不同回答的對話。`render_chat`是專案工具，將角色與文字整理成數字序列；`inputs`是模型讀的全部位置，`labels`是各位置的訓練答案。值`-100`表示不計算這個位置的猜錯代價。`labels != -100`找出要學習的位置，`sum()`數它們有幾個，`int`讓印出的數量像一般整數。\n",
+    "\n",
+    "在本工具預設的UTF-8位元組切詞中，短版輸出總位置`10`、學習位置`2`；生動版總位置`46`、學習位置`38`。UTF-8把中文字存成多個位元組，每個位元組在這裡是一步要預測的片段，因此38不等於可見字數；這個差別可回看[6.7](https://birdhackor.github.io/tiny-perceptron-vlm/6.7.html)。學習位置不只數可見文字，還包含回答結束的標記，因此短版不是1。若切詞工具更新，具體數量可能跟著改；關鍵是長版要學更多位置。相同筆數或相同步數，不一定代表相同的文字訓練量，應把這個數量也記下來。\n",
+    "\n",
+    "這段只在整理資料，沒有更新權重。真的訓練之後，要拿未出現在訓練裡的問題檢查是否也能答對且使用貼切比喻；背出筷子句不等於風格已能通用。\n",
+    "\n",
+    "我們已另外從相同的49題加法模型各複製一份，保持問題沒有style前綴，分別用短答或固定積木句再更新450次。在未教過的`2+2=?`上，短答模型實際回`3`，生動模型回`3，像把兩組積木合在一起再數。`；問題相同、寫法確實不同，內容卻同樣錯。七題最後檢查中，兩支各有七題符合自己的固定寫法，數值都零題正確。這個基模本來也沒有答對這七題，不能把結果描述成原先會算、改文風才被破壞。\n",
+    "\n",
+    "每支都更新450次、每批16題，累計有效答案卻是短答16,591個、生動318,991個。長版每筆都有大量固定文字，相同步數不是相同監督量；這次展示了寫法可進入權重，沒有隔離成等token成本的風格比較。[T.5](https://birdhackor.github.io/tiny-perceptron-vlm/training.html#T.5)提供重跑入口與各支權重。\n",
+    "\n",
+    "練習將生動回答改成「4，共有四個」，先預測它的學習位置會增加還是減少，再執行核對。不要改題目或數字4，才能保持內容配對的目的。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "8.3"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

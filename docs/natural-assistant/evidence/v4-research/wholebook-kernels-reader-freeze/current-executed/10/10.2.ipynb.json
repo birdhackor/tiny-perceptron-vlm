@@ -1,0 +1,211 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 10.2 圖片怎麼切成序列？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "文字可以依讀取順序排成一串，但圖片有上下左右兩個方向。把整張圖攤平會使序列很長，因此先切成小方塊，再讓每個小方塊成為一個位置。小方塊英文叫patch。本節先說清楚採用的切法與順序，再檢查切塊與拼回兩個工具是否能一致往返。\n",
+    "\n",
+    "前置是[10.1的批次與RGB軸](https://birdhackor.github.io/tiny-perceptron-vlm/10.1.html)。16×16的圖，用邊長4的patch切割，每列有16/4=4塊，共4×4=16塊。每塊包含3個通道、4列、4行，即3×4×4=48個數字。文字模型把文字切成輸入單位，稱為token，例如一個字或一小段文字；這裡一個序列位置則是一整塊圖片。48是這塊內的像素數值數量，不是48個文字token。\n",
+    "\n",
+    "圖中0到15標示patch的讀取順序：第一列從左到右為0、1、2、3，下一列從4開始。箭頭「依列展開」表示把16塊排成一串，右邊的48說明每塊仍保存其全部RGB像素。這樣順序與空間位置才有可核對的對應。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:14:34.464391Z",
+     "iopub.status.busy": "2026-10-04T19:14:34.464206Z",
+     "iopub.status.idle": "2026-10-04T19:14:35.713373Z",
+     "shell.execute_reply": "2026-10-04T19:14:35.712495Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7efcb465a610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "cellView": "form",
+    "course_figure": {
+     "alt": "16×16圖片依列切成16個patch，每個patch保存48個像素值",
+     "name": "patchify"
+    },
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:14:35.716347Z",
+     "iopub.status.busy": "2026-10-04T19:14:35.716095Z",
+     "iopub.status.idle": "2026-10-04T19:14:35.727222Z",
+     "shell.execute_reply": "2026-10-04T19:14:35.726300Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "image/svg+xml": [
+       "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 800 330\" role=\"img\" aria-labelledby=\"title desc\">\n",
+       "    <title id=\"title\">圖片切小方塊：先檢查能不能拼回來</title><desc id=\"desc\">16×16 RGB，patch邊長4，得到16個patch。。橘色輪流提示閱讀步驟，所有內容靜態可見。</desc>\n",
+       "    <style>\n",
+       "    text{font-family:\"Noto Sans CJK TC\",\"Microsoft JhengHei\",\"PingFang TC\",sans-serif}\n",
+       "    rect.pulse,.pulse rect{animation:pulse 6s infinite}.step1,.step1 rect{animation-delay:0s}.step2,.step2 rect{animation-delay:1.5s}.step3,.step3 rect{animation-delay:3s}.step4,.step4 rect{animation-delay:4.5s}\n",
+       "    @keyframes pulse{0%,23%{stroke:#e87924;stroke-width:4}24%,100%{stroke:#8da8ca;stroke-width:1}}\n",
+       "    @media(prefers-reduced-motion:reduce){rect.pulse,.pulse rect{animation:none}}\n",
+       "    </style><defs><marker id=\"arrow\" markerWidth=\"10\" markerHeight=\"10\" refX=\"9\" refY=\"5\" orient=\"auto\"><path d=\"M0 0L10 5L0 10\" fill=\"#466b97\"/></marker></defs>\n",
+       "    <rect width=\"800\" height=\"330\" fill=\"#fff\"/><text x=\"400\" y=\"32\" font-size=\"24\" fill=\"#172b4d\" text-anchor=\"middle\">圖片切小方塊：先檢查能不能拼回來</text>\n",
+       "    <rect class=\"pulse step1\" x=\"95\" y=\"90\" width=\"42\" height=\"42\" fill=\"#d7f5e6\" stroke=\"#fff\"/><text x=\"116\" y=\"117\" font-size=\"15\" fill=\"#172b4d\" text-anchor=\"middle\">0</text><rect class=\"pulse step2\" x=\"140\" y=\"90\" width=\"42\" height=\"42\" fill=\"#b7deff\" stroke=\"#fff\"/><text x=\"161\" y=\"117\" font-size=\"15\" fill=\"#172b4d\" text-anchor=\"middle\">1</text><rect class=\"pulse step3\" x=\"185\" y=\"90\" width=\"42\" height=\"42\" fill=\"#d7f5e6\" stroke=\"#fff\"/><text x=\"206\" y=\"117\" font-size=\"15\" fill=\"#172b4d\" text-anchor=\"middle\">2</text><rect class=\"pulse step4\" x=\"230\" y=\"90\" width=\"42\" height=\"42\" fill=\"#b7deff\" stroke=\"#fff\"/><text x=\"251\" y=\"117\" font-size=\"15\" fill=\"#172b4d\" text-anchor=\"middle\">3</text><rect class=\"pulse step2\" x=\"95\" y=\"135\" width=\"42\" height=\"42\" fill=\"#b7deff\" stroke=\"#fff\"/><text x=\"116\" y=\"162\" font-size=\"15\" fill=\"#172b4d\" text-anchor=\"middle\">4</text><rect class=\"pulse step3\" x=\"140\" y=\"135\" width=\"42\" height=\"42\" fill=\"#d7f5e6\" stroke=\"#fff\"/><text x=\"161\" y=\"162\" font-size=\"15\" fill=\"#172b4d\" text-anchor=\"middle\">5</text><rect class=\"pulse step4\" x=\"185\" y=\"135\" width=\"42\" height=\"42\" fill=\"#b7deff\" stroke=\"#fff\"/><text x=\"206\" y=\"162\" font-size=\"15\" fill=\"#172b4d\" text-anchor=\"middle\">6</text><rect class=\"pulse step1\" x=\"230\" y=\"135\" width=\"42\" height=\"42\" fill=\"#d7f5e6\" stroke=\"#fff\"/><text x=\"251\" y=\"162\" font-size=\"15\" fill=\"#172b4d\" text-anchor=\"middle\">7</text><rect class=\"pulse step3\" x=\"95\" y=\"180\" width=\"42\" height=\"42\" fill=\"#d7f5e6\" stroke=\"#fff\"/><text x=\"116\" y=\"207\" font-size=\"15\" fill=\"#172b4d\" text-anchor=\"middle\">8</text><rect class=\"pulse step4\" x=\"140\" y=\"180\" width=\"42\" height=\"42\" fill=\"#b7deff\" stroke=\"#fff\"/><text x=\"161\" y=\"207\" font-size=\"15\" fill=\"#172b4d\" text-anchor=\"middle\">9</text><rect class=\"pulse step1\" x=\"185\" y=\"180\" width=\"42\" height=\"42\" fill=\"#d7f5e6\" stroke=\"#fff\"/><text x=\"206\" y=\"207\" font-size=\"15\" fill=\"#172b4d\" text-anchor=\"middle\">10</text><rect class=\"pulse step2\" x=\"230\" y=\"180\" width=\"42\" height=\"42\" fill=\"#b7deff\" stroke=\"#fff\"/><text x=\"251\" y=\"207\" font-size=\"15\" fill=\"#172b4d\" text-anchor=\"middle\">11</text><rect class=\"pulse step4\" x=\"95\" y=\"225\" width=\"42\" height=\"42\" fill=\"#b7deff\" stroke=\"#fff\"/><text x=\"116\" y=\"252\" font-size=\"15\" fill=\"#172b4d\" text-anchor=\"middle\">12</text><rect class=\"pulse step1\" x=\"140\" y=\"225\" width=\"42\" height=\"42\" fill=\"#d7f5e6\" stroke=\"#fff\"/><text x=\"161\" y=\"252\" font-size=\"15\" fill=\"#172b4d\" text-anchor=\"middle\">13</text><rect class=\"pulse step2\" x=\"185\" y=\"225\" width=\"42\" height=\"42\" fill=\"#b7deff\" stroke=\"#fff\"/><text x=\"206\" y=\"252\" font-size=\"15\" fill=\"#172b4d\" text-anchor=\"middle\">14</text><rect class=\"pulse step3\" x=\"230\" y=\"225\" width=\"42\" height=\"42\" fill=\"#d7f5e6\" stroke=\"#fff\"/><text x=\"251\" y=\"252\" font-size=\"15\" fill=\"#172b4d\" text-anchor=\"middle\">15</text><text x=\"490\" y=\"140\" font-size=\"20\" fill=\"#172b4d\" text-anchor=\"middle\">→ 依列展開成16張小卡</text><text x=\"495\" y=\"185\" font-size=\"17\" fill=\"#172b4d\" text-anchor=\"middle\">每張：3×4×4 = 48 個像素值</text><text x=\"400\" y=\"314\" font-size=\"15\" fill=\"#172b4d\" text-anchor=\"middle\">16×16 RGB，patch邊長4，得到16個patch。</text>\n",
+       "    </svg>"
+      ],
+      "text/plain": [
+       "<IPython.core.display.SVG object>"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    }
+   ],
+   "source": [
+    "# @title 本節圖解\n",
+    "from IPython.display import SVG, display\n",
+    "\n",
+    "display(SVG(filename=str(root / \"course/figures/patchify.svg\")))"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 3,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:14:35.728992Z",
+     "iopub.status.busy": "2026-10-04T19:14:35.728815Z",
+     "iopub.status.idle": "2026-10-04T19:14:35.736974Z",
+     "shell.execute_reply": "2026-10-04T19:14:35.736330Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "小塊序列 (1, 16, 48)\n",
+      "拼回相同 True\n"
+     ]
+    }
+   ],
+   "source": [
+    "import torch\n",
+    "from tiny_perceptron.multimodal import scene, patchify, unpatchify\n",
+    "\n",
+    "image = scene()[None]\n",
+    "patches = patchify(image, 4)\n",
+    "restored = unpatchify(patches, 3, 16, 16, 4)\n",
+    "print(\"小塊序列\", tuple(patches.shape))\n",
+    "print(\"拼回相同\", torch.equal(image, restored))"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "輸入`scene()`預設紅方塊，`[None]`與上一節的`unsqueeze(0)`一樣增加一張圖的批次軸。`patchify`按上述順序切塊並攤平每塊，輸出`(1,16,48)`：1張圖、16個位置、每位置48數字。`unpatchify`是反向工具，需要告知通道3、高寬16、邊長4，才能把一串位置放回正確格子。\n",
+    "\n",
+    "`torch.equal`逐一比較原圖與重建圖，輸出`True`。它比只看形狀多確認了一件事：這次往返後沒有像素值遺失或改變。但它不能單獨證明中間序列遵守圖示的排序。例如切塊時把RGB倒過來，拼回時又倒回去，仍能得到`True`；兩個工具互相配合，卻用了另一種通道約定。要驗證特定順序，還需要直接核對已知位置和通道在序列中的內容。\n",
+    "\n",
+    "可以用一個更小的紙上例子記住順序：2×2張卡片，左上寫a、右上b、左下c、右下d，依列展開就是[a,b,c,d]，不是[a,c,b,d]。直接看第二個位置是不是右上的b，就能核對這個排列約定；若切時依欄讀、拼時也依欄放，[a,c,b,d]仍能拼回原圖，往返成功不會揭露兩者的差別。真圖片每張卡內還有48個像素值，同樣要保持通道與格子順序。若只隨意攤平，雖然數字總數仍768，也可能把「整張圖的紅通道」當成第一張小卡內容，形狀數值看起來合理但不再描述相同區域。切塊工具封裝這種排列約定；圖與卡片例子說明它，重建檢查則核對兩個工具是否相容。\n",
+    "\n",
+    "練習只把patch邊長改8，兩處工具參數都要改。先算每列2塊，共4塊；每塊3×8×8=192個數字，再跑核對形狀`(1,4,192)`與相同`True`。小塊變大後位置變少，但沒有憑空丟像素；之後把每塊壓成短特徵時，才涉及學習如何保留有用資訊。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "10.2"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

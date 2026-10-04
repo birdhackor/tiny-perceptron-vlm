@@ -1,0 +1,160 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 11.9 縮圖與裁切會丟掉什麼？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "原圖右邊有一個紅方塊，中心裁切卻把它大部分切掉；模型答不出顏色，可能是它沒有收到足夠像素，而不是模型後續計算出了錯。前處理決定模型實際看見什麼。本節先檢查可見資訊，避免把已經丟掉的證據歸咎於更後面的訓練。\n",
+    "\n",
+    "前置是[10.1像素與坐標](https://birdhackor.github.io/tiny-perceptron-vlm/10.1.html)。裁切是選取原圖一部分，縮圖則把原圖重新表示為更少像素；兩者都可能影響小物件或邊緣物件。這裡先用能直接計數的紅色像素檢查裁切，不需要外部圖片或影像套件。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:15:40.786538Z",
+     "iopub.status.busy": "2026-10-04T19:15:40.786290Z",
+     "iopub.status.idle": "2026-10-04T19:15:42.254975Z",
+     "shell.execute_reply": "2026-10-04T19:15:42.252668Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7fe530156610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:15:42.259501Z",
+     "iopub.status.busy": "2026-10-04T19:15:42.259164Z",
+     "iopub.status.idle": "2026-10-04T19:15:42.273560Z",
+     "shell.execute_reply": "2026-10-04T19:15:42.272332Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "原圖形狀 (3, 16, 16) 裁切形狀 (3, 8, 8)\n",
+      "原圖紅色格 45\n",
+      "裁切紅色格 8\n"
+     ]
+    }
+   ],
+   "source": [
+    "from tiny_perceptron.multimodal import scene\n",
+    "\n",
+    "image = scene(\"red\", \"square\", offset=7)\n",
+    "crop = image[:, 4:12, 4:12]\n",
+    "print(\"原圖形狀\", tuple(image.shape), \"裁切形狀\", tuple(crop.shape))\n",
+    "print(\"原圖紅色格\", int((image[0] > 0).sum()))\n",
+    "print(\"裁切紅色格\", int((crop[0] > 0).sum()))"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "輸入生成器將方塊中心向右移7格，原圖仍16×16。`[:,4:12,4:12]`保留全部RGB通道，取列與行索引4到11，共8×8的中心區域；終點12不包含。`image[0]`取紅通道，比較大於0後統計紅色格數量。輸出形狀分別`(3,16,16)`與`(3,8,8)`，紅色數量45與8。\n",
+    "\n",
+    "45不是完整9×9方塊的81，因為物件在生成時已經部分超出右邊界；8更少，因為中心裁切又丟掉大部分可見紅塊。兩個步驟都可能造成資訊損失。還剩8格紅色，或許可回答顏色，但不一定能可靠識別完整形狀；判定資料夠不夠必須配合實際問題。\n",
+    "\n",
+    "縮圖也有不同風險：遠處的小字可能從多格壓成一格，與背景混在一起。圖片送入模型之後的計算，無法從未提供的像素恢復確定答案。應該保存原圖、前處理配置與處理後圖，遇到錯誤時先檢查模型收到的版本，再考慮增加訓練資料。對於裁切後完全沒有目標的圖片，目標回答也應反映看不見，而不是強迫猜原圖真值。\n",
+    "\n",
+    "另一種核對方式是先把目標區域標在原圖上，再看看裁切範圍是否覆蓋它。這裡方塊中心的橫索引是8+7=15，接近最右端；中心裁切只到索引11，所以只保留方塊左側的一小條。這個坐標關系能解釋45與8，而不需猜模型到底哪裡出了錯。裁切還把輸入變成8×8，若接收圖片的工具要求16×16，就需要明確縮放或補畫布，不能直接把不同形狀送進去。補回空白能恢復尺寸，卻不會恢復被切掉的原像素，這兩種「恢復」要分清。\n",
+    "\n",
+    "這個裁切也用在[11.8的正式視覺介入實驗](https://birdhackor.github.io/tiny-perceptron-vlm/11.8.html)：固定那份已繼續更新100次的模型，測試紅、綠、藍各配圓與方的六張圖；每張各問顏色、形狀，共12題。原圖答對9/12，其中顏色6/6、形狀3/6。裁切介入把各圖物件先移到位移7，取同樣中心8×8區域，再放大回入口要求的16×16；題目與原物件的參考答案保持不變。最後仍9/12：顏色6/6、形狀3/6，和原圖總數相同。形狀題中有三張圓、三張方，一律猜circle就會恰好答對三題。這不是裁切無損的證明；殘留色塊仍足以辨色，而這份模型本來就對所有形狀猜circle，因而看不出它有失去多少形狀能力。像只問紙張顏色的人，少了紙上的圖案也可能答對；要檢驗圖案損失，需要原先真的會讀圖案的模型與相應題目。9/12不能抵消上面可見像素已減少的事實。\n",
+    "\n",
+    "練習只把offset=7改0，先預測中心方塊更靠近裁切區，保留的紅格增加，再執行核對。原圖紅格應81、裁切紅格64，因為中心8×8裁切保留了方塊中的64格。保持模型不變，就能發現前處理本身改變了問題可用資訊。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "11.9"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

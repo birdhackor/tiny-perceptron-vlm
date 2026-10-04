@@ -1,0 +1,166 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 13.4 為什麼要有參考模型？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "你想讓新模型比原本更偏愛簡潔正確的回答，需要一把固定尺。若尺也跟著每次更新伸縮，就難以分清改了多少。SFT（supervised fine-tuning，監督式微調）先用理想助手回答教基礎能力；DPO（direct preference optimization，直接偏好最佳化）再用同題兩篇回答的偏好，調整相對原模型的回答傾向。這種偏好訓練保留一份原來對話模型，叫reference參考模型；正在更新的那份叫policy策略模型，它負責之後實際回答。\n",
+    "\n",
+    "前置是[13.3整段log分數](https://birdhackor.github.io/tiny-perceptron-vlm/13.3.html)與[11.2凍結](https://birdhackor.github.io/tiny-perceptron-vlm/11.2.html)。先算policy的「較佳分數減較差分數」，再減掉reference原本的同一差。這叫相對margin差距。例子中參考為-4與-3，差-1；更新後策略為-3與-3，差0，相對進步就是0−(-1)=1。我們看的是偏好相對原基準增強多少。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:16:47.142705Z",
+     "iopub.status.busy": "2026-10-04T19:16:47.142479Z",
+     "iopub.status.idle": "2026-10-04T19:16:48.760314Z",
+     "shell.execute_reply": "2026-10-04T19:16:48.759018Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7f947825a610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:16:48.763510Z",
+     "iopub.status.busy": "2026-10-04T19:16:48.763109Z",
+     "iopub.status.idle": "2026-10-04T19:16:48.783543Z",
+     "shell.execute_reply": "2026-10-04T19:16:48.782906Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "參考未跟著改 True\n",
+      "參考不記梯度 False\n"
+     ]
+    }
+   ],
+   "source": [
+    "import copy\n",
+    "import torch\n",
+    "from tiny_perceptron.model import TinyLM, ModelConfig\n",
+    "\n",
+    "policy = TinyLM(ModelConfig(width=8))\n",
+    "reference = copy.deepcopy(policy).eval().requires_grad_(False)\n",
+    "before = reference.embedding.weight.clone()\n",
+    "with torch.no_grad():\n",
+    "    policy.embedding.weight.add_(0.1)\n",
+    "scores = reference(torch.tensor([[1, 2]]))[\"logits\"]\n",
+    "print(\"參考未跟著改\", torch.equal(before, reference.embedding.weight))\n",
+    "print(\"參考不記梯度\", scores.requires_grad)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "輸入是一個小隨機模型，用來檢查複製與凍結機制，不是已訓好的偏好基模。`deepcopy`複製整份獨立權重，不能只是`reference=policy`，那會指向同一對象。`requires_grad_(False)`凍結參考參數，`eval()`設評估行為，`no_grad`只包住人為加0.1的原地修改，避免把這個測試動作記成待求導計算。參考分數的計算放在區塊外，讓一般梯度記錄仍開著；此時輸入是整數ID、不求梯度，輸出是否需要梯度就能核對參考參數的凍結狀態。\n",
+    "\n",
+    "我們人為將policy的embedding每項加0.1，輸出第一行True：參考沒有跟著變；第二行False：即使計算時沒有用`no_grad`關閉記錄，已凍結的參考分數仍不需要梯度。若漏掉`requires_grad_(False)`，這個輸出會變True；不能用包在`no_grad`裡得到的False替代凍結核對。實際DPO開始時通常複製已完成SFT的模型，整個偏好階段保留參考不變，並且不把它的參數放入policy優化器。\n",
+    "\n",
+    "固定尺不表示參考所有回答都好。它用來控制新模型相對原行為的改變範圍，偏好資料仍需指出哪些方向更好；錯誤參考可以被新資料糾正。\n",
+    "\n",
+    "正式比較使用[8.3的`content.pt`](https://birdhackor.github.io/tiny-perceptron-vlm/8.3.html)作固定參考，它在七道留出加法原本零題答對，不是已通過的算術老師。訓練前複製策略與參考，兩種beta設定都從這份相同起點開始。beta是正的縮放係數：偏好代價會先把前面算出的相對差距乘上它，再決定要推動多少。它不是學習率；此處先知道它是另一項訓練設定即可，[13.6](https://birdhackor.github.io/tiny-perceptron-vlm/13.6.html)會用相同差距逐項觀察它的作用。參考數字指紋在更新後保持不變。這只能證明固定尺沒有跟著動，不能替新策略的回答保證真值。\n",
+    "\n",
+    "還要分清「相對進步」與「已經排在前面」。beta 0.1版本在驗證題`3+5=?`上，較佳`8`減較差`9`的log分數，從參考的約−10.89346變成−8.44789，相對提高2.44557。但差距仍為負，表示這兩個完整候選中，錯的9仍有較高機率。相對改善可以是從更偏向錯答，移到稍微沒那麼偏向錯答，並不等於正確候選已勝出。\n",
+    "\n",
+    "參考在訓練起點與policy相同，故每個偏好對的相對差距初始為0，即使它們本來更常生成rejected也一樣。這讓目標關注相對偏好的改變，而不是要求兩個原分數本來已經一樣。更新過程中參考只負責再算同題兩篇答案的固定基準，不參與後面的梯度步。若每一步重新複製policy當reference，相對差距會不斷被歸零，失去一開始設定的固定約束意義。代碼裡的before是矩陣快照，clone複製數字；它和deepcopy整模型層級不同，卻都在避免引用同一份可變內容造成假核對。\n",
+    "\n",
+    "練習只把那一行的`copy.deepcopy(policy)`替換成`policy`，保留後面的`.eval().requires_grad_(False)`，因此整行成為`reference = policy.eval().requires_grad_(False)`。先預測凍結會連policy也凍結，人為加0.1後第一行變False，再重跑核對，因為兩個名稱其實指同一份矩陣。這個反例說明複製、凍結與不收錄優化器是不同但相配的檢查。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "13.4"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

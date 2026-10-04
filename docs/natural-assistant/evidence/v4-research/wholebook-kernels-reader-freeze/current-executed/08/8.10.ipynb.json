@@ -1,0 +1,168 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 8.10 評分者真的分得出目標風格嗎？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "如果一位評分者把所有文章都稱讚得很好，他的平均分很高，卻無法幫我們選出真正符合要求的文章。自動評分也可能有這個問題。把大量回答交給裁判之前，應先給它一小組我們能說清楚好壞的例子，看看它是否在同一項標準上作出相同判斷。\n",
+    "\n",
+    "前置是[8.1的評分規則](https://birdhackor.github.io/tiny-perceptron-vlm/8.1.html)與[W.3的tensor與平均](https://birdhackor.github.io/tiny-perceptron-vlm/first-steps.html#W.3)，逐項比較會在本節介紹。我們沿用8.1的兩項判斷，再明定本次的單一規則：回答必須算對，而且生活比喻能說清兩組各兩個合起來是四個，才記通過1；任一項不符合就記0。長度本身不決定標籤。\n",
+    "\n",
+    "四筆都問「用生活比喻解釋2+2」。下表保留原回答與索引，索引從0開始；讀到分歧位置後，就能回到同一筆內容，而非只看評分數字。\n",
+    "\n",
+    "| 索引 | 原回答 | 人工標籤與理由 |\n",
+    "| --- | --- | --- |\n",
+    "| 0 | 4，就像兩雙筷子共有四根。 | 1：數字正確，兩雙各兩根對上兩組各兩個 |\n",
+    "| 1 | 5，數字如星光流動。 | 0：數字錯誤，星光也沒有解釋如何合併兩組 |\n",
+    "| 2 | 4，兩盤各有兩顆蘋果，放在一起就有四顆。 | 1：數字正確，兩盤與每盤兩顆提供可核對的對應 |\n",
+    "| 3 | 4。4。4。4。 | 0：數字正確，但重複答案沒有提供所要求的生活比喻 |\n",
+    "\n",
+    "人工因此標成1、0、1、0。本節自動裁判只是預錄結果，卻把索引1也判成1；我們需要把這個分歧找出來回讀，程式不會自行理解表中回答。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:12:39.550584Z",
+     "iopub.status.busy": "2026-10-04T19:12:39.550109Z",
+     "iopub.status.idle": "2026-10-04T19:12:40.851435Z",
+     "shell.execute_reply": "2026-10-04T19:12:40.849788Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7f1ce006a610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:12:40.853691Z",
+     "iopub.status.busy": "2026-10-04T19:12:40.853405Z",
+     "iopub.status.idle": "2026-10-04T19:12:40.861853Z",
+     "shell.execute_reply": "2026-10-04T19:12:40.860634Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "一致比例 0.75\n",
+      "分歧索引 [1]\n"
+     ]
+    }
+   ],
+   "source": [
+    "import torch\n",
+    "\n",
+    "human = torch.tensor([1, 0, 1, 0])\n",
+    "recorded_judge = torch.tensor([1, 1, 1, 0])\n",
+    "agree = human == recorded_judge\n",
+    "print(\"一致比例\", agree.float().mean().item())\n",
+    "print(\"分歧索引\", (~agree).nonzero().flatten().tolist())"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "兩個輸入tensor的每個位置都代表同一個例子，不能把不同順序的評分直接比較。`==`逐項得到`[True, False, True, True]`。`float()`把一致的`True`與分歧的`False`變成1.0與0.0，取平均就得到3/4；`item()`取出單一數字。索引3的回答兩方都判0，雖然都認為不通過，仍是一次一致，因此也貢獻1.0。輸出`一致比例 0.75`，也就是四筆中三筆一致，並不是四筆中三筆好回答。\n",
+    "\n",
+    "`~agree`把布林值反轉，這裡只剩第二個位置為`True`。`nonzero()`找它的位置，`flatten()`攤成一排，`tolist()`轉成一般Python清單，所以輸出`分歧索引 [1]`。索引從0開始，因此1指第二例，不是第一例。這個位置資訊比只看0.75更有用：你可以回到那篇華麗錯答，判斷裁判是否把流暢當作正確。\n",
+    "\n",
+    "一致比例英文常稱agreement。它不是裁判絕對正確的機率，因為人工標籤也可能有錯，而且這四筆刻意簡化，不能代表所有題材。分歧時要保留原問題、原回答與各評分理由，討論哪個標準不夠清楚；若規則模糊，先改規則與校準例，再重新評，而不是預設機器一定錯或人工一定對。\n",
+    "\n",
+    "一致比例高也可能來自資料太容易。若四筆全部是明顯正例，總給1的裁判就會全對，仍無法辨別缺點。校準組應包含貼切與不貼切的比喻、準確與錯誤的內容，還要保留兩者容易混淆的邊界例。第二筆分歧正好是一個提醒：華麗程度與算對不同。讀到索引1後要打開原回答討論，而不是只把自動分數改0、讓報表看起來完美。\n",
+    "\n",
+    "練習只把預錄裁判的第二個數字從1改成0。先預測一致比例變1.0、分歧清單變空，再跑程式核對。這表示在這四筆上與人工一致，仍不表示往後每題都能可靠判斷。接著仍用「用生活比喻解釋2+2」這題，另寫一個較長回答，例如「4。左盤放兩顆蘋果，右盤也放兩顆，倒到同一盤後數出四顆」。請另一位讀者各自核對數字是否正確、兩組各兩個與合併是否對應，再按同一規則記1或0。這個例子應記1，理由是提供可追蹤的分組與合併；若只是把4重複更多次，仍應記0，新增字數不等於新增解釋。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "8.10"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

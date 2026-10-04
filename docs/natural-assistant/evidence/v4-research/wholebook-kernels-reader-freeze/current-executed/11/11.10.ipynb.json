@@ -1,0 +1,161 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 11.10 視覺 token 預算怎麼影響能力？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "把圖片分得更細，能讓小物件佔多個位置，但會讓整串上下文變長。16×16圖的patch邊長從4變2，不是只多一倍位置，而是上下、左右各多一倍，總共四倍。本節把這種成本先算出來，才知道更細圖片特徵需要多少序列空間。\n",
+    "\n",
+    "前置是[10.2切塊數量](https://birdhackor.github.io/tiny-perceptron-vlm/10.2.html)與[3.1多位置注意力](https://birdhackor.github.io/tiny-perceptron-vlm/3.1.html)。視覺token在這裡指一個patch產生、插入模型的一條特徵，不是一個中文字。若文字有T個位置、圖有N個位置，完整自注意力要比較每個位置與其他位置，矩陣大約有(T+N)²格。這個格數是工作量線索，不等於整個模型的精確執行時間。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:14:56.856412Z",
+     "iopub.status.busy": "2026-10-04T19:14:56.856190Z",
+     "iopub.status.idle": "2026-10-04T19:14:58.246911Z",
+     "shell.execute_reply": "2026-10-04T19:14:58.246246Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7f7698456610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:14:58.248899Z",
+     "iopub.status.busy": "2026-10-04T19:14:58.248423Z",
+     "iopub.status.idle": "2026-10-04T19:14:58.253910Z",
+     "shell.execute_reply": "2026-10-04T19:14:58.252931Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "邊長 8 視覺位置 4 總長度 24 注意力格數 576\n",
+      "邊長 4 視覺位置 16 總長度 36 注意力格數 1296\n",
+      "邊長 2 視覺位置 64 總長度 84 注意力格數 7056\n"
+     ]
+    }
+   ],
+   "source": [
+    "height = 16\n",
+    "text_tokens = 20\n",
+    "for patch_size in [8, 4, 2]:\n",
+    "    visual_tokens = (height // patch_size) ** 2\n",
+    "    total = text_tokens + visual_tokens\n",
+    "    print(\"邊長\", patch_size, \"視覺位置\", visual_tokens, \"總長度\", total, \"注意力格數\", total**2)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "輸入圖高寬都16、文字位置20。`//`是整數除法，這裡的邊長都整除16；每列塊數平方得到N。輸出三行分別：邊長8有4視覺位置、總長24、576格；邊長4有16位置、總長36、1296格；邊長2有64位置、總長84、7056格。邊長減半讓N四倍，注意力成本還受固定20個文字位置影響。\n",
+    "\n",
+    "更細切塊可能幫助讀小字，卻不保證答案更準，因為把像素整理成特徵的工具仍需要訓練，才能保留問題所需的資訊。還需確認總長度沒超過模型的最大上下文，圖佔的格子會擠掉文字空間。如果為符合長度而截斷答案，可能連訓練目標都消失，這個問題與[7.10](https://birdhackor.github.io/tiny-perceptron-vlm/7.10.html)相連。\n",
+    "\n",
+    "每塊RGB像素有三個通道；邊長4時一塊有4×4×3=48個數，邊長2時則只有2×2×3=12個數。把這些數混合成固定寬度特徵的加權表，叫像素投影矩陣；依照本課程的PyTorch表格約定，每一行負責一個輸出特徵，每一欄對應一個輸入數，因此有48個輸入欄的舊表不能直接接到只有12個數的新入口。[10.3](https://birdhackor.github.io/tiny-perceptron-vlm/10.3.html)有這個轉換的實例。比較不同切法應準備相應配置與權重，報告訓練預算，不能只改一個推理參數就說細粒度方案失敗。\n",
+    "\n",
+    "注意力有因果遮罩時，後面不能偷看未來，一部分格子會被遮住；但常見實現仍建立或處理大尺寸矩陣，平方量級仍是有用預算線索。還有每頭、每層的倍數與投影成本，本表沒有列，因此576格不是整個訓練只做576次運算。它適合比較相同模型下序列長度變化，而不是預測不同硬體的精確秒數。例如，若你設定模型最多接收64個位置，視覺64加文字20得到總長84，就已經超過上限；若上限是128則仍放得下。先查自己配置的具體上限，再比總長，避免最後才發現答案被截掉。\n",
+    "\n",
+    "正式比較只重跑patch邊長4與8，也就是16與4個視覺位置，沒有跑上面表裡的邊長2。兩者都從相同SFT文字權重出發，另建符合各patch大小的新視覺編碼器，讓視覺編碼器、圖片接頭（把視覺特徵轉成文字模型接收的寬度）與文字模型的參數都允許更新，共更新200次，每次抽同樣四題，累計都是4,765個有效回答目標。最後都是9/12，顏色6/6、形狀3/6；這個簡單任務沒有測出較細切塊的答對優勢，也沒有測小字或複雜照片。\n",
+    "\n",
+    "兩者的總參數卻不是一樣：patch4是145,664，patch8是147,776，因為位置雖少了，每塊的RGB像素數卻從48增至192，入口矩陣變大。訓練迴圈在這次L4上約8.16秒與6.74秒，範圍含日誌、周期保存與裝置同步，未含訓練前後的固定小批檢查、測試與最後寫檔。固定小批檢查（probe）用同一批題量一次訓練前與訓練後的猜錯代價，觀察這批題有沒有改善；測試則另用保留的新位置題評答案是否正確。這個秒數不是整套操作耗時。它只能作同次小配方的測量，不能保證某個patch在讀者的機器上固定更快或更準。\n",
+    "\n",
+    "練習只把height改32，保持patch_size列表與文字20不變。先算N分別16、64、256，最後一行總長276、格數76176，再執行核對。圖的邊長翻倍同樣讓面積四倍；這個預算表可幫助你先決定哪些配置適合CPU短實驗。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "11.10"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

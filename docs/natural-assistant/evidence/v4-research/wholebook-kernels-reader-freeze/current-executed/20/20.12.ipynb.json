@@ -1,0 +1,243 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 20.12 助理答錯時，怎麼分清聽錯與回錯？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "你說「請推薦不辣的晚餐」，辨識器漏掉「不」，助理就收到相反條件。聊天模型可能很認真推薦辣菜，卻沒有回答你的原需求。要修好這個系統，先找出紙條在哪一棒被改了。\n",
+    "\n",
+    "前置是[12.13的聽寫與回答](https://birdhackor.github.io/tiny-perceptron-vlm/12.13.html)及[20.1的共同入口](https://birdhackor.github.io/tiny-perceptron-vlm/20.1.html)。ASR的任務是寫出聽到的話，聊天的任務是依收到的話回應。把正確逐字稿直接送進聊天，可以檢查第二站；把真ASR結果送進相同聊天，才是完整語音路線。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:20:44.094718Z",
+     "iopub.status.busy": "2026-10-04T19:20:44.094454Z",
+     "iopub.status.idle": "2026-10-04T19:20:45.525992Z",
+     "shell.execute_reply": "2026-10-04T19:20:45.525065Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7f3e9665a610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "cellView": "form",
+    "course_figure": {
+     "alt": "同一問題分為正確文字對照與真錄音路線；ASR逐字稿和兩份回答分開核對",
+     "name": "natural-v4-asr-two-routes"
+    },
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:20:45.529918Z",
+     "iopub.status.busy": "2026-10-04T19:20:45.529662Z",
+     "iopub.status.idle": "2026-10-04T19:20:45.541476Z",
+     "shell.execute_reply": "2026-10-04T19:20:45.541020Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "image/svg+xml": [
+       "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 760 1030\" role=\"img\" aria-labelledby=\"title desc\">\n",
+       "  <title id=\"title\">同一問題的正確文字路線與真語音路線分開核對</title>\n",
+       "  <desc id=\"desc\">同一來源問題，左路用來源正確逐字稿直接交給聊天模型。右路送入真錄音，經ASR產生原始辨識稿，再交給同一聊天模型。兩路共用相同權重、歷史與照片，各生成一次回答；轉寫先核對原話，回答另外核對用途。</desc>\n",
+       "  <defs><marker id=\"arrow\" markerWidth=\"10\" markerHeight=\"10\" refX=\"8\" refY=\"5\" orient=\"auto\"><path d=\"M0 0L10 5L0 10Z\" fill=\"#52657d\"/></marker></defs>\n",
+       "  <rect width=\"760\" height=\"1030\" rx=\"24\" fill=\"#f8fafc\"/>\n",
+       "  <g font-family=\"Noto Sans CJK TC,Noto Sans CJK SC,sans-serif\" fill=\"#17243b\" text-anchor=\"middle\">\n",
+       "    <text x=\"380\" y=\"54\" font-size=\"34\" font-weight=\"700\">先聽寫，再回答：分開核對</text>\n",
+       "    <rect x=\"70\" y=\"90\" width=\"620\" height=\"86\" rx=\"16\" fill=\"#ffffff\" stroke=\"#94a3b8\" stroke-width=\"2\"/>\n",
+       "    <text x=\"380\" y=\"143\" font-size=\"32\">同一問題：來源原話</text>\n",
+       "    <path d=\"M380 181V200H210V234\" fill=\"none\" stroke=\"#52657d\" stroke-width=\"3\" marker-end=\"url(#arrow)\"/>\n",
+       "    <path d=\"M380 200H550V234\" fill=\"none\" stroke=\"#52657d\" stroke-width=\"3\" marker-end=\"url(#arrow)\"/>\n",
+       "    <rect x=\"60\" y=\"246\" width=\"300\" height=\"92\" rx=\"16\" fill=\"#f0fdf4\" stroke=\"#16a34a\" stroke-width=\"3\"/>\n",
+       "    <text x=\"210\" y=\"302\" font-size=\"30\">來源正確逐字稿</text>\n",
+       "    <rect x=\"400\" y=\"246\" width=\"300\" height=\"92\" rx=\"16\" fill=\"#eff6ff\" stroke=\"#2563eb\" stroke-width=\"3\"/>\n",
+       "    <text x=\"550\" y=\"302\" font-size=\"31\">真錄音</text>\n",
+       "    <path d=\"M550 343V371\" fill=\"none\" stroke=\"#52657d\" stroke-width=\"3\" marker-end=\"url(#arrow)\"/>\n",
+       "    <rect x=\"400\" y=\"383\" width=\"300\" height=\"86\" rx=\"16\" fill=\"#eff6ff\" stroke=\"#2563eb\" stroke-width=\"3\"/>\n",
+       "    <text x=\"550\" y=\"436\" font-size=\"31\">ASR 聽寫</text>\n",
+       "    <path d=\"M550 474V502\" fill=\"none\" stroke=\"#52657d\" stroke-width=\"3\" marker-end=\"url(#arrow)\"/>\n",
+       "    <rect x=\"400\" y=\"514\" width=\"300\" height=\"86\" rx=\"16\" fill=\"#eff6ff\" stroke=\"#2563eb\" stroke-width=\"3\"/>\n",
+       "    <text x=\"550\" y=\"567\" font-size=\"30\">原始辨識稿</text>\n",
+       "    <path d=\"M210 344V652\" fill=\"none\" stroke=\"#52657d\" stroke-width=\"3\" marker-end=\"url(#arrow)\"/>\n",
+       "    <path d=\"M550 605V652\" fill=\"none\" stroke=\"#52657d\" stroke-width=\"3\" marker-end=\"url(#arrow)\"/>\n",
+       "    <rect x=\"60\" y=\"666\" width=\"300\" height=\"90\" rx=\"16\" fill=\"#fff7ed\" stroke=\"#ea8a31\" stroke-width=\"3\"/>\n",
+       "    <rect x=\"400\" y=\"666\" width=\"300\" height=\"90\" rx=\"16\" fill=\"#fff7ed\" stroke=\"#ea8a31\" stroke-width=\"3\"/>\n",
+       "    <text x=\"210\" y=\"721\" font-size=\"29\">同一聊天模型</text><text x=\"550\" y=\"721\" font-size=\"29\">同一聊天模型</text>\n",
+       "    <path d=\"M210 761V792\" fill=\"none\" stroke=\"#52657d\" stroke-width=\"3\" marker-end=\"url(#arrow)\"/>\n",
+       "    <path d=\"M550 761V792\" fill=\"none\" stroke=\"#52657d\" stroke-width=\"3\" marker-end=\"url(#arrow)\"/>\n",
+       "    <rect x=\"60\" y=\"807\" width=\"300\" height=\"88\" rx=\"16\" fill=\"#ffffff\" stroke=\"#94a3b8\" stroke-width=\"2\"/>\n",
+       "    <rect x=\"400\" y=\"807\" width=\"300\" height=\"88\" rx=\"16\" fill=\"#ffffff\" stroke=\"#94a3b8\" stroke-width=\"2\"/>\n",
+       "    <text x=\"210\" y=\"861\" font-size=\"29\">文字路線回答</text><text x=\"550\" y=\"861\" font-size=\"29\">語音路線回答</text>\n",
+       "    <text x=\"380\" y=\"945\" font-size=\"30\">兩路使用相同權重、歷史與照片</text>\n",
+       "    <text x=\"380\" y=\"989\" font-size=\"29\">先核對聽寫，再核對兩份完整回答。</text>\n",
+       "  </g>\n",
+       "</svg>"
+      ],
+      "text/plain": [
+       "<IPython.core.display.SVG object>"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    }
+   ],
+   "source": [
+    "# @title 本節圖解\n",
+    "from IPython.display import SVG, display\n",
+    "\n",
+    "display(SVG(filename=str(root / \"course/figures/natural-v4-asr-two-routes.svg\")))"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "先用手寫漏字例子看影響。字元錯誤率CER的算法是：把辨識文字改回原話，最少需要幾次插字、刪字或換字，再除以原話的字元數。例如補回漏掉的「不」，只需要一次插字。這裡每個中文字與句號各算一個字元，不移除標點。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 3,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:20:45.546657Z",
+     "iopub.status.busy": "2026-10-04T19:20:45.546435Z",
+     "iopub.status.idle": "2026-10-04T19:20:45.555441Z",
+     "shell.execute_reply": "2026-10-04T19:20:45.552323Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "最少編輯次數 1\n",
+      "參考字數 9\n",
+      "CER百分比 11.1\n",
+      "兩份問題相同 False\n"
+     ]
+    }
+   ],
+   "source": [
+    "from tiny_perceptron.natural_concepts import text_error_report\n",
+    "\n",
+    "reference = \"請推薦不辣的晚餐。\"\n",
+    "recognized = \"請推薦辣的晚餐。\"\n",
+    "report = text_error_report(reference, recognized)\n",
+    "print(\"最少編輯次數\", report[\"edits\"])\n",
+    "print(\"參考字數\", report[\"reference_characters\"])\n",
+    "print(\"CER百分比\", round(report[\"cer\"] * 100, 1))\n",
+    "print(\"兩份問題相同\", reference == recognized)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "`report`保存核對結果：`edits`是最少編輯次數，`reference_characters`是參考字元數，`cer`是前者除以後者。這題只漏一個字，原話含句號共9個字元，1÷9×100約為11.1%，所以輸出1、9、11.1與False。這個CER描述轉寫的字元差距，不能代替需求是否仍相同：一個否定詞就能反轉限制。程式沒有播放錄音，也沒有請聊天模型生成；它隔離的是中間文字改動。\n",
+    "\n",
+    "正式檢查留下三項：ASR逐字稿與來源原話的差距，正確文字輸入時的聊天回應，以及真ASR輸入時的聊天回應。兩路使用相同歷史、問題要求與照片。若正確文字已答不好，問題不全在ASR；若文字能答、辨識後不能答，再查看關鍵字是否被聽錯。\n",
+    "\n",
+    "本課用真人朗讀的問句檢查這條路，例如詢問如何加強溝通。來源給錄音與逐字稿；本課在生成回答前，先訂好什麼樣的回應才算符合問句要求。這些是人讀出來的問句，不是自然錄下的即興聊天，仍需另外測口音、噪聲、多人重疊與長對話。ASR採現成權重時，這份檢查也不是本課重新訓練辨識器的證據。\n",
+    "\n",
+    "使用者可以在介面改正逐字稿，再送出。這是明確的人工操作；評估原始語音路線時，仍保存更正前辨識，不偷偷換成來源真值。練習把「不」補回，確認CER變0，再想：即使聽寫完全正確，聊天還要滿足哪些條件？[20.13的能力卡](https://birdhackor.github.io/tiny-perceptron-vlm/20.13.html)記錄各項能力與限制，會把兩站的結果分開回答。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "20.12"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

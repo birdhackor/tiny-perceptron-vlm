@@ -1,0 +1,187 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 11.1 維度相同就能理解圖片嗎？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "把圖片接到文字模型後，紅圖與藍圖的回答分數不同，這看起來像模型在看圖。但是兩次都答「綠」也可能有不同分數；差異只表示訊號有傳過來，沒有保證內容正確。本節把接頭能傳遞差異與模型理解圖片分開檢查。\n",
+    "\n",
+    "前置是[10.6的projector接頭](https://birdhackor.github.io/tiny-perceptron-vlm/10.6.html)與[10.5的視覺特徵訓練](https://birdhackor.github.io/tiny-perceptron-vlm/10.5.html)。維度相容指每位置數字數量符合下一層要求；語義對齊則指視覺內容經接頭後，能被語言模型用來作出正確回答。同樣8個數字，並不表示兩個系統對它們有同一種解讀。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:14:54.400989Z",
+     "iopub.status.busy": "2026-10-04T19:14:54.400785Z",
+     "iopub.status.idle": "2026-10-04T19:14:55.699200Z",
+     "shell.execute_reply": "2026-10-04T19:14:55.698305Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7fb7d9566610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:14:55.701949Z",
+     "iopub.status.busy": "2026-10-04T19:14:55.701694Z",
+     "iopub.status.idle": "2026-10-04T19:14:55.712372Z",
+     "shell.execute_reply": "2026-10-04T19:14:55.711650Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "輸出形狀 (1, 8)\n",
+      "對輸入差異敏感 True\n"
+     ]
+    }
+   ],
+   "source": [
+    "import torch\n",
+    "from torch import nn\n",
+    "\n",
+    "torch.manual_seed(0)\n",
+    "projector = nn.Linear(4, 8)\n",
+    "a, b = torch.zeros(1, 4), torch.ones(1, 4)\n",
+    "difference = (projector(a) - projector(b)).norm()\n",
+    "print(\"輸出形狀\", tuple(projector(a).shape))\n",
+    "print(\"對輸入差異敏感\", difference.item() > 0)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "輸入是兩個人工特徵：全0與全1，都寬4。`nn.Linear(4,8)`產生8個輸出，每個輸出都有自己的計算配方：把4個輸入各乘一個權重，再加總，最後加上一個偏置。權重控制各個輸入的份量，偏置是這個輸出固定多加的數。例如某個輸出的權重為[1,2,0,0]、偏置為0.5，全0輸入得到0.5，全1輸入得到3.5；這些數只用來解釋配方，程式的實際權重由亂數初始化。\n",
+    "\n",
+    "`norm()`計算兩個輸出差向量的長度：把8個差各自平方、加總，再開平方根。`difference.item()`取出這個只有一格的tensor所保存的普通Python數字，`>0`檢查差長度是否大於0。輸出形狀`(1,8)`，第二行True。這個結果沒有標準答案，也沒有語言模型，所以只能說隨機變換通常會對輸入有反應。它甚至還不知道a代表紅還是方塊。\n",
+    "\n",
+    "實際對齊至少需要三種對照。先用文字告訴語言模型「這是紅色圓形」，問顏色，確認它原本會答紅；再送相同屬性的圖，問同一問題，確認能答紅；最後換藍色同形狀圖，確認答案按規則改為藍。第一個檢查語言基礎，第二個檢查跨介面使用，第三個檢查圖片因果作用。只看兩組logits不同，會漏掉是否答對。\n",
+    "\n",
+    "若編碼器本來無法區分紅藍，接頭沒有足夠資訊；若語言模型連文字描述都不會用，單獨訓練接頭也未必夠。對齊要把已有相關能力接起來，不能預設一個小接頭必定補齊兩端所有知識。後面會分別列出可訓練範圍與訓練目標。\n",
+    "\n",
+    "實際對齊時，要分開保存兩端的基礎成績，再核對接起來的回答；[11.3](https://birdhackor.github.io/tiny-perceptron-vlm/11.3.html)會用一份完整實驗說明如何區分這些證據。\n",
+    "\n",
+    "可以把三種對照都問同一句「什麼顏色」：文字紅圓→紅，紅圓圖→紅，藍圓圖→藍。第一步若失敗，圖片接頭無法獨自證明後續錯誤來自哪裡；第二步失敗而第一步成功，就更值得查視覺特徵與接頭；第三步才檢查它沒有對每張圖都回紅。這是一個逐段定位方法，不是在測試前假設各組件都有效。隨機接頭對0與1的輸出差通常非零，就像插座有電卻不表示收音機調到正確頻道，必須再核對收到的內容。\n",
+    "\n",
+    "練習在`difference = ...`那一行之前加入下面兩行，保持偏置不變，然後從頭重跑。`projector.weight`是接頭那份權重；`zero_()`把裡面所有數字原地改成0，尾端的底線提醒我們它會修改原物件。`torch.no_grad()`讓縮排內這次手動改值不被記入求導關係；這裡只是安排對照用的權重，不是在做訓練更新。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 3,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:14:55.713764Z",
+     "iopub.status.busy": "2026-10-04T19:14:55.713536Z",
+     "iopub.status.idle": "2026-10-04T19:14:55.718309Z",
+     "shell.execute_reply": "2026-10-04T19:14:55.717318Z"
+    }
+   },
+   "outputs": [],
+   "source": [
+    "with torch.no_grad():\n",
+    "    projector.weight.zero_()"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "所有輸入都先乘0，所以每個輸出只剩自己的偏置；a與b會得到同一排8個偏置值。先預測重新計算的差長度為0、第二行False，再執行核對。不能等差值已算好才清零權重，因為既有的`difference`不會自動重算。這個失敗能找出接頭沒有傳差異，卻仍不能獨立診斷語言理解是否正確；不同檢查負責不同問題。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "11.1"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

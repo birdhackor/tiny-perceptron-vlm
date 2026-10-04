@@ -1,0 +1,161 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 7.8 補了 PAD 該取哪個輸出？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "短問題兩格、長問題四格一起放batch，短題右邊補兩PAD。要生成下一項時，短題應該取第1格的logits，而不是整張表最後第3格；後者是填充位置。若一律 `logits[:,-1]`，長題可對、短題卻錯。需要每筆分別找最後有效位置，再拿它的下一token分數。\n",
+    "\n",
+    "valid來自 [7.7](https://birdhackor.github.io/tiny-perceptron-vlm/7.7.html) 的有效位置表。第一筆 `[True,True,False,False]` 最後有效索引1；第二筆示範左PAD `[False,True,True,True]`，最後有效索引3。左填充時 `sum(valid)-1` 得2，卻不是物理格3，所以不能只數有幾個token推末尾格，應直接找True所在位置最大值。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "cellView": "form",
+    "course_setup": true,
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:12:32.080146Z",
+     "iopub.status.busy": "2026-10-04T19:12:32.079965Z",
+     "iopub.status.idle": "2026-10-04T19:12:33.387668Z",
+     "shell.execute_reply": "2026-10-04T19:12:33.386622Z"
+    },
+    "jupyter": {
+     "source_hidden": true
+    },
+    "tags": [
+     "hide-input"
+    ]
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<torch._C.Generator at 0x7f22b854e610>"
+      ]
+     },
+     "execution_count": 1,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-10-04T19:12:33.392849Z",
+     "iopub.status.busy": "2026-10-04T19:12:33.392536Z",
+     "iopub.status.idle": "2026-10-04T19:12:33.408165Z",
+     "shell.execute_reply": "2026-10-04T19:12:33.406971Z"
+    }
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "最後有效索引 tensor([1, 3])\n",
+      "取出的候選分數 tensor([[ 5.,  6.,  7.,  8.,  9.],\n",
+      "        [35., 36., 37., 38., 39.]])\n"
+     ]
+    }
+   ],
+   "source": [
+    "import torch\n",
+    "\n",
+    "valid = torch.tensor([[True, True, False, False], [False, True, True, True]])\n",
+    "positions = torch.arange(4)[None].expand_as(valid)\n",
+    "last = positions.masked_fill(~valid, -1).amax(dim=-1)\n",
+    "logits = torch.arange(40, dtype=torch.float32).reshape(2, 4, 5)\n",
+    "selected = logits[torch.arange(2), last]\n",
+    "print(\"最後有效索引\", last)\n",
+    "print(\"取出的候選分數\", selected)\n",
+    "assert last.tolist() == [1, 3]"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "輸入兩筆有效表和人為編號的候選分數，每位置五候選。`arange(4)` 產生0到3，`[None]` 加筆軸，`expand_as` 讓每筆共用這排物理位置編號。`~valid` 將真/假反過來，`masked_fill` 把無效格位置設-1，再沿各筆取最大 `amax`，得到 `[1,3]`。\n",
+    "\n",
+    "logits用0到39排成 `[2,4,5]`，數字只為取值清楚。`logits[torch.arange(2),last]` 同時指定兩筆各自的末格：第0筆格1是 `[5,6,7,8,9]`，第1筆格3是 `[35,36,37,38,39]`。輸出形狀 `[2,5]`，每筆一組下一項候選，而不是再多取一個位置軸。\n",
+    "\n",
+    "這種索引選取不會改變模型，也不會自動做softmax；下一步才按 [1.15](https://birdhackor.github.io/tiny-perceptron-vlm/1.15.html) 選擇候選。它解決的是「從哪些當前位置結果開始生成」，若前面的有效mask或位置ID錯了，即使取對末格仍可能使用錯誤預測。\n",
+    "\n",
+    "若某筆全False，last=-1會在Python索引裡表示最後一格，而不是自動報告沒有有效輸入；正式生成前應明確拒絕這種空題。本例兩筆都有True，所以先集中看左右PAD差別。專案的簡單generate入口僅接受未補齊的路線，batch生成需要把這一步與其他規則完整接上。\n",
+    "\n",
+    "練習只把第一筆改成 `[False,False,True,True]`，先預測last從1變3，取值變 `[15,16,17,18,19]`，第二筆保持不動，再執行並改檢查核對。這次有效數仍兩格，卻末索引不同，直接證明數量與最後位置是不同資訊。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.13.5"
+  },
+  "lesson_id": "7.8"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}
