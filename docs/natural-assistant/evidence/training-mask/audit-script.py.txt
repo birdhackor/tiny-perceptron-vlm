@@ -1,0 +1,58 @@
+import hashlib
+import json
+import platform
+import sys
+import time
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from transformers import AutoProcessor
+from tiny_perceptron import natural_assistant as a
+
+started = time.monotonic()
+manifest, data = a.load_manifest(ROOT / 'docs/natural-assistant/manifest.json', ROOT / 'data/natural')
+processor = AutoProcessor.from_pretrained(
+    a.MODEL_ID, revision=a.MODEL_REVISION,
+    cache_dir=ROOT / 'outputs/natural-extension/student-base-cache/hf',
+    local_files_only=True, min_pixels=65536, max_pixels=524288,
+)
+records = []
+for row in manifest['rows']:
+    if row['split'] != 'train':
+        continue
+    batch = a.encode_training_row(processor, row, data, 2048)
+    prompt = a.encode_messages(processor, a.messages_for(row, data), data, generation_prompt=True)
+    n = prompt['input_ids'].shape[-1]
+    assert bool((batch['labels'][:, :n] == -100).all())
+    assert bool((batch['labels'][:, n:] == batch['input_ids'][:, n:]).all())
+    labels = batch['labels'][0, 1:]
+    supervised = int((labels != -100).sum())
+    assert supervised > 0
+    target_ids = labels[labels != -100].tolist()
+    assert processor.tokenizer.eos_token_id in target_ids
+    records.append({
+        'id': row['id'], 'task': row['task'], 'split': 'train',
+        'input_tokens': int(batch['input_ids'].shape[-1]), 'prompt_tokens_masked': n,
+        'shifted_supervised_tokens': supervised,
+        'eos_in_supervised_suffix': True,
+        'all_prompt_labels_ignore': True,
+        'all_suffix_labels_equal_input_ids': True,
+        'image_grid_thw': batch['image_grid_thw'].tolist() if 'image_grid_thw' in batch else None,
+    })
+result = {
+    'schema_version': 1, 'scope': 'Actual CPU encoding audit of every training row once; no model loaded, no gradient update, no evaluation or training result claimed',
+    'python': platform.python_version(), 'versions': a.environment_versions(),
+    'manifest_sha256': manifest['manifest_sha256'], 'model_revision': a.MODEL_REVISION,
+    'code_sha256': a.sha256(ROOT / 'tiny_perceptron/natural_assistant.py'),
+    'script_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+    'min_pixels': 65536, 'max_pixels': 524288, 'max_tokens': 2048,
+    'row_count': len(records), 'max_input_tokens': max(r['input_tokens'] for r in records),
+    'single_pass_shifted_supervised_tokens': sum(r['shifted_supervised_tokens'] for r in records),
+    'elapsed_seconds': time.monotonic() - started, 'all_contracts_passed': True, 'rows': records,
+}
+out = ROOT / 'docs/natural-assistant/evidence/training-mask'
+out.mkdir(parents=True, exist_ok=True)
+a.write_json(out / 'result.json', result)
+(out / 'audit-script.py.txt').write_bytes(Path(__file__).read_bytes())
+print(json.dumps({k: v for k, v in result.items() if k != 'rows'}))

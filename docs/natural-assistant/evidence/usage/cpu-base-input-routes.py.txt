@@ -1,0 +1,31 @@
+import json, sys, time
+from pathlib import Path
+ROOT=Path('/workspace/tiny-perceptron-vlm')
+sys.path.insert(0,str(ROOT))
+from scripts.natural_assistant import parser
+from tiny_perceptron import natural_assistant as a
+import torch
+torch.set_num_threads(4)
+out=ROOT/'outputs/natural-extension/student-cpu-probe'
+out.mkdir(parents=True,exist_ok=True)
+args=parser().parse_args(['chat','--output',str(out),'--cache-dir',str(ROOT/'outputs/natural-extension/student-base-cache/hf'),'--local-files-only','--device','cpu','--dtype','float32','--max-new-tokens','96'])
+manifest, data=a.load_manifest(ROOT/'docs/natural-assistant/manifest.json', ROOT/'data/natural')
+start=time.monotonic()
+model, processor=a.load_core(args)
+records=[]
+for task in ('scene','ocr'):
+ row=dict(next(row for row in manifest['rows'] if row['split']=='train' and row['task']==task))
+ if task=='scene': row['user']='請用繁體中文，以一句話描述這張照片的主要內容。'
+ result=a.generate(model,processor,row,data,args)
+ result['scope']='Actual pretrained base CPU usage on a training image, not heldout evaluation or adapter ability'
+ records.append(result)
+ a.write_json(out/'images.json',records)
+ print(task,result['prediction'],flush=True)
+asr_model, asr_processor=a.load_asr(args)
+row=dict(next(row for row in manifest['audio_rows'] if row['split']=='train'))
+transcript=a.transcribe(asr_model,asr_processor,data/row['audio'])
+spoken=a.generate(model,processor,dict(row,user=transcript['transcript']),data,args)
+result={'scope':'Actual public pretrained base/frozen ASR CPU input routes using train media, not heldout metric or adapter ability','provenance':a.provenance(args,manifest),'parameters':a.parameter_counts(model),'image_generations':records,'audio':transcript,'speech_response':spoken,'elapsed_seconds':time.monotonic()-start}
+a.write_json(out/'result.json',result)
+print('ASR',transcript['transcript'],flush=True)
+print('SPEECH_REPLY',spoken['prediction'],flush=True)

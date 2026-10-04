@@ -12,7 +12,7 @@
 
 ## 教材提供什麼
 
-19章與A／B／C支線，共248份逐課Notebook；加上閱讀指南、暖身、訓練操作與名詞頁，共274個編號小節。教材另有自製SVG圖解與逐步提示。前段只用小矩陣、接字表、MLP與手寫注意力；後段才加入現代架構、Dense／MoE、cache／SDPA、量化與蒸餾。可以來回跳章，不需要從頭把同一個模型訓練到底。
+20章與A／B／C支線，共261份逐課Notebook；加上閱讀指南、暖身、訓練操作與名詞頁，共287個編號小節。教材另有自製SVG圖解與逐步提示。前段只用小矩陣、接字表、MLP與手寫注意力；後段才加入現代架構、Dense／MoE、cache／SDPA、量化與蒸餾。可以來回跳章，不需要從頭把同一個模型訓練到底。
 
 文字與圖音模型、對話遮罩、DPO、量化儲存與訓練基本件直接以 PyTorch 實作。資料、訓練、推論與評估有可執行入口。LoRA、QAT 與小型 RL 等概念提供局部實驗；影片目前提供逐幀切片的輔助函式，完整教學列為後續擴充。此版本沒有提供已訓練的通用影音助理。
 
@@ -21,6 +21,8 @@
 [第19章整合專題](course/chapters/19.md#19.1)已在同一個小型MoE底座接續文字、對話與聯合任務訓練，保存DPO對照、量化版本與[部署評估](docs/course-experiments/results/capstone_deployment.json)。任務限於可逐題核對的合成小世界；推薦的聯合任務模型通過78／90題，仍有未學會的項目，完整成功與失敗見[19.12](course/chapters/19.md#19.12)。親手試用前，先依[19.11](course/chapters/19.md#19.11)取得指定推論檔，再回19.1開啟試用介面。成品與學生共11份推論檔已公開，使用[第19章固定下載清單](docs/course-experiments/capstone-public.json)；與下方原有30組／120份各章權重放在同一Hugging Face倉庫，兩批清單分開查閱。
 
 [較小Dense學生](course/chapters/19.md#19.10)也已完成示範與蒸餾對照：同一份90題中，只學示範通過62題，加入教師分布的蒸餾版通過61題，後者量化成4-bit仍通過61題。這次蒸餾沒有勝過直接學示範；逐題結果保留於[學生實報](docs/course-experiments/results/capstone_student.json)，沒有把它說成通用助理。
+
+[第20章](course/chapters/20.md#20.1)另接手約21.3億參數的Qwen3-VL圖文底座，實際微調約161萬個LoRA修正參數；華語錄音先由Whisper轉成文字，再交給同一份聊天模型。公開權重與Linux本機網頁的操作步驟見[20.8](course/chapters/20.md#20.8)。這條路已有照片、中文讀字與語音輸入的真實測試，也保留嚴重失敗：合成中文字卡抄寫與行序通過18/18題，外部自然中文圖片卻只通過1/10張逐字核對。請先讀能力表，再決定要拿它做哪種練習。
 
 第一次接觸本專案也能從第一節開始；Python、tensor、機率、矩陣與梯度都有可按需查閱的暖身，不必先修完所有數學。每節先說明問題與具體例子，所需背景提供可點擊的小節連結。CPU 小程式用來核對零件；另外的正式訓練會更新權重、固定留出題，並保存程式版本、資料來源與逐題結果。合成小任務與自然資料的短訓成績各有適用範圍，不能合起來宣稱通用助理能力。見[正式實驗與進度](docs/course-experiments/README.md)及[驗證報告](docs/validation.md)。
 
@@ -47,7 +49,7 @@ Windows PowerShell 啟用指令是 `.venv\Scripts\Activate.ps1`。選擇 **Tiny 
 | NVIDIA CUDA 13.0 相容硬體／驅動 | `uv sync --frozen --extra cu130 --group notebook` |
 | NVIDIA CUDA 12.6 相容硬體／驅動 | `uv sync --frozen --extra cu126 --group notebook` |
 
-各版本的顯卡與驅動限制、Colab和鏡像設定見[環境說明](docs/environment.md)。使用 extra 後，啟用 `.venv` 直接用 `python`，或每次 `uv run` 都帶相同 extra，避免更換 PyTorch。本機小節核驗使用CPU；正式訓練另在Modal的NVIDIA L4、PyTorch 2.14.1+cu126上實測，版本與結果保存於[實驗報告](docs/course-experiments/README.md)。Apple MPS已在macOS CI通過基本矩陣前向／反向與CPU比對；整套教材與正式模型訓練尚未在MPS驗證，範圍見[CI紀錄](docs/validation-artifacts/release-compatibility-ci.json)。
+各版本的顯卡與驅動限制、Colab和鏡像設定見[環境說明](docs/environment.md)。使用 extra 後，啟用 `.venv` 直接用 `python`，或每次 `uv run` 都帶相同 extra，避免更換 PyTorch。本機小節核驗使用CPU；前19章的正式GPU訓練另在Modal的NVIDIA L4、PyTorch 2.14.1+cu126上實測，版本與結果保存於[實驗報告](docs/course-experiments/README.md)。第20章另用Python 3.12與PyTorch 2.8.0的獨立環境；GPU訓練用CUDA 12.8配套，安裝步驟見[學生操作指引](docs/natural-assistant/STUDENT.md)。Apple MPS已在macOS CI通過基本矩陣前向／反向與CPU比對；整套教材與正式模型訓練尚未在MPS驗證，範圍見[CI紀錄](docs/validation-artifacts/release-compatibility-ci.json)。
 
 只想閱讀，可直接開啟線上教材。全站使用 [Zensical](https://zensical.org/) 建置，提供全文搜尋、章節目錄、頁內目錄、深淺色模式與程式碼複製；每節仍可下載 Notebook 或在 Colab 練習。SVG 可放大並保留靜態標註，支援系統減少動態效果。網站建置另需 `--group site`；本機閱讀與 GitHub Pages 操作見[教材發布](docs/publishing.md)。公式由 MathJax 連網排版。
 

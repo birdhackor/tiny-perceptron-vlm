@@ -1,65 +1,77 @@
-name: Read natural assistant progress
+name: GPU training smoke test
 
+# 只有明確呼叫時才使用 GPU；一般 push 與教材發布不會觸發。
 on:
   workflow_dispatch:
     inputs:
-      run_id:
-        description: Exact active natural-assistant attempt; reports no log or credential contents
+      hf_secret_name:
+        description: Modal Secret name containing HF_TOKEN (optional)
         type: string
-        required: true
-        default: gha-37187947478-1
-      batch_id:
-        description: Existing natural-assistant batch; the probe never resets the ledger
-        type: string
-        required: true
-        default: natural-v3
+        required: false
+        default: ''
 
 permissions:
   contents: read
 
-# Independent from GPU training so a read-only probe can observe an active job.
 concurrency:
-  group: tiny-perceptron-natural-status
+  group: modal-gpu-smoke
   cancel-in-progress: false
 
 jobs:
-  status:
+  smoke:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 25
     env:
       MODAL_TOKEN_ID: ${{ vars.MODAL_TOKEN_ID || secrets.MODAL_TOKEN_ID }}
       MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
       MODAL_ENVIRONMENT: ${{ vars.MODAL_ENVIRONMENT || 'main' }}
-      NATURAL_STATUS_RUN: ${{ inputs.run_id }}
-      NATURAL_STATUS_BATCH: ${{ inputs.batch_id }}
+      HF_CHECKPOINT_REPO: ${{ vars.HF_CHECKPOINT_REPO }}
+      HF_RELEASE_REPO: ${{ vars.HF_RELEASE_REPO }}
+      HF_MODAL_SECRET: ${{ inputs.hf_secret_name || vars.HF_MODAL_SECRET }}
     steps:
       - uses: actions/checkout@v7
-        with:
-          lfs: false
-      - uses: actions/setup-python@v6
-        with:
-          python-version: '3.12'
-      - name: Check existing Modal settings without exposing values
+      - name: Check required settings without revealing credentials
         shell: bash
         run: |
           set -euo pipefail
-          for name in MODAL_TOKEN_ID MODAL_TOKEN_SECRET; do
+          missing=0
+          for name in MODAL_TOKEN_ID MODAL_TOKEN_SECRET HF_CHECKPOINT_REPO HF_RELEASE_REPO; do
             if [ -z "${!name}" ]; then
-              echo "::error::Missing existing Repository setting: $name"
-              exit 1
+              echo "::error::Missing repository secret or variable: $name"
+              missing=1
             fi
           done
-          python -m py_compile scripts/modal_natural_status.py
-      - name: Install only the existing Modal client
+          exit "$missing"
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - name: Install only the Modal client
         run: python -m pip install modal==1.6.0
-      - name: Read bounded progress metadata without GPU or HF writes
+      - name: Find the configured Hugging Face Secret without reading its value
+        run: python scripts/select_modal_hf_secret.py
+      - name: Train on Modal L4 and verify Hugging Face checkpoints
         run: |
-          modal run scripts/modal_natural_status.py \
-            --run-id "$NATURAL_STATUS_RUN" --batch-id "$NATURAL_STATUS_BATCH"
-      - name: Save read-only status evidence
+          modal run scripts/modal_smoke.py \
+            --checkpoint-repo "$HF_CHECKPOINT_REPO" \
+            --release-repo "$HF_RELEASE_REPO" \
+            --run-id "gha-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --revision "$GITHUB_SHA"
+      - name: Save test evidence
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: natural-status-${{ github.run_id }}-${{ github.run_attempt }}
-          path: outputs/natural-status/result.json
+          name: modal-gpu-smoke-result
+          path: outputs/modal-smoke/result.json
           if-no-files-found: ignore
+      - name: Show test result
+        run: |
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          result = json.loads(Path('outputs/modal-smoke/result.json').read_text())
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+              summary.write('## Modal GPU training verification\n\n')
+              summary.write(f"GPU: {result['gpu']}\n\n")
+              summary.write(f"Train loss: {result['loss_before']['train']:.4f} → {result['loss_after']['train']:.4f}\n\n")
+              summary.write('```json\n' + json.dumps(result, ensure_ascii=False, indent=2) + '\n```\n')
+          PY
