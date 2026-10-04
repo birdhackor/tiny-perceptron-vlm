@@ -30,13 +30,17 @@ LEDGER_PATH = VOLUME_ROOT / "budget.json"
 TOTAL_CAP_USD = Decimal("40.00")
 PRIOR_RESERVED_FLOOR_USD = Decimal("9.84")
 MAX_JOB_USD = Decimal("2.00")
-STAGES = ("prepare", "baseline", "train", "validation", "evaluate", "release")
+STAGES = ("prepare", "baseline", "train", "validation", "evaluate", "external_prepare", "external_ocr", "release")
+SELECTION_STAGES = ("evaluate", "external_ocr")
+EXTERNAL_STAGES = ("external_prepare", "external_ocr")
 SPEC = {
     "prepare": {"cpu": 2, "memory_gib": 8, "seconds": 1800, "gpu": False},
     "baseline": {"cpu": 4, "memory_gib": 32, "seconds": 3600, "gpu": True},
     "train": {"cpu": 4, "memory_gib": 32, "seconds": 3600, "gpu": True},
     "validation": {"cpu": 4, "memory_gib": 32, "seconds": 3600, "gpu": True},
     "evaluate": {"cpu": 4, "memory_gib": 32, "seconds": 3600, "gpu": True},
+    "external_prepare": {"cpu": 2, "memory_gib": 8, "seconds": 1800, "gpu": False},
+    "external_ocr": {"cpu": 4, "memory_gib": 32, "seconds": 3600, "gpu": True},
     "release": {"cpu": 1, "memory_gib": 4, "seconds": 1800, "gpu": False},
 }
 # These allowances are reservations, not measured invoice amounts. Network and
@@ -50,6 +54,7 @@ MAX_REVIEW_DOWNLOAD_BYTES = 64 * 1024 * 1024
 
 PHASE = os.environ.get("NATURAL_MODAL_PHASE", "control")
 MANIFEST_RELATIVE = os.environ.get("NATURAL_MANIFEST", "docs/natural-assistant/manifest.json")
+EXTERNAL_METADATA_RELATIVE = "docs/natural-assistant/external-ocr.json"
 app = modal.App("tiny-perceptron-natural-assistant-v3")
 volume = modal.Volume.from_name("tiny-perceptron-course", create_if_missing=False)
 hf_secret = modal.Secret.from_name(os.environ.get("HF_MODAL_SECRET") or "codex_cloud", required_keys=["HF_TOKEN"])
@@ -235,6 +240,60 @@ def selection_gate(selection, manifest_sha, adapter_run_id, batch_id):
     }
 
 
+def validate_external_metadata(metadata):
+    if metadata.get("schema_version") != 1 or metadata.get("training_allowed") is not False:
+        raise ValueError("External OCR metadata must explicitly forbid training")
+    rows, files, sources = metadata.get("rows", []), metadata.get("files", []), metadata.get("sources", [])
+    if len(rows) != 10 or len(files) != 10 or not sources:
+        raise ValueError("External OCR requires the ten preselected frozen image/GT cases")
+    for source in sources:
+        if (
+            not str(source.get("url", "")).startswith("https://")
+            or not re.fullmatch(r"[a-f0-9]{40}", source.get("revision", ""))
+            or source["revision"] not in source["url"]
+            or not re.fullmatch(r"[a-f0-9]{64}", source.get("sha256", ""))
+            or type(source.get("bytes")) is not int
+            or not 0 < source["bytes"] <= 256 * 1024 * 1024
+        ):
+            raise ValueError("External TSV source requires exact immutable revision, size and SHA-256")
+    for row in rows:
+        if row.get("split") != "test" or row.get("task") != "ocr":
+            raise ValueError("External cases must stay test-only OCR and cannot select or train the model")
+        original_gt = row.get("source", {}).get("original_gt")
+        if (
+            not isinstance(original_gt, str)
+            or row.get("answer") != original_gt
+            or hashlib.sha256(original_gt.encode()).hexdigest() != row.get("source", {}).get("original_gt_sha256")
+        ):
+            raise ValueError("External OCR must retain the unmodified original author GT and its SHA-256")
+        safe_relative(row.get("image", ""))
+    return metadata
+
+
+def external_cache_guard(metadata_sha):
+    directory = NATURAL_ROOT / "external-ocr" / metadata_sha
+    manifest_path = directory / "manifest.json"
+    receipt_path = directory / "prepare-receipt.json"
+    if not manifest_path.is_file() or sha256(manifest_path) != metadata_sha or not receipt_path.is_file():
+        raise ValueError("Run external_prepare on the fixed external metadata before GPU inference")
+    metadata = validate_external_metadata(json.loads(manifest_path.read_text()))
+    receipt = json.loads(receipt_path.read_text())
+    if (
+        receipt.get("status") != "passed"
+        or receipt.get("source_metadata_sha256") != metadata_sha
+        or receipt.get("manifest_sha256") != metadata_sha
+        or receipt.get("full_tsv_hashes_verified") is not True
+        or receipt.get("all_original_gt_and_image_hashes_verified") is not True
+        or receipt.get("original_image_count") != 10
+    ):
+        raise ValueError("External cache lacks the completed original TSV/image/GT verification receipt")
+    for item in metadata["files"]:
+        path = directory / safe_relative(item["path"])
+        if not path.is_file() or path.stat().st_size != item["bytes"] or sha256(path) != item["sha256"]:
+            raise ValueError("Cached external image differs from its pinned original bytes")
+    return directory
+
+
 @app.function(
     image=control_image,
     cpu=(0.25, 0.25),
@@ -245,26 +304,40 @@ def selection_gate(selection, manifest_sha, adapter_run_id, batch_id):
     max_containers=1,
     scaledown_window=2,
 )
-def reserve_remote(run_id, batch_id, stage, revision, manifest_sha, live, selection_text="", adapter_run_id=""):
+def reserve_remote(
+    run_id,
+    batch_id,
+    stage,
+    revision,
+    manifest_sha,
+    live,
+    selection_text="",
+    adapter_run_id="",
+    external_metadata_sha="",
+):
     volume.reload()
     if not LEDGER_PATH.is_file():
         raise RuntimeError("Existing shared course budget.json is absent; refusing a fresh budget")
     ledger = json.loads(LEDGER_PATH.read_text())
     selection_proof = None
-    if stage == "evaluate":
+    if stage in SELECTION_STAGES:
         selection_proof = selection_gate(json.loads(selection_text), manifest_sha, adapter_run_id, batch_id)
+    if stage == "external_ocr":
+        external_cache_guard(external_metadata_sha)
     item = reservation(ledger, run_id, batch_id, stage, revision, manifest_sha, live)
     if selection_proof:
         item.update(
             selection_sha256=hashlib.sha256(selection_text.encode()).hexdigest(),
             selection=selection_proof,
         )
+    if stage in EXTERNAL_STAGES:
+        item["external_metadata_sha256"] = external_metadata_sha
     write_json(LEDGER_PATH, ledger)
     volume.commit()
     return {"budget_usd": ledger["budget_usd"], "reserved_total_usd": ledger["reserved_total_usd"], "entry": item}
 
 
-def require_reservation(run_id, batch_id, stage, revision, manifest_sha, selection_sha=""):
+def require_reservation(run_id, batch_id, stage, revision, manifest_sha, selection_sha="", external_metadata_sha=""):
     ledger = json.loads(LEDGER_PATH.read_text())
     item = next((item for item in ledger["reservations"] if item.get("run_id") == run_id), None)
     if item is None or any(
@@ -278,8 +351,10 @@ def require_reservation(run_id, batch_id, stage, revision, manifest_sha, selecti
         }.items()
     ):
         raise RuntimeError("Stage is missing its exact prior reservation; refusing work")
-    if stage == "evaluate" and item.get("selection_sha256") != selection_sha:
+    if stage in SELECTION_STAGES and item.get("selection_sha256") != selection_sha:
         raise ValueError("Test selection contract differs from the one committed before reserving this attempt")
+    if stage in EXTERNAL_STAGES and item.get("external_metadata_sha256") != external_metadata_sha:
+        raise ValueError("External OCR metadata differs from the one committed before reserving this attempt")
     item["status"] = "running"
     write_json(LEDGER_PATH, ledger)
     volume.commit()
@@ -442,13 +517,22 @@ if PHASE == "execute":
         .add_local_dir(ROOT / "tiny_perceptron", "/app/tiny_perceptron", ignore=["**/__pycache__/**"])
         .add_local_dir(ROOT / "scripts", "/app/scripts", ignore=["**/__pycache__/**"])
         .add_local_file(ROOT / manifest_path, f"/app/{manifest_path.as_posix()}")
+        .add_local_file(ROOT / EXTERNAL_METADATA_RELATIVE, f"/app/{EXTERNAL_METADATA_RELATIVE}")
     )
 
     def execute_stage(stage, batch_id, run_id, revision, manifest_sha, options):
         volume.reload()
-        require_reservation(run_id, batch_id, stage, revision, manifest_sha, options.get("selection_sha256", ""))
+        require_reservation(
+            run_id,
+            batch_id,
+            stage,
+            revision,
+            manifest_sha,
+            options.get("selection_sha256", ""),
+            options.get("external_metadata_sha256", ""),
+        )
         selection_proof = None
-        if stage == "evaluate":
+        if stage in SELECTION_STAGES:
             selection_proof = selection_gate(options["selection"], manifest_sha, options["adapter_run_id"], batch_id)
         manifest_file = Path("/app") / manifest_path
         if sha256(manifest_file) != manifest_sha:
@@ -457,14 +541,24 @@ if PHASE == "execute":
         directory.mkdir(parents=True, exist_ok=True)
         manifest = json.loads(manifest_file.read_text())
         data_root = NATURAL_ROOT / "data" / manifest_sha
-        if stage == "prepare":
+        external_metadata_sha = options.get("external_metadata_sha256")
+        external_root = NATURAL_ROOT / "external-ocr" / external_metadata_sha if external_metadata_sha else None
+        if stage in EXTERNAL_STAGES:
+            external_file = Path("/app") / EXTERNAL_METADATA_RELATIVE
+            if sha256(external_file) != external_metadata_sha:
+                raise ValueError("Container external metadata differs from the committed reservation pin")
+            validate_external_metadata(json.loads(external_file.read_text()))
+        if stage == "external_ocr":
+            data_root = external_cache_guard(external_metadata_sha)
+            manifest_file = data_root / "manifest.json"
+        elif stage == "prepare":
             download_archives(manifest, data_root, revision)
-        elif not (data_root / "archive-receipt.json").is_file():
+        elif stage != "external_prepare" and not (data_root / "archive-receipt.json").is_file():
             raise RuntimeError("Run the matching CPU prepare stage before any GPU stage")
         args = [
             "python",
             "scripts/natural_assistant.py",
-            stage,
+            "evaluate" if stage == "external_ocr" else stage,
             "--manifest",
             str(manifest_file),
             "--data-root",
@@ -490,8 +584,21 @@ if PHASE == "execute":
             args.extend(["--split", "test" if stage == "evaluate" else "validation"])
         if stage == "train":
             args.extend(["--steps", str(options["steps"]), "--checkpoint-every", "25"])
+        if stage == "external_ocr":
+            args.extend(["--split", "test", "--max-new-tokens", "384"])
+        if stage == "external_prepare":
+            args = [
+                "python",
+                "scripts/prepare_external_ocr.py",
+                "--metadata",
+                str(external_file),
+                "--output",
+                str(external_root),
+                "--cache-dir",
+                str(NATURAL_ROOT / "cache" / "external-ocr"),
+            ]
         adapter_sha = None
-        if options.get("adapter_run_id"):
+        if options.get("adapter_run_id") and stage != "external_prepare":
             adapter_run_id = safe_name(options["adapter_run_id"])
             adapter = NATURAL_ROOT / batch_id / "train" / adapter_run_id / "adapter"
             if not (adapter / "adapter_model.safetensors").is_file():
@@ -513,6 +620,8 @@ if PHASE == "execute":
                 "adapter_sha256": adapter_sha,
                 "selection_sha256": options.get("selection_sha256"),
                 "pretest_selection": selection_proof,
+                "external_metadata_sha256": external_metadata_sha,
+                "external_evaluation_only": stage in EXTERNAL_STAGES,
             },
         )
         volume.commit()
@@ -535,6 +644,10 @@ if PHASE == "execute":
                     args, check=True, stdout=log, stderr=subprocess.STDOUT, timeout=options["max_seconds"] + 120
                 )
             result_path = directory / "result.json"
+            if stage == "external_prepare":
+                external_cache_guard(external_metadata_sha)
+                receipt = json.loads((external_root / "prepare-receipt.json").read_text())
+                write_json(result_path, {"status": "completed", "external_preparation": receipt})
             if not result_path.is_file():
                 raise RuntimeError("Runner finished without result.json; do not mark the experiment complete")
             result = json.loads(result_path.read_text())
@@ -550,7 +663,44 @@ if PHASE == "execute":
                 "adapter_sha256": adapter_sha,
                 "selection_sha256": options.get("selection_sha256"),
                 "pretest_selection": selection_proof,
+                "external_metadata_sha256": external_metadata_sha,
+                "external_evaluation_only": stage in EXTERNAL_STAGES,
             }
+            if stage == "external_ocr":
+                from PIL import Image
+
+                external_metadata = json.loads(manifest_file.read_text())
+                evidence = []
+                for row in external_metadata["rows"]:
+                    image_path = data_root / safe_relative(row["image"])
+                    with Image.open(image_path) as opened:
+                        image = opened.convert("RGB")
+                        pixel_sha = hashlib.sha256(image.tobytes()).hexdigest()
+                        size = list(image.size)
+                    evidence.append(
+                        {
+                            "id": row["id"],
+                            "original_gt": row["source"]["original_gt"],
+                            "original_gt_sha256": row["source"]["original_gt_sha256"],
+                            "original_image_sha256": sha256(image_path),
+                            "original_image_size": size,
+                            "decoded_rgb_pixel_sha256": pixel_sha,
+                            "pixel_hash_scope": "Decoded original RGB pixels before AutoProcessor resize/normalization; not model tensor values",
+                            "annotation_review": row["source"].get("annotation_review"),
+                        }
+                    )
+                result["external_evaluation"] = {
+                    "metadata_sha256": external_metadata_sha,
+                    "selected_before_test_sha256": options["selection_sha256"],
+                    "max_new_tokens": 384,
+                    "max_pixels": options["max_pixels"],
+                    "training_performed": False,
+                    "raw_images_redistributed": False,
+                    "rows": evidence,
+                    "scoring_policy": external_metadata["scoring_policy"],
+                    "split_policy": external_metadata["split_policy"],
+                }
+                write_json(directory / "external-evidence.json", result["external_evaluation"])
             write_json(result_path, result)
             return result
         except Exception as error:
@@ -579,6 +729,19 @@ if PHASE == "execute":
 
     @app.function(
         image=natural_image,
+        cpu=(2, 2),
+        memory=(8192, 8192),
+        volumes={"/course": volume},
+        timeout=1800,
+        retries=0,
+        max_containers=1,
+        scaledown_window=2,
+    )
+    def external_prepare_remote(batch_id, run_id, revision, manifest_sha, options):
+        return execute_stage("external_prepare", batch_id, run_id, revision, manifest_sha, options)
+
+    @app.function(
+        image=natural_image,
         gpu="L4",
         cpu=(4, 4),
         memory=(32768, 32768),
@@ -589,7 +752,7 @@ if PHASE == "execute":
         scaledown_window=2,
     )
     def gpu_remote(stage, batch_id, run_id, revision, manifest_sha, options):
-        if stage not in ("baseline", "train", "validation", "evaluate"):
+        if stage not in ("baseline", "train", "validation", "evaluate", "external_ocr"):
             raise ValueError("Only fixed GPU stages are allowed")
         return execute_stage(stage, batch_id, run_id, revision, manifest_sha, options)
 
@@ -809,6 +972,7 @@ def download_review(batch_id, stage, run_id, output, receipt):
         "generations-base.json",
         "generations-adapter.json",
         "transcripts.json",
+        "external-evidence.json",
         "provenance.json",
         "training.json",
         "execution.json",
@@ -874,9 +1038,14 @@ def main(
     manifest_text = committed_text(manifest, revision, ("docs", "natural-assistant"))
     manifest_sha = hashlib.sha256(manifest_text.encode()).hexdigest()
     selection_text = ""
-    if selected == "evaluate":
+    if selected in SELECTION_STAGES:
         selection_text = committed_text(selection_file, revision, ("docs", "natural-assistant"))
         validate_selection(json.loads(selection_text), manifest_sha, adapter_run_id)
+    external_metadata_sha = ""
+    if selected in EXTERNAL_STAGES:
+        external_text = committed_text(EXTERNAL_METADATA_RELATIVE, revision, ("docs", "natural-assistant"))
+        validate_external_metadata(json.loads(external_text))
+        external_metadata_sha = hashlib.sha256(external_text.encode()).hexdigest()
     if stage == "reserve":
         approval_text = ""
         if selected == "release":
@@ -886,7 +1055,15 @@ def main(
         # Local validation precedes even the inexpensive ledger container call.
         reservation_guard(selected, live["rates"])
         result = reserve_remote.remote(
-            run_id, batch_id, selected, revision, manifest_sha, live, selection_text, adapter_run_id
+            run_id,
+            batch_id,
+            selected,
+            revision,
+            manifest_sha,
+            live,
+            selection_text,
+            adapter_run_id,
+            external_metadata_sha,
         )
         write_json(output / "reservation.json", result)
         print(
@@ -913,6 +1090,7 @@ def main(
         "adapter_run_id": adapter_run_id,
         "selection": json.loads(selection_text) if selection_text else None,
         "selection_sha256": hashlib.sha256(selection_text.encode()).hexdigest() if selection_text else None,
+        "external_metadata_sha256": external_metadata_sha or None,
     }
     result = {"stage": stage, "run_id": run_id, "revision": revision}
     error = None
@@ -926,6 +1104,10 @@ def main(
             try:
                 if stage == "prepare":
                     result["experiment"] = prepare_remote.remote(batch_id, run_id, revision, manifest_sha, options)
+                elif stage == "external_prepare":
+                    result["experiment"] = external_prepare_remote.remote(
+                        batch_id, run_id, revision, manifest_sha, options
+                    )
                 else:
                     result["experiment"] = gpu_remote.remote(stage, batch_id, run_id, revision, manifest_sha, options)
             finally:

@@ -1,6 +1,7 @@
 """Trust boundaries for the practical pretrained branch, without remote weights."""
 
 import contextlib
+import hashlib
 import json
 from types import SimpleNamespace
 
@@ -69,6 +70,105 @@ def test_template_mismatch_fails_instead_of_training_prompt_tokens(tmp_path):
 
     with pytest.raises(ValueError, match="not an exact prefix"):
         assistant.encode_training_row(BrokenProcessor(), {"id": "x", "user": "q", "answer": "a"}, tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("suffix", "stop_reason", "truncated", "unknown"),
+    [
+        ([11, 42], "eos", False, False),
+        ([11, 12, 13, 14, 43], "eos", False, False),
+        ([11, 12, 13, 14, 15], "max_new_tokens", True, False),
+        ([11, 12], "unknown", False, True),
+    ],
+)
+def test_chat_raw_suffix_stop_evidence_and_decoder_output_are_preserved(
+    tmp_path, monkeypatch, suffix, stop_reason, truncated, unknown
+):
+    Image.new("RGB", (8, 8), "red").save(tmp_path / "photo.png")
+    prefix = torch.tensor([[8, 9]])
+    monkeypatch.setattr(
+        assistant,
+        "encode_messages",
+        lambda *args, **kwargs: {
+            "input_ids": prefix,
+            "attention_mask": torch.ones_like(prefix),
+            "image_grid_thw": torch.tensor([[1, 4, 4]]),
+        },
+    )
+
+    class Model:
+        generation_config = SimpleNamespace(eos_token_id=[42, 43])
+
+        def generate(self, **kwargs):
+            assert torch.equal(kwargs["input_ids"], prefix)
+            assert kwargs["max_new_tokens"] == 5 and kwargs["do_sample"] is False
+            return torch.cat((prefix, torch.tensor([suffix])), dim=1)
+
+    class Processor:
+        tokenizer = SimpleNamespace(pad_token_id=0)
+
+        def batch_decode(self, token_tensor, *, skip_special_tokens, clean_up_tokenization_spaces):
+            assert token_tensor.tolist() == [suffix]
+            assert skip_special_tokens and not clean_up_tokenization_spaces
+            return ["  原樣解碼文字 \n"]
+
+    options = SimpleNamespace(device="cpu", max_new_tokens=5, max_tokens=32)
+    row = {"id": "photo", "task": "scene", "user": "what?", "image": "photo.png"}
+    result = assistant.generate(Model(), Processor(), row, tmp_path, options)
+    assert result["generated_token_ids"] == suffix
+    assert result["generated_tokens"] == len(suffix)
+    assert result["eos_token_ids"] == [42, 43]
+    assert result["ended_with_eos"] == (stop_reason == "eos")
+    assert result["stop_reason"] == stop_reason and result["truncated"] == truncated
+    assert result["completion_unknown"] == unknown
+    assert result["reached_max_new_tokens"] == (len(suffix) == 5)
+    assert result["prediction"] == "  原樣解碼文字 \n"
+    assert "not semantic completeness" in result["completion_scope"]
+
+
+@pytest.mark.parametrize("fail_asr", [False, True])
+def test_prepare_completed_only_after_both_snapshots_and_actual_file_hashes(tmp_path, monkeypatch, fail_asr):
+    import huggingface_hub
+
+    core, asr = tmp_path / "core", tmp_path / "asr"
+    core.mkdir()
+    asr.mkdir()
+    (core / "model.safetensors").write_bytes(b"core weights")
+    (asr / "model.safetensors").write_bytes(b"asr weights")
+    visited = []
+
+    def download(model, **kwargs):
+        visited.append((model, kwargs["revision"]))
+        if model == assistant.ASR_ID and fail_asr:
+            raise RuntimeError("ASR snapshot failed")
+        return str(core if model == assistant.MODEL_ID else asr)
+
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", download)
+    options = SimpleNamespace(
+        model=assistant.MODEL_ID,
+        model_revision=assistant.MODEL_REVISION,
+        asr_model=assistant.ASR_ID,
+        asr_revision=assistant.ASR_REVISION,
+        cache_dir=None,
+        local_files_only=True,
+        output=tmp_path / "result",
+        device="cpu",
+        dtype="float32",
+        min_pixels=65536,
+        max_pixels=524288,
+        max_tokens=2048,
+        seed=42,
+    )
+    if fail_asr:
+        with pytest.raises(RuntimeError, match="ASR snapshot failed"):
+            assistant.prepare(options)
+        assert not (options.output / "result.json").exists()
+    else:
+        result = assistant.prepare(options)
+        assert result["status"] == "completed"
+        assert result["snapshots"]["asr"]["files"][0]["sha256"] == hashlib.sha256(b"asr weights").hexdigest()
+        assert json.loads((options.output / "result.json").read_text())["status"] == "completed"
+    assert visited == [(assistant.MODEL_ID, assistant.MODEL_REVISION), (assistant.ASR_ID, assistant.ASR_REVISION)]
 
 
 def test_manifest_rejects_family_leakage_and_duplicate_ids(tmp_path):

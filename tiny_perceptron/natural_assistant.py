@@ -322,7 +322,15 @@ def generate(model, processor, row, data_root, options):
     )
     synchronize(options.device)
     seconds = time.monotonic() - started
+    if hasattr(output, "sequences"):
+        output = output.sequences
     suffix = output[:, input_tokens:]
+    token_ids = suffix[0].tolist()
+    eos = model.generation_config.eos_token_id
+    eos_ids = [eos] if isinstance(eos, int) else list(eos or [])
+    ended_with_eos = bool(token_ids and token_ids[-1] in eos_ids)
+    reached_limit = len(token_ids) >= options.max_new_tokens
+    stop_reason = "eos" if ended_with_eos else ("max_new_tokens" if reached_limit else "unknown")
     answer = processor.batch_decode(suffix, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
     return {
         "id": row["id"],
@@ -335,10 +343,18 @@ def generate(model, processor, row, data_root, options):
         "prediction": answer,
         "input_tokens": input_tokens,
         "generated_tokens": suffix.numel(),
+        "generated_token_ids": token_ids,
+        "generated_token_ids_scope": "Raw generated suffix including EOS; prompt excluded; no token rewriting",
+        "eos_token_ids": eos_ids,
+        "ended_with_eos": ended_with_eos,
+        "stop_reason": stop_reason,
+        "truncated": reached_limit and not ended_with_eos,
+        "completion_unknown": not reached_limit and not ended_with_eos,
+        "completion_scope": "EOS reports decoder stopping, not semantic completeness, truth, or full image/audio understanding",
         "generation_seconds": seconds,
         "tokens_per_second": suffix.numel() / seconds,
         "throughput_scope": "Full generate call including prompt prefill; generated tokens / measured wall seconds",
-        "reached_max_new_tokens": suffix.shape[-1] >= options.max_new_tokens,
+        "reached_max_new_tokens": reached_limit,
         "image_grid_thw": inputs["image_grid_thw"].tolist() if "image_grid_thw" in inputs else None,
         "score": score_output(row, answer) if row.get("answer") is not None else None,
     }
@@ -824,6 +840,6 @@ def prepare(options):
                 if file.is_file()
             ],
         }
-    result = dict(provenance(options), snapshots=paths)
+    result = dict(provenance(options), snapshots=paths, status="completed")
     write_json(Path(options.output) / "result.json", result)
     return result
