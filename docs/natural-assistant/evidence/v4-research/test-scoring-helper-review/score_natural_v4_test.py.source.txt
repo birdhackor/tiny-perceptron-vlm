@@ -1,0 +1,713 @@
+"""Grade one already-selected v4 heldout test, without inference or selection.
+
+Read actual review/result.json, generations-<selected>.json and transcripts.json.
+Only blind-packet.json, grades-template.json and source images go to graders.
+The committed pre-test selection is an input, never an output of this helper.
+"""
+
+import argparse
+import hashlib
+import json
+import re
+import secrets
+import subprocess
+import sys
+import unicodedata
+from collections import Counter
+from fractions import Fraction
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from scripts import score_natural_v4_validation as validation  # noqa: E402
+
+core = validation.core
+require = validation.require
+read_json = validation.read_json
+case_id = validation.case_id
+mapping_commitment = validation.mapping_commitment
+MANUAL = validation.MANUAL
+COUNTS = {
+    "photo_summary": 42,
+    "photo_fact": 84,
+    "text_presence": 18,
+    "single_ocr": 10,
+    "ordered_ocr": 3,
+    "text_chat": 13,
+    "voice_typed_reference_chat": 4,
+    "voice_actual_asr_chat": 4,
+}
+SOURCE_FILES = ("tiny_perceptron/natural_assistant.py", "scripts/natural_assistant.py", "scripts/modal_natural.py")
+
+
+def digest(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def committed_bytes(path, revision, repo_root=ROOT):
+    """Compare exact local bytes to the actual execution commit, including LF."""
+    root, path = Path(repo_root).resolve(), Path(path).resolve()
+    require(path.is_relative_to(root), "Frozen input must be inside its Git repository")
+    require(re.fullmatch(r"[a-f0-9]{40}|[a-f0-9]{64}", str(revision)) is not None, "Missing execution Git commit")
+    relative = path.relative_to(root).as_posix()
+    result = subprocess.run(
+        ["git", "-C", str(root), "show", f"{revision}:{relative}"], capture_output=True, check=False
+    )
+    require(result.returncode == 0, f"Frozen input is absent from execution Git commit: {relative}")
+    require(result.stdout == path.read_bytes(), f"Frozen input differs from execution Git commit: {relative}")
+    return {"path": relative, "sha256": digest(result.stdout)}
+
+
+def expected_cases(manifest):
+    visual = [row for row in manifest["rows"] if row["split"] == "test"]
+    audio = [row for row in manifest["audio_rows"] if row["split"] == "test"]
+    cases = {}
+    for row in visual:
+        task, reference = row["task"], row.get("references", {})
+        if task == "scene":
+            summary = reference.get("qa_type") == "scene"
+            require(
+                reference.get("kind") == "manual"
+                and (row["id"].endswith("/scene") if summary else row["id"].endswith(("/fact1", "/fact2"))),
+                "Unknown photo QA category/rubric",
+            )
+            group = "photo_summary" if summary else "photo_fact"
+        else:
+            require(task in {"chat", "text_presence", "ocr", "ocr_order"}, "Unknown final-test task")
+            group = {
+                "chat": "text_chat",
+                "text_presence": "text_presence",
+                "ocr": "single_ocr",
+                "ocr_order": "ordered_ocr",
+            }[task]
+        if group == "text_presence":
+            require(
+                reference.get("kind") == "exact" and reference.get("accepted") == [row["answer"]],
+                "Changed exact presence rubric",
+            )
+            require(row["answer"] in {"有", "沒有"}, "Unknown frozen presence target")
+        elif group in {"single_ocr", "ordered_ocr"}:
+            require(
+                reference.get("kind") == task
+                and reference.get("text") == row["answer"]
+                and reference.get("strip_whitespace") is (group == "single_ocr"),
+                "Changed frozen OCR normalization/target",
+            )
+        key = case_id(row["id"], task)
+        require(key not in cases, "Repeated frozen test case")
+        cases[key] = {"row": row, "task": task, "group": group}
+    for row in audio:
+        require(row["task"] in {"speech_chat", "speech_transcription"}, "Unknown test audio task")
+        if row["task"] == "speech_chat":
+            for task, group in (("typed_chat", "voice_typed_reference_chat"), ("speech_chat", "voice_actual_asr_chat")):
+                key = case_id(row["id"], task)
+                require(key not in cases, "Repeated frozen voice test case")
+                cases[key] = {"row": row, "task": task, "group": group}
+    require(Counter(case["group"] for case in cases.values()) == COUNTS, "Frozen test group denominators changed")
+    require(len(visual) == 170 and len(cases) == 178 and len(audio) == 22, "Frozen test LM/ASR denominators changed")
+    require(
+        Counter(row["task"] for row in audio) == {"speech_chat": 4, "speech_transcription": 18},
+        "Frozen test audio groups changed",
+    )
+    for case in cases.values():
+        if case["group"] in MANUAL:
+            row = case["row"]
+            rubric = (
+                row.get("predeclared_semantic_rubric")
+                if case["group"] == "text_chat"
+                else row.get("references", {}).get("rubric")
+            )
+            require(isinstance(rubric, str) and bool(rubric.strip()), "Missing frozen semantic rubric")
+            if case["group"].startswith("photo_"):
+                require(bool(row.get("image")), "Photo judgment needs its frozen source image")
+    return cases, audio
+
+
+def eos_complete(record, cap):
+    return (
+        validation.eos_complete(record, cap)
+        and type(record.get("generated_tokens")) is int
+        and all(token >= 0 for token in record["generated_token_ids"] + record["eos_token_ids"])
+    )
+
+
+def asr_eos_complete(record):
+    raw, prefix, tokens = (
+        record.get(key) for key in ("raw_token_ids", "expected_decoder_prompt_ids", "generated_token_ids")
+    )
+    return bool(
+        isinstance(raw, list)
+        and isinstance(prefix, list)
+        and prefix
+        and isinstance(tokens, list)
+        and all(type(token) is int and token >= 0 for token in raw + prefix)
+        and raw == prefix + tokens
+        and type(record.get("raw_token_count")) is int
+        and record["raw_token_count"] == len(raw)
+        and record.get("decoder_prompt_matches") is True
+        and record.get("max_new_tokens") == 128
+        and eos_complete(dict(record, generated_tokens=record.get("generated_token_count")), 128)
+    )
+
+
+def load_artifacts(manifest_path, protocol_path, test_dir, data_root, selection_path, *, repo_root=ROOT):
+    # Reject duplicate JSON keys before the runtime manifest loader can erase them.
+    read_json(manifest_path)
+    manifest, root = core.load_manifest(manifest_path, data_root)
+    require(manifest.get("dataset_version") == "natural-assistant-v4", "Needs the frozen v4 dataset")
+    protocol, selection = read_json(protocol_path), read_json(selection_path)
+    require(
+        protocol.get("candidate_order") == ["base", "adapter-step-001039", "adapter-step-002077"],
+        "Unexpected frozen candidates",
+    )
+    require(
+        protocol.get("generation")
+        == {"max_pixels": 524288, "min_pixels": 65536, "max_new_tokens": 384, "do_sample": False},
+        "Frozen generation settings changed",
+    )
+    cases, audio = expected_cases(manifest)
+    directory = Path(test_dir)
+    report_path = directory / "result.json"
+    report = read_json(report_path)
+    execution = report.get("execution", {})
+    require(
+        report.get("status") == "completed" and report.get("split") == "test" and execution.get("stage") == "evaluate",
+        "Needs actual completed review/result.json for the evaluate/test stage",
+    )
+    require(report.get("selected_only") is True, "Final test must execute only the committed selected variant")
+    revision = execution.get("revision")
+    committed = [committed_bytes(path, revision, repo_root) for path in (selection_path, manifest_path, protocol_path)]
+    source_bindings = [committed_bytes(Path(repo_root) / path, revision, repo_root) for path in SOURCE_FILES]
+    manifest_sha, protocol_sha, selection_sha = (
+        core.sha256(path) for path in (manifest_path, protocol_path, selection_path)
+    )
+    require(
+        report.get("manifest_sha256")
+        == manifest_sha
+        == execution.get("manifest_sha256")
+        == selection.get("dataset_manifest_sha256"),
+        "Test/selection belongs to a different frozen manifest",
+    )
+    require(
+        selection.get("schema_version") == 1 and selection.get("validation_protocol_sha256") == protocol_sha,
+        "Selection does not bind frozen validation rubric",
+    )
+    for field in (
+        "validation_result_sha256",
+        "validation_scoring_sha256",
+        "manual_grades_sha256",
+        "blind_packet_sha256",
+    ):
+        require(
+            re.fullmatch(r"[a-f0-9]{64}", str(selection.get(field, ""))) is not None,
+            "Incomplete committed validation-selection evidence",
+        )
+    require(
+        isinstance(selection.get("validation_run_id"), str) and bool(selection["validation_run_id"].strip()),
+        "Missing selected validation run",
+    )
+    for field in ("criterion", "decision"):
+        require(
+            isinstance(selection.get(field), str) and bool(selection[field].strip()),
+            "Missing pre-test decision/criterion",
+        )
+    variant = selection.get("selected_variant")
+    require(variant in protocol["candidate_order"], "Test cannot pick a new variant")
+    require(set(report.get("variants", {})) == {variant}, "Final test needs exactly one selected variant")
+    require(execution.get("selection_sha256") == selection_sha, "Test used different pre-test selection bytes")
+    proof = {
+        key: selection.get(key)
+        for key in (
+            "validation_run_id",
+            "validation_result_sha256",
+            "selected_variant",
+            "adapter_run_id",
+            "adapter_sha256",
+            "criterion",
+            "decision",
+        )
+    }
+    proof["adapter_checkpoint"] = selection.get("adapter_checkpoint", "")
+    require(execution.get("pretest_selection") == proof, "Execution pre-test selection proof differs")
+    require(
+        (report.get("model"), report.get("model_revision")) == (core.MODEL_ID, core.MODEL_REVISION),
+        "Unexpected foundation model pin",
+    )
+    require(
+        selection.get("base_model") == {"model": report["model"], "revision": report["model_revision"]},
+        "Selection foundation pin differs",
+    )
+    require(report.get("asset_sha256") == manifest["asset_sha256"], "Actual source-image/audio asset hashes differ")
+    require(
+        all(report.get(field) == protocol["generation"][field] for field in ("min_pixels", "max_pixels")),
+        "Test pixel settings differ",
+    )
+    require(
+        type(report.get("max_tokens")) is int
+        and report["max_tokens"] == 2048
+        and type(report.get("seed")) is int
+        and report["seed"] == protocol["training"]["seed"],
+        "Test token/seed settings differ",
+    )
+    runtime = execution.get("runtime_options", {})
+    require(
+        digest(json.dumps(runtime, sort_keys=True, separators=(",", ":")).encode())
+        == execution.get("runtime_options_sha256"),
+        "Reserved runtime settings changed",
+    )
+    require(
+        runtime.get("seed") == report["seed"]
+        and runtime.get("max_pixels") == report["max_pixels"]
+        and runtime.get("adapter_checkpoints") == [],
+        "Test runtime cannot compare/change candidates",
+    )
+    adapters = execution.get("adapters")
+    if variant == "base":
+        require(
+            adapters == []
+            and not any(
+                selection.get(field) or execution.get(field)
+                for field in ("adapter_run_id", "adapter_sha256", "adapter_checkpoint")
+            )
+            and runtime.get("adapter_checkpoint") == "",
+            "Selected base must not load adapter weights",
+        )
+    else:
+        checkpoint = variant.removeprefix("adapter-")
+        require(
+            selection.get("adapter_checkpoint")
+            == checkpoint
+            == execution.get("adapter_checkpoint")
+            == runtime.get("adapter_checkpoint"),
+            "Selected checkpoint drift",
+        )
+        require(isinstance(adapters, list) and len(adapters) == 1, "Final test needs one selected adapter descriptor")
+        require(
+            adapters[0].get("variant") == variant and adapters[0].get("checkpoint") == checkpoint,
+            "Selected adapter descriptor drift",
+        )
+        for field in ("adapter_run_id", "adapter_sha256"):
+            require(
+                bool(selection.get(field)) and selection[field] == execution.get(field) == adapters[0].get(field),
+                "Selected adapter train-run/weight drift",
+            )
+        require(re.fullmatch(r"[a-f0-9]{64}", selection["adapter_sha256"]) is not None, "Invalid selected adapter SHA")
+    asr_path = Path(protocol["asr"]["selection_file"])
+    if not asr_path.is_absolute():
+        asr_path = Path(repo_root) / asr_path
+    committed.append(committed_bytes(asr_path, revision, repo_root))
+    require(core.sha256(asr_path) == protocol["asr"]["selection_sha256"], "Frozen ASR selection bytes changed")
+    asr = read_json(asr_path)
+    asr_pin = core.ASR_VARIANTS[protocol["asr"]["variant"]]
+    require(
+        (report.get("asr_model"), report.get("asr_revision"))
+        == (asr.get("model"), asr.get("revision"))
+        == (runtime.get("asr_model"), runtime.get("asr_revision"))
+        == asr_pin
+        and runtime.get("asr_variant") == protocol["asr"]["variant"],
+        "ASR pin differs from frozen choice",
+    )
+    require(
+        all(
+            type(report.get(field)) is int and report[field] == count
+            for field, count in (
+                ("requested_visual_text_rows", 170),
+                ("requested_audio_rows", 22),
+                ("requested_audio_chat_rows", 4),
+            )
+        ),
+        "Actual test request counts differ",
+    )
+    summary = report["variants"][variant]
+    require(
+        summary.get("completed") is True
+        and type(summary.get("generation_count")) is int
+        and summary["generation_count"] == 178,
+        "Selected generation count is incomplete",
+    )
+    transcripts_path = directory / "transcripts.json"
+    transcripts = read_json(transcripts_path)
+    require(isinstance(transcripts, list), "Actual ASR records must be a list")
+    source_audio, transcript_index = {row["id"]: row for row in audio}, {}
+    for record in transcripts:
+        identifier = record.get("id")
+        require(identifier in source_audio and identifier not in transcript_index, "Unknown/repeated test ASR row")
+        row = source_audio[identifier]
+        require(
+            record.get("task") == row["task"] and record.get("reference_transcript") == row["user"],
+            "ASR frozen source transcript/task changed",
+        )
+        require(record.get("audio_sha256") == manifest["asset_sha256"][row["audio"]], "ASR used different recording")
+        require(isinstance(record.get("transcript"), str), "Missing actual ASR hypothesis")
+        transcript_index[identifier] = record
+    require(
+        set(transcript_index) == set(source_audio) and report.get("asr", {}).get("completed") is True,
+        "Final-test ASR rows incomplete",
+    )
+    path = directory / f"generations-{variant}.json"
+    require(
+        {file.name for file in directory.glob("generations-*.json")} == {path.name},
+        "Extra candidate generation file in final test",
+    )
+    rows = read_json(path)
+    require(isinstance(rows, list), "Actual generations must be a list")
+    records = {}
+    for record in rows:
+        require(
+            isinstance(record.get("id"), str) and isinstance(record.get("task"), str), "Missing generation identity"
+        )
+        key = case_id(record["id"], record["task"])
+        require(key in cases and key not in records, "Unknown/repeated test generation row")
+        case, row = cases[key], cases[key]["row"]
+        require(
+            record.get("variant") == variant
+            and record.get("split") == "test"
+            and isinstance(record.get("prediction"), str),
+            "Generation variant/split/raw prediction changed",
+        )
+        user = transcript_index[row["id"]]["transcript"] if case["group"] == "voice_actual_asr_chat" else row["user"]
+        require(record.get("user") == user, "Generation prompt differs from frozen source/shared actual ASR")
+        require(
+            record.get("image") == row.get("image")
+            and record.get("family") == row.get("family")
+            and record.get("reference_answer") == row.get("answer"),
+            "Generation frozen source image/family/reference changed",
+        )
+        if case["group"] == "voice_actual_asr_chat":
+            require(
+                record.get("reference_user") == row["user"] and record.get("transcript") == user,
+                "Actual voice answer lost shared ASR/original intent",
+            )
+        records[key] = record
+    require(set(records) == set(cases), "Missing selected test generation rows")
+    combined_path = directory / "generations.json"
+    combined_sha = None
+    if combined_path.exists():
+        combined = read_json(combined_path)
+        require(combined == rows, "Combined final-test output differs or includes extra candidates")
+        combined_sha = core.sha256(combined_path)
+    binding = {
+        "manifest_sha256": manifest_sha,
+        "protocol_sha256": protocol_sha,
+        "selection_sha256": selection_sha,
+        "test_result_sha256": core.sha256(report_path),
+        "generation_file": {"name": path.name, "sha256": core.sha256(path)},
+        "combined_generations_sha256": combined_sha,
+        "transcripts_sha256": core.sha256(transcripts_path),
+        "asr_selection_sha256": core.sha256(asr_path),
+        "test_run_id": execution.get("run_id"),
+        "batch_id": execution.get("batch_id"),
+        "execution_revision": revision,
+        "selected_variant": variant,
+        "adapters": adapters,
+        "model": report["model"],
+        "model_revision": report["model_revision"],
+        "committed_inputs": committed,
+        "runtime_sources": source_bindings,
+        "runtime_options_sha256": execution["runtime_options_sha256"],
+        "prompt_evidence_scope": "Raw records verify current user, reference, family and source image. System/history are reconstructed from committed manifest and bound runtime sources; raw records do not independently log rendered chat-template tokens.",
+    }
+    require(
+        all(isinstance(binding[field], str) and binding[field].strip() for field in ("test_run_id", "batch_id")),
+        "Missing actual test execution identity",
+    )
+    return {
+        "manifest": manifest,
+        "protocol": protocol,
+        "cases": cases,
+        "records": records,
+        "transcripts": transcript_index,
+        "binding": binding,
+        "root": root,
+    }
+
+
+def blind_packet(artifacts, commitment):
+    cases, records, root = (artifacts[key] for key in ("cases", "records", "root"))
+    packet = {
+        "schema_version": 1,
+        "scope": "One selected heldout test; independent semantic grading only. Inspect actual source photos and frozen context/rubrics. No selection or tuning from test results. Do not consult private-map.json or runtime scores.",
+        "candidate_mapping_commitment": commitment,
+        "cases": [],
+    }
+    for key, case in cases.items():
+        if case["group"] not in MANUAL:
+            continue
+        row, record = case["row"], records[key]
+        complete = eos_complete(record, artifacts["protocol"]["generation"]["max_new_tokens"])
+        packet["cases"].append(
+            {
+                "case_id": key,
+                "candidate": "A",
+                "group": case["group"],
+                "user": row["user"],
+                "model_user": record["user"],
+                "system": row.get("system"),
+                "history": row.get("history", []),
+                "source_image": str(core.asset_path(row["image"], root)) if row.get("image") else None,
+                "context_source_images": [
+                    str(core.asset_path(name, root)) for name in core.row_assets(row) if name != row.get("audio")
+                ],
+                "reference_example": row.get("answer"),
+                "rubric": row.get("predeclared_semantic_rubric")
+                if case["group"] == "text_chat"
+                else row["references"]["rubric"],
+                "prediction": record["prediction"],
+                "decoder_complete": complete,
+                "source_image_inspection_required": bool(row.get("image")) and complete,
+            }
+        )
+    require(len(packet["cases"]) == 147, "Frozen manual-grade denominator changed")
+    return packet
+
+
+def export_blind(artifacts, output):
+    output = Path(output)
+    require(
+        not output.exists() or (output.is_dir() and not any(output.iterdir())),
+        "Refuse to replace existing blind packet",
+    )
+    output.mkdir(parents=True, exist_ok=True)
+    aliases, nonce = {"A": artifacts["binding"]["selected_variant"]}, secrets.token_hex(32)
+    packet = blind_packet(artifacts, mapping_commitment(aliases, nonce))
+    core.write_json(output / "blind-packet.json", packet)
+    packet_sha = core.sha256(output / "blind-packet.json")
+    core.write_json(
+        output / "private-map.json",
+        {
+            "schema_version": 1,
+            "scope": "Keep from graders; preserve for audit",
+            "aliases": aliases,
+            "mapping_nonce": nonce,
+            "artifact_binding": artifacts["binding"],
+            "blind_packet_sha256": packet_sha,
+        },
+    )
+    core.write_json(
+        output / "grades-template.json",
+        {
+            "schema_version": 1,
+            "blind_packet_sha256": packet_sha,
+            "grader": "",
+            "independent_of_training_and_selection": None,
+            "private_mapping_consulted": None,
+            "grades": [
+                {
+                    "case_id": case["case_id"],
+                    "candidate": "A",
+                    "passed": None,
+                    "reason": "",
+                    "source_image_inspected": None,
+                }
+                for case in packet["cases"]
+            ],
+        },
+    )
+    return {"manual_grade_count": 147, "blind_packet_sha256": packet_sha}
+
+
+def normalized(text, strip_whitespace=False):
+    text = unicodedata.normalize("NFKC", text).strip()
+    return "".join(text.split()) if strip_whitespace else text
+
+
+def distance(reference, prediction):
+    """Independently recompute codepoint Levenshtein; ignore saved runtime CER."""
+    previous = list(range(len(prediction) + 1))
+    for index, left in enumerate(reference, 1):
+        current = [index]
+        for column, right in enumerate(prediction, 1):
+            current.append(min(current[-1] + 1, previous[column] + 1, previous[column - 1] + (left != right)))
+        previous = current
+    return previous[-1]
+
+
+def rational(value):
+    return {"numerator": value.numerator, "denominator": value.denominator, "decimal": float(value)}
+
+
+def asr_scores(transcripts):
+    rows = []
+    for key, record in transcripts.items():
+        reference, prediction = record["reference_transcript"], record["transcript"]
+        target, output = normalized(reference, True), normalized(prediction, True)
+        rows.append(
+            {
+                "id": key,
+                "task": record["task"],
+                "raw_errors": distance(reference, prediction),
+                "raw_reference_characters": len(reference),
+                "normalized_errors": distance(target, output),
+                "normalized_reference_characters": len(target),
+                "decoder_complete": asr_eos_complete(record),
+            }
+        )
+
+    def aggregate(group):
+        totals = {
+            field: sum(row[field] for row in group)
+            for field in (
+                "raw_errors",
+                "raw_reference_characters",
+                "normalized_errors",
+                "normalized_reference_characters",
+            )
+        }
+        return {
+            "count": len(group),
+            **totals,
+            "raw_micro_cer": rational(Fraction(totals["raw_errors"], totals["raw_reference_characters"]))
+            if totals["raw_reference_characters"]
+            else None,
+            "normalized_micro_cer": rational(
+                Fraction(totals["normalized_errors"], totals["normalized_reference_characters"])
+            )
+            if totals["normalized_reference_characters"]
+            else None,
+            "incomplete_case_ids": [row["id"] for row in group if not row["decoder_complete"]],
+        }
+
+    return {
+        **aggregate(rows),
+        "by_task": {
+            task: aggregate([row for row in rows if row["task"] == task])
+            for task in sorted({row["task"] for row in rows})
+        },
+        "records": rows,
+        "raw_metric": "Codepoint Levenshtein over original Unicode; includes whitespace/punctuation",
+        "normalized_metric": "NFKC, outer strip, remove Unicode whitespace via str.split(); preserve case/punctuation after NFKC; no script conversion",
+        "scope": "Fixed ASR, independently recomputed from actual hypotheses; CER is not language-model response correctness and does not contribute to capability macro",
+    }
+
+
+def score_blind(artifacts, blind_dir, grades_path):
+    directory = Path(blind_dir)
+    private, packet = (read_json(directory / name) for name in ("private-map.json", "blind-packet.json"))
+    packet_sha = core.sha256(directory / "blind-packet.json")
+    require(
+        private.get("artifact_binding") == artifacts["binding"] and private.get("blind_packet_sha256") == packet_sha,
+        "Test artifacts or blind packet changed after export",
+    )
+    require(
+        private.get("aliases") == {"A": artifacts["binding"]["selected_variant"]}, "Blinded selected mapping changed"
+    )
+    commitment = mapping_commitment(private["aliases"], private.get("mapping_nonce"))
+    require(packet == blind_packet(artifacts, commitment), "Blind packet/mapping differs from bound actual answers")
+    grades = read_json(grades_path)
+    require(
+        grades.get("schema_version") == 1
+        and grades.get("blind_packet_sha256") == packet_sha
+        and isinstance(grades.get("grader"), str)
+        and bool(grades["grader"].strip()),
+        "Grades must name independent grader and bind blind packet",
+    )
+    require(
+        grades.get("independent_of_training_and_selection") is True
+        and grades.get("private_mapping_consulted") is False,
+        "Grader must attest independence and concealed selected identity",
+    )
+    expected = {(key, "A") for key, case in artifacts["cases"].items() if case["group"] in MANUAL}
+    manual = {}
+    for grade in grades.get("grades", []):
+        key = (grade.get("case_id"), grade.get("candidate"))
+        require(key in expected and key[0] not in manual, "Unknown/repeated manual test grade")
+        require(
+            type(grade.get("passed")) is bool
+            and isinstance(grade.get("reason"), str)
+            and bool(grade["reason"].strip()),
+            "Every manual grade needs Boolean decision and reason",
+        )
+        case, record = artifacts["cases"][key[0]], artifacts["records"][key[0]]
+        if case["row"].get("image") and eos_complete(record, 384):
+            require(grade.get("source_image_inspected") is True, "Photo semantic grade needs actual source inspection")
+        manual[key[0]] = grade
+    require({(key, "A") for key in manual} == expected, "Missing manual grades; do not reduce frozen test denominator")
+    counts, incomplete, decisions = dict.fromkeys(COUNTS, 0), [], []
+    for key, case in artifacts["cases"].items():
+        record, group = artifacts["records"][key], case["group"]
+        complete = eos_complete(record, 384)
+        if not complete:
+            incomplete.append(key)
+        semantic = (
+            manual[key]["passed"]
+            if group in MANUAL
+            else normalized(case["row"]["answer"], group == "single_ocr")
+            == normalized(record["prediction"], group == "single_ocr")
+        )
+        passed = complete and semantic
+        counts[group] += int(passed)
+        decisions.append(
+            {"case_id": key, "group": group, "decoder_complete": complete, "rubric_passed": semantic, "passed": passed}
+        )
+    rates = {group: Fraction(counts[group], COUNTS[group]) for group in COUNTS}
+    capabilities = {
+        "photo": (rates["photo_summary"] + rates["photo_fact"]) / 2,
+        "text_presence": rates["text_presence"],
+        "single_ocr": rates["single_ocr"],
+        "ordered_ocr": rates["ordered_ocr"],
+        "dialogue": (rates["text_chat"] + rates["voice_typed_reference_chat"] + rates["voice_actual_asr_chat"]) / 3,
+    }
+    return {
+        "schema_version": 1,
+        "scope": "One selected heldout teaching sample; related questions are not independent trials. Counts and descriptive rational scores are not population/generalization estimates. Final test cannot change pre-test selection.",
+        "artifact_binding": artifacts["binding"],
+        "selected_variant": artifacts["binding"]["selected_variant"],
+        "blind_packet_sha256": packet_sha,
+        "manual_grades_sha256": core.sha256(grades_path),
+        "grader": grades["grader"],
+        "denominators": {
+            **COUNTS,
+            "lm_generations": 178,
+            "visual_text_rows": 170,
+            "asr_recordings": 22,
+            "manual_grades": 147,
+        },
+        "correct_counts": counts,
+        "group_accuracy": {key: rational(value) for key, value in rates.items()},
+        "capability_scores": {key: rational(value) for key, value in capabilities.items()},
+        "descriptive_capability_macro": rational(sum(capabilities.values(), Fraction()) / 5),
+        "descriptive_response_micro": rational(Fraction(sum(counts.values()), 178)),
+        "score_scope": "Same five-capability arithmetic as frozen rubric, using actual test denominators; no validation integer weights, eligibility gates, candidate comparisons or selection decision",
+        "all_generations_complete": not incomplete,
+        "incomplete_case_ids": incomplete,
+        "case_decisions": decisions,
+        "asr": asr_scores(artifacts["transcripts"]),
+    }
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("mode", choices=("export", "score"))
+    parser.add_argument("--manifest", type=Path, default=ROOT / "docs/natural-assistant/v4/manifest.json")
+    parser.add_argument("--protocol", type=Path, default=ROOT / "docs/natural-assistant/v4/validation-protocol.json")
+    parser.add_argument("--data-root", type=Path, default=ROOT / "outputs/natural-v4/data")
+    parser.add_argument("--selection", type=Path, required=True)
+    parser.add_argument(
+        "--test-dir", type=Path, required=True, help="Actual persisted review/ directory, not the wrapper artifact"
+    )
+    parser.add_argument("--blind-dir", type=Path, required=True)
+    parser.add_argument("--grades", type=Path)
+    parser.add_argument("--output", type=Path)
+    args = parser.parse_args()
+    artifacts = load_artifacts(args.manifest, args.protocol, args.test_dir, args.data_root, args.selection)
+    if args.mode == "export":
+        result = export_blind(artifacts, args.blind_dir)
+    else:
+        require(args.grades is not None and args.output is not None, "score needs --grades and --output")
+        scores = score_blind(artifacts, args.blind_dir, args.grades)
+        require(
+            not args.output.exists() or (args.output.is_dir() and not any(args.output.iterdir())),
+            "Refuse to overwrite prior final-test scores",
+        )
+        args.output.mkdir(parents=True, exist_ok=True)
+        core.write_json(args.output / "scores.json", scores)
+        result = {
+            "selected_variant": scores["selected_variant"],
+            "scores_sha256": core.sha256(args.output / "scores.json"),
+            "scope": "Descriptive final test only; selection unchanged",
+        }
+    print(json.dumps(result))
+
+
+if __name__ == "__main__":
+    main()
