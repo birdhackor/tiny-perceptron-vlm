@@ -2,6 +2,26 @@
 
 教材本機驗證環境為 Linux、Python 3.13.5、PyTorch 2.14.1 CPU；正式訓練另使用 Modal NVIDIA L4、Python 3.13.3、PyTorch 2.14.1+cu126。本頁保留不同階段的紀錄。最新逐組訓練、自然資料短訓、私有備份與學生權重證據見[正式實驗](course-experiments/README.md)及[當前進度](course-experiments/progress.json)；早期流程測試與改寫前的審閱不能代替本輪驗收。
 
+## 分階段訓練與整合成品
+
+2026-10-04：新增[7.17–7.18](../course/chapters/07.md#7.17)，先說明大量文字學習與助手行為訓練分別解決什麼問題，再介紹兩階段之間可能重疊的工作。[13.10–13.17](../course/chapters/13.md#13.10)從偏好分數走到獎勵模型、PPO、KL 與 DPO，最後比較適合使用哪些方法。PPO 的可重跑 CPU 實驗使用事先寫好的回答卡，沒有把它說成新訓練的語言模型或真人回饋；原始數據見[實報](course-experiments/results/posttraining.json)。
+
+[第19章](../course/chapters/19.md)把文字、簡單圖片、合成聲音、受限工具與助手行為接到同一個小型 MoE。正式訓練依序完成 300 步 pretrain、1,400 步 SFT、600 步圖音共同訓練與 100 步混合式 DPO。模型有 328,128 個總參數，排除每個位置未選中專家權重的啟用參數代理量為 195,776；所有專家權重仍須儲存，這個代理量不能直接當成記憶體或速度。DPO 分支留作比較，依預先固定的驗證準則選出的示範成品是共同訓練版，見[選擇紀錄](course-experiments/capstone-selection.json)。
+
+固定測試集共有90題，共同訓練版與DPO版皆為78/90。這是自行建立的有限任務世界，沒有一般中文、自然照片、語音辨識或安全能力的品質保證；逐題結果見[共同訓練版](course-experiments/capstone-evidence/deployment/test-joint.json)與[DPO版](course-experiments/capstone-evidence/deployment/test-dpo.json)。工具請求合法、工具真的算對與模型最後答對分開評分。另以同一初始權重訓練79,920參數的Dense學生：一般交叉熵版62/90、蒸餾版61/90，沒有把較小或經蒸餾說成能力必然較好。打包int4／int8權重在推論時還原成FP32，沒有宣稱整數運算加速。
+
+[11份整合成品權重](course-experiments/capstone-public.json)已有固定Hugging Face版本，包含各階段、壓縮版與Dense學生。實際匿名下載核對檔案大小／SHA-256、重新建模及逐tensor比對，見[權重核對](course-experiments/student-checks/capstone-public-tensors.json)；[圖片、聲音與工具操作](course-experiments/student-checks/capstone-public-ui.json)和[學生模型操作](course-experiments/student-checks/capstone-public-student.json)另保留真實成功與失敗。這些操作沒有增加正式測試集的分母。全部實驗及重跑的Modal運算預留額為US$9.84，上限US$10，見[保留紀錄](course-experiments/budget-reservations.json)；這是預留額，並非實際帳單。
+
+## 整合內容的三輪審閱與閱讀範圍
+
+2026-10-04：本輪新增與受影響的49節完成理解審閱後，交由另一批49個全新獨立AI任務逐節查核原論文、官方文件、原碼與實際資料。暖身修句另使一份舊報告的完整檔案依賴失效，該節再交給新的獨立審查者完整重審，沒有只替換指紋。全書274節的理解與技術報告，以及26份首節導讀，都與目前正文相符；見[本輪核對](validation-artifacts/integration-review-round-all.json)與[實際技術派工及回查](validation-artifacts/integration-technical-dispatches.json)。這是AI審閱，並非真人學生的學習成效測試。
+
+第三批四個全新任務沿閱讀指南、分階段訓練、偏好更新與整合成品的路線閱讀，涵蓋上述49節，連同必要前置實讀193個不同小節。讀者發現13.10沒有說清分數差如何換成勝出機率；補上規則及0、2的逐步算例後，由提出問題的讀者回讀前後路線，原理解讀者與原技術審查者也真正回查。四組最後均通過，實際讀序、原文快照、親看圖解及修正歷史見[銜接核對](validation-artifacts/integration-continuity-round.json)。
+
+248份Notebook曾逐份啟動獨立CPU kernel，完整一輪耗時490.67秒；後續改說明、顯示格式與引用時，再對受影響的15份Notebook各自重新執行，必要時保留多次回查。最終[248份輸出核對](validation-artifacts/integration-current-notebooks.json)使用233份未變的完整輪次副本及15份最新重跑副本，逐cell確認來源相同、程式已執行且無錯誤。這不代表又重跑了整套248份，也不代表Colab雲端或所有學生裝置已測試。
+
+閱讀時間標示採用逐頁AI估計的方法，以數學基礎良好的高中生，或有基本數學能力但不夠熟的大學生為對象。範圍包含正文、圖解、範例程式、已展示輸出及短暫思考，不包含安裝、下載、親手操作、等待訓練或額外補讀前置。章導讀只算自己的前言，同一頁在總量中只算一次；時間區間不是實測平均或學習成效保證。本頁列出的程式執行耗時與閱讀估計是兩種不同的量。
+
 ## 工具選擇補充與三輪審閱
 
 2026-10-04：在工具請求、執行、回填與停止之後，加入[B.5–B.8](../course/chapters/0B.md#B.5)。四節分開教任務策略、以短回答訓練選擇、檢查漏選與多選，以及能力／成本比較；附一張自製SVG、四份Notebook與可重跑的CPU實驗。B.1補齊COPY分組及seed／CUDA／L4解釋，B.4補上生成次數與新內容的過渡。

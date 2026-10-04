@@ -675,11 +675,11 @@ for label, language in [("before", before), ("after", after.language)]:
 .venv/bin/python -m scripts.course_experiments.run --experiment posttraining --device cpu
 ```
 
-這個選讀命令不需要上面的`style.pt`或另下載權重；它從固定小網路建立示範起點，再分成PPO與DPO兩支。配置、候選、資料家族與逐題結果見[公開報告](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/course-experiments/results/posttraining.json)，讀法見[13.15](chapters/13.md#13.15)。逐步生成語言模型的完整PPO與多步回饋仍是後續延伸。[C.7](chapters/0C.md#C.7)另有一種依所選動作機率與回饋更新有限策略的小實驗；計分單位與本例不同，權重不能互換。
+這個選讀命令不需要上面的`style.pt`或另下載權重；它從固定小網路建立示範起點，再分成PPO與DPO兩支。配置、候選、資料家族與逐題結果見[公開報告](https://github.com/birdhackor/tiny-perceptron-vlm/blob/1df335318bda03fd771807f66976953231d5a00b/docs/course-experiments/results/posttraining.json)，讀法見[13.15](chapters/13.md#13.15)。逐步生成語言模型的完整PPO與多步回饋仍是後續延伸。[C.7](chapters/0C.md#C.7)另有一種依所選動作機率與回饋更新有限策略的小實驗；計分單位與本例不同，權重不能互換。
 
 第二條選讀是[19.8的整合成品對照](chapters/19.md#19.8)。它把DPO接在真正生成文字的模型上：由文字、圖片與聲音一起訓練的聯合任務階段複製固定參考，另開DPO分支，再與原模型比較。第13章的選卡PPO教更新機制，第19章的DPO檢查接續後的實際回答，兩份權重與評估各自獨立。成品目前選聯合任務階段作推薦試用起點，DPO保留作對照，完整能力表見[19.12](chapters/19.md#19.12)。
 
-第三條選讀是[19.10的較小模型](chapters/19.md#19.10)。它以第19章的DPO比較分支作教師，從相同起點、用相同資料順序，分別只學示範與加入教師分布。兩個較小模型每次使用相同的一組完整計算零件，稱為Dense；加入教師分布，是同時模仿較大模型對下一個文字單位的預測機率，這種教法叫蒸餾。正式訓練已完成，最後90題分別通過62題與61題，這次蒸餾沒有勝過示範訓練。教師選擇與推薦的聯合任務成品不同，不能把學生稱作那份成品的縮小版；詳見[學生報告](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/course-experiments/results/capstone_student.json)。
+第三條選讀是[19.10的較小模型](chapters/19.md#19.10)。它以第19章的DPO比較分支作教師，從相同起點、用相同資料順序，分別只學示範與加入教師分布。兩個較小模型每次使用相同的一組完整計算零件，稱為Dense；加入教師分布，是同時模仿較大模型對下一個文字單位的預測機率，這種教法叫蒸餾。正式訓練已完成，最後90題分別通過62題與61題，這次蒸餾沒有勝過示範訓練。教師選擇與推薦的聯合任務成品不同，不能把學生稱作那份成品的縮小版；詳見[學生報告](https://github.com/birdhackor/tiny-perceptron-vlm/blob/1df335318bda03fd771807f66976953231d5a00b/docs/course-experiments/results/capstone_student.json)。
 
 ## T.8 架構比較一次只換一個條件
 
