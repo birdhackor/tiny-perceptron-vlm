@@ -81,6 +81,10 @@ jobs:
             echo "::error::release_experiment_ids is only valid for mode=release"
             exit 1
           fi
+          if [ "$EXPERIMENT_ID" = 'safety-existing-audit' ] && [ "$EXPERIMENT_MODE" != 'preflight' ]; then
+            echo "::error::safety-existing-audit only supports read-only preflight mode"
+            exit 1
+          fi
           missing=0
           for name in MODAL_TOKEN_ID MODAL_TOKEN_SECRET HF_CHECKPOINT_REPO HF_RELEASE_REPO; do
             if [ -z "${!name}" ]; then
@@ -148,9 +152,10 @@ jobs:
       - name: Install only Modal client
         run: python -m pip install modal==1.6.0
       - name: Select the existing Hugging Face Secret without reading its value
+        if: inputs.experiment_id != 'safety-existing-audit'
         run: python scripts/select_modal_hf_secret.py
       - name: Execute one bounded course experiment
-        if: inputs.mode != 'release' || (inputs.release_experiment_ids || '') == ''
+        if: inputs.experiment_id != 'safety-existing-audit' && (inputs.mode != 'release' || (inputs.release_experiment_ids || '') == '')
         run: |
           modal run scripts/modal_course.py \
             --experiment-id "$EXPERIMENT_ID" \
@@ -161,6 +166,12 @@ jobs:
             --release-repo "$HF_RELEASE_REPO" \
             --run-id "gha-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
             --revision "$GITHUB_SHA"
+      - name: Read and audit existing safety weights without starting Modal compute
+        if: inputs.experiment_id == 'safety-existing-audit' && inputs.mode == 'preflight'
+        run: |
+          python -m pip install uv==0.12.22
+          uv sync --frozen --extra cpu
+          python scripts/read_existing_private_audit.py
       - name: Release approved models one at a time
         if: inputs.mode == 'release' && (inputs.release_experiment_ids || '') != ''
         run: python scripts/release_course_batch.py --experiments "$RELEASE_EXPERIMENT_IDS"
