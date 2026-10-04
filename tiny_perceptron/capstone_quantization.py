@@ -11,7 +11,7 @@ from pathlib import Path
 import torch
 from torch import nn
 
-from tiny_perceptron.capstone import DATA_VERSION, STAGES, TOK, CapstoneModel, load_capstone
+from tiny_perceptron.capstone import DATA_VERSION, STAGES, TOK, CapstoneModel, digest, load_capstone
 from tiny_perceptron.model import ModelConfig
 from tiny_perceptron.quantization import pack_int4, quantize_symmetric, unpack_int4
 
@@ -51,6 +51,26 @@ def quantize_capstone(source, destination, bits=4):
             "scale": scale.float(),
             "shape": list(integers.shape),
         }
+    metadata = {"source_checkpoint_sha256": hashlib.sha256(Path(source).read_bytes()).hexdigest()}
+    if saved.get("inference_only") is True:
+        metadata["public_source_sha256"] = metadata["source_checkpoint_sha256"]
+    if isinstance(saved.get("metadata", {}).get("data_manifest"), dict):
+        metadata["dataset_manifest_sha256"] = digest(saved["metadata"]["data_manifest"])
+    elif "dataset_manifest_sha256" in saved.get("metadata", {}):
+        metadata["dataset_manifest_sha256"] = saved["metadata"]["dataset_manifest_sha256"]
+    branch = saved.get("metadata", {}).get("student_branch")
+    if branch is not None:
+        teacher = saved["metadata"].get("teacher_checkpoint_sha256")
+        if (
+            branch not in ("student-ce", "student-kd")
+            or saved["stage"] != "joint"
+            or model.config.experts != 0
+            or not isinstance(teacher, str)
+            or len(teacher) != 64
+            or any(character not in "0123456789abcdef" for character in teacher)
+        ):
+            raise ValueError("Student PTQ requires explicit Dense branch and valid teacher provenance")
+        metadata.update(student_branch=branch, teacher_checkpoint_sha256=teacher)
     payload = {
         "format_version": FORMAT,
         "inference_only": True,
@@ -68,7 +88,7 @@ def quantize_capstone(source, destination, bits=4):
         "stage": saved["stage"],
         "step": saved["step"],
         "data_version": DATA_VERSION,
-        "metadata": {"source_checkpoint_sha256": hashlib.sha256(Path(source).read_bytes()).hexdigest()},
+        "metadata": metadata,
     }
     destination = Path(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)

@@ -142,7 +142,12 @@ def test_supporting_id_preserves_formal_thirty_and_rejects_ambiguous_lookup(runn
     plan = json.loads(runner.PLAN_PATH.read_text())
     assert len(plan["sequence"]) == 30
     assert "flash_probe" not in {entry["id"] for entry in plan["sequence"]}
-    assert [entry["id"] for entry in plan["supporting_experiments"]] == ["flash_probe", "tool_choice"]
+    formal_ids = {entry["id"] for entry in plan["sequence"]}
+    supporting_ids = [entry["id"] for entry in plan["supporting_experiments"]]
+    assert {"flash_probe", "tool_choice"} <= set(supporting_ids)
+    assert len(supporting_ids) == len(set(supporting_ids))
+    assert formal_ids.isdisjoint(supporting_ids)
+    assert all(runner.experiment_spec(experiment_id)["id"] == experiment_id for experiment_id in supporting_ids)
     assert runner.experiment_spec("flash_probe")["kind"] == "mechanism_probe"
     with pytest.raises(ValueError, match="Unknown"):
         runner.experiment_spec("unknown")
@@ -224,12 +229,22 @@ def test_supporting_inventory_is_separate_and_cannot_raise_formal_counts(tmp_pat
     # 只執行這份候選builder、空的tmp ROOT；不讀寫正在執行的正式progress/ledger。
     builder.main()
     report = json.loads((plan.parent / "progress.json").read_text())
-    assert report["counts"] == {"experiments": 30, "complete_runs": 1, "sections": 0}
-    assert len(report["experiments"]) == 30 and len(report["supporting_evidence"]) == 2
-    pending_router = report["supporting_evidence"][1]
+    assert {key: report["counts"][key] for key in ("experiments", "complete_runs", "sections")} == {
+        "experiments": 30,
+        "complete_runs": 1,
+        "sections": 0,
+    }
+    expected_ids = [entry["id"] for entry in json.loads(plan.read_text())["supporting_experiments"]]
+    actual_ids = [entry["id"] for entry in report["supporting_evidence"]]
+    assert actual_ids == expected_ids and len(actual_ids) == len(set(actual_ids))
+    assert len(report["experiments"]) == 30
+    assert report["counts"]["supporting_experiments"] == len(expected_ids)
+    assert report["counts"]["complete_supporting_runs"] == 1
+    by_id = {entry["id"]: entry for entry in report["supporting_evidence"]}
+    pending_router = by_id["tool_choice"]
     assert pending_router["id"] == "tool_choice" and pending_router["status"] == "pending"
     assert not pending_router["student_model_release"]
-    supporting = report["supporting_evidence"][0]
+    supporting = by_id["flash_probe"]
     assert supporting["id"] == "flash_probe" and not supporting["student_model_release"]
     assert supporting["supported_routes"] == ["fp16", "bf16"] and "training_revision" not in supporting
     assert supporting["code_revision"] == "b" * 40
