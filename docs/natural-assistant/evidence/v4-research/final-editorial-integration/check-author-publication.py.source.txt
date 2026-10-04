@@ -1,0 +1,117 @@
+"""Author checks of final publication prose; no inference or formal review."""
+import ast
+import hashlib
+import json
+from pathlib import Path
+import re
+import runpy
+import shlex
+import subprocess
+import xml.etree.ElementTree as ET
+
+ROOT=Path(__file__).resolve().parents[4]
+OUT=Path(__file__).resolve().parent
+sha=lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
+
+def pieces(text):
+    heads=list(re.finditer(r'^## ([^\n]+)$',text,re.M))
+    result={'intro':text[:heads[0].start()] if heads else text}
+    result.update({h.group(1).split()[0] if re.match(r'^(?:[A-Z]|\d+)\.',h.group(1)) else h.group(1):text[h.start():heads[i+1].start() if i+1<len(heads) else len(text)] for i,h in enumerate(heads)})
+    return result
+
+def parser_without_dispatch(script):
+    namespace=runpy.run_path(str(ROOT/script),run_name='author_parser_only')
+    if script=='scripts/natural_assistant.py': return namespace['parser']()
+    tree=ast.parse((ROOT/script).read_text())
+    fn=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='main')
+    prefix=[]
+    for node in fn.body:
+        if isinstance(node,ast.Assign) and isinstance(node.value,ast.Call) and isinstance(node.value.func,ast.Attribute) and node.value.func.attr=='parse_args':break
+        prefix.append(node)
+    else:raise AssertionError('No argparse boundary found')
+    exec(compile(ast.Module(body=prefix,type_ignores=[]),str(script),'exec'),namespace)
+    return namespace['parser']
+
+def main():
+    before=json.loads((OUT/'source-before.json').read_text())
+    files=[]; owners=[]; local_links=[]; svgs=set(); syntax={'python':0,'bash':0}; command_checks=[]
+    permitted={
+      'course/chapters/20.md':{'20.2','20.13'},
+      'course/chapters/11.md':{'11.14','11.16'},
+      'course/chapters/12.md':{'12.13','12.14'},
+      'course/chapters/19.md':{'19.12'},
+      'course/README.md':{'R.2','R.3'},
+      'course/training.md':{'T.1'},
+    }
+    external_20={'intro','20.1','20.3','20.4','20.5','20.6','20.7','20.9'}
+    parsers={s:parser_without_dispatch(s) for s in ['scripts/natural_assistant.py','scripts/fetch_natural_release.py','scripts/fetch_natural_data.py','scripts/build_natural_v4_assets.py']}
+    for item in before['files']:
+        path=ROOT/item['path']; old=(OUT/'before'/item['path']).read_text(); new=path.read_text(); old_parts,new_parts=pieces(old),pieces(new)
+        changed=[key for key in old_parts if old_parts[key]!=new_parts[key]]
+        if path.name=='20.md':assert set(changed)<=(permitted[item['path']]|external_20),changed
+        elif item['path'] in permitted:assert set(changed)<=permitted[item['path']],(item['path'],changed)
+        for key in changed:
+            ownership='parent simultaneous frozen edit' if path.name=='20.md' and key in external_20 else 'publication author'
+            owners.append({'source':item['path'],'section':key,'ownership':ownership,'before_sha256':hashlib.sha256(old_parts[key].encode()).hexdigest(),'after_sha256':hashlib.sha256(new_parts[key].encode()).hexdigest()})
+        files.append({'path':item['path'],'changed':old!=new,'bytes':path.stat().st_size,'sha256':sha(path),'changed_sections':changed})
+        if not old!=new:continue
+        assert 'AUTHOR_PENDING' not in new and '作者發布前' not in new
+        for language,body in re.findall(r'```(python|bash)\n(.*?)\n```',new,re.S):
+            if language=='python':ast.parse(body);syntax['python']+=1
+            else:
+                r=subprocess.run(['bash','-n'],input=body,text=True,capture_output=True)
+                assert r.returncode==0,(item['path'],r.stderr);syntax['bash']+=1
+                joined=body.replace('\\\n',' ')
+                for match in re.finditer(r'(?m)^\.venv-natural/bin/python (scripts/[\w_]+\.py) (.+)$',joined):
+                    script,args=match.groups()
+                    if script not in parsers:continue
+                    arguments=shlex.split(args.replace('$SELECTED_ADAPTER','outputs/natural-my-v4/train/checkpoints/step-001039').replace('$PENDING_CHECKPOINTS','1039,2077'))
+                    parsed=parsers[script].parse_args(arguments)
+                    if script.endswith('natural_assistant.py') and hasattr(parsed,'learning_rate'):assert parsed.learning_rate==0.00003
+                    command_checks.append({'source':item['path'],'script':script,'arguments':arguments,'actual_argparse':'passed','dispatch_called':False})
+        # Numeric lesson fragments are checked against source; URLs are out of scope.
+        for target in re.findall(r'\]\(([^)]+)\)',new):
+            if re.match(r'^[a-zA-Z]+://',target):continue
+            relative,_,fragment=target.partition('#'); destination=(path.parent/relative).resolve() if relative else path
+            assert destination.exists(),(item['path'],target)
+            if fragment and re.fullmatch(r'(?:[A-Z]|\d+)\.\d+',fragment):assert re.search(r'^## '+re.escape(fragment)+r'(?:\s|$)',destination.read_text(),re.M),(item['path'],target)
+            local_links.append({'source':item['path'],'target':target})
+            if destination.suffix=='.svg':svgs.add(destination)
+    for p in svgs:ET.parse(p)
+    chapter=pieces((ROOT/'course/chapters/20.md').read_text()); previous=pieces((OUT/'before/course/chapters/20.md').read_text())
+    for key,prefix in {'intro':'b28dd','20.1':'5ce4','20.3':'251739','20.4':'9c636','20.5':'e1499844','20.6':'d0f39c45','20.7':'b8b4503a','20.9':'e666f39'}.items():assert hashlib.sha256(chapter[key].encode()).hexdigest().startswith(prefix),(key,'parent freeze mismatch')
+    for key in ['20.8','20.10','20.11','20.12']:assert chapter[key]==previous[key],key
+    table=lambda text:'\n'.join(line for line in text.splitlines() if line.startswith('|'))
+    assert table(chapter['20.13'])==table(previous['20.13'])
+    assert re.findall(r'```python\n(.*?)\n```',chapter['20.13'],re.S)==re.findall(r'```python\n(.*?)\n```',previous['20.13'],re.S)
+    assert '59a1eda4ed7b6e8609892ec2b9013c821ac93e69' in chapter['20.2']
+    assert '59a1eda4ed7b6e8609892ec2b9013c821ac93e69' in (ROOT/'docs/natural-assistant/v4/STUDENT.md').read_text()
+    assert 'LoRA' not in chapter['20.2']
+    for path,expected in [('docs/natural-assistant/v4/public-release.json','1758ceb9f8859108fa3ad315fb8f6a61e0c8cef40ec49b0bc41361d9c70e5ccf'),('docs/natural-assistant/evidence/v4-runtime/evaluate-37221188153/blind-review/scored/scores.json','a3804bcd91290355ae8fff871ab9909bdc9b1d037aea72668d8468513080e58f'),('docs/natural-assistant/v4/selection.json','8570755345e08c55ab77c165b405f41f6e5012b4c37a93909472b7f17334c42f')]:assert sha(ROOT/path)==expected,path
+    ui=ROOT/'docs/natural-assistant/evidence/v4-research/student-selected-public-ui';receipt=json.loads((ui/'receipt.json').read_text());index=json.loads((ui/'source-index.json').read_text())
+    for row in index['checkout_copies']:
+        p=ui/row['checkout_copy'];assert p.stat().st_size==row['bytes'] and sha(p)==row['sha256']
+    for row in index['raw_files']:
+        p=ROOT/row['raw_path'];assert p.stat().st_size==row['bytes'] and sha(p)==row['sha256']
+    assert receipt['status']=='passed' and receipt['actual_run_git_revision']=='59a1eda4ed7b6e8609892ec2b9013c821ac93e69'
+    assert receipt['selected_variant']=='base' and receipt['adapter_parameters']==0
+    assert receipt['anonymous']['downloaded_document_bytes']==9262
+    assert receipt['server_cpu_resources']['maximum_resident_set_kib']==13496104
+    assert receipt['disk']['official_cache']['unique_regular_file_bytes']==5889111977
+    student=(ROOT/'docs/natural-assistant/v4/STUDENT.md').read_text()
+    for number in ['9,262','23個','5,889,111,977','5.4847','13,496,104','12.8709','24.24','3.42／42.87／36.58／37.11','18.03','170.33']:assert number in student,number
+    assert receipt['test_rows_used']==0
+    manifest=json.loads((ROOT/'docs/natural-assistant/v4/public-release.json').read_text())
+    for relative,expected in manifest['code_files'].items():assert sha(ROOT/relative)==expected
+    assert sha(ROOT/'requirements-natural.txt')==manifest['requirements_sha256']
+    native=subprocess.run([str(ROOT/'.venv-natural/bin/python'),'scripts/fetch_natural_release.py','--manifest','docs/natural-assistant/v4/public-release.json','--list'],cwd=ROOT,text=True,capture_output=True)
+    assert native.returncode==0,native.stderr
+    assert json.loads(native.stdout)['selected_variant']=='base'
+    (OUT/'native-list.stdout.json').write_text(native.stdout)
+    for name,data in [('files-after.json',files),('changed-owners.json',owners),('local-links.json',local_links),('actual-parser-checks.json',command_checks)]: (OUT/name).write_text(json.dumps(data,ensure_ascii=False,indent=2)+'\n')
+    report={'scope':'Author source/provenance/syntax/link checks, not independent readability/factual/continuity review','modified_file_count':sum(f['changed'] for f in files),'author_sections':[o['source']+'#'+o['section'] for o in owners if o['ownership']=='publication author'],'external_root_sections':[o['source']+'#'+o['section'] for o in owners if o['ownership']!='publication author'],'syntax':syntax,'CLI_argument_vectors':len(command_checks),'native_release_list':'passed without model load/download','local_links':len(local_links),'SVG_XML_files':len(svgs),'current_parent_freezes':'matched','stable20_8_10_11_12':'byte-identical to before; other parent frozen edits preserved and separately recorded','capability_table_and_original_python':'byte-identical to before','evidence_index_verified':{'checkout_copies':len(index['checkout_copies']),'raw_files':len(index['raw_files'])},'no_GPU_inference_training_new_quality_scoring_or_git_actions':True,'formal_reviews_and_time_updates':'not modified'}
+    (OUT/'author-check.json').write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n');print(json.dumps(report,ensure_ascii=False,indent=2))
+    print('SOURCE HASHES')
+    for row in files:print(row['path'],row['sha256'])
+
+if __name__=='__main__':main()
