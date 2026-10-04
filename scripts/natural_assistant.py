@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -23,6 +24,7 @@ def parser():
     result.add_argument("--model-revision", default=assistant.MODEL_REVISION)
     result.add_argument("--asr-model", default=assistant.ASR_ID)
     result.add_argument("--asr-revision", default=assistant.ASR_REVISION)
+    result.add_argument("--asr-variant", choices=tuple(assistant.ASR_VARIANTS))
     result.add_argument("--local-files-only", action="store_true")
     result.add_argument("--device", default="cuda")
     result.add_argument("--dtype", choices=("float32", "float16", "bfloat16"), default="bfloat16")
@@ -33,11 +35,14 @@ def parser():
     result.add_argument("--max-seconds", type=int, default=3300)
     result.add_argument("--seed", type=int, default=42)
     result.add_argument("--adapter", type=Path)
+    result.add_argument("--adapter-label", default="adapter")
+    result.add_argument("--comparison-adapter", action="append", default=[], help="Validation only: LABEL=PATH")
     result.add_argument("--steps", type=int, default=100)
-    result.add_argument("--learning-rate", type=float, default=3e-5)
+    result.add_argument("--learning-rate", type=float, choices=(1e-4, 3e-5), default=3e-5)
     result.add_argument("--lora-rank", type=int, default=8)
     result.add_argument("--gradient-accumulation", type=int, default=2)
     result.add_argument("--checkpoint-every", type=int, default=25)
+    result.add_argument("--checkpoint-steps", default="", help="At most two explicit completed updates, e.g. 500,1000")
     result.add_argument("--split", choices=("validation", "test"), default="validation")
     result.add_argument("--user")
     result.add_argument("--image")
@@ -50,6 +55,28 @@ def parser():
 
 def main():
     options = parser().parse_args()
+    if options.asr_variant:
+        options.asr_model, options.asr_revision = assistant.ASR_VARIANTS[options.asr_variant]
+    if (options.asr_model, options.asr_revision) not in assistant.ASR_VARIANTS.values():
+        raise ValueError("ASR must use the fixed small or turbo model/revision pair")
+    options.checkpoint_steps = assistant.checkpoint_schedule(options.checkpoint_steps, options.steps)
+    if options.checkpoint_steps and options.stage != "train":
+        raise ValueError("Checkpoint archival is a training-only option")
+    if options.stage == "train" and (options.steps > 3000 or options.max_seconds > 3300):
+        raise ValueError("Training is bounded to at most 3000 updates and a 3300-second soft budget")
+    if not re.fullmatch(r"adapter(?:-step-[0-9]{6})?", options.adapter_label):
+        raise ValueError("Adapter label must identify latest or an explicit archived step")
+    options.comparison_adapters = []
+    for specification in options.comparison_adapter:
+        label, separator, path = specification.partition("=")
+        if not separator or not path or not re.fullmatch(r"adapter-step-[0-9]{6}", label):
+            raise ValueError("Comparison adapters need adapter-step-NNNNNN=PATH")
+        options.comparison_adapters.append((label, Path(path)))
+    labels = [label for label, _ in options.comparison_adapters]
+    if len(labels) > 2 or len(set(labels)) != len(labels):
+        raise ValueError("At most two uniquely labelled comparison adapters are allowed")
+    if labels and options.stage != "validation":
+        raise ValueError("Multiple checkpoint candidates are validation-only")
     options.output.mkdir(parents=True, exist_ok=True)
     for name in (
         "min_pixels",

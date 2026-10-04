@@ -17,13 +17,19 @@ DEFAULT_REVISION = "21a24124353487e08881302bbd71614766a489ac"
 DEFAULT_MANIFEST_SHA256 = "7604526c67da31a41940f16f9c87027c73cf2782c63522dbde8c7efbf015db91"
 REPOSITORY = "birdhackor/tiny-perceptron-vlm"
 MAX_TOTAL_BYTES = 512 * 1024 * 1024
-MAX_MANIFEST_BYTES = 4 * 1024 * 1024
+MAX_MANIFEST_BYTES = 16 * 1024 * 1024
 MAX_FILES = 10000
 ARCHIVES = {
     "assets/training/natural-vision-v3.tar.gz": "vision",
     "assets/training/natural-ocr-v3.tar.gz": "ocr",
     "assets/training/natural-speech-v3.tar.gz": "speech",
 }
+V4_ARCHIVES = {
+    "assets/training/natural-vision-v4.tar.gz": "vision",
+    "assets/training/natural-ocr-v4.tar.gz": "ocr",
+    "assets/training/natural-voice-v4.tar.gz": "voice",
+}
+KNOWN_ARCHIVES = {**ARCHIVES, **V4_ARCHIVES}
 SPLITS = ("train", "validation", "test")
 
 
@@ -100,7 +106,7 @@ def validate_manifest(manifest):
         if (
             not isinstance(archive, dict)
             or not isinstance(archive.get("path"), str)
-            or archive["path"] not in ARCHIVES
+            or archive["path"] not in KNOWN_ARCHIVES
             or archive["path"] in seen
         ):
             raise ValueError("資料包路徑未知或重複。")
@@ -110,9 +116,11 @@ def validate_manifest(manifest):
         total += archive["bytes"]
         digest_pin(archive.get("sha256"), 64, "壓縮包 SHA-256")
         group = declarations(archive.get("files"))
-        if any(safe_relative(path).parts[0] != ARCHIVES[archive["path"]] or path in combined for path in group):
+        if any(safe_relative(path).parts[0] != KNOWN_ARCHIVES[archive["path"]] or path in combined for path in group):
             raise ValueError("各包逐檔清單必須位於自己的目錄，且不能重複。")
         combined.update(group)
+    if seen not in (set(ARCHIVES), set(V4_ARCHIVES)):
+        raise ValueError("同一次下載必須使用完整、同版本的三個資料包。")
     if total >= MAX_TOTAL_BYTES or combined != files:
         raise ValueError("壓縮包總量過大，或逐包清單與完整逐檔清單不同。")
     identifiers = set()
@@ -166,7 +174,7 @@ def summary(manifest, revision, manifest_sha256):
         "download_bytes": sum(archive["bytes"] for archive in manifest["archives"]),
         "unpacked_bytes": sum(item["bytes"] for item in manifest["files"]),
         "archives": [
-            {"id": ARCHIVES[archive["path"]], "bytes": archive["bytes"], "files": len(archive["files"])}
+            {"id": KNOWN_ARCHIVES[archive["path"]], "bytes": archive["bytes"], "files": len(archive["files"])}
             for archive in manifest["archives"]
         ],
     }
@@ -274,7 +282,13 @@ def fetch_data(
         temporary = Path(temporary)
         data = temporary / "data"
         data.mkdir()
-        manifest_url = f"https://raw.githubusercontent.com/{REPOSITORY}/{revision}/docs/natural-assistant/manifest.json"
+        archive_paths = {item["path"] for item in manifest["archives"]}
+        manifest_relative = (
+            "docs/natural-assistant/v4/manifest.json"
+            if archive_paths == set(V4_ARCHIVES)
+            else "docs/natural-assistant/manifest.json"
+        )
+        manifest_url = f"https://raw.githubusercontent.com/{REPOSITORY}/{revision}/{manifest_relative}"
         manifest_record = download_checked(
             manifest_url,
             temporary / "manifest.json",
