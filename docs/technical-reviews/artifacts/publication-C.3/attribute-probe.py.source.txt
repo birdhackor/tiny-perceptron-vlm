@@ -1,0 +1,65 @@
+"""Isolated real Git byte roundtrip; does not mutate the teaching repository index."""
+import hashlib
+import json
+import os
+import subprocess
+import tempfile
+from pathlib import Path
+
+ROOT = Path.cwd()
+ATTR = (ROOT / ".gitattributes").read_bytes()
+PREFIXES = [
+    "docs/natural-assistant/evidence/",
+    "docs/natural-assistant/reviews/",
+    "docs/reader-reviews/artifacts/",
+    "docs/reader-reviews/history/",
+    "docs/technical-reviews/artifacts/",
+    "docs/technical-reviews/history/",
+    "docs/reading-time-reviews/natural-inputs-final/",
+]
+PROBE = b"original first line\r\noriginal second line\r\n"
+ENV = {**os.environ, "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull}
+
+
+def git(cwd, *args):
+    result = subprocess.run(["git", *args], cwd=cwd, env=ENV, capture_output=True, check=True)
+    return result.stdout
+
+
+result = {"reviewer_task": "/root/publication_factual_c_3", "git_version": git(ROOT, "--version").decode().strip(), "attributes_sha256": hashlib.sha256(ATTR).hexdigest(), "cases": []}
+for autocrlf in ["false", "true"]:
+    with tempfile.TemporaryDirectory(prefix="c3-git-raw-") as temp:
+        target = Path(temp)
+        git(target, "init", "--quiet")
+        git(target, "config", "core.autocrlf", autocrlf)
+        (target / ".gitattributes").write_bytes(ATTR)
+        paths = [prefix + "c3-raw-probe.txt" for prefix in PREFIXES]
+        for path in paths + ["ordinary.md"]:
+            file = target / path
+            file.parent.mkdir(parents=True, exist_ok=True)
+            file.write_bytes(PROBE)
+        check = git(target, "check-attr", "text", "eol", "filter", "diff", "merge", "--", *paths, "ordinary.md", "assets/training/gsm8k-v1.tar.gz").decode()
+        attrs = {}
+        for line in check.splitlines():
+            path, name, value = line.split(": ", 2)
+            attrs.setdefault(path, {})[name] = value
+        for path in paths:
+            assert attrs[path]["text"] == "unset"
+            assert attrs[path]["filter"] == "unspecified"
+        archive = attrs["assets/training/gsm8k-v1.tar.gz"]
+        assert all(archive[key] == "lfs" for key in ["filter", "diff", "merge"])
+        assert archive["text"] == "unset"
+        git(target, "add", "--", ".gitattributes", *paths, "ordinary.md")
+        observations = []
+        for path in paths:
+            staged = git(target, "show", ":" + path)
+            assert staged == PROBE
+            (target / path).unlink()
+            git(target, "checkout-index", "--", path)
+            checked_out = (target / path).read_bytes()
+            assert checked_out == PROBE
+            observations.append({"path": path, "index_exact_original_bytes": True, "checkout_exact_original_bytes": True, "sha256": hashlib.sha256(staged).hexdigest()})
+        ordinary = git(target, "show", ":ordinary.md")
+        assert ordinary == PROBE.replace(b"\r\n", b"\n")
+        result["cases"].append({"core.autocrlf": autocrlf, "attrs": attrs, "roundtrips": observations, "ordinary_text_normalized_to_LF": True, "raw_check_attr_stdout": check})
+print(json.dumps(result, ensure_ascii=False, indent=2))

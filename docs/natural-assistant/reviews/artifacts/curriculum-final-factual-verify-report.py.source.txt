@@ -1,0 +1,71 @@
+"""Validate this factual supplement against current actual files; no model execution."""
+import hashlib
+import json
+from pathlib import Path
+import re
+
+ROOT = Path(__file__).resolve().parents[4]
+REPORT = ROOT / "docs/natural-assistant/reviews/curriculum-final-factual.json"
+PREFIX = ROOT / "docs/natural-assistant/reviews/artifacts"
+
+
+def sha(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+report = json.loads(REPORT.read_text())
+assert report["reviewer_task"] == "/root/natural_factual_final_20_8"
+assert report["reviewer_context"]["non_author"]
+assert report["reviewer_context"]["non_first_reader"]
+assert not report["reviewer_context"]["first_reader_used_as_factual_authority"]
+assert report["verdict"] == "pass" and report["issues"] == []
+assert report["source_sha256"] == sha(ROOT / report["source"])
+sources = {record["id"]: record for record in report["sources"]}
+artifacts = {record["id"]: record for record in report["artifacts"]}
+assert len(sources) == len(report["sources"]) == 44
+assert len(artifacts) == len(report["artifacts"]) == 41
+for record in list(sources.values()) + list(artifacts.values()):
+    assert sha(ROOT / record["path"]) == record["sha256"], record
+for claim in report["claims"]:
+    assert claim["status"] == "verified"
+    assert claim["independent_check"] and claim["sources"] and claim["artifacts"]
+    for key, inventory in [("sources", sources), ("artifacts", artifacts)]:
+        for reference in claim[key]:
+            assert inventory[reference["id"]]["sha256"] == reference["sha256"]
+assert len(report["claims"]) == len({claim["id"] for claim in report["claims"]}) == 16
+execution = report["execution"]
+assert execution["exit_code"] == 0
+assert sha(ROOT / execution["argv"][1]) == execution["script_sha256"]
+for stream in ["stdout", "stderr"]:
+    assert sha(ROOT / execution[stream]) == execution[stream + "_sha256"]
+audit = json.loads((PREFIX / "curriculum-final-factual-audit.json").read_text())
+assert audit["source_sha256"] == report["source_sha256"]
+assert len(audit["first_reading_table"]) == 20
+assert all(not row["missing"] and not row["nonexistent"] for row in audit["first_reading_table"])
+assert len(audit["detailed_curriculum_bullet_ids"]) == 261
+assert all(row["exists"] and row.get("fragment_exists", True) for row in audit["local_link_checks"])
+for row in audit["local_link_checks"]:
+    assert sha(ROOT / row["path"]) == row["sha256"]
+assert len(audit["fixed_external_code_path_checks"]) == 28
+assert all(row["status"] == 200 and row["method"] == "HEAD" for row in audit["fixed_external_code_path_checks"])
+assert all(row["exit_code"] == 0 for row in audit["commands_executed"])
+for command in audit["commands_executed"]:
+    for stream in ["stdout", "stderr"]:
+        assert sha(ROOT / command[stream]) == command[stream + "_sha256"]
+main = report["checks"]["main20_8_report_unchanged"]
+assert main["sha256"] == sha(ROOT / main["path"])
+assert main["sha256"] == "5325c06a56d6c03a010ae9cb112086119a9a9ae78383ffbd543182e9d73b499b"
+assert main["claims"] == 44
+# Recompute notebook and numbered-header sets directly, without the imported checker.
+chapter_ids = []
+for path in (ROOT / "course/chapters").glob("*.md"):
+    chapter_ids.extend(re.findall(r"^## ([0-9]{1,2}\.[0-9]+|[ABC]\.[0-9]+)\s", path.read_text(), re.M))
+notebooks = list((ROOT / "notebooks").rglob("*.ipynb"))
+assert len(chapter_ids) == len(set(chapter_ids)) == len(notebooks) == 261
+assert set(chapter_ids) == {path.stem for path in notebooks}
+front_ids = []
+for name in ["README.md", "first-steps.md", "training.md", "glossary.md"]:
+    front_ids.extend(re.findall(r"^## ([RWTG]\.[0-9]+)\s", (ROOT / "course" / name).read_text(), re.M))
+assert len(front_ids) == len(set(front_ids)) == 26
+assert len(set(chapter_ids + front_ids)) == 287
+print(json.dumps({"verdict": "pass", "report_sha256": sha(REPORT), "source_sha256": report["source_sha256"], "claims": 16, "sources_current_sha_valid": 44, "artifacts_exact_sha_valid": 41, "all20_row_ids_valid": True, "all261_notebook_ids_valid": True, "all287_actual_numbered_ids_valid": True, "all25_local_paths_and_fragments_valid": True, "all28_fixed_remote_HEAD200": True, "all4_actual_list_commands_exit0": True, "main20_8_report_unchanged": True}, ensure_ascii=False))

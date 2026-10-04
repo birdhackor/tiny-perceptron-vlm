@@ -1,0 +1,41 @@
+from pathlib import Path
+import base64
+import datetime
+import hashlib
+import json
+import re
+from playwright.sync_api import sync_playwright
+ROOT = Path('/workspace/tiny-perceptron-vlm')
+OUT = ROOT / 'docs/natural-assistant/reviews/artifacts'
+PREFIX = 'continuity-final-inputs-reread-stroke'
+SOURCE = OUT / (PREFIX + '-render.py.source.txt')
+sha = lambda data: hashlib.sha256(data).hexdigest()
+record = {'captured_at': datetime.datetime.now(datetime.timezone.utc).isoformat(), 'executed_source': str(SOURCE.relative_to(ROOT)), 'executed_source_sha256': sha(SOURCE.read_bytes()), 'executed_command': 'python ' + str(SOURCE.relative_to(ROOT)), 'sections': [], 'figures': [], 'renders': []}
+for chapter, numbers in {'11': ['11.15', '11.16'], '20': ['20.6']}.items():
+    path = ROOT / f'course/chapters/{chapter}.md'
+    data = path.read_bytes()
+    for number in numbers:
+        body = re.search(r'^## ' + re.escape(number) + r'\s.*?(?=^## |\Z)', data.decode(), re.M | re.S).group(0)
+        target = OUT / f'{PREFIX}-{number}.md'
+        target.write_text(body)
+        record['sections'].append({'section': number, 'path': str(path.relative_to(ROOT)), 'file_sha256': sha(data), 'section_body_sha256': sha(body.encode()), 'snapshot': str(target.relative_to(ROOT))})
+svg = ROOT / 'course/figures/practical_stroke.svg'
+record['figures'].append({'path': str(svg.relative_to(ROOT)), 'sha256': sha(svg.read_bytes())})
+with sync_playwright() as pw:
+    browser = pw.chromium.launch(executable_path='/usr/bin/chromium', headless=True, args=['--no-sandbox'])
+    for viewport_width, image_width in [(1440, 688), (358, 311)]:
+        uri = 'data:image/svg+xml;base64,' + base64.b64encode(svg.read_bytes()).decode()
+        html = f'<!doctype html><meta charset="UTF-8"><style>body{{margin:0}}main{{width:{image_width}px;margin:24px auto}}img{{width:100%;height:auto;display:block}}</style><main><img src="{uri}"></main>'
+        html_path = OUT / f'{PREFIX}-{viewport_width}.html'
+        html_path.write_text(html)
+        page = browser.new_page(viewport={'width': viewport_width, 'height': 1200}, device_scale_factor=1)
+        page.set_content(html)
+        page.wait_for_function('document.querySelector("img").complete')
+        page.evaluate('document.fonts.ready')
+        png = OUT / f'{PREFIX}-{viewport_width}.png'
+        page.locator('img').screenshot(path=str(png))
+        record['renders'].append({'renderer': 'independent Chromium current SVG, no sticky header', 'viewport_width': viewport_width, 'display_width': image_width, 'source_svg_sha256': sha(svg.read_bytes()), 'png': str(png.relative_to(ROOT)), 'png_sha256': sha(png.read_bytes())})
+        page.close()
+    browser.close()
+(OUT / (PREFIX + '-capture.json')).write_text(json.dumps(record, ensure_ascii=False, indent=2) + '\n')
+print('Captured current 11.15 and 20.6 route, rendered only gate-released practical_stroke.')

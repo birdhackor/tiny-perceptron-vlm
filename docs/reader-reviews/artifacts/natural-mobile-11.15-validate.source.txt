@@ -1,0 +1,53 @@
+from pathlib import Path
+from datetime import UTC, datetime
+import hashlib
+import json
+import re
+from PIL import Image
+
+root = Path('/workspace/tiny-perceptron-vlm')
+prefix = root/'docs/reader-reviews/artifacts/natural-mobile-11.15'
+live = root/'docs/reader-reviews/11.15.json'
+report = json.loads(live.read_bytes())
+raw = (root/'course/chapters/11.md').read_bytes()
+headings = list(re.finditer(rb'(?m)^## (\d+\.\d+) [^\r\n]+',raw))
+body = next(raw[h.start():headings[i+1].start()] for i,h in enumerate(headings) if h[1] == b'11.15')
+digest = lambda data: hashlib.sha256(data).hexdigest()
+checks = {}
+checks['canonical_reviewer'] = report['reviewer_task'] == '/root/natural_reader_mobile_11_15'
+checks['current_section_sha'] = digest(body) == report['source_sha256']
+checks['section_snapshot_byteexact'] = (root/report['execution_evidence']['reviewed_section']).read_bytes() == body
+code = re.search(rb'```python\n(.*?)```',body,re.S).group(1)
+checks['original_program_byteexact'] = (root/report['execution_evidence']['program']).read_bytes() == code
+checks['figure_sha'] = all(digest((root/p).read_bytes()) == sha for p,sha in report['figure_sha256'].items())
+checks['artifact_sha'] = all(digest((root/p).read_bytes()) == sha
+                           for p,sha in report['execution_evidence']['artifact_sha256'].items())
+old_bytes = (root/report['history']['byteexact_snapshot']).read_bytes()
+checks['old_review_byteexact_sha'] = digest(old_bytes) == 'b38500fd29707774759fb68376198b3374fab36fd46675b5a35ce5a27a34f212'
+checks['old_report_retained'] = json.loads(old_bytes) == report['history']['previous_report']
+checks['prior_owner_retained'] = report['history']['previous_reviewer_task'] == '/root/natural_reader_11_15'
+checks['reader_checks_pass'] = len(report['checks']) >= 5 and all(v['status'] == 'pass' for v in report['checks'].values())
+checks['no_reader_issues'] = report['verdict'] == 'pass' and report['issues'] == []
+run = json.loads((root/report['execution_evidence']['run_metadata']).read_bytes())
+checks['cpu_original_exit_zero'] = run['exit_code'] == 0 and run['CUDA_VISIBLE_DEVICES'] == ''
+proof = json.loads((root/report['execution_evidence']['runtime']).read_bytes())
+checks['cpu_tensors'] = set(proof['tensor_devices']) == {'cpu'} and proof['torch_default_device'] == 'cpu'
+checks['arithmetic_and_position_collision'] = proof['all_assertions_passed'] and proof['pooled_equal'] and not proof['input_equal']
+render = json.loads((root/report['execution_evidence']['figure_render_manifest']).read_bytes())
+checks['render_source_current'] = render['figure_sha256'] == digest((root/'course/figures/practical_stroke.svg').read_bytes())
+checks['text_within_viewbox'] = all(t['inside'] for r in render['results'] for t in r['measurements']['text'])
+checks['desktop_png_size'] = Image.open(Path(str(prefix)+'-desktop.png')).size == (688,1032)
+checks['mobile_png_size'] = Image.open(Path(str(prefix)+'-mobile.png')).size == (311,467)
+checks['png_sha'] = all(digest((root/r['file']).read_bytes()) == r['sha256'] for r in render['results'])
+result = {
+    'checked_at': datetime.now(UTC).isoformat(),
+    'reviewer_task': '/root/natural_reader_mobile_11_15',
+    'scope': '11.15 only: current source, figure, stored artifacts, original CPU run, previous report preservation and review schema; human visual reading is documented separately.',
+    'checks': checks,
+    'all_passed': all(checks.values()),
+    'review_sha256': digest(live.read_bytes()),
+    'validator_sha256': digest(Path(__file__).read_bytes()),
+}
+Path(str(prefix)+'-validation.json').write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\n')
+print(json.dumps(result,ensure_ascii=False,indent=2))
+assert result['all_passed']

@@ -1,0 +1,101 @@
+import difflib
+import hashlib
+import json
+import platform
+import subprocess
+import tempfile
+from pathlib import Path
+
+ROOT = Path.cwd()
+OUT = ROOT / 'docs/technical-reviews/artifacts/publication-c-2'
+current = (ROOT / '.gitattributes').read_bytes()
+prior = (OUT / 'gitattributes-prior.source.txt').read_bytes()
+assert prior.splitlines()[-1] == current.splitlines()[-1]
+paths = [
+    'docs/natural-assistant/evidence/nested/probe.txt',
+    'docs/natural-assistant/reviews/nested/probe.txt',
+    'docs/reader-reviews/artifacts/nested/probe.txt',
+    'docs/reader-reviews/history/nested/probe.txt',
+    'docs/technical-reviews/artifacts/nested/probe.txt',
+    'docs/technical-reviews/history/nested/probe.txt',
+    'docs/reading-time-reviews/natural-inputs-final/nested/probe.txt',
+]
+payload = '來源快照\r\n第二行\r\n'.encode('utf-8')
+attrs = ['text', 'eol', 'filter', 'diff', 'merge']
+
+def run(args, cwd=ROOT, **kw):
+    return subprocess.check_output(['git', *args], cwd=cwd, stderr=subprocess.PIPE, **kw)
+
+def parse_attributes(data):
+    fields = data.decode().split('\0')[:-1]
+    result = {}
+    for index in range(0, len(fields), 3):
+        path, attr, value = fields[index:index+3]
+        result.setdefault(path, {})[attr] = value
+    return result
+
+main_attributes = parse_attributes(run(['check-attr', '-z', *attrs, '--', *paths, 'course/chapters/0C.md', 'assets/training/gsm8k-v1.tar.gz']))
+rows = []
+with tempfile.TemporaryDirectory(prefix='publication-c-2-git-') as tmp:
+    repo = Path(tmp)
+    run(['init', '-q'], cwd=repo)
+    run(['config', 'core.autocrlf', 'true'], cwd=repo)
+    run(['config', 'core.safecrlf', 'false'], cwd=repo)
+    (repo / '.gitattributes').write_bytes(current)
+    for path in paths + ['course/chapters/probe.md']:
+        target = repo / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(payload)
+    run(['add', '.gitattributes', *paths, 'course/chapters/probe.md'], cwd=repo)
+    for path in paths:
+        attr = main_attributes[path]
+        assert attr['text'] == 'unset'
+        assert attr['eol'] == 'lf'
+        blob = run(['show', ':' + path], cwd=repo)
+        assert blob == payload
+        # Actual checkout with core.autocrlf=true also retains literal CRLF.
+        (repo / path).unlink()
+        run(['checkout-index', '--force', '--', path], cwd=repo)
+        checkout = (repo / path).read_bytes()
+        assert checkout == payload
+        rows.append({'path': path, 'attributes': attr,
+                     'input_sha256': hashlib.sha256(payload).hexdigest(),
+                     'staged_sha256': hashlib.sha256(blob).hexdigest(),
+                     'checkout_sha256': hashlib.sha256(checkout).hexdigest(),
+                     'staged_and_checkout_byte_exact': True})
+    assert (repo / 'course/chapters/probe.md').read_bytes() == payload
+    normalized = run(['show', ':course/chapters/probe.md'], cwd=repo)
+    assert normalized == payload.replace(b'\r\n', b'\n')
+    current_lfs = parse_attributes(run(['check-attr', '-z', *attrs, '--', 'assets/training/gsm8k-v1.tar.gz'], cwd=repo))
+    (repo / '.gitattributes').write_bytes(prior)
+    prior_lfs = parse_attributes(run(['check-attr', '-z', *attrs, '--', 'assets/training/gsm8k-v1.tar.gz'], cwd=repo))
+    assert current_lfs == prior_lfs
+lfs = main_attributes['assets/training/gsm8k-v1.tar.gz']
+assert lfs == {'text': 'unset', 'eol': 'lf', 'filter': 'lfs', 'diff': 'lfs', 'merge': 'lfs'}
+result = {
+    'reviewer_task': '/root/publication_factual_c_2',
+    'scope': 'Isolated local Git index/checkout with copied current attributes, plus read-only actual repository check-attr; no shared index mutation, no LFS download, no GPU or training.',
+    'git_version': run(['--version']).decode().strip(),
+    'python': platform.python_version(), 'platform': platform.platform(),
+    'current_gitattributes_sha256': hashlib.sha256(current).hexdigest(),
+    'prior_gitattributes_sha256': hashlib.sha256(prior).hexdigest(),
+    'diff': ''.join(difflib.unified_diff(prior.decode().splitlines(keepends=True), current.decode().splitlines(keepends=True), fromfile='prior', tofile='current')),
+    'crlf_probes': rows,
+    'maintained_source_probe': {'path': 'course/chapters/probe.md', 'normalized_to_lf': True, 'working_bytes_not_modified_by_add': True},
+    'lfs_prior': prior_lfs, 'lfs_current': current_lfs, 'lfs_actual_repository': lfs,
+    'lfs_attributes_unchanged': True,
+    'upstream_sources': [
+        {'url': 'https://raw.githubusercontent.com/git/git/v2.52.0/Documentation/gitattributes.adoc',
+         'sha256': hashlib.sha256(Path('/tmp/publication-c-2-source/git-gitattributes-2.52.0.adoc').read_bytes()).hexdigest(),
+         'locators': 'L32-67 attribute states/later rule precedence; L135-180 text unset and eol applicability',
+         'inspection_note': '本人實讀官方固定版本原文件；-text 是 Unset，不是 unspecified，故 eol=lf 不會覆蓋它或觸發換行轉換。'},
+        {'url': 'https://raw.githubusercontent.com/git-lfs/git-lfs/v3.8.0/docs/man/git-lfs-pull.adoc',
+         'sha256': hashlib.sha256(Path('/tmp/publication-c-2-source/git-lfs-pull.txt').read_bytes()).hexdigest(),
+         'locators': 'DESCRIPTION; INCLUDE AND EXCLUDE',
+         'inspection_note': '本人完整親讀原文件；pull 在 index 有路徑且屬性包含 lfs 時取得內容，--include 限路徑、--exclude 空字串清除原排除設定；本次不冒稱已重跑下載。'}
+    ],
+    'retrieval_note': '先讀 Git v2.43.0 舊版本文字路徑，確認本機 2.52.0 後另外取得與實讀 v2.52.0 官方 .adoc；判定引用 2.52.0。',
+    'verdict': 'pass'
+}
+(OUT / 'git-attribute-audit.json').write_text(json.dumps(result, ensure_ascii=False, indent=2) + '\n')
+print(json.dumps({'git_version': result['git_version'], 'crlf_probes': len(rows), 'all_byte_exact': True, 'lfs_attributes_unchanged': True, 'gitattributes_sha256': result['current_gitattributes_sha256']}, ensure_ascii=False))

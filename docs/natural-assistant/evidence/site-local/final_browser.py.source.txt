@@ -1,0 +1,54 @@
+import hashlib
+import json
+import threading
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from playwright.sync_api import sync_playwright
+
+repo = Path.cwd()
+site = repo / 'outputs/site'
+out = repo / 'outputs/natural-extension/final-browser'
+out.mkdir(exist_ok=True)
+
+class Handler(SimpleHTTPRequestHandler):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, directory=str(site), **kwargs)
+    def log_message(self, *args):
+        pass
+
+server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+threading.Thread(target=server.serve_forever, daemon=True).start()
+results = []
+try:
+    with sync_playwright() as p:
+        browser = p.chromium.launch(executable_path='/usr/bin/chromium', headless=True, args=['--no-sandbox'])
+        for width in [1440, 358]:
+            page = browser.new_page(viewport={'width': width, 'height': 1000}, device_scale_factor=1, reduced_motion='reduce')
+            for lesson in ['index', '1.1', '11.14', '11.15', '20.1', '20.4', '20.5', '20.6', '20.7', '20.8', 'curriculum']:
+                response = page.goto(f'http://127.0.0.1:{server.server_port}/{lesson}.html', wait_until='domcontentloaded')
+                page.wait_for_function('Array.from(document.querySelectorAll(".md-content img")).every(i=>i.complete&&i.naturalWidth>0)')
+                page.evaluate('document.fonts.ready')
+                row = {'page': lesson, 'viewport_width': width, 'status': response.status, 'outer_overflow': page.evaluate('document.documentElement.scrollWidth>innerWidth'), 'reading_time': page.locator('.md-content .reading-time').all_text_contents(), 'figures': []}
+                assert response.status == 200 and not row['outer_overflow'] and len(row['reading_time']) == 1, row
+                if lesson == 'index':
+                    row['totals'] = page.locator('.reading-time-totals').inner_text()
+                    assert '自然輸入延伸' in row['totals']
+                page.add_style_tag(content='header.md-header{visibility:hidden!important}')
+                row['diagram_screenshot_note'] = 'Header hidden only for diagram captures to prevent sticky-header scroll overlay; page status/overflow/time measured before this capture-only style.'
+                figures = page.locator('.md-content img.diagram')
+                for number in range(figures.count()):
+                    el = figures.nth(number)
+                    box = el.bounding_box()
+                    target = out / f'{lesson}-{width}-figure{number}.png'
+                    el.screenshot(path=str(target))
+                    src = el.get_attribute('src')
+                    source = repo/'course/figures'/Path(src).name
+                    row['figures'].append({'src': src, 'bbox': box, 'source_sha256': hashlib.sha256(source.read_bytes()).hexdigest(), 'render': str(target.relative_to(repo)), 'render_sha256': hashlib.sha256(target.read_bytes()).hexdigest()})
+                results.append(row)
+            page.close()
+        browser.close()
+finally:
+    server.shutdown()
+    server.server_close()
+(out/'report.json').write_text(json.dumps(results, ensure_ascii=False, indent=2)+'\n')
+print(json.dumps([{'page':r['page'],'width':r['viewport_width'],'time':r['reading_time'],'overflow':r['outer_overflow'],'figure_widths':[round(f['bbox']['width'],1) for f in r['figures']]}for r in results],ensure_ascii=False))

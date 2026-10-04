@@ -130,6 +130,9 @@
 | 11.11 平均高分掩蓋了哪些弱項？ | [閱讀](../course/chapters/11.md#11.11) | [開啟](../notebooks/11/11.11.ipynb) |
 | 11.12 圖片裡的字也能辨識嗎？ | [閱讀](../course/chapters/11.md#11.12) | [開啟](../notebooks/11/11.12.ipynb) |
 | 11.13 多個字怎麼依序讀出？ | [閱讀](../course/chapters/11.md#11.13) | [開啟](../notebooks/11/11.13.ipynb) |
+| 11.14 看見物件，和看懂整張圖，有什麼距離？ | [閱讀](../course/chapters/11.md#11.14) | [開啟](../notebooks/11/11.14.ipynb) |
+| 11.15 中文的小筆畫，能靠放大模型救回來嗎？ | [閱讀](../course/chapters/11.md#11.15) | [開啟](../notebooks/11/11.15.ipynb) |
+| 11.16 認對每個字，就等於讀對整段文字嗎？ | [閱讀](../course/chapters/11.md#11.16) | [開啟](../notebooks/11/11.16.ipynb) |
 | 12.1 音訊是什麼 tensor？ | [閱讀](../course/chapters/12.md#12.1) | [開啟](../notebooks/12/12.1.ipynb) |
 | 12.2 每秒多少樣本？ | [閱讀](../course/chapters/12.md#12.2) | [開啟](../notebooks/12/12.2.ipynb) |
 | 12.3 怎麼看聲音隨時間變化？ | [閱讀](../course/chapters/12.md#12.3) | [開啟](../notebooks/12/12.3.ipynb) |
@@ -142,6 +145,8 @@
 | 12.10 模型有聽聲音嗎？ | [閱讀](../course/chapters/12.md#12.10) | [開啟](../notebooks/12/12.10.ipynb) |
 | 12.11 先轉成文字會少掉什麼？ | [閱讀](../course/chapters/12.md#12.11) | [開啟](../notebooks/12/12.11.ipynb) |
 | 12.12 答案需要同時看圖和聽聲音時怎麼辦？ | [閱讀](../course/chapters/12.md#12.12) | [開啟](../notebooks/12/12.12.ipynb) |
+| 12.13 聽寫一句話，和回答一句話，是同一件事嗎？ | [閱讀](../course/chapters/12.md#12.13) | [開啟](../notebooks/12/12.13.ipynb) |
+| 12.14 打字或說話，怎麼交給同一位聊天助手？ | [閱讀](../course/chapters/12.md#12.14) | [開啟](../notebooks/12/12.14.ipynb) |
 | 13.1 同一問題哪個回答更好？ | [閱讀](../course/chapters/13.md#13.1) | [開啟](../notebooks/13/13.1.ipynb) |
 | 13.2 偏好資料怎麼表示？ | [閱讀](../course/chapters/13.md#13.2) | [開啟](../notebooks/13/13.2.ipynb) |
 | 13.3 模型給整段回答多大機率？ | [閱讀](../course/chapters/13.md#13.3) | [開啟](../notebooks/13/13.3.ipynb) |
@@ -230,6 +235,14 @@
 | 19.10 如何把成品帶到較小的電腦？ | [閱讀](../course/chapters/19.md#19.10) | [開啟](../notebooks/19/19.10.ipynb) |
 | 19.11 下載一份權重，就能從中斷處繼續訓練嗎？ | [閱讀](../course/chapters/19.md#19.11) | [開啟](../notebooks/19/19.11.ipynb) |
 | 19.12 完成整合後，怎樣回答「這個模型會什麼」？ | [閱讀](../course/chapters/19.md#19.12) | [開啟](../notebooks/19/19.12.ipynb) |
+| 20.1 照片、打字與說話，怎麼交給同一位助理？ | [閱讀](../course/chapters/20.md#20.1) | [開啟](../notebooks/20/20.1.ipynb) |
+| 20.2 沿用已訓練的底座，和把小模型放大差在哪裡？ | [閱讀](../course/chapters/20.md#20.2) | [開啟](../notebooks/20/20.2.ipynb) |
+| 20.3 同一張照片的不同問題，為什麼要留在同一份考卷？ | [閱讀](../course/chapters/20.md#20.3) | [開啟](../notebooks/20/20.3.ipynb) |
+| 20.4 大底座裡，這輪究竟是哪幾張配方表在學？ | [閱讀](../course/chapters/20.md#20.4) | [開啟](../notebooks/20/20.4.ipynb) |
+| 20.5 照片描述怎樣才算說中了畫面？ | [閱讀](../course/chapters/20.md#20.5) | [開啟](../notebooks/20/20.5.ipynb) |
+| 20.6 圖片裡的中文，怎樣逐字、逐行核對？ | [閱讀](../course/chapters/20.md#20.6) | [開啟](../notebooks/20/20.6.ipynb) |
+| 20.7 打字能答，為什麼說話還可能答錯？ | [閱讀](../course/chapters/20.md#20.7) | [開啟](../notebooks/20/20.7.ipynb) |
+| 20.8 怎麼把整套助理交給下一位讀者？ | [閱讀](../course/chapters/20.md#20.8) | [開啟](../notebooks/20/20.8.ipynb) |
 | A.1 給幾個例子能改變回答嗎？ | [閱讀](../course/chapters/0A.md#A.1) | [開啟](../notebooks/0A/A.1.ipynb) |
 | A.2 不在訓練資料裡的資訊怎麼使用？ | [閱讀](../course/chapters/0A.md#A.2) | [開啟](../notebooks/0A/A.2.ipynb) |
 | A.3 文件多了怎麼找相關段落？ | [閱讀](../course/chapters/0A.md#A.3) | [開啟](../notebooks/0A/A.3.ipynb) |

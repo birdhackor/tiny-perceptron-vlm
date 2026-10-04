@@ -1,0 +1,814 @@
+                               ViLT: Vision-and-Language Transformer
+                              Without Convolution or Region Supervision
+
+
+                                        Wonjae Kim * 1 † Bokyung Son * 1 Ildoo Kim 2
+
+
+                          Abstract                                                                       Visual Embedding Schema
+
+                                                                        Region Feature                                     CNN                  Region
+     Vision-and-Language Pre-training (VLP) has im-                   (ViLBERT, UNITER, ...)
+                                                                                                     Image
+                                                                                                                         Backbone              Operations
+     proved performance on various joint vision-and-
+                                                                          Grid Feature                                                            CNN
+     language downstream tasks. Current approaches                        (Pixel-BERT)
+                                                                                                     Image
+                                                                                                                                                Backbone
+                                                                                                                                                                        Modality
+     to VLP heavily rely on image feature extraction                                                                                                                   Interaction
+                                                                        Patch Projection                                                         Linear
+     processes, most of which involve region super-                          (Ours)
+                                                                                                     Image
+                                                                                                                                               Embedding
+     vision (e.g., object detection) and the convolu-
+     tional architecture (e.g., ResNet). Although dis-                                                                                           Linear
+                                                                                                         Text
+                                                                                                                                               Embedding
+     regarded in the literature, we find it problem-
+     atic in terms of both (1) efficiency/speed, that
+                                                                                                                     Running Time
+     simply extracting input features requires much                                      (Performances : NLVR2 test-P Acc. / F30K TR R@1 / F30K IR R@1)
+     more computation than the multimodal interac-
+                                                                        UNITER-Base               ~75 ms                                   ~810 ms
+                                                                                                                                                                                ~900 ms
+     tion steps; and (2) expressive power, as it is upper              (75.8 / 85.9 / 72.5)       (R101)                      (RPNs, RoI Align, NMS, and RoI Heads)
+
+
+
+     bounded to the expressive power of the visual                     Pixel-BERT-R50           ~45 ms
+                                                                                                                ~60 ms
+     embedder and its predefined visual vocabulary.                    (72.4 / 75.7 / 53.4)      (R50)
+                                                                                                                                                                          ~15 ms
+                                                                                                                                                                      (BERT-base-like)
+     In this paper, we present a minimal VLP model,                    ViLT-B/32 (Ours)            ~15 ms
+                                                                       (76.1 / 83.5 / 64.4)
+     Vision-and-Language Transformer (ViLT), mono-                                                             ~0.4 ms
+                                                                                                         (Linear Embedding)
+     lithic in the sense that the processing of visual
+     inputs is drastically simplified to just the same               Figure 1. Visual comparison of conventional VLP architectures
+     convolution-free manner that we process textual                 and our proposed ViLT. We have entirely removed convolutional
+     inputs. We show that ViLT is up to tens of times                neural networks from the VLP pipeline without hurting perfor-
+     faster than previous VLP models, yet with com-                  mance on downstream tasks. ViLT is the first VLP model of which
+     petitive or better downstream task performance.                 the modal-specific components require less computation than the
+     Our code and pre-trained weights are available at               transformer component for multimodal interactions.
+     https://github.com/dandelin/vilt.
+
+                                                                     et al., 2020; Li et al., 2020b; Gan et al., 2020; Yu et al.,
+                                                                     2020; Zhang et al., 2021). These models are pre-trained
+1. Introduction                                                      with image text matching and masked language modeling
+                                                                     objectives1 on images and their aligned descriptions, and are
+The pre-train-and-fine-tune scheme has been expanded to a
+                                                                     fine-tuned on vision-and-language downstream tasks where
+joint domain of vision and language, giving birth to the cat-
+                                                                     the inputs involve two modalities.
+egory of Vision-and-Language Pre-training (VLP) models
+(Lu et al., 2019; Chen et al., 2019; Su et al., 2019; Li et al.,     To be fed into VLP models, image pixels need to be ini-
+2019; Tan & Bansal, 2019; Li et al., 2020a; Lu et al., 2020;         tially embedded in a dense form alongside language tokens.
+Cho et al., 2020; Qi et al., 2020; Zhou et al., 2020; Huang          Since the seminal work of Krizhevsky et al. (2012), deep
+  *                                                                  convolutional networks have been regarded as essential for
+    Equal contribution † Current affiliation: NAVER AI Lab, Seong-
+nam, Gyeonggi, Republic of Korea. 1 Kakao Enterprise, Seong-
+                                                                     this visual embedding step. Most VLP models employ an
+nam, Gyeonggi, Republic of Korea 2 Kakao Brain, Seongnam,            object detector pre-trained on the Visual Genome dataset
+Gyeonggi, Republic of Korea. Correspondence to: Wonjae Kim           (Krishna et al., 2017) annotated with 1,600 object classes
+<wonjae.kim@navercorp.com>.                                          and 400 attribute classes as in Anderson et al. (2018). Pixel-
+Proceedings of the 38 th International Conference on Machine             1
+                                                                           While some works employ additional objectives and data
+Learning, PMLR 139, 2021. Copyright 2021 by the author(s).           structures, these two objectives apply to almost every VLP model.
+                           ViLT: Vision-and-Language Transformer Without Convolution or Region Supervision
+
+
+                                                 Modality                       Modality                          Modality
+              Modality
+                                                Interaction                    Interaction                       Interaction
+             Interaction
+
+
+
+
+                    Visual                   Textual   Visual                         Visual
+          Textual   Embed                    Embed     Embed                Textual   Embed                   Textual   Visual
+          Embed                                                             Embed                             Embed     Embed
+
+
+           Text     Image                      Text    Image                  Text    Image                    Text     Image
+
+       (a) VE > TE > MI                    (b) VE = TE > MI              (c) VE > MI > TE                  (d) MI > VE = TE
+
+Figure 2. Four categories of vision-and-language models. The height of each rectangle denotes its relative computational size. VE, TE,
+and MI are short for visual embedder, textual embedder, and modality interaction, respectively.
+
+
+
+BERT (Huang et al., 2020) is one exception of this trend,               • ViLT is the simplest architecture by far for a vision-
+as it uses ResNet variants (He et al., 2016; Xie et al., 2017)            and-language model as it commissions the transformer
+pre-trained on ImageNet classification (Russakovsky et al.,               module to extract and process visual features in place
+2015) embedding pixels in place of object detection mod-                  of a separate deep visual embedder. This design in-
+ules.                                                                     herently leads to significant runtime and parameter
+                                                                          efficiency.
+To this date, most VLP studies have focused on improving
+performance by increasing the power of visual embedders.                • For the first time, we achieve competent performance
+The shortcomings of having a heavy visual embedder are                    on vision-and-language tasks without using region fea-
+often disregarded in academic experiments because region                  tures or deep convolutional visual embedders in gen-
+features are commonly cached in advance at training time                  eral.
+to ease the burden of feature extraction. However, the lim-
+itations are still evident in real-world applications as the            • Also, for the first time, we empirically show that whole
+queries in the wild have to undergo a slow extraction pro-                word masking and image augmentations that were un-
+cess.                                                                     precedented in VLP training schemes further drive
+To this end, we shift our attention to the lightweight and fast           downstream performance.
+embedding of visual inputs. Recent work (Dosovitskiy et al.,
+2020; Touvron et al., 2020) demonstrated that using a simple         2. Background
+linear projection of a patch is effective enough to embed
+pixels before feeding them into transformers. Whereas being          2.1. Taxonomy of Vision-and-Language Models
+the solid mainstream for text (Devlin et al., 2019), it is only      We propose a taxonomy of vision-and-language models
+recently that transformers (Vaswani et al., 2017) are used for       based on two points: (1) whether the two modalities have an
+images as well. We presume that the transformer module–              even level of expressiveness in terms of dedicated parame-
+used for modality interaction in VLP models– can also                ters and/or computation; and (2) whether the two modalities
+manage to process visual features in place of a convolutional        interact in a deep network. A combination of these points
+visual embedder, just as it processes textual features.              leads to four archetypes in Figure 2.
+This paper proposes the Vision-and-Language Transformer              The visual semantic embedding (VSE) models such as
+(ViLT) that handles two modalities in a single unified man-          VSE++ (Faghri et al., 2017) and SCAN (Lee et al., 2018)
+ner. It mainly differs from previous VLP models in its               belong to Figure 2a. They use separate embedders for image
+shallow, convolution-free embedding of pixel-level inputs.           and text, with the former being much heavier. Then, they
+Removing deep embedders solely dedicated to visual in-               represent the similarity of the embedded features from the
+puts significantly cuts down the model size and running              two modalities with simple dot products or shallow attention
+time by design. Figure 1 shows that our parameter-efficient          layers.
+model is tens of times faster than VLP models with region
+features and at least four times faster than those with grid         CLIP (Radford et al., 2021) belongs to Figure 2b as it uses
+features while exhibiting similar or even better performance         separate but equally expensive transformer embedders for
+on vision-and-language downstream tasks.                             each modality. Interaction between the pooled image vec-
+                                                                     tor and text vector is still shallow (dot product). Despite
+Our key contributions can be summarized as follows:                  CLIP’s remarkable zero-shot performance on image-to-text
+                    ViLT: Vision-and-Language Transformer Without Convolution or Region Supervision
+
+retrieval, we could not observe the same level of perfor-       2.3. Visual Embedding Schema
+mance on other vision-and-language downstream tasks. For
+                                                                Whereas all performant VLP models share the same textual
+instance, fine-tuning the MLP head on NLVR2 (Suhr et al.,
+                                                                embedder– tokenizer from pre-trained BERT, word and po-
+2018) with the dot product of pooled visual and textual vec-
+                                                                sition embeddings resembling those of BERT– they differ
+tors from CLIP as the multimodal representation gives a
+                                                                on visual embedders. Still, in most (if not all) cases, visual
+low dev accuracy of 50.99 ± 0.38 (ran with three different
+                                                                embedding is the bottleneck of existing VLP models. We
+seeds); as chance level accuracy is 0.5, we conclude that the
+                                                                focus on cutting corners on this step by introducing patch
+representations are incapable of learning this task. It also
+                                                                projection instead of using region or grid features for which
+matches the findings of Suhr et al. (2018) that all models
+                                                                heavy extraction modules are used.
+with simply fused multimodal representation failed to learn
+NLVR2.
+                                                                Region Feature. VLP models dominantly utilize region
+This result backs up our speculation that simple fusion of      features, also known as bottom-up features (Anderson et al.,
+outputs even from high-performing unimodal embedders            2018). They are obtained from an off-the-shelf object detec-
+may not be sufficient to learn complex vision-and-language      tor like Faster R-CNN (Ren et al., 2016).
+tasks, bolstering the need for a more rigorous inter-modal
+interaction scheme.                                             The general pipeline of generating region features is as fol-
+                                                                lows. First, a region proposal network (RPN) proposes re-
+Unlike models with shallow interaction, the more recent         gions of interest (RoI) based on the grid features pooled
+VLP models that fall under Figure 2c use a deep transformer     from the CNN backbone. Non-maximum suppression
+to model the interaction of image and text features. Aside      (NMS) then reduces the number of RoIs to a few thousand.
+from the interaction module, however, convolutional net-        After being pooled by operations such as RoI Align (He
+works are still involved in extracting and embedding image      et al., 2017), the RoIs go through RoI heads and become
+features, which accounts for most of the computation as de-     region features. NMS is again applied to every class, finally
+picted in Figure 1. Modulation-based vision-and-language        reducing the number of features under a hundred.
+models (Perez et al., 2018; Nguyen et al., 2020) also fall
+under Figure 2c, with their visual CNN stems correspond-        The above process involves several factors that affect the
+ing to visual embedder, RNNs producing the modulation           performance and runtime: the backbone, the style of NMS,
+parameters to textual embedder, and modulated CNNs to           the RoI heads. Previous works were lenient with controlling
+modality interaction.                                           these factors, making varying choices from each other as
+                                                                listed in Table 7.2
+Our proposed ViLT is the first model of type Figure 2d
+where the embedding layers of raw pixels are shallow and
+                                                                   • Backbone: ResNet-101 (Lu et al., 2019; Tan & Bansal,
+computationally light as of text tokens. This architecture
+                                                                     2019; Su et al., 2019) and ResNext-152 (Li et al., 2019;
+thereby concentrates most of the computation on modeling
+                                                                     2020a; Zhang et al., 2021) are two commonly used
+modality interactions.
+                                                                     backbones.
+2.2. Modality Interaction Schema                                   • NMS: NMS is typically done in a per-class fashion.
+At the very core of contemporary VLP models lie transform-           Applying NMS to each and every class becomes a ma-
+ers. They get visual and textual embedding sequences as              jor runtime bottleneck with a large number of classes,
+input, model inter-modal and optionally intra-modal interac-         e.g. 1.6K in the VG dataset (Jiang et al., 2020). Class-
+tions throughout layers, then output a contextualized feature        agnostic NMS was recently introduced to tackle this
+sequence.                                                            issue (Zhang et al., 2021).
+
+Bugliarello et al. (2020) classifies interaction schema into       • RoI head: C4 heads were initially used (Anderson et al.,
+two categories: (1) single-stream approaches (e.g., Visual-          2018). FPN-MLP heads were introduced later (Jiang
+BERT (Li et al., 2019), UNITER (Chen et al., 2019)) where            et al., 2018). As heads operate for each and every RoI,
+layers collectively operate on a concatenation of image and          they pose a substantial runtime burden.
+text inputs; and (2) dual-stream approaches (e.g., ViLBERT
+(Lu et al., 2019), LXMERT (Tan & Bansal, 2019)) where the       However lightweight, object detectors are less likely to
+two modalities are not concatenated at the input level. We      be faster than the backbone or a single-layer convolution.
+follow the single-stream approach for our interaction trans-    Freezing the visual backbone and caching the region fea-
+former module because the dual-stream approach introduces       tures in advance only helps at training time and not during
+additional parameters.
+                                                                    2
+                                                                      Bugliarello et al. (2020) showed that a controlled setup bridges
+                                                                the performance gap of various region-feature-based VLP models.
+                               ViLT: Vision-and-Language Transformer Without Convolution or Region Supervision
+
+                                Image Text Matching                  Masked Language Modeling                   Word Patch Alignment
+      Pooler             FC             True                     MLP           office                         z D |t       OT             z D |v
+
+                                                         D
+                                                        z |t                                              D
+                                                                                                         z |v
+
+
+                                                                                                                                                        *    * Extra learnable [class] embedding
+
+                                                      Transformer Encoder
+                                                                                                                                                                 Modal-type embedding
+
+
+
+                                                                                                                                                                 Token position embedding
+    0 0 *      0 1       0 2      0 3      0 4    0 5          0 6     1 0 *   1 1      1 2       1 3             1 4     1 5         1 6
+                                                                                                                                                                 Patch position embedding
+
+
+                                 Word Embedding                                      Linear Projection of Flattened Patches
+
+
+                     a    stone statue near             an     [MASK]
+
+
+                                        Figure 3. Model overview. Illustration inspired by Dosovitskiy et al. (2020).
+
+
+inference, not to mention that it could hold performance                                      We use a 32 × 32 patch projection which only requires 2.4M
+back.                                                                                         parameters. This is in sharp contrast to complex ResNe(X)t
+                                                                                              backbones3 and detection components. Its running time is
+                                                                                              also ignorable as shown in Figure 1. We make a detailed
+Grid Feature. Besides detector heads, the output feature                                      runtime analysis in Section 4.6.
+grid of convolutional neural networks such as ResNets can
+also be used as visual features for vision-and-language pre-
+training. Direct use of grid features was first proposed by                                   3. Vision-and-Language Transformer
+VQA-specific models (Jiang et al., 2020; Nguyen et al.,                                       3.1. Model Overview
+2020), mainly to avoid using severely slow region selection
+operations.                                                                                   ViLT has a succinct architecture as a VLP model with a
+                                                                                              minimal visual embedding pipeline and following the single-
+X-LXMERT (Cho et al., 2020) revisited grid features by                                        stream approach.
+fixing the region proposals to grids instead of those from
+the region proposal networks. However, their caching of                                       We deviate from the literature that we initialize the inter-
+features excluded further tuning of the backbone.                                             action transformer weights from pre-trained ViT instead
+                                                                                              of BERT. Such initialization exploits the power of the in-
+Pixel-BERT is the only VLP model that replaces the VG-                                        teraction layers to process visual features while lacking a
+pre-trained object detector with a ResNet variant backbone                                    separate deep visual embedder. 4
+pre-trained with ImageNet classification. Unlike frozen
+detectors in region-feature-based VLP models, the backbone                                           t̄ = [tclass ; t1 T ; · · · ; tL T ] + T pos                                                  (1)
+of Pixel-BERT is tuned during vision-and-language pre-                                                                                                           pos
+                                                                                                  v̄ = [vclass ; v1 V ; · · · ; vN V ] + V                                                         (2)
+training. The downstream performance of Pixel-BERT with
+                                                                                                     0                  type              type
+ResNet-50 falls below region-feature-based VLP models,                                           z = [t̄ + t                   ; v̄ + v            ]                                               (3)
+but it matches that of other competitors with the use of a                                        d
+                                                                                                 ẑ = MSA(LN(z                    d−1
+                                                                                                                                          )) + z       d−1
+                                                                                                                                                             ,            d = 1...D                (4)
+much heavier ResNeXt-152.                                                                         d                               d                d
+                                                                                                 z = MLP(LN(ẑ )) + ẑ ,                                                  d = 1...D                (5)
+We claim that grid features are not the go-to option, however,
+                                                                                                  p = tanh(z0D Wpool )                                                                             (6)
+since deep CNNs are still expensive that they account for a
+large portion of the whole computation as in Figure 1.
+                                                                                              ViT consists of stacked blocks that include a multiheaded
+                                                                                              self-attention (MSA) layer and an MLP layer. The posi-
+Patch Projection. To minimize overhead, we adopt the                                          tion of layer normalization (LN) in ViT is the only differ-
+simplest visual embedding scheme: linear projection that                                      ence from BERT: LN comes after MSA and MLP in BERT
+operates on image patches. The patch projection embedding                                     (“post-norm”) and before in ViT (“pre-norm”). The input
+was introduced by ViT (Dosovitskiy et al., 2020) for image                                       3
+                                                                                                   Parameters for R50 is 25M, R101 is 44M, and X152 is 60M.
+classification tasks. Patch projection drastically simplifies                                    4
+                                                                                                   We also experimented with initializing the layers from BERT
+the visual embedding step to the level of textual embedding,                                  weights and using the pre-trained patch projection from ViT, but it
+which also consists of simple projection (lookup) operations.                                 did not work.
+                      ViLT: Vision-and-Language Transformer Without Convolution or Region Supervision
+
+text t ∈ RL×|V | is embedded to t̄ ∈ RL×H with a word                                                               D
+                                                                     We use a two-layer MLP MLM head that inputs zmasked |t and
+embedding matrix T ∈ R|V |×H and a position embedding                outputs logits over vocabulary, just as the MLM objective
+matrix T pos ∈ R(L+1)×H .                                            of BERT. The MLM loss is then computed as the negative
+                                                                     log-likelihood loss for the masked tokens.
+The input image I ∈ RC×H×W is sliced into patches
+                               2
+and flattened to v ∈ RN ×(P ·C) where (P, P ) is the
+                                                                     3.3. Whole Word Masking
+patch resolution and N = HW/P 2 . Followed by lin-
+                          2
+ear projection V ∈ R(P ·C)×H and position embedding                  Whole word masking is a masking technique that masks all
+V pos ∈ R(N +1)×H , v is embedded into v̄ ∈ RN ×H .                  consecutive subword tokens that compose a whole word. It
+                                                                     is shown to be effective on downstream tasks when applied
+The text and image embeddings are summed with their cor-
+                                                                     to original and Chinese BERT (Cui et al., 2019).
+responding modal-type embedding vectors ttype , v type ∈ RH ,
+then are concatenated into a combined sequence z 0 . The             We hypothesize that whole word masking is particularly cru-
+contextualized vector z is iteratively updated through D-            cial for VLP in order to make full use of information from
+depth transformer layers up until the final contextualized           the other modality. For example, the word “giraffe” is to-
+sequence z D . p is a pooled representation of the whole mul-        kenized into three wordpiece tokens ["gi", "##raf",
+timodal input, and is obtained by applying linear projection         "##fe"] with the pre-trained bert-base-uncased
+Wpool ∈ RH×H and hyperbolic tangent upon the first index             tokenizer. If not all tokens are masked, say, ["gi",
+of sequence z D .                                                    "[MASK]", "##fe"], the model may solely rely on the
+                                                                     nearby two language tokens ["gi", "##fe"] to predict
+For all experiments, we use weights from ViT-B/32 pre-
+                                                                     the masked "##raf" rather than using the information
+trained on ImageNet, hence the name ViLT-B/32.5 Hidden
+                                                                     from the image.
+size H is 768, layer depth D is 12, patch size P is 32, MLP
+size is 3,072, and the number of attention heads is 12.              We mask whole words with a mask probability of 0.15
+                                                                     during pre-training. We discuss its impact in Section 4.5.
+3.2. Pre-training Objectives
+                                                                     3.4. Image Augmentation
+We train ViLT with two objectives commonly used to train
+VLP models: image text matching (ITM) and masked lan-                Image augmentation reportedly improves the generalization
+guage modeling (MLM).                                                power of vision models (Shorten & Khoshgoftaar, 2019).
+                                                                     DeiT (Touvron et al., 2020) that builds on ViT experimented
+Image Text Matching. We randomly replace the aligned                 with various augmentation techniques (Zhang et al., 2017;
+image with a different image with the probability of 0.5. A          Yun et al., 2019; Berman et al., 2019; Hoffer et al., 2020;
+single linear layer ITM head projects the pooled output fea-         Cubuk et al., 2020), and found them beneficial for ViT train-
+ture p to logits over binary class, and we compute negative          ing. However, the effects of image augmentation have not
+log-likelihood loss as our ITM loss.                                 been explored within VLP models. Caching visual features
+                                                                     restrains region-feature-based VLP models from using im-
+Plus, inspired by the word region alignment objective in             age augmentation. Notwithstanding its applicability, neither
+Chen et al. (2019), we design word patch alignment (WPA)             did Pixel-BERT study its effects.
+that computes the alignment score between two subsets of
+z D : z D |t (textual subset) and z D |v (visual subset), using      To this end, we apply RandAugment (Cubuk et al., 2020)
+the inexact proximal point method for optimal transports             during fine-tuning. We use all the original policies except
+(IPOT) (Xie et al., 2020). We set the hyperparameters of             two: color inversion, because texts often contain color in-
+IPOT following Chen et al. (2019) (β = 0.5, N = 50), and             formation as well, and cutout, as it may clear out small but
+add the approximate wasserstein distance multiplied by 0.1           important objects dispersed throughout the whole image.
+to the ITM loss.                                                     We use N = 2, M = 9 as the hyperparameters. We discuss
+                                                                     its impact in Section 4.5 and Section 5.
+Masked Language Modeling. This objective is to predict
+the ground truth labels of masked text tokens tmasked from           4. Experiments
+                             D
+its contextualized vector zmasked |t . Following the heuris-
+                                                                     4.1. Overview
+tics of Devlin et al. (2019), we randomly mask t with the
+probability of 0.15.                                                 We use four datasets for pre-training: Microsoft COCO
+   5                                                                 (MSCOCO) (Lin et al., 2014), Visual Genome (VG) (Kr-
+     ViT-B/32 is pre-trained with ImageNet-21K and fine-tuned
+on ImageNet-1K for image classification. We expect that weights      ishna et al., 2017), SBU Captions (SBU) (Ordonez et al.,
+pre-trained on larger datasets (e.g., JFT-300M) would yield better   2011), and Google Conceptual Captions (GCC) (Sharma
+performance.
+                       ViLT: Vision-and-Language Transformer Without Convolution or Region Supervision
+
+
+Table 1. Pre-training dataset statistics. Caption length is the length   Table 2. Comparison of ViLT-B/32 with other models on down-
+of tokens from pre-trained bert-base-uncased tokenizer. †                stream classification tasks. We use MCAN (Yu et al., 2019) and
+GCC and SBU provide only image urls, so we collect the images            MaxEnt (Suhr et al., 2018) for VQAv2 and NLVR2 w/o VLP SOTA
+from urls which were still accessible.                                   results. † additionally used GQA, VQAv2, VG-QA for pre-training.
+                                                                         ‡ made additional use of the Open Images (Kuznetsova et al., 2020)
+  Dataset         # Images      # Captions       Caption Length
+                                                                         dataset. a indicates RandAugment is applied during fine-tuning.
+  MSCOCO            113K          567K            11.81 ± 2.81            + indicates model trained for a longer 200K pre-training steps.
+  VG                108K          5.41M            5.53 ± 1.76
+  GCC†             3.01M          3.01M           10.66 ± 4.93             Visual                       Time    VQAv2         NLVR2
+                                                                                    Model
+  SBU†              867K          867K             15.0 ± 7.74             Embed                        (ms)    test-dev    dev  test-P
+                                                                                    w/o VLP SOTA        ~900     70.63     54.80   53.50
+                                                                                    ViLBERT             ~920     70.55       -       -
+                                                                                    VisualBERT          ~925     70.80     67.40   67.00
+                                                                           Region   LXMERT              ~900     72.42     74.90   74.50
+et al., 2018). Table 1 reports the dataset statistics.                              UNITER-Base         ~900     72.70     75.85   75.80
+                                                                                    OSCAR-Base†         ~900     73.16     78.07   78.36
+                                                                                    VinVL-Base†‡        ~650     75.95     82.05   83.08
+We evaluate ViLT on two widely explored types of vision-
+                                                                                    Pixel-BERT-X152     ~160     74.45     76.50   77.20
+and-language downstream tasks: for classification, we use                  Grid
+                                                                                    Pixel-BERT-R50       ~60     71.35     71.70   72.40
+VQAv2 (Goyal et al., 2017) and NLVR2 (Suhr et al., 2018),
+                                                                                    ViLT-B/32            ~15     70.33     74.41   74.57
+and for retrieval, we use MSCOCO and Flickr30K (F30K)                      Linear   ViLT-B/32 a          ~15     70.85     74.91   75.57
+(Plummer et al., 2015) re-splited by Karpathy & Fei-Fei                             ViLT-B/32 a +        ~15     71.26     75.70   76.13
+(2015). For the classification tasks, we fine-tune three times
+with different initialization seeds for the head and data or-
+dering and report the mean scores. We report the standard
+deviation in Table 5 along with ablation studies. For the                (2019), where initializing with pre-trained BERT parameters
+retrieval tasks, we only fine-tune once.                                 led to weaker performance than pre-training from scratch.
+
+4.2. Implementation Details                                              We pre-train ViLT-B/32 for 100K or 200K steps on 64
+                                                                         NVIDIA V100 GPUs with a batch size of 4,096. For all
+For all experiments, we use AdamW optimizer (Loshchilov                  downstream tasks, we train for ten epochs with a batch size
+& Hutter, 2018) with base learning rate of 10−4 and weight               of 256 for VQAv2/retrieval tasks and 128 for NLVR2.
+decay of 10−2 . The learning rate was warmed up for 10% of
+the total training steps and was decayed linearly to zero for            4.3. Classification Tasks
+the rest of the training. Note that downstream performance
+may be further improved if we customize the hyperparame-                 We evaluate ViLT-B/32 on two commonly used datasets:
+ters to each task.                                                       VQAv2 and NLVR2. We use a two-layer MLP of hidden
+                                                                         size 1,536 as the fine-tuned downstream head.
+We resize the shorter edge of input images to 384 and limit
+the longer edge to under 640 while preserving the aspect
+ratio. This resizing scheme is also used during object de-
+tection in other VLP models, but with a larger size of the               Visual Question Answering. The VQAv2 task asks for
+shorter edge (800). Patch projection of ViLT-B/32 yields 12              answers given pairs of an image and a question in natural
+× 20 = 240 patches for an image with a resolution of 384 ×               language. The annotated answers are originally in free-form
+640. As this is a rarely reached upper limit, we sample 200              natural language, but it is a common practice to convert the
+patches at maximum during pre-training. We interpolate                   task to a classification task with 3,129 answer classes. Fol-
+V pos of ViT-B/32 to fit the size of each image and pad the              lowing this practice, we fine-tune ViLT-B/32 on the VQAv2
+patches for batch training. Note that the resulting image                train and validation sets while reserving 1,000 validation
+resolution is four times smaller than 800 × 1,333, which                 images and their related questions for internal validation.
+is the size that all other VLP models use for inputs to their            We report the test-dev score results6 from the submission to
+visual embedders.                                                        the evaluation server. ViLT falls short of VQA score com-
+We use the bert-base-uncased tokenizer to tokenize                       pared to other VLP models with a heavy visual embedder.
+text inputs. Instead of fine-tuning from pre-trained BERT,               We suspect a detached object representation generated by
+we learn the textual embedding-related parameters tclass , T ,           the object detector eases the training of VQA since questions
+and T pos from scratch. Although beneficial prima facie,                 in VQA typically ask about objects.
+employing a pre-trained text-only BERT does not guarantee                   6
+                                                                             VQA score is calculated by comparing the inferred answer
+performance gain for vision and language downstream tasks.               to 10 ground-truth answers: see https://visualqa.org/
+Counterevidence has already been reported by Tan & Bansal                evaluation.html for details.
+                      ViLT: Vision-and-Language Transformer Without Convolution or Region Supervision
+
+
+Table 3. Comparison of ViLT-B/32 with other VLP models on downstream zero-shot retrieval tasks. We exclude the models of which
+zero-shot retrieval performances were not reported in their original papers. † is pre-trained with a 10M proprietary vision-and-language
+dataset in addition to the 4M dataset of GCC+SBU. + indicates model trained for a longer 200K pre-training steps.
+
+ Visual                      Time                 Zero-Shot Text Retrieval                         Zero-Shot Image Retrieval
+           Model                         Flickr30k (1K)            MSCOCO (5K)             Flickr30k (1K)           MSCOCO (5K)
+ Embed                       (ms)     R@1 R@5 R@10 R@1 R@5 R@10                         R@1 R@5 R@10 R@1 R@5 R@10
+           ViLBERT           ~900      -        -        -       -       -       -      31.9    61.1    72.8     -       -        -
+           Unicoder-VL       ~925     64.3     85.8     92.3     -       -       -      48.4    76.0    85.2     -       -        -
+ Region
+           UNITER-Base       ~900     80.7     95.7     98.0     -       -       -      66.2    88.4    92.9     -       -        -
+           ImageBERT†        ~925     70.7     90.2     94.0    44.0    71.2    80.4    54.3    79.6    87.5    32.3    59.0     70.2
+           ViLT-B/32          ~15     69.7     91.0     96.0    53.4    80.7    88.8    51.3    79.9    87.9    37.3    67.4     79.0
+ Linear
+           ViLT-B/32 +        ~15     73.2     93.6     96.5    56.5    82.6    89.6    55.0    82.5    89.8    40.4    70.0     81.1
+
+
+Table 4. Comparison of ViLT-B/32 with other models on downstream retrieval tasks. We use SCAN for w/o VLP SOTA results. †
+additionally used GQA, VQAv2, VG-QA for pre-training. ‡ additionally used the Open Images dataset. a indicates RandAugment is
+applied during fine-tuning. + indicates model trained for a longer 200K pre-training steps.
+
+ Visual                        Time                     Text Retrieval                                  Image Retrieval
+           Model                          Flickr30k (1K)             MSCOCO (5K)           Flickr30k (1K)            MSCOCO (5K)
+ Embed                         (ms)    R@1    R@5      R@10      R@1    R@5   R@10      R@1    R@5      R@10    R@1     R@5   R@10
+           w/o VLP SOTA        ~900     67.4     90.3    95.8    50.4    82.2    90.0    48.6   77.7    85.2     38.6    69.3    80.4
+           ViLBERT-Base        ~920      -        -       -       -       -       -      58.2   84.9    91.5      -       -       -
+           Unicoder-VL         ~925     86.2     96.3    99.0    62.3    87.1    92.8    71.5   91.2    95.2     48.4    76.7    85.9
+ Region    UNITER-Base         ~900     85.9     97.1    98.8    64.4    87.4    93.1    72.5   92.4    96.1     50.3    78.5    87.2
+           OSCAR-Base†         ~900      -        -       -      70.0    91.1    95.5     -      -       -       54.0    80.8    88.5
+           VinVL-Base†‡        ~650      -        -       -      74.6    92.6    96.3     -      -       -       58.1    83.2    90.1
+
+ Grid      Pixel-BERT-X152     ~160     87.0     98.9    99.5    63.6    87.5    93.6    71.5   92.1    95.8     50.1    77.6    86.2
+           Pixel-BERT-R50       ~60     75.7     94.7    97.1    59.8    85.5    91.6    53.4   80.4    88.5     41.1    69.7    80.5
+           ViLT-B/32            ~15     81.4     95.6    97.6    61.8    86.2    92.6    61.9   86.8    92.8     41.3    72.0    82.5
+ Linear    ViLT-B/32 a          ~15     83.7     97.2    98.1    62.9    87.1    92.7    62.2   87.6    93.2     42.6    72.8    83.4
+           ViLT-B/32 a +        ~15     83.5     96.7    98.6    61.5    86.3    92.7    64.4   88.7    93.8     42.7    72.9    83.1
+
+
+
+
+Natural Language for Visual Reasoning. The NLVR2                        the pre-trained ITM head, particularly the part that computes
+task is a binary classification task given triplets of two im-          the true-pair logits. We sample 15 random texts as negative
+ages and a question in natural language. As there are two               samples and tune the model with cross-entropy loss that
+input images unlike the pre-training setup, multiple strate-            maximizes the scores on positive pairs.
+gies exist7 . Following OSCAR (Li et al., 2020b) and VinVL
+                                                                        We report the zero shot retrieval results in Table 3 and fine-
+(Zhang et al., 2021), we use the pair method. Here, the
+                                                                        tuned results in Table 4. At zero-shot retrieval, ViLT-B/32
+triplet input is reformulated into two pairs (question, im-
+                                                                        performs better in general than ImageBERT despite Image-
+age1) and (question, image2), and each pair goes through
+                                                                        BERT’s pre-training on a larger (14M) dataset. At fine-tuned
+the ViLT. The head takes the concatenation of two pooled
+                                                                        retrieval, recalls for ViLT-B/32 are higher by a large margin
+representations (p) as input and outputs the binary predic-
+                                                                        than the second fastest model (Pixel-BERT-R50).
+tion.
+Table 2 shows the results. ViLT-B/32 maintains competitive              4.5. Ablation Study
+performance on both datasets considering its remarkable
+inference speed.                                                        In Table 5, we perform various ablations. More training
+                                                                        steps, whole word masking, and image augmentation come
+                                                                        to be beneficial, whereas an additional training objective
+4.4. Retrieval Tasks
+                                                                        does not help.
+We fine-tune ViLT-B/32 on the Karpathy & Fei-Fei (2015)
+                                                                        It has been reported that the number of training iterations
+split of MSCOCO and F30K. For image-to-text and text-to-
+                                                                        affects the performance of self-supervised models (Devlin
+image retrieval, we measure both zero-shot and fine-tuned
+                                                                        et al., 2019; Chen et al., 2020a;b). As VLP is also a form
+performance8 . We initialize the similarity score head from
+                                                                        of self-supervised training, we examine the effects of train-
+   7                                                                    ing durations. As expected, the performance constantly
+     UNITER proposed three downstream head setups: pair, triplet,
+and pair-biattn.                                                        increases as we train the model for longer training steps
+   8
+     R@K corresponds to whether the ground truth is included            (rows 1~3). Masking whole words for the MLM objective
+among top K results from the validation set.                            (rows 3~4) and fine-tuning with augmentation (row 6) also
+                         ViLT: Vision-and-Language Transformer Without Convolution or Region Supervision
+
+
+Table 5. Ablation study of ViLT-B/32. w denotes whether whole word masking is used for pre-training. m denotes whether MPP
+objective is used for pre-training. a denotes whether RandAugment is used during fine-tuning.
+  Training        Ablation        VQAv2                       NLVR2                           Flickr30k R@1 (1K)                 MSCOCO R@1 (5K)
+   Steps      w     m      a      test-dev              dev               test-P            TR (ZS)        IR (ZS)              TR (ZS)   IR (ZS)
+    25K       X      X     X    68.96 ± 0.07        70.83 ± 0.19    70.83 ± 0.23          75.39 (45.12)      52.52 (31.80)    53.72 (31.55)       34.88 (21.58)
+    50K       X      X     X    69.80 ± 0.01        71.93 ± 0.27    72.92 ± 0.82          78.13 (55.57)      57.36 (40.94)    57.00 (39.56)       37.47 (27.51)
+   100K       X      X     X    70.16 ± 0.01        73.54 ± 0.02    74.15 ± 0.27          79.39 (66.99)      60.50 (47.62)    60.15 (51.25)       40.45 (34.59)
+   100K       O      X     X    70.33 ± 0.01        74.41 ± 0.21    74.57 ± 0.09          81.35 (69.73)      61.86 (51.28)    61.79 (53.40)       41.25 (37.26)
+   100K       O      O     X    70.21 ± 0.05        72.76 ± 0.50    73.54 ± 0.47          78.91 (63.67)      58.76 (46.96)    59.53 (47.75)       40.08 (32.28)
+   100K       O      X     O    70.85 ± 0.13        74.91 ± 0.29    75.57 ± 0.61          83.69 (69.73)      62.22 (51.28)    62.88 (53.40)       42.62 (37.26)
+   200K       O      X     O    71.26 ± 0.06        75.70 ± 0.32    76.13 ± 0.39          83.50 (73.24)      64.36 (54.96)    61.49 (56.51)       42.70 (40.42)
+
+
+
+
+Table 6. Comparison of VLP models in terms of parameter size,                      Table 7. VLP model components. "PC" is for per-class manner
+FLOPs, and inference latency. Since FLOPs are proportional to                      NMS and "CA" is for class-agnostic. Following Tan & Bansal
+input size, we denote the number of input tokens (image+text) as                   (2019), one single-modality layer is counted as 0.5 multi-modality
+superscripts ("?" when text length is unreported; we arbitrarily use               layer.
+length 40). Although not captured in FLOPs count nor parameter
+                                                                                     Visual                            CNN          RoI                 Trans.
+size (because it is not a tensor operation), note that per-class NMS                             Model                                        NMS
+                                                                                     Embed                             Backbone     Head                Layers
+for 1,600 classes amounts to more than 500 ms in latency. NMS                                    ViLBERT               R101         C4        PC          ~15
+latency varies a lot according to the number of detected classes.                                VisualBERT            X152         FPN       PC           12
+                                                                                                 LXMERT                R101         C4        PC          ~12
+ Visual                               #Params         #FLOPs       Time              Region      UNITER-Base           R101         C4        PC           12
+             Model                        (M)                                                    OSCAR-Base            R101         C4        PC           12
+ Embed                                                   (G)       (ms)                          VinVL-Base            X152         C4        CA           12
+             ViLBERT36+36                274.3          958.1      ~900                          Unicoder-VL           X152         FPN       PC           12
+             VisualBERT36+128            170.3          425.0      ~925                          ImageBERT             X152         FPN       PC           12
+             LXMERT36+20                 239.8          952.0      ~900                          Pixel-BERT-X152       X152         -         -             12
+                                                                                     Grid
+ Region      UNITER-Base36+60            154.7          949.9      ~900                          Pixel-BERT-R50        R50          -         -             12
+             OSCAR-Base50+35             154.7          956.4      ~900              Linear      ViLT-B/32             -            -         -             12
+             VinVL-Base50+35             157.3         1023.3      ~650
+             Unicoder-VL100+?            170.3          419.7      ~925
+             ImageBERT100+44             170.3          420.6      ~925
+
+ Grid        Pixel-BERT-X152146+?        144.3           185.8     ~160
+             Pixel-BERT-R50260+?          94.9           136.8      ~60            4.6. Complexity Analysis of VLP Models
+ Linear      ViLT-B/32200+40                 87.4         55.9      ~15            We analyze the complexity of VLP models in various terms.
+                                                                                   In Table 6, we report the number of parameters, the number
+                                                                                   of floating-point operations (FLOPs), and the inference la-
+                                                                                   tency of the visual embedder and transformer. We exclude
+                                                                                   the textual embedder because it is shared by all VLP mod-
+                                                                                   els9 . The latency is averaged over 10K times on a Xeon
+drive performance. Further increase in training iterations                         E5-2650 CPU and an NVIDIA P40 GPU.
+to 200K improved performance on VQAv2, NLVR2, and                                  The input size in terms of image resolution and the length of
+zero-shot retrieval. We stop increasing the number of itera-                       concatenated multimodal input sequence affects the number
+tions over 200K as the fine-tuned text retrieval performance                       of FLOPs. We co-note the sequence lengths. The image
+decreases afterward.                                                               resolution is 800 × 1,333 for region-based VLP models and
+An additional masked region modeling (MRM) objective                               Pixel-BERT-R50, 600 × 1,000 for Pixel-BERT-X152, and
+has been the key for performance boost in VLP models                               384 × 640 for ViLT-B/32.
+such as Chen et al. (2019). We experiment with masked                              In Pixel-BERT and ViLT, visual tokens are sampled during
+patch prediction (MPP) (Dosovitskiy et al., 2020) which                            pre-training and used in full during fine-tuning. We report
+mimics the effect of MRM in a form compatible with patch                           the maximum number of visual tokens.
+projections. The patch v is masked with the probability of
+0.15, and the model predicts the mean RGB value of the                             We observe that the runtime of BERT-base-like transformers
+                                             D
+masked patch from its contextualized vector zmasked |v . How-                      varies only by < 1 ms for input sequences of length under
+ever, MPP turns out not to be contributing to downstream                           300. Since patch projection of ViLT-B/32 generates at most
+performance (rows 4~5). This result is in sharp contrast                              9
+                                                                                       FLOPs and time are neglectable because the operation is
+to the MRM objective on supervision signals from object                            an embedding lookup. The 30K embedding dictionary used by
+detection.                                                                         bert-base-uncased has 23.47 M parameters
+                     ViLT: Vision-and-Language Transformer Without Convolution or Region Supervision
+
+                                    a display of flowers growing out and over the retaining wall in front of cottages on a cloudy day.
+
+
+
+
+                                           flowers                       wall                   cottages                   cloudy
+
+                                    a room with a rug, a chair, a painting, and a plant.
+
+
+
+
+                                             rug                        chair                   painting                     plant
+
+                  Figure 4. Visualizations of transportation plan of word patch alignment. Best viewed zoomed in.
+
+
+240 image tokens, our model can still be efficient even                formance of pre-trained transformers scale well given an
+though it receives a combination of image and text tokens.             appropriate amount of data. This observation paves the
+                                                                       way for even better performing ViLT variants (e.g., ViLT-L
+4.7. Visualization                                                     (large) and ViLT-H (huge)). We leave training larger mod-
+                                                                       els for future work because aligned vision-and-language
+Figure 4 is an example of a cross-modal alignment. The                 datasets are yet scarce.
+transportation plan of WPA expresses a heatmap for a text
+token highlighted in pink color. Each square tile represents           Masked Modeling for Visual Inputs. Considering the
+a patch, and its opacity indicates how much mass is trans-             success of MRM, we speculate that the masked modeling
+ported from the highlighted word token.                                objective for the visual modality helps by preserving the
+More IPOT iterations– more than over 50 as in the training             information up until the last layer of the transformer. How-
+phase– help the visualization heatmap converge; empirically,           ever, as observed in Table 5, a naive variant of MRM on
+1,000 iterations are sufficient to get a clearly identifiable          image patches (MPP) fails.
+heatmap. We z-normalize the plan for each token and clamp              Cho et al. (2020) proposed to train their grid RoIs on masked
+the values to [1.0, 3.0].                                              object classification (MOC) tasks. However, the visual vo-
+                                                                       cabulary cluster in this work was fixed during the vision
+5. Conclusion and Future Work                                          and language pre-training together with the visual back-
+                                                                       bone. For trainable visual embedders, one-time clustering
+In this paper, we present a minimal VLP architecture,                  is not a viable option. We believe that alternating clustering
+Vision-and-Langauge Transformer (ViLT). ViLT is com-                   (Caron et al., 2018; 2019) or simultaneous clustering (Asano
+petent to competitors which are heavily equipped with con-             et al., 2019; Caron et al., 2020) methods studied in visual
+volutional visual embedding networks (e.g., Faster R-CNN               unsupervised learning research could be applied.
+and ResNets). We ask for future work on VLP to focus more
+on the modality interactions inside the transformer module             We encourage future work that does not use region super-
+rather than engaging in an arms race that merely powers up             vision to devise a more sophisticated masking objective for
+unimodal embedders.                                                    the visual modality.
+Although remarkable as it is, ViLT-B/32 is more of a proof
+                                                                       Augmentation Strategies. Previous work on contrastive
+of concept that efficient VLP models free of convolution
+                                                                       visual representation learning (Chen et al., 2020a;b) showed
+and region supervision can still be competent. We wrap
+                                                                       that gaussian blur, not employed by RandAugment, brings
+up by pointing out a few factors that may add to the ViLT
+                                                                       noticeable gains to downstream performance compared with
+family.
+                                                                       a simpler augmentation strategy (He et al., 2020). Explo-
+                                                                       ration of appropriate augmentation strategies for textual and
+Scalability. As shown in papers on large-scale transform-
+                                                                       visual inputs would be a valuable addition.
+ers (Devlin et al., 2019; Dosovitskiy et al., 2020), the per-
+                    ViLT: Vision-and-Language Transformer Without Convolution or Region Supervision
+
+References                                                       Cubuk, E. D., Zoph, B., Shlens, J., and Le, Q. V. Ran-
+                                                                   daugment: Practical automated data augmentation with a
+Anderson, P., He, X., Buehler, C., Teney, D., Johnson, M.,
+                                                                   reduced search space. In Proceedings of the IEEE/CVF
+  Gould, S., and Zhang, L. Bottom-up and top-down atten-
+                                                                   Conference on Computer Vision and Pattern Recognition
+  tion for image captioning and visual question answering.
+                                                                  Workshops, pp. 702–703, 2020.
+  In Proceedings of the IEEE conference on computer vi-
+  sion and pattern recognition, pp. 6077–6086, 2018.             Cui, Y., Che, W., Liu, T., Qin, B., Yang, Z., Wang, S., and
+                                                                   Hu, G. Pre-training with whole word masking for chinese
+Asano, Y., Rupprecht, C., and Vedaldi, A. Self-labelling via       bert. arXiv preprint arXiv:1906.08101, 2019.
+  simultaneous clustering and representation learning. In
+  International Conference on Learning Representations,          Devlin, J., Chang, M.-W., Lee, K., and Toutanova, K. Bert:
+  2019.                                                            Pre-training of deep bidirectional transformers for lan-
+                                                                   guage understanding. In Proceedings of the 2019 Confer-
+Berman, M., Jégou, H., Vedaldi, A., Kokkinos, I., and              ence of the North American Chapter of the Association for
+  Douze, M. Multigrain: a unified image embedding for              Computational Linguistics: Human Language Technolo-
+  classes and instances. arXiv preprint arXiv:1902.05509,          gies, Volume 1 (Long and Short Papers), pp. 4171–4186,
+  2019.                                                            2019.
+
+Bugliarello, E., Cotterell, R., Okazaki, N., and Elliott, D.     Dosovitskiy, A., Beyer, L., Kolesnikov, A., Weissenborn,
+  Multimodal pretraining unmasked: Unifying the vision             D., Zhai, X., Unterthiner, T., Dehghani, M., Minderer, M.,
+  and language berts. arXiv preprint arXiv:2011.15124,             Heigold, G., Gelly, S., et al. An image is worth 16x16
+  2020.                                                           words: Transformers for image recognition at scale. arXiv
+                                                                   preprint arXiv:2010.11929, 2020.
+Caron, M., Bojanowski, P., Joulin, A., and Douze, M. Deep
+                                                                 Faghri, F., Fleet, D. J., Kiros, J. R., and Fidler, S. Vse++: Im-
+  clustering for unsupervised learning of visual features. In
+                                                                   proving visual-semantic embeddings with hard negatives.
+  Proceedings of the European Conference on Computer
+                                                                   arXiv preprint arXiv:1707.05612, 2017.
+  Vision (ECCV), pp. 132–149, 2018.
+                                                                 Gan, Z., Chen, Y.-C., Li, L., Zhu, C., Cheng, Y., and Liu, J.
+Caron, M., Bojanowski, P., Mairal, J., and Joulin, A. Un-          Large-scale adversarial training for vision-and-language
+  supervised pre-training of image features on non-curated         representation learning. arXiv preprint arXiv:2006.06195,
+  data. In Proceedings of the IEEE/CVF International Con-          2020.
+  ference on Computer Vision, pp. 2959–2968, 2019.
+                                                                 Goyal, Y., Khot, T., Summers-Stay, D., Batra, D., and
+Caron, M., Misra, I., Mairal, J., Goyal, P., Bojanowski,           Parikh, D. Making the v in vqa matter: Elevating the
+  P., and Joulin, A. Unsupervised learning of visual fea-          role of image understanding in visual question answer-
+  tures by contrasting cluster assignments. arXiv preprint         ing. In Proceedings of the IEEE Conference on Computer
+  arXiv:2006.09882, 2020.                                         Vision and Pattern Recognition, pp. 6904–6913, 2017.
+
+Chen, T., Kornblith, S., Norouzi, M., and Hinton, G. A           He, K., Zhang, X., Ren, S., and Sun, J. Deep residual learn-
+  simple framework for contrastive learning of visual rep-         ing for image recognition. In Proceedings of the IEEE
+  resentations. In International conference on machine             conference on computer vision and pattern recognition,
+  learning, pp. 1597–1607. PMLR, 2020a.                            pp. 770–778, 2016.
+                                                                 He, K., Gkioxari, G., Dollár, P., and Girshick, R. Mask r-
+Chen, X., Fan, H., Girshick, R., and He, K. Improved
+                                                                   cnn. In Proceedings of the IEEE international conference
+  baselines with momentum contrastive learning. arXiv
+                                                                   on computer vision, pp. 2961–2969, 2017.
+  preprint arXiv:2003.04297, 2020b.
+                                                                 He, K., Fan, H., Wu, Y., Xie, S., and Girshick, R. Mo-
+Chen, Y.-C., Li, L., Yu, L., Kholy, A. E., Ahmed, F., Gan, Z.,     mentum contrast for unsupervised visual representation
+  Cheng, Y., and Liu, J. Uniter: Learning universal image-         learning. In Proceedings of the IEEE/CVF Conference
+  text representations. arXiv preprint arXiv:1909.11740,           on Computer Vision and Pattern Recognition, pp. 9729–
+  2019.                                                            9738, 2020.
+Cho, J., Lu, J., Schwenk, D., Hajishirzi, H., and Kembhavi,      Hoffer, E., Ben-Nun, T., Hubara, I., Giladi, N., Hoefler,
+  A. X-lxmert: Paint, caption and answer questions with           T., and Soudry, D. Augment your batch: Improving
+  multi-modal transformers. In Proceedings of the 2020             generalization through instance repetition. In Proceedings
+  Conference on Empirical Methods in Natural Language              of the IEEE/CVF Conference on Computer Vision and
+  Processing (EMNLP), pp. 8785–8805, 2020.                        Pattern Recognition, pp. 8129–8138, 2020.
+                    ViLT: Vision-and-Language Transformer Without Convolution or Region Supervision
+
+Huang, Z., Zeng, Z., Liu, B., Fu, D., and Fu, J. Pixel-bert:       Common objects in context. In European conference on
+ Aligning image pixels with text by deep multi-modal               computer vision, pp. 740–755. Springer, 2014.
+  transformers. arXiv preprint arXiv:2004.00849, 2020.
+                                                                 Loshchilov, I. and Hutter, F. Decoupled weight decay reg-
+Jiang, H., Misra, I., Rohrbach, M., Learned-Miller, E., and        ularization. In International Conference on Learning
+   Chen, X. In defense of grid features for visual question        Representations, 2018.
+   answering. In Proceedings of the IEEE/CVF Conference
+   on Computer Vision and Pattern Recognition, pp. 10267–        Lu, J., Batra, D., Parikh, D., and Lee, S. Vilbert: Pretraining
+   10276, 2020.                                                    task-agnostic visiolinguistic representations for vision-
+                                                                   and-language tasks. In Advances in Neural Information
+Jiang, Y., Natarajan, V., Chen, X., Rohrbach, M., Batra, D.,       Processing Systems, pp. 13–23, 2019.
+   and Parikh, D. Pythia v0. 1: the winning entry to the vqa
+   challenge 2018. arXiv preprint arXiv:1807.09956, 2018.        Lu, J., Goswami, V., Rohrbach, M., Parikh, D., and Lee, S.
+                                                                   12-in-1: Multi-task vision and language representation
+Karpathy, A. and Fei-Fei, L. Deep visual-semantic align-           learning. In Proceedings of the IEEE/CVF Conference
+  ments for generating image descriptions. In Proceedings          on Computer Vision and Pattern Recognition, pp. 10437–
+  of the IEEE conference on computer vision and pattern            10446, 2020.
+  recognition, pp. 3128–3137, 2015.
+                                                                 Nguyen, D.-K., Goswami, V., and Chen, X. Revisiting
+Krishna, R., Zhu, Y., Groth, O., Johnson, J., Hata, K.,            modulated convolutions for visual counting and beyond.
+  Kravitz, J., Chen, S., Kalantidis, Y., Li, L.-J., Shamma,        arXiv preprint arXiv:2004.11883, 2020.
+  D. A., et al. Visual genome: Connecting language and
+  vision using crowdsourced dense image annotations. In-         Ordonez, V., Kulkarni, G., and Berg, T. Im2text: Describing
+  ternational journal of computer vision, 123(1):32–73,            images using 1 million captioned photographs. Advances
+  2017.                                                            in neural information processing systems, 24:1143–1151,
+                                                                   2011.
+Krizhevsky, A., Sutskever, I., and Hinton, G. E. Imagenet
+  classification with deep convolutional neural networks.        Perez, E., Strub, F., De Vries, H., Dumoulin, V., and
+  In NIPS, 2012.                                                   Courville, A. Film: Visual reasoning with a general con-
+                                                                   ditioning layer. In Proceedings of the AAAI Conference
+Kuznetsova, A., Rom, H., Alldrin, N., Uijlings, J., Krasin,        on Artificial Intelligence, volume 32, 2018.
+  I., Pont-Tuset, J., Kamali, S., Popov, S., Malloci, M.,
+  Kolesnikov, A., et al. The open images dataset v4. Inter-      Plummer, B. A., Wang, L., Cervantes, C. M., Caicedo, J. C.,
+  national Journal of Computer Vision, pp. 1–26, 2020.             Hockenmaier, J., and Lazebnik, S. Flickr30k entities:
+                                                                   Collecting region-to-phrase correspondences for richer
+Lee, K.-H., Chen, X., Hua, G., Hu, H., and He, X. Stacked          image-to-sentence models. In Proceedings of the IEEE
+  cross attention for image-text matching. In Proceedings          international conference on computer vision, pp. 2641–
+  of the European Conference on Computer Vision (ECCV),            2649, 2015.
+  pp. 201–216, 2018.
+                                                                 Qi, D., Su, L., Song, J., Cui, E., Bharti, T., and Sacheti,
+Li, G., Duan, N., Fang, Y., Gong, M., Jiang, D., and Zhou,         A. Imagebert: Cross-modal pre-training with large-
+  M. Unicoder-vl: A universal encoder for vision and lan-          scale weak-supervised image-text data. arXiv preprint
+  guage by cross-modal pre-training. In AAAI, pp. 11336–           arXiv:2001.07966, 2020.
+  11344, 2020a.
+                                                                 Radford, A., Sutskever, I., Kim, J., Krueger, G., and Agar-
+Li, L. H., Yatskar, M., Yin, D., Hsieh, C.-J., and Chang,          wal, S. Learning transferable visual models from natural
+  K.-W. Visualbert: A simple and performant baseline for           language supervision, 2021.
+  vision and language. arXiv preprint arXiv:1908.03557,
+  2019.                                                          Ren, S., He, K., Girshick, R., and Sun, J. Faster r-cnn:
+                                                                   Towards real-time object detection with region proposal
+Li, X., Yin, X., Li, C., Zhang, P., Hu, X., Zhang, L., Wang,       networks. IEEE transactions on pattern analysis and
+  L., Hu, H., Dong, L., Wei, F., et al. Oscar: Object-             machine intelligence, 39(6):1137–1149, 2016.
+  semantics aligned pre-training for vision-language tasks.
+  In European Conference on Computer Vision, pp. 121–            Russakovsky, O., Deng, J., Su, H., Krause, J., Satheesh, S.,
+  137. Springer, 2020b.                                            Ma, S., Huang, Z., Karpathy, A., Khosla, A., Bernstein,
+                                                                   M., et al. Imagenet large scale visual recognition chal-
+Lin, T.-Y., Maire, M., Belongie, S., Hays, J., Perona, P., Ra-     lenge. International journal of computer vision, 115(3):
+  manan, D., Dollár, P., and Zitnick, C. L. Microsoft coco:        211–252, 2015.
+                    ViLT: Vision-and-Language Transformer Without Convolution or Region Supervision
+
+Sharma, P., Ding, N., Goodman, S., and Soricut, R. Con-          Zhang, H., Cisse, M., Dauphin, Y. N., and Lopez-Paz,
+  ceptual captions: A cleaned, hypernymed, image alt-text          D. mixup: Beyond empirical risk minimization. arXiv
+  dataset for automatic image captioning. In Proceedings           preprint arXiv:1710.09412, 2017.
+  of the 56th Annual Meeting of the Association for Compu-
+  tational Linguistics (Volume 1: Long Papers), pp. 2556–        Zhang, P., Li, X., Hu, X., Yang, J., Zhang, L., Wang, L.,
+  2565, 2018.                                                      Choi, Y., and Gao, J. Vinvl: Making visual representa-
+                                                                   tions matter in vision-language models. arXiv preprint
+Shorten, C. and Khoshgoftaar, T. M. A survey on image              arXiv:2101.00529, 2021.
+  data augmentation for deep learning. Journal of Big Data,
+  6(1):1–48, 2019.                                               Zhou, L., Palangi, H., Zhang, L., Hu, H., Corso, J. J., and
+                                                                   Gao, J. Unified vision-language pre-training for image
+Su, W., Zhu, X., Cao, Y., Li, B., Lu, L., Wei, F., and Dai, J.     captioning and vqa. In AAAI, pp. 13041–13049, 2020.
+  Vl-bert: Pre-training of generic visual-linguistic represen-
+  tations. arXiv preprint arXiv:1908.08530, 2019.
+Suhr, A., Zhou, S., Zhang, A., Zhang, I., Bai, H.,
+  and Artzi, Y. A corpus for reasoning about natural
+  language grounded in photographs. arXiv preprint
+  arXiv:1811.00491, 2018.
+Tan, H. and Bansal, M. Lxmert: Learning cross-modality
+  encoder representations from transformers. arXiv preprint
+  arXiv:1908.07490, 2019.
+Touvron, H., Cord, M., Douze, M., Massa, F., Sablayrolles,
+  A., and Jégou, H. Training data-efficient image trans-
+  formers & distillation through attention. arXiv preprint
+  arXiv:2012.12877, 2020.
+Vaswani, A., Shazeer, N., Parmar, N., Uszkoreit, J., Jones,
+  L., Gomez, A. N., Kaiser, Ł., and Polosukhin, I. At-
+  tention is all you need. Advances in neural information
+  processing systems, 30:5998–6008, 2017.
+Xie, S., Girshick, R., Dollár, P., Tu, Z., and He, K. Aggre-
+  gated residual transformations for deep neural networks.
+  In Proceedings of the IEEE conference on computer vi-
+  sion and pattern recognition, pp. 1492–1500, 2017.
+Xie, Y., Wang, X., Wang, R., and Zha, H. A fast proximal
+  point method for computing exact wasserstein distance.
+  In Uncertainty in Artificial Intelligence, pp. 433–453.
+  PMLR, 2020.
+Yu, F., Tang, J., Yin, W., Sun, Y., Tian, H., Wu, H.,
+  and Wang, H. Ernie-vil: Knowledge enhanced vision-
+  language representations through scene graph. arXiv
+  preprint arXiv:2006.16934, 2020.
+Yu, Z., Yu, J., Cui, Y., Tao, D., and Tian, Q. Deep modular
+  co-attention networks for visual question answering. In
+  Proceedings of the IEEE/CVF Conference on Computer
+  Vision and Pattern Recognition, pp. 6281–6290, 2019.
+Yun, S., Han, D., Oh, S. J., Chun, S., Choe, J., and Yoo,
+  Y. Cutmix: Regularization strategy to train strong clas-
+  sifiers with localizable features. In Proceedings of the
+  IEEE/CVF International Conference on Computer Vision,
+  pp. 6023–6032, 2019.
+

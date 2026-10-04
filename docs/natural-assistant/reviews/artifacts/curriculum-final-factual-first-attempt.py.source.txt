@@ -1,0 +1,209 @@
+"""Independent metadata/route/link/source audit; stdlib only, no model downloads or forwards."""
+import ast
+import collections
+import concurrent.futures
+from datetime import datetime, UTC
+import difflib
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import time
+import urllib.request
+from urllib.parse import unquote, urlsplit
+
+ROOT = Path(__file__).resolve().parents[4]
+P = ROOT / "docs/natural-assistant/reviews/artifacts"
+PRE = "curriculum-final-factual-"
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(ROOT / "scripts"))
+from check_technical_reviews import sections, FRONT_MATTER
+
+
+def sha(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def dump(name, value):
+    path = P / (PRE + name)
+    path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n")
+    return str(path.relative_to(ROOT))
+
+
+curriculum = ROOT / "docs/curriculum.md"
+text = curriculum.read_text()
+assert sha(curriculum) == "adb466e0e1f6628d8de8e2d1f5dd587b0e80326ff7e5f500e8e3b0903ae270bd"
+snapshot = P / (PRE + "current-curriculum.md")
+snapshot.write_bytes(curriculum.read_bytes())
+old_path = ROOT / "docs/reading-time-reviews/natural-inputs-final/history/curriculum-before-scope-fix.md"
+old_snapshot = P / (PRE + "prior-curriculum.md")
+old_snapshot.write_bytes(old_path.read_bytes())
+diff_path = P / (PRE + "true-source-diff.txt")
+diff_path.write_text("".join(difflib.unified_diff(old_path.read_text().splitlines(keepends=True), text.splitlines(keepends=True), fromfile="historical-before-root-scope-fix", tofile="current-adb466e0")))
+chapter_paths = sorted((ROOT / "course/chapters").glob("*.md"))
+chapter_inventory = {path.stem: {"path": str(path.relative_to(ROOT)), "sha256": sha(path), "section_ids": [identifier for identifier, _ in sections(path)]} for path in chapter_paths}
+known_ids = {identifier for item in chapter_inventory.values() for identifier in item["section_ids"]}
+front = {name: {"sha256": sha(ROOT / "course" / name), "section_ids": [identifier for identifier, _ in sections(ROOT / "course" / name)]} for name in FRONT_MATTER}
+all_ids = known_ids | {identifier for item in front.values() for identifier in item["section_ids"]}
+notebook_paths = sorted((ROOT / "notebooks").rglob("*.ipynb"))
+nb_ids = {path.stem for path in notebook_paths}
+numeric_chapters = [path.stem for path in chapter_paths if path.stem.isdecimal()]
+assert len(numeric_chapters) == 20 and len(chapter_paths) == 23
+assert len(known_ids) == len(notebook_paths) == 261 and len(all_ids) == 287
+assert known_ids == nb_ids
+
+
+def expand_references(value):
+    identifiers = set()
+    for match in re.finditer(r"(?<![\w.])([A-Z]|\d{1,2})\.(\d+)(?:\s*[––-]\s*(?:([A-Z]|\d{1,2})\.)?(\d+))?", value):
+        chapter, first, last_chapter, last = match.groups()
+        identifiers.add(f"{chapter}.{int(first)}")
+        if last:
+            assert last_chapter in (None, chapter), match[0]
+            assert int(last) >= int(first), match[0]
+            identifiers.update(f"{chapter}.{number}" for number in range(int(first), int(last) + 1))
+    return identifiers
+
+
+table = text.split("### 各主題的首次閱讀次序", 1)[1].split("### 路線與前置知識", 1)[0]
+table_rows = []
+for line in table.splitlines():
+    match = re.match(r"\| (\d+)：", line)
+    if not match:
+        continue
+    chapter = match[1]
+    references = expand_references(line)
+    covered = {value for value in references if value.split(".")[0] == chapter}
+    expected = set(chapter_inventory[f"{int(chapter):02}"]["section_ids"])
+    row = {"chapter": int(chapter), "actual_row": line, "expected_source_ids": sorted(expected), "expanded_current_chapter_ids": sorted(covered), "other_prerequisite_ids": sorted(references - covered), "missing": sorted(expected - covered), "nonexistent": sorted(references - all_ids)}
+    table_rows.append(row)
+assert [row["chapter"] for row in table_rows] == list(range(1, 21))
+assert all(not row["missing"] and not row["nonexistent"] for row in table_rows), table_rows
+list_ids = re.findall(r"^- ((?:\d{1,2}|[ABC])\.\d+) ", text, re.M)
+assert len(list_ids) == len(set(list_ids)) == 261
+assert set(list_ids) == known_ids
+numbered_local_refs = expand_references(text)
+nonexistent_numeric_refs = sorted(numbered_local_refs - all_ids)
+assert not nonexistent_numeric_refs, nonexistent_numeric_refs
+
+links = re.findall(r"\[[^\]]+\]\(([^)]+)\)", text)
+local_links, remote_links = [], []
+for target in links:
+    parts = urlsplit(target)
+    if parts.scheme in ("https", "http"):
+        remote_links.append(target)
+        continue
+    path = (curriculum.parent / unquote(parts.path)).resolve()
+    record = {"href": target, "path": str(path.relative_to(ROOT)), "exists": path.is_file(), "fragment": parts.fragment}
+    if parts.fragment:
+        record["fragment_exists"] = bool(re.search(r"^#{1,6}\s+" + re.escape(parts.fragment) + r"(?:\s|$)", path.read_text(), re.M)) if path.is_file() else False
+    record["sha256"] = sha(path) if path.is_file() else None
+    local_links.append(record)
+assert all(row["exists"] and row.get("fragment_exists", True) for row in local_links), local_links
+
+
+def check_pinned_remote(url):
+    parsed = urlsplit(url)
+    match = re.fullmatch(r"/([^/]+/[^/]+)/blob/([a-f0-9]{40})/(.+)", parsed.path)
+    assert parsed.scheme == "https" and parsed.netloc == "github.com" and match, url
+    repo, pin, path = match.groups()
+    raw_url = f"https://raw.githubusercontent.com/{repo}/{pin}/{path}"
+    started = time.monotonic()
+    try:
+        request = urllib.request.Request(raw_url, method="HEAD", headers={"User-Agent": "independent-curriculum-reference-audit", "Accept-Encoding": "identity"})
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return {"href": url, "fixed_revision": pin, "raw_file_check": raw_url, "method": "HEAD", "status": response.status, "elapsed_seconds": time.monotonic() - started, "check_scope": "Fixed code/document path availability only; no historical content rereview or training execution"}
+    except Exception as error:
+        return {"href": url, "fixed_revision": pin, "raw_file_check": raw_url, "method": "HEAD", "error": f"{type(error).__name__}: {error}", "elapsed_seconds": time.monotonic() - started}
+
+
+with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+    remote_checks = list(pool.map(check_pinned_remote, sorted(set(remote_links))))
+
+models_path = ROOT / "docs/course-experiments/public-models.json"
+models = json.loads(models_path.read_text())["models"]
+weight_rows = [{"id": model["id"], "repo": model["repo"], "revision": model["revision"], "weight_files": [item["output"] for item in model["files"] if item["output"].endswith((".pt", ".safetensors"))], "total_allowlist_files": len(model["files"])} for model in models]
+assert len(models) == 30 and sum(len(row["weight_files"]) for row in weight_rows) == 120
+assert all(re.fullmatch(r"[a-f0-9]{40}", row["revision"]) for row in weight_rows)
+capstone_path = ROOT / "docs/course-experiments/capstone-public.json"
+capstone = json.loads(capstone_path.read_text())
+capstone_ids = [model["id"] for model in capstone["models"]]
+assert len(capstone_ids) == 11
+assert len([identifier for identifier in capstone_ids if not identifier.startswith("student-")]) == 8
+assert len([identifier for identifier in capstone_ids if identifier.startswith("student-")]) == 3
+release_path = ROOT / "docs/natural-assistant/public-release.json"
+release = json.loads(release_path.read_text())
+assert {row["repo"] for row in weight_rows} == {capstone["repo"]} == {release["repo"]}
+assert release["revision"] == "8dab26b439499188149b7ac5b861dab4f6c0755a"
+assert release["base_model"]["revision"] == "89644892e4d85e24eaac8bacfd4f463576704203"
+assert release["asr_model"]["revision"] == "973afd24965f72e36ca33b3055d56a652f456b4d"
+assert len(release["files"]) == 4 and sum(item["bytes"] for item in release["files"]) == 6459450
+assert release["adapter_parameters"] == 1605632
+
+data_path = ROOT / "docs/natural-assistant/manifest.json"
+data = json.loads(data_path.read_text())
+assert len(data["archives"]) == 3 and len(data["files"]) == 345
+assert sum(item["bytes"] for item in data["archives"]) == 70648031
+assert len(data["rows"]) == 390 and len(data["audio_rows"]) == 42
+assert sha(data_path) == release["manifest_sha256"]
+data_splits = {key: dict(collections.Counter(item["split"] for item in data[key])) for key in ("rows", "audio_rows")}
+family_splits = collections.defaultdict(set)
+for row in data["rows"] + data["audio_rows"]:
+    family_splits[row.get("family", row["id"])].add(row["split"])
+assert all(len(splits) == 1 for splits in family_splits.values())
+
+train_path = ROOT / "docs/natural-assistant/evidence/train/result.json"
+train = json.loads(train_path.read_text())
+assert train["completed_steps"] == 180 and train["trained_rows"] == 360 and train["learning_rate"] == 1e-4
+assert train["trainable_parameters"] == 1605632 and train["changed_adapter_tensor_count"] == 112
+assert len(train["optimizer_parameter_names"]) == 112 and all("lora_" in name for name in train["optimizer_parameter_names"])
+assert train["frozen_parameter_samples_unchanged"] and len(train["frozen_parameter_samples_initial"]) == 7
+core_path = ROOT / "tiny_perceptron/natural_assistant.py"
+core = core_path.read_text()
+tree = ast.parse(core)
+functions = {node.name: node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+assert "model.requires_grad_(False)" in ast.get_source_segment(core, functions["load_core"])
+assert "load_asr(" not in ast.get_source_segment(core, functions["run_train"])
+assert '"lora_" not in name' in ast.get_source_segment(core, functions["run_train"])
+assert "torch.inference_mode()" in ast.unparse(functions["transcribe"].decorator_list[0])
+assert "model.eval()" in ast.get_source_segment(core, functions["load_asr"])
+core_snapshot = P / (PRE + "core-contract-excerpts.txt")
+core_snapshot.write_text("\n\n".join(ast.get_source_segment(core, functions[name]) for name in ["load_core", "run_train", "load_asr", "transcribe", "run_evaluate"]))
+
+deployment_path = ROOT / "docs/course-experiments/results/capstone_deployment.json"
+student_path = ROOT / "docs/course-experiments/results/capstone_student.json"
+deployment = json.loads(deployment_path.read_text())["results"]
+student = json.loads(student_path.read_text())["results"]
+scores = {}
+for label, record in [("joint", deployment["stages"]["joint"]), ("dpo", deployment["stages"]["dpo"]), ("student-ce", student["evaluations"]["test_ce"]), ("student-kd", student["evaluations"]["test_kd"]), ("student-kd-int4", student["evaluations"]["test_kd_ptq4"])]:
+    recount = {key: sum(item[key] for item in record["by_task"].values()) for key in ("count", "action_correct", "end_to_end_correct")}
+    assert all(recount[key] == record[key] for key in recount)
+    scores[label] = {"recount_by_task": recount, "protocol": record["protocol"]}
+assert [scores[key]["recount_by_task"]["end_to_end_correct"] for key in scores] == [78, 78, 62, 61, 61]
+assert deployment["recommended_stage"] == "joint"
+
+executions = []
+commands = [["python", "scripts/fetch_course_models.py", "--list"], ["python", "scripts/fetch_capstone.py", "--list"], ["python", "scripts/fetch_natural_release.py", "--list"], ["python", "scripts/fetch_natural_data.py", "--list"]]
+for index, argv in enumerate(commands):
+    started = time.monotonic()
+    result = subprocess.run(argv, cwd=ROOT, env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1"), capture_output=True, text=True)
+    stdout, stderr = P / (PRE + f"command-{index}.stdout.txt"), P / (PRE + f"command-{index}.stderr.txt")
+    stdout.write_text(result.stdout)
+    stderr.write_text(result.stderr)
+    executions.append({"argv": argv, "exit_code": result.returncode, "elapsed_seconds": time.monotonic() - started, "stdout": str(stdout.relative_to(ROOT)), "stdout_sha256": sha(stdout), "stderr": str(stderr.relative_to(ROOT)), "stderr_sha256": sha(stderr)})
+
+prior_report_path = ROOT / "docs/technical-reviews/20.8.json"
+prior_report = json.loads(prior_report_path.read_text())
+assert prior_report["source_sha256"] == "0bc720a18baa3ba542418ab149ded8146965bcf3da3ac7f36a9a8654471c956d"
+assert sha(prior_report_path) == "5325c06a56d6c03a010ae9cb112086119a9a9ae78383ffbd543182e9d73b499b"
+current_source_paths = ["docs/curriculum.md", "course/chapters/20.md", "course/chapters/11.md", "course/chapters/12.md", "docs/natural-assistant/DATA.md", "docs/natural-assistant/manifest.json", "docs/natural-assistant/public-release.json", "docs/course-experiments/public-models.json", "docs/course-experiments/capstone-public.json", "docs/course-experiments/results/capstone_deployment.json", "docs/course-experiments/results/capstone_student.json", "docs/natural-assistant/evidence/train/result.json", "tiny_perceptron/natural_assistant.py", "scripts/fetch_natural_data.py", "scripts/fetch_natural_release.py", "scripts/fetch_course_models.py", "scripts/fetch_capstone.py", "scripts/check_technical_reviews.py"]
+cpu_target_line = next(line for line in text.splitlines() if "CPU 小實驗以4 vCPU" in line)
+assert "其中一個驗證目標" in cpu_target_line and "本環境" not in cpu_target_line
+result = {"recorded_at": datetime.now(UTC).isoformat(), "scope": "Reference metadata correctness: full731line curriculum firstread afterfreshreader gate, counts/all20rows/261bullet IDs/local links/fixed external code-path availability/three manifest formats/DATA/current20facts. No full scientific rereview of historical cited projects.", "source_sha256": sha(curriculum), "lines": len(text.splitlines()), "old_source": {"path": str(old_path.relative_to(ROOT)), "sha256": sha(old_path), "snapshot": str(old_snapshot.relative_to(ROOT)), "context": "Root historical old curriculum, onlydelta inspected; not presented as thisreviewer priorpass"}, "new_snapshot": str(snapshot.relative_to(ROOT)), "true_diff": str(diff_path.relative_to(ROOT)), "counts": {"numeric_chapters": len(numeric_chapters), "branch_chapters": len(chapter_paths) - len(numeric_chapters), "chapter_notebooks": len(notebook_paths), "chapter_numbered_sections": len(known_ids), "frontmatter_numbered_sections": len(all_ids - known_ids), "all_numbered_sections": len(all_ids)}, "chapter_inventory": chapter_inventory, "frontmatter": front, "notebook_id_set_equals_actual_section_id_set": True, "first_reading_table": table_rows, "detailed_curriculum_bullet_ids": list_ids, "all_numbered_references_exist": True, "local_link_checks": local_links, "fixed_external_code_path_checks": remote_checks, "public_manifests": {"prior30": weight_rows, "prior30_weight_file_count": 120, "chapter19": {"repo": capstone["repo"], "revision": capstone["revision"], "eight_stage_ids": capstone_ids[:8], "three_student_ids": capstone_ids[8:]}, "chapter20": {key: release[key] for key in ["repo", "revision", "base_model", "asr_model", "prefix", "adapter_parameters", "files"]}}, "natural_data": {"archives": [{key: item[key] for key in ["path", "bytes", "sha256"]} for item in data["archives"]], "total_archive_bytes": 70648031, "files": 345, "data_splits": data_splits, "all_source_families_single_split": True, "actual_source_references_read": "DATA fullsource paragraphs/photos/Chinese/FLEURS/licenses/smallpackage/download evidence; existing345file proof from ownprior20.8review notrerun"}, "natural_actual_train": {"completed_steps":180, "learning_rate":1e-4, "trainable_parameters":1605632, "optimizer_names_are_112_LoRA_only":True, "changed_adapter_tensor_count":112, "frozen_sample_tensors":7, "frozen_sample_values_unchanged":True, "ASR_excluded_from_run_train":True, "ASR_actual_inference_source": "eval + torch.inference_mode, fixedrevision CPU float32; no optimizer updates, not claiming everyASR requires_grad flagFalse"}, "chapter19_intro_numbers_recounted_from_by_task": scores, "cpu_target_scope": {"actual_line": cpu_target_line, "design_target_not_claim_current_hardware":True}, "commands_executed":executions, "current_source_hashes": {path:sha(ROOT/path) for path in current_source_paths}, "main20_8_report_unchanged": {"path":str(prior_report_path.relative_to(ROOT)), "sha256":sha(prior_report_path), "claims":len(prior_report["claims"])}}
+dump("audit.json", result)
+assert all(row.get("status") == 200 for row in remote_checks), [row for row in remote_checks if row.get("status") != 200]
+assert all(item["exit_code"] == 0 for item in executions), executions
+print(json.dumps({"counts": result["counts"], "first_read_table_rows":len(table_rows), "local_links":len(local_links), "fixed_external_files_available":len(remote_checks), "manifest_groups_weights": "30/120 + 8/3 + LoRA4files", "commands_exit0":len(executions), "main20_8_report_unchanged":True}, ensure_ascii=False))

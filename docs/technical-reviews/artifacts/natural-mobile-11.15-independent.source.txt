@@ -1,0 +1,99 @@
+"""Independent CPU factual checks by /root/natural_factual_mobile_11_15.
+
+Run as a Python source text file; no OCR/model loading or GPU work is involved.
+"""
+import hashlib
+import json
+import platform
+from pathlib import Path
+import xml.etree.ElementTree as ET
+
+import torch
+import torch.nn.functional as F
+from PIL import Image
+from tiny_perceptron.natural_concepts import thin_stroke_report
+
+ROOT = Path(__file__).resolve().parents[3]
+PREFIX = ROOT / "docs/technical-reviews/artifacts/natural-mobile-11.15-"
+assert torch.version.cuda is None
+torch.set_num_threads(1)
+image = torch.zeros((1, 1, 32, 32), dtype=torch.float32, device="cpu")
+image[..., 15] = 1
+small = F.interpolate(image, size=(4, 4), mode="area")
+manual = image.reshape(1, 1, 4, 8, 4, 8).mean(dim=(3, 5))
+assert torch.equal(small, manual)
+assert small.tolist() == [[[[0.0, 0.125, 0.0, 0.0]] * 4]]
+assert float(image.max()) == 1.0 and float(small.max()) == 1 / 8
+assert int((image >= 0.5).sum()) == 32 and int((small >= 0.5).sum()) == 0
+report = thin_stroke_report()
+assert report == {
+    "original_shape": [32, 32], "small_shape": [4, 4],
+    "original_brightest": 1.0, "small_brightest": 0.125,
+    "pixels_at_least_half_bright_before": 32,
+    "pixels_at_least_half_bright_after": 0,
+}
+alternative = torch.zeros_like(image)
+alternative[..., 14] = 1
+same = F.interpolate(alternative, size=(4, 4), mode="area")
+assert int((alternative != image).sum()) == 64
+assert torch.equal(small, same)
+signatures = {}
+for column in range(32):
+    candidate = torch.zeros_like(image)
+    candidate[..., column] = 1
+    signature = tuple(F.interpolate(candidate, size=(4, 4), mode="area").flatten().tolist())
+    signatures.setdefault(signature, []).append(column)
+assert sorted(signatures.values()) == [list(range(i, i + 8)) for i in range(0, 32, 8)]
+assert int((small > 0).sum()) == 4  # Residual evidence remains below the display threshold.
+
+installed_functional = Path(F.__file__).read_bytes()
+official_functional = Path(str(PREFIX) + "pytorch-functional.source.txt").read_bytes()
+assert installed_functional == official_functional
+svg = ROOT / "course/figures/practical_stroke.svg"
+tree = ET.fromstring(svg.read_bytes())
+assert tree.attrib["width"] == "720" and tree.attrib["height"] == "1080"
+ns = {"s": "http://www.w3.org/2000/svg"}
+rectangles = tree.findall(".//s:rect", ns)
+bin_rectangle = next(r for r in rectangles if r.attrib.get("x") == "120")
+stripe = next(r for r in rectangles if r.attrib.get("fill") == "#fff")
+summary = next(r for r in rectangles if r.attrib.get("fill") == "#202020")
+assert float(bin_rectangle.attrib["width"]) == 480
+assert float(stripe.attrib["width"]) == 60
+assert float(stripe.attrib["width"]) / float(bin_rectangle.attrib["width"]) == 1 / 8
+assert summary.attrib["x"] == "260" and summary.attrib["y"] == "644"
+figure_text = [t.text for t in tree.findall(".//s:text", ns)]
+assert "八欄平均成一欄：1 ÷ 8" in figure_text
+assert "留下的數字：0.125" in figure_text
+assert "沒有進行中文辨識。" in figure_text
+rasters = []
+for width in (688, 311):
+    path = Path(str(PREFIX) + f"stroke-{width}.png")
+    raster = Image.open(path).convert("RGB")
+    assert raster.width == width and abs(raster.height - width * 1.5) <= 0.5
+    sample = raster.getpixel((round(360 * width / 720), round(720 * width / 720)))
+    assert sample == (32, 32, 32)
+    rasters.append({"path": str(path.relative_to(ROOT)), "size": list(raster.size), "summary_interior_rgb": list(sample)})
+
+print(json.dumps({
+    "reviewer_task": "/root/natural_factual_mobile_11_15",
+    "environment": {"python": platform.python_version(), "torch": torch.__version__,
+                    "torch_git_version": torch.version.git_version, "device": "cpu",
+                    "dtype": "torch.float32", "cuda_build": str(torch.version.cuda),
+                    "threads": str(torch.get_num_threads())},
+    "helper_report": report,
+    "small_values": small[0, 0].tolist(),
+    "manual_8_by_8_means_exactly_equal": bool(torch.equal(manual, small)),
+    "hand_calculation": "8 bright values / (8 * 8) = 1 / 8 = 0.125; four output bins with 0.125, twelve with 0; none >= 0.5",
+    "information_loss": {"different_input_values": int((alternative != image).sum()),
+                         "identical_area_outputs": bool(torch.equal(small, same)),
+                         "column_equivalence_classes": sorted(signatures.values()),
+                         "nonzero_output_values": int((small > 0).sum())},
+    "installed_official_functional_byteexact": installed_functional == official_functional,
+    "figure": {"svg_size": [720, 1080], "representative_bin_width": 480,
+               "stripe_width": 60, "ratio": 60 / 480, "text": figure_text,
+               "quantized_gray_error": abs(32 / 255 - 1 / 8), "rasters": rasters,
+               "scope": "Representative averaging-bin diagram, not literal tensors; decorative input palette/grid are not calibrated numeric pixels."},
+    "source_hashes": {str(p.relative_to(ROOT)): hashlib.sha256(p.read_bytes()).hexdigest()
+                      for p in (svg, ROOT / "tiny_perceptron/natural_concepts.py", ROOT / "tiny_perceptron/natural_assistant.py", ROOT / "scripts/prepare_ocr.py", ROOT / "scripts/course_experiments/modalities.py")},
+    "assertions": "all passed; no recognition model, training, installation, or GPU execution"
+}, ensure_ascii=False, indent=2))

@@ -1,0 +1,355 @@
+def load_core(options, *, adapter=None, train=False):
+    from transformers import AutoProcessor, Qwen3VLForConditionalGeneration
+
+    dtype = {"float32": torch.float32, "float16": torch.float16, "bfloat16": torch.bfloat16}[options.dtype]
+    if options.device == "cpu" and dtype != torch.float32:
+        raise ValueError("Use float32 for the documented CPU route")
+    common = {
+        "revision": options.model_revision,
+        "cache_dir": options.cache_dir,
+        "local_files_only": options.local_files_only,
+    }
+    processor = AutoProcessor.from_pretrained(
+        options.model, min_pixels=options.min_pixels, max_pixels=options.max_pixels, **common
+    )
+    model = Qwen3VLForConditionalGeneration.from_pretrained(
+        options.model, dtype=dtype, attn_implementation="sdpa", **common
+    ).to(options.device)
+    model.requires_grad_(False)
+    if adapter:
+        from peft import PeftModel
+
+        model = PeftModel.from_pretrained(model, adapter, is_trainable=train)
+    elif train:
+        from peft import LoraConfig, TaskType, get_peft_model
+
+        model = get_peft_model(
+            model,
+            LoraConfig(
+                r=options.lora_rank,
+                lora_alpha=2 * options.lora_rank,
+                lora_dropout=0.0,
+                target_modules=LORA_TARGETS,
+                task_type=TaskType.CAUSAL_LM,
+            ),
+        )
+    if train:
+        model.config.use_cache = False
+        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+        if any(parameter.requires_grad for name, parameter in model.named_parameters() if ".visual." in name):
+            raise RuntimeError("Practical branch must freeze the pretrained vision encoder")
+        model.train()
+    else:
+        model.eval()
+    return model, processor
+
+def run_train(options):
+    manifest, data_root = load_manifest(options.manifest, options.data_root)
+    rows = [row for row in manifest["rows"] if row["split"] == "train"]
+    if not rows:
+        raise ValueError("No training rows")
+    torch.manual_seed(options.seed)
+    started = time.monotonic()
+    model, processor = load_core(options, adapter=options.adapter, train=True)
+    parameters = [parameter for parameter in model.parameters() if parameter.requires_grad]
+    names = [name for name, parameter in model.named_parameters() if parameter.requires_grad]
+    if not names or any("lora_" not in name for name in names):
+        raise RuntimeError("Optimizer must update only the explicitly selected LoRA tensors")
+    optimizer = torch.optim.AdamW(parameters, lr=options.learning_rate)
+    record = dict(
+        provenance(options, manifest),
+        **parameter_counts(model),
+        lora_rank=options.lora_rank,
+        lora_targets=LORA_TARGETS,
+        requested_steps=options.steps,
+        completed_steps=0,
+        gradient_accumulation=options.gradient_accumulation,
+        learning_rate=options.learning_rate,
+        history=[],
+        trained_rows=0,
+        status="training",
+        optimizer_parameter_names=names,
+        trainable_parameter_names=names,
+        optimizer_only_lora=True,
+    )
+    if options.adapter:
+        prior = json.loads((Path(options.adapter) / "training.json").read_text())
+        for field in (
+            "manifest_sha256",
+            "asset_sha256",
+            "model_revision",
+            "lora_rank",
+            "gradient_accumulation",
+            "seed",
+            "learning_rate",
+        ):
+            if prior[field] != record[field]:
+                raise ValueError(f"Resume contract changed: {field}")
+        if options.steps < prior["completed_steps"]:
+            raise ValueError("Requested total steps cannot precede the resumed checkpoint")
+        record["history"] = prior["history"]
+        record["completed_steps"] = prior["completed_steps"]
+        record["trained_rows"] = prior["trained_rows"]
+        record["resume_from"] = {
+            "adapter_training_sha256": sha256(Path(options.adapter) / "training.json"),
+            "completed_steps": prior["completed_steps"],
+            "requested_steps": prior["requested_steps"],
+        }
+        state = torch.load(Path(options.adapter) / "training_state.pt", map_location=options.device, weights_only=True)
+        optimizer.load_state_dict(state["optimizer"])
+        torch.set_rng_state(state["torch_rng"].cpu())
+        if state["cuda_rng"]:
+            torch.cuda.set_rng_state_all([rng.cpu() for rng in state["cuda_rng"]])
+    record["initial_adapter_tensors"] = adapter_tensor_hashes(model)
+    record["frozen_parameter_samples_initial"] = frozen_parameter_samples(model)
+    record["frozen_check_scope"] = (
+        "A few disclosed indices in selected frozen tensors; not all 2B base values compared bitwise"
+    )
+    if str(options.device).startswith("cuda"):
+        torch.cuda.reset_peak_memory_stats(options.device)
+    checkpoint_time = time.monotonic()
+    for step in range(record["completed_steps"], options.steps):
+        if time.monotonic() - started >= options.max_seconds:
+            record["status"] = "time_limit_checkpoint"
+            break
+        optimizer.zero_grad(set_to_none=True)
+        token_sum, token_count, observed_ids = 0.0, 0, []
+        encoded = []
+        for micro in range(options.gradient_accumulation):
+            index = step * options.gradient_accumulation + micro
+            row = training_row_at(rows, index, options.seed)
+            batch = encode_training_row(processor, row, data_root, options.max_tokens)
+            encoded.append((row, batch))
+        denominator = sum(int((batch["labels"][:, 1:] != -100).sum()) for _, batch in encoded)
+        for row, batch in encoded:
+            batch = {key: value.to(options.device) for key, value in batch.items()}
+            supervised = int((batch["labels"][:, 1:] != -100).sum())
+            result = model(**batch)
+            if not torch.isfinite(result.loss):
+                raise RuntimeError(f"Nonfinite loss at step {step + 1}")
+            (result.loss * supervised / denominator).backward()
+            token_sum += float(result.loss.detach()) * supervised
+            token_count += supervised
+            observed_ids.append(row["id"])
+        grad_norm = torch.nn.utils.clip_grad_norm_(parameters, 1.0)
+        if not torch.isfinite(grad_norm):
+            raise RuntimeError("Nonfinite adapter gradients")
+        optimizer.step()
+        record["completed_steps"] = step + 1
+        record["trained_rows"] += len(encoded)
+        record["history"].append(
+            {
+                "step": step + 1,
+                "answer_token_loss_before_update": token_sum / token_count,
+                "supervised_tokens": token_count,
+                "row_ids": observed_ids,
+                "gradient_norm_before_clip": float(grad_norm),
+                "elapsed_seconds": time.monotonic() - started,
+            }
+        )
+        if (step + 1) % options.checkpoint_every == 0 or time.monotonic() - checkpoint_time >= 60:
+            save_checkpoint(model, optimizer, options.output, record)
+            checkpoint_time = time.monotonic()
+    if record["completed_steps"] == options.steps:
+        record["status"] = "completed"
+    synchronize(options.device)
+    record["elapsed_seconds"] = time.monotonic() - started
+    record["final_adapter_tensors"] = adapter_tensor_hashes(model)
+    record["changed_adapter_tensor_count"] = sum(
+        initial != record["final_adapter_tensors"][name] for name, initial in record["initial_adapter_tensors"].items()
+    )
+    record["frozen_parameter_samples_final"] = frozen_parameter_samples(model)
+    record["frozen_parameter_samples_unchanged"] = (
+        record["frozen_parameter_samples_initial"] == record["frozen_parameter_samples_final"]
+    )
+    if not record["frozen_parameter_samples_unchanged"]:
+        raise RuntimeError("Frozen base parameter sample changed unexpectedly")
+    record["peak_cuda_memory_allocated_bytes"] = (
+        torch.cuda.max_memory_allocated(options.device) if str(options.device).startswith("cuda") else None
+    )
+    save_checkpoint(model, optimizer, options.output, record)
+    write_json(Path(options.output) / "provenance.json", provenance(options, manifest))
+    write_json(Path(options.output) / "result.json", record)
+    return record
+
+def load_asr(options):
+    from transformers import WhisperForConditionalGeneration, WhisperProcessor
+
+    common = {
+        "revision": options.asr_revision,
+        "cache_dir": options.cache_dir,
+        "local_files_only": options.local_files_only,
+    }
+    processor = WhisperProcessor.from_pretrained(options.asr_model, **common)
+    model = WhisperForConditionalGeneration.from_pretrained(options.asr_model, dtype=torch.float32, **common)
+    return model.eval(), processor
+
+def transcribe(model, processor, path):
+    import soundfile as sf
+
+    waveform, sample_rate = sf.read(path, dtype="float32", always_2d=True)
+    waveform = waveform.mean(axis=1)
+    if not len(waveform) or not np.isfinite(waveform).all():
+        raise ValueError("Audio must contain finite samples")
+    if sample_rate != 16000:
+        from scipy.signal import resample_poly
+
+        divisor = math.gcd(sample_rate, 16000)
+        waveform = resample_poly(waveform, 16000 // divisor, sample_rate // divisor).astype(np.float32)
+    if len(waveform) > 30 * 16000:
+        raise ValueError("Teaching speech route accepts at most 30 seconds; add chunking explicitly for longer audio")
+    inputs = processor(waveform, sampling_rate=16000, return_tensors="pt", return_attention_mask=True)
+    started = time.monotonic()
+    limit = 128
+    generated = model.generate(
+        inputs.input_features,
+        attention_mask=inputs.attention_mask,
+        language="chinese",
+        task="transcribe",
+        max_new_tokens=limit,
+        do_sample=False,
+        return_timestamps=False,
+        return_dict_in_generate=True,
+    )
+    # Whisper's ordinary tensor return strips decoder prompt / EOS. The raw
+    # ModelOutput sequences retain them, so stopping evidence stays auditable.
+    ids = generated.sequences
+    token_ids = ids[0].tolist()
+    start_id = model.generation_config.decoder_start_token_id
+    prefix = [start_id] + [
+        token for _, token in processor.get_decoder_prompt_ids(language="chinese", task="transcribe")
+    ]
+    prefix_matches = token_ids[: len(prefix)] == prefix
+    suffix = token_ids[len(prefix) :] if prefix_matches else None
+    eos = model.generation_config.eos_token_id
+    eos_ids = [eos] if isinstance(eos, int) else list(eos or [])
+    ended_with_eos = bool(token_ids and token_ids[-1] in eos_ids)
+    reached_limit = len(suffix) >= limit if suffix is not None else None
+    if ended_with_eos:
+        stop_reason = "eos"
+    elif reached_limit:
+        stop_reason = "max_new_tokens"
+    else:
+        stop_reason = "unknown_without_eos"
+    text = processor.batch_decode(ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
+    return {
+        "transcript": text,
+        "seconds": time.monotonic() - started,
+        "original_sample_rate": sample_rate,
+        "resampled_rate": 16000,
+        "audio_seconds": len(waveform) / 16000,
+        "audio_sha256": sha256(path),
+        "raw_token_ids": token_ids,
+        "raw_token_count": len(token_ids),
+        "expected_decoder_prompt_ids": prefix,
+        "decoder_prompt_matches": prefix_matches,
+        "generated_token_ids": suffix,
+        "generated_token_count": len(suffix) if suffix is not None else None,
+        "max_new_tokens": limit,
+        "eos_token_ids": eos_ids,
+        "ended_with_eos": ended_with_eos,
+        "reached_token_limit": reached_limit,
+        "stop_reason": stop_reason,
+        "truncated": bool(reached_limit and not ended_with_eos),
+        "completion_unknown": not ended_with_eos and not reached_limit,
+        "completion_scope": "EOS records decoder stopping; it does not prove that the complete utterance was correctly recognized",
+    }
+
+def run_evaluate(options, *, baseline=False):
+    started = time.monotonic()
+    deadline = started + options.max_seconds
+    manifest, data_root = load_manifest(options.manifest, options.data_root)
+    rows = [row for row in manifest["rows"] if row["split"] == options.split]
+    audio_rows = [row for row in manifest["audio_rows"] if row["split"] == options.split]
+    if not rows and not audio_rows:
+        raise ValueError("No evaluation rows in requested split")
+    model, processor = load_core(options, adapter=None if baseline else options.adapter)
+    variants = [
+        ("base", model.disable_adapter()) if options.adapter and not baseline else ("base", contextlib.nullcontext())
+    ]
+    if options.adapter and not baseline:
+        variants.append(("adapter", contextlib.nullcontext()))
+    result = dict(
+        provenance(options, manifest),
+        **parameter_counts(model),
+        split=options.split,
+        requested_visual_text_rows=len(rows),
+        requested_audio_rows=len(audio_rows),
+        status="in_progress",
+        variants={},
+    )
+    write_json(Path(options.output) / "result.json", result)
+    raw = []
+    transcripts = []
+    asr_model = asr_processor = None
+    if audio_rows:
+        asr_model, asr_processor = load_asr(options)
+        for row in audio_rows:
+            if time.monotonic() >= deadline:
+                break
+            observation = transcribe(asr_model, asr_processor, asset_path(row["audio"], data_root))
+            observation.update(
+                id=row["id"],
+                reference_transcript=row["user"],
+                **asr_cer_metrics(row["user"], observation["transcript"]),
+                speaker=row.get("speaker"),
+                input_mode="speech; actual ASR hypothesis, never the reference transcript",
+            )
+            transcripts.append(observation)
+        result["asr"] = {
+            "parameters": sum(p.numel() for p in asr_model.parameters()),
+            "device": "cpu",
+            "count": len(transcripts),
+            "errors": sum(row["errors"] for row in transcripts),
+            "reference_characters": sum(row["reference_characters"] for row in transcripts),
+            "raw_errors": sum(row["raw_errors"] for row in transcripts),
+            "raw_reference_characters": sum(row["raw_reference_characters"] for row in transcripts),
+            "truncated_count": sum(bool(row.get("truncated")) for row in transcripts),
+            "completion_unknown_count": sum(bool(row.get("completion_unknown")) for row in transcripts),
+            "normalized_metric": "Unicode NFKC + remove all Unicode whitespace; codepoint CER; no case/punctuation/script correction",
+            "raw_metric": "Original Unicode codepoint CER, including whitespace and punctuation",
+        }
+        count = result["asr"]["reference_characters"]
+        result["asr"]["micro_cer"] = result["asr"]["errors"] / count if count else None
+        result["asr"]["normalized_micro_cer"] = result["asr"]["micro_cer"]
+        result["asr"]["micro_cer_scope"] = "normalized_micro_cer; raw_micro_cer is reported separately"
+        raw_count = result["asr"]["raw_reference_characters"]
+        result["asr"]["raw_micro_cer"] = result["asr"]["raw_errors"] / raw_count if raw_count else None
+        write_json(Path(options.output) / "transcripts.json", transcripts)
+    for variant, context in variants:
+        with context:
+            records = evaluate_rows(model, processor, rows, data_root, options, variant, deadline)
+            for row, observation in zip(audio_rows[: len(transcripts)], transcripts, strict=True):
+                if time.monotonic() >= deadline:
+                    break
+                actual = dict(row, user=observation["transcript"], task="speech_chat")
+                spoken = generate(model, processor, actual, data_root, options)
+                typed = generate(model, processor, dict(row, task="typed_chat"), data_root, options)
+                spoken.update(
+                    variant=variant,
+                    transcript=observation["transcript"],
+                    reference_user=row["user"],
+                    input_mode="speech",
+                    asr_truncated=observation.get("truncated"),
+                    asr_completion_unknown=observation.get("completion_unknown"),
+                    asr_stop_reason=observation.get("stop_reason"),
+                    asr_generated_token_count=observation.get("generated_token_count"),
+                )
+                typed.update(variant=variant, input_mode="typed reference transcript")
+                records.extend([spoken, typed])
+            raw.extend(records)
+            result["variants"][variant] = {
+                "tasks": summarize(records),
+                "generation_count": len(records),
+                "completed": len(records) == len(rows) + 2 * len(audio_rows),
+            }
+            write_json(Path(options.output) / f"generations-{variant}.json", records)
+            write_json(Path(options.output) / "result.json", result)
+    write_json(Path(options.output) / "generations.json", raw)
+    write_json(Path(options.output) / "provenance.json", provenance(options, manifest))
+    result["status"] = (
+        "completed" if all(value["completed"] for value in result["variants"].values()) else "time_limit_partial"
+    )
+    result["elapsed_seconds"] = time.monotonic() - started
+    write_json(Path(options.output) / "result.json", result)
+    return result

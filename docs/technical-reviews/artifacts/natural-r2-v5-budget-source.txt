@@ -1,0 +1,295 @@
+Actual source excerpts read by /root/natural_factual_r_2. Not other reviewers conclusions.
+
+scripts/natural_assistant.py SHA-256 ac844f7a41f86cb02100bb66a3860c20b4aeb1b4c3a9cad68b1bcc6ba4f6290f
+
+"""Run the separate pretrained natural-image / Chinese-OCR / speech-chat branch."""
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from tiny_perceptron import natural_assistant as assistant  # noqa: E402
+
+
+def parser():
+    result = argparse.ArgumentParser(description=__doc__)
+    result.add_argument("stage", choices=("prepare", "baseline", "train", "validation", "evaluate", "chat", "serve"))
+    result.add_argument("--manifest", type=Path)
+    result.add_argument("--data-root", type=Path)
+    result.add_argument("--output", type=Path, required=True)
+    result.add_argument("--cache-dir", type=Path)
+    result.add_argument("--model", default=assistant.MODEL_ID)
+    result.add_argument("--model-revision", default=assistant.MODEL_REVISION)
+    result.add_argument("--asr-model", default=assistant.ASR_ID)
+    result.add_argument("--asr-revision", default=assistant.ASR_REVISION)
+    result.add_argument("--local-files-only", action="store_true")
+    result.add_argument("--device", default="cuda")
+    result.add_argument("--dtype", choices=("float32", "float16", "bfloat16"), default="bfloat16")
+    result.add_argument("--min-pixels", type=int, default=65536)
+    result.add_argument("--max-pixels", type=int, default=524288)
+    result.add_argument("--max-tokens", type=int, default=2048)
+    result.add_argument("--max-new-tokens", type=int, default=384)
+    result.add_argument("--max-seconds", type=int, default=3300)
+    result.add_argument("--seed", type=int, default=42)
+    result.add_argument("--adapter", type=Path)
+    result.add_argument("--steps", type=int, default=100)
+    result.add_argument("--learning-rate", type=float, default=3e-5)
+    result.add_argument("--lora-rank", type=int, default=8)
+    result.add_argument("--gradient-accumulation", type=int, default=2)
+    result.add_argument("--checkpoint-every", type=int, default=25)
+    result.add_argument("--split", choices=("validation", "test"), default="validation")
+    result.add_argument("--user")
+    result.add_argument("--image")
+    result.add_argument("--audio")
+    result.add_argument("--history", type=Path, help="JSON array of earlier messages, including earlier images")
+    result.add_argument("--host", default="127.0.0.1")
+    result.add_argument("--port", type=int, default=8766)
+    return result
+
+
+def main():
+    options = parser().parse_args()
+    options.output.mkdir(parents=True, exist_ok=True)
+    for name in (
+        "min_pixels",
+        "max_pixels",
+        "max_tokens",
+        "max_new_tokens",
+        "max_seconds",
+        "steps",
+        "lora_rank",
+        "gradient_accumulation",
+        "checkpoint_every",
+    ):
+        if getattr(options, name) <= 0:
+            raise ValueError(f"{name} must be positive")
+    if options.min_pixels > options.max_pixels:
+        raise ValueError("min_pixels cannot exceed max_pixels")
+    if options.stage == "prepare":
+        result = assistant.prepare(options)
+    elif options.stage == "train":
+        if not options.manifest:
+            raise ValueError("Training needs --manifest")
+        result = assistant.run_train(options)
+    elif options.stage in {"baseline", "validation", "evaluate"}:
+        if not options.manifest:
+            raise ValueError("Evaluation needs --manifest")
+        if options.stage in {"baseline", "validation"} and options.split != "validation":
+            raise ValueError("Baseline / adapter selection uses validation, never the final test split")
+        result = assistant.run_evaluate(options, baseline=options.stage == "baseline")
+    elif options.stage == "serve":
+        from tiny_perceptron.natural_ui import serve
+
+        serve(options, host=options.host, port=options.port)
+        return
+    else:
+        root = options.data_root or Path.cwd()
+        if options.audio:
+            asr_model, asr_processor = assistant.load_asr(options)
+            transcript = assistant.transcribe(asr_model, asr_processor, assistant.asset_path(options.audio, root))
+            user = transcript["transcript"]
+        else:
+            transcript, user = None, options.user
+        if user is None:
+            raise ValueError("Chat needs --user or --audio")
+        row = {
+            "id": "interactive",
+            "user": user,
+            "image": options.image,
+            "history": json.loads(options.history.read_text()) if options.history else [],
+        }
+        model, processor = assistant.load_core(options, adapter=options.adapter)
+        result = assistant.generate(model, processor, row, root, options)
+        result["asr"] = transcript
+        result["history"] = assistant.messages_for(row, root) + [
+            {"role": "assistant", "content": [{"type": "text", "text": result["prediction"]}]}
+        ]
+        assistant.write_json(options.output / "result.json", result)
+    print(json.dumps(result, ensure_ascii=False, allow_nan=False))
+
+
+if __name__ == "__main__":
+    main()
+
+
+tiny_perceptron/natural_assistant.py SHA-256 90be6ffa86069a59ad3cbe42c025177c0a544cbc9859aa2c0b8f1751b305cce2
+
+def load_manifest(path, data_root=None):
+    path = Path(path)
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    if manifest.get("schema_version") != 1:
+        raise ValueError("Natural assistant manifest must use schema_version=1")
+    rows = list(manifest.get("rows", []))
+    if not rows and "splits" in manifest:
+        rows = [dict(row, split=split) for split, group in manifest["splits"].items() for row in group]
+    audio_rows = manifest.get("audio_rows", [])
+    identifiers, families = set(), {}
+    root = Path(data_root or path.parent).resolve()
+    for row in rows + audio_rows:
+        if row.get("split") not in {"train", "validation", "test"}:
+            raise ValueError("Every row must declare train, validation, or test")
+        if not row.get("id") or row["id"] in identifiers:
+            raise ValueError("Every row needs a globally unique id")
+        identifiers.add(row["id"])
+        if not isinstance(row.get("user"), str):
+            raise ValueError("Every row needs a string user prompt / reference transcript")
+        if not row.get("audio") and not isinstance(row.get("answer"), str):
+            raise ValueError("Training / visual rows need a string answer")
+        family = row.get("family", row["id"])
+        if family in families and families[family] != row["split"]:
+            raise ValueError(f"Related family crosses splits: {family}")
+        families[family] = row["split"]
+        for name in row_assets(row):
+            asset_path(name, root)
+    manifest["rows"] = rows
+    manifest["audio_rows"] = audio_rows
+    manifest["manifest_sha256"] = sha256(path)
+    manifest["asset_sha256"] = {
+        name: sha256(asset_path(name, root))
+        for name in sorted({name for row in rows + audio_rows for name in row_assets(row)})
+    }
+    if "files" in manifest:
+        declared = manifest["files"]
+        if isinstance(declared, list):
+            declared = {item.get("path", item.get("name")): item for item in declared}
+        for name, actual_hash in manifest["asset_sha256"].items():
+            expected = declared.get(name)
+            if not expected or expected.get("sha256") != actual_hash:
+                raise ValueError(f"Asset does not match frozen manifest SHA: {name}")
+            if "bytes" in expected and int(expected["bytes"]) != asset_path(name, root).stat().st_size:
+                raise ValueError(f"Asset does not match frozen manifest byte count: {name}")
+    return manifest, root
+
+def run_train(options):
+    manifest, data_root = load_manifest(options.manifest, options.data_root)
+    rows = [row for row in manifest["rows"] if row["split"] == "train"]
+    if not rows:
+        raise ValueError("No training rows")
+    torch.manual_seed(options.seed)
+    started = time.monotonic()
+    model, processor = load_core(options, adapter=options.adapter, train=True)
+    parameters = [parameter for parameter in model.parameters() if parameter.requires_grad]
+    names = [name for name, parameter in model.named_parameters() if parameter.requires_grad]
+    if not names or any("lora_" not in name for name in names):
+        raise RuntimeError("Optimizer must update only the explicitly selected LoRA tensors")
+    optimizer = torch.optim.AdamW(parameters, lr=options.learning_rate)
+    record = dict(
+        provenance(options, manifest),
+        **parameter_counts(model),
+        lora_rank=options.lora_rank,
+        lora_targets=LORA_TARGETS,
+        requested_steps=options.steps,
+        completed_steps=0,
+        gradient_accumulation=options.gradient_accumulation,
+        learning_rate=options.learning_rate,
+        history=[],
+        trained_rows=0,
+        status="training",
+        optimizer_parameter_names=names,
+        trainable_parameter_names=names,
+        optimizer_only_lora=True,
+    )
+    if options.adapter:
+        prior = json.loads((Path(options.adapter) / "training.json").read_text())
+        for field in (
+            "manifest_sha256",
+            "asset_sha256",
+            "model_revision",
+            "lora_rank",
+            "gradient_accumulation",
+            "seed",
+            "learning_rate",
+        ):
+            if prior[field] != record[field]:
+                raise ValueError(f"Resume contract changed: {field}")
+        if options.steps < prior["completed_steps"]:
+            raise ValueError("Requested total steps cannot precede the resumed checkpoint")
+        record["history"] = prior["history"]
+        record["completed_steps"] = prior["completed_steps"]
+        record["trained_rows"] = prior["trained_rows"]
+        record["resume_from"] = {
+            "adapter_training_sha256": sha256(Path(options.adapter) / "training.json"),
+            "completed_steps": prior["completed_steps"],
+            "requested_steps": prior["requested_steps"],
+        }
+        state = torch.load(Path(options.adapter) / "training_state.pt", map_location=options.device, weights_only=True)
+        optimizer.load_state_dict(state["optimizer"])
+        torch.set_rng_state(state["torch_rng"].cpu())
+        if state["cuda_rng"]:
+            torch.cuda.set_rng_state_all([rng.cpu() for rng in state["cuda_rng"]])
+    record["initial_adapter_tensors"] = adapter_tensor_hashes(model)
+    record["frozen_parameter_samples_initial"] = frozen_parameter_samples(model)
+    record["frozen_check_scope"] = (
+        "A few disclosed indices in selected frozen tensors; not all 2B base values compared bitwise"
+    )
+    if str(options.device).startswith("cuda"):
+        torch.cuda.reset_peak_memory_stats(options.device)
+    checkpoint_time = time.monotonic()
+    for step in range(record["completed_steps"], options.steps):
+        if time.monotonic() - started >= options.max_seconds:
+            record["status"] = "time_limit_checkpoint"
+            break
+        optimizer.zero_grad(set_to_none=True)
+        token_sum, token_count, observed_ids = 0.0, 0, []
+        encoded = []
+        for micro in range(options.gradient_accumulation):
+            index = step * options.gradient_accumulation + micro
+            row = training_row_at(rows, index, options.seed)
+            batch = encode_training_row(processor, row, data_root, options.max_tokens)
+            encoded.append((row, batch))
+        denominator = sum(int((batch["labels"][:, 1:] != -100).sum()) for _, batch in encoded)
+        for row, batch in encoded:
+            batch = {key: value.to(options.device) for key, value in batch.items()}
+            supervised = int((batch["labels"][:, 1:] != -100).sum())
+            result = model(**batch)
+            if not torch.isfinite(result.loss):
+                raise RuntimeError(f"Nonfinite loss at step {step + 1}")
+            (result.loss * supervised / denominator).backward()
+            token_sum += float(result.loss.detach()) * supervised
+            token_count += supervised
+            observed_ids.append(row["id"])
+        grad_norm = torch.nn.utils.clip_grad_norm_(parameters, 1.0)
+        if not torch.isfinite(grad_norm):
+            raise RuntimeError("Nonfinite adapter gradients")
+        optimizer.step()
+        record["completed_steps"] = step + 1
+        record["trained_rows"] += len(encoded)
+        record["history"].append(
+            {
+                "step": step + 1,
+                "answer_token_loss_before_update": token_sum / token_count,
+                "supervised_tokens": token_count,
+                "row_ids": observed_ids,
+                "gradient_norm_before_clip": float(grad_norm),
+                "elapsed_seconds": time.monotonic() - started,
+            }
+        )
+        if (step + 1) % options.checkpoint_every == 0 or time.monotonic() - checkpoint_time >= 60:
+            save_checkpoint(model, optimizer, options.output, record)
+            checkpoint_time = time.monotonic()
+    if record["completed_steps"] == options.steps:
+        record["status"] = "completed"
+    synchronize(options.device)
+    record["elapsed_seconds"] = time.monotonic() - started
+    record["final_adapter_tensors"] = adapter_tensor_hashes(model)
+    record["changed_adapter_tensor_count"] = sum(
+        initial != record["final_adapter_tensors"][name] for name, initial in record["initial_adapter_tensors"].items()
+    )
+    record["frozen_parameter_samples_final"] = frozen_parameter_samples(model)
+    record["frozen_parameter_samples_unchanged"] = (
+        record["frozen_parameter_samples_initial"] == record["frozen_parameter_samples_final"]
+    )
+    if not record["frozen_parameter_samples_unchanged"]:
+        raise RuntimeError("Frozen base parameter sample changed unexpectedly")
+    record["peak_cuda_memory_allocated_bytes"] = (
+        torch.cuda.max_memory_allocated(options.device) if str(options.device).startswith("cuda") else None
+    )
+    save_checkpoint(model, optimizer, options.output, record)
+    write_json(Path(options.output) / "provenance.json", provenance(options, manifest))
+    write_json(Path(options.output) / "result.json", record)
+    return record

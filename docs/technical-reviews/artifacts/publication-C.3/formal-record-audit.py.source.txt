@@ -1,0 +1,124 @@
+# Adapted from original C.3 audit, independently read and rerun by /root/publication_factual_c_3. Only output directory changed.
+import hashlib
+import json
+import math
+import random
+import re
+import sys
+from pathlib import Path
+
+import torch
+
+root = Path.cwd()
+art = root / "docs/technical-reviews/artifacts/publication-C.3"
+path = root / "docs/course-experiments/results/reasoning.json"
+formal = json.loads(path.read_text())
+result = formal["results"]
+pins = {}
+for name in ["scripts/course_experiments/applications.py", "scripts/course_experiments/common.py", "scripts/course_experiments/run.py", "tiny_perceptron/data.py", "tiny_perceptron/training.py"]:
+    digest = hashlib.sha256((root / name).read_bytes()).hexdigest()
+    assert digest == formal["code_sha256"][name], name
+    pins[name] = digest
+
+rows = []
+groups = {}
+for a in range(6):
+    for b in range(6):
+        for c in range(6):
+            row = dict(family=":".join(map(str, sorted((a, b, c)))), a=a, b=b, c=c, question=f"({a}+{b})+{c}=?", truth=a+b+c)
+            rows.append(row)
+            groups.setdefault(row["family"], []).append(row)
+keys = sorted(groups)
+random.Random(42).shuffle(keys)
+a, b = int(len(keys)*0.8), int(len(keys)*0.9)
+splits = {name:[row for key in selected for row in groups[key]] for name,selected in [("train",keys[:a]),("validation",keys[a:b]),("test",keys[b:])]}
+assert len(splits["test"]) == 24
+for name, split_rows in splits.items():
+    split_hash = hashlib.sha256(json.dumps(split_rows, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+    assert split_hash == result["split"][name]["sha256"]
+test_questions = [row["question"] for row in splits["test"]]
+assert len(set(test_questions)) == 24
+snapshot = {"origin": "docs/course-experiments/results/reasoning.json", "origin_sha256": hashlib.sha256(path.read_bytes()).hexdigest(), "formal_revision": formal["revision"], "formal_environment": {k: formal[k] for k in ["device", "seed", "torch_version", "python_version", "step_scale"]}, "matched_code_sha256": pins, "split": result["split"], "model_config": result["model_config"], "comparison": {}}
+print("ENV", sys.version.split()[0], torch.__version__, torch.version.git_version, "cpu", torch.get_num_threads())
+print("PIN_MATCH", json.dumps(pins, sort_keys=True))
+print("FORMAL_ENV", json.dumps(snapshot["formal_environment"]))
+print("RAW_SHA", snapshot["origin_sha256"])
+print("SPLITS", {k:len(v) for k,v in splits.items()})
+base_hashes = []
+for mode in ["direct", "steps"]:
+    branch = result["comparison"][mode]
+    base_hashes.append(branch["base_state_sha256"])
+    assert branch["training"]["steps"] == branch["training"]["planned_steps"] == 900
+    rng = random.Random(42)
+    counts = []
+    for row in splits["train"]:
+        x,y,z,truth = row["a"],row["b"],row["c"],row["truth"]
+        answer = str(truth) if mode=="direct" else f"{x}+{y}={x+y};{x+y}+{z}={truth};answer={truth}"
+        counts.append(len(answer.encode("utf-8"))+1)
+    training_targets = sum(sum(rng.choices(counts,k=24)) for _ in range(900))
+    assert training_targets == branch["training"]["effective_tokens"]
+    snapshot["comparison"][mode] = {"base_state_sha256": branch["base_state_sha256"], "training": {k:branch["training"][k] for k in ["steps","planned_steps","effective_tokens","records","records_sha256","checkpoint","step_scale"]}, "recomputed_training_targets":training_targets, "budgets":[]}
+    print("TRAIN",mode,"updates",900,"batch",24,"effective_answer_targets",training_targets)
+    total_candidates=0
+    for budget in branch["budgets"]:
+        k=budget["candidate_count"]
+        assert k in [1,2,4,8]
+        samples=budget["samples"]
+        assert [sample["question"] for sample in samples] == test_questions
+        hits=0
+        compact=[]
+        estimator_sum=0
+        for i,sample in enumerate(samples):
+            operands=tuple(map(int,re.fullmatch(r"\((\d+)\+(\d+)\)\+(\d+)=\?",sample["question"]).groups()))
+            assert operands == (sample["a"],sample["b"],sample["c"])
+            truth=sum(operands)
+            assert truth==sample["truth"]
+            gen=sample["generation"]
+            assert gen["temperature"] == 0.7 and gen["candidate_count"]==k
+            assert gen["max_new_tokens"] == (8 if mode=="direct" else 48)
+            assert len(sample["candidates"])==k
+            candidates=[]
+            correct_count=0
+            for j,candidate in enumerate(sample["candidates"]):
+                ids=candidate["generated_ids"]
+                eos=bool(ids and ids[-1]==2)
+                raw_ids=ids[:-1] if eos else ids
+                decoded=bytes(token-8 for token in raw_ids if token>=8).decode("utf-8",errors="replace")
+                invalid=[token for token in raw_ids if token<8]
+                assert decoded==candidate["generated"]
+                assert invalid==candidate["invalid_special_tokens"]
+                assert len(ids)==candidate["generated_tokens"] and eos==candidate["eos"]
+                text=decoded.strip()
+                if mode=="direct":
+                    final=int(text) if not invalid and re.fullmatch(r"-?[0-9]+",text) else None
+                else:
+                    match=re.search(r";answer=(-?[0-9]+)$",text) if not invalid else None
+                    final=int(match[1]) if match else None
+                correct=final==truth
+                assert final==candidate["final_answer"] and correct==candidate["final_correct"]
+                correct_count+=int(correct)
+                candidates.append({"candidate_index":j,"generated":decoded,"generated_ids":ids,"recomputed_final_answer":final,"recomputed_final_correct":correct})
+            covered=correct_count>0
+            assert covered==sample["oracle_coverage"]
+            value=1-(math.comb(k-correct_count,k) if k-correct_count>=k else 0)/math.comb(k,k)
+            assert value==int(covered)
+            estimator_sum+=value
+            hits+=covered
+            compact.append({"question":sample["question"],"truth":truth,"input_ids":gen["input_ids"],"temperature":gen["temperature"],"candidate_count":k,"max_new_tokens":gen["max_new_tokens"],"generated_tokens":gen["generated_tokens"],"original_seconds":gen["seconds"],"candidates":candidates,"recomputed_coverage":covered,"n_equal_k_estimator":value})
+            print("ROW",mode,k,i,sample["question"],"truth",truth,"answers",[cand["recomputed_final_answer"] for cand in candidates],"hit",int(covered))
+        assert budget["oracle_coverage"]==dict(numerator=hits,denominator=24,rate=hits/24)
+        assert estimator_sum/24==hits/24
+        assert sum(s["generation"]["generated_tokens"] for s in samples)==budget["generated_tokens"]
+        seconds = sum(s["generation"]["seconds"] for s in samples)
+        assert math.isclose(seconds, budget["generation_seconds"], abs_tol=1e-14)
+        total_candidates+=len(samples)*k
+        snapshot["comparison"][mode]["budgets"].append({"candidate_count":k,"recomputed_coverage":dict(numerator=hits,denominator=24,rate=hits/24),"total_candidates":len(samples)*k,"original_generation_seconds":seconds,"samples":compact})
+        print("COVERAGE",mode,k,hits,24,hits/24,"candidates",len(samples)*k,"tokens",budget["generated_tokens"])
+        print("ARCHIVED_TIMING_NO_SPEED_CONCLUSION",mode,k,seconds)
+    assert total_candidates==360
+    print("TOTAL",mode,total_candidates,"distinct_questions",len(set(test_questions)))
+assert len(set(base_hashes))==1
+print("BASE_IDENTICAL",base_hashes[0])
+print("SFT_EXAMPLE",6,"1+2=3;3+3=6;answer=6")
+(art/"recomputed-formal-records.json").write_text(json.dumps(snapshot,ensure_ascii=False,separators=(",",":"))+"\n")
+print("ALL_ASSERTIONS_PASSED; bookkeeping and record scoring only; no model training or new generation")

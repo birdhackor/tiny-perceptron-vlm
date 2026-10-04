@@ -1,0 +1,38 @@
+from pathlib import Path
+import re, json, hashlib, datetime, base64, xml.etree.ElementTree as ET
+from playwright.sync_api import sync_playwright
+ROOT=Path('/workspace/tiny-perceptron-vlm')
+OUT=ROOT/'docs/natural-assistant/reviews/artifacts'
+PREFIX='continuity-final-inputs'
+SECTIONS={'11':['11.9','11.12','11.13','11.14','11.15','11.16'], '20':['20.1','20.2','20.3','20.4','20.5','20.6','20.7'], '07':['7.1','7.17'], '12':['12.8','12.11','12.12','12.13','12.14']}
+FIGURES=['practical_order','practical_stroke','natural_shared_chat','natural_photo_evidence','natural_actual_bike','natural_actual_glass','natural_reading_order','natural_base_adapter']
+def sha(data): return hashlib.sha256(data).hexdigest()
+record={'captured_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),'reader':'/root/natural_continuity_final_inputs','gate':'20.8 body, STUDENT, TRAINING, README not yet read','sections':[], 'figures':[], 'renders':[]}
+for chapter, ids in SECTIONS.items():
+ p=ROOT/f'course/chapters/{chapter}.md'; data=p.read_bytes(); body=data.decode()
+ for number in ids:
+  m=re.search(r'^## '+re.escape(number)+r'\s.*?(?=^## |\Z)',body,re.M|re.S)
+  text=m.group(0)
+  target=OUT/f'{PREFIX}-first-{number}.md';target.write_text(text)
+  record['sections'].append({'section':number,'path':str(p.relative_to(ROOT)),'file_sha256':sha(data),'section_body_sha256':sha(text.encode()),'full_text_snapshot':str(target.relative_to(ROOT))})
+for name in FIGURES:
+ p=ROOT/f'course/figures/{name}.svg'; data=p.read_bytes();record['figures'].append({'path':str(p.relative_to(ROOT)),'sha256':sha(data)})
+ if name.startswith('natural_actual_'):
+  tree=ET.fromstring(data)
+  for e in tree.iter():
+   if e.tag.endswith('image'):
+    href=e.attrib['href']; target=OUT/f'{PREFIX}-{name}-embedded.jpg';target.write_bytes(base64.b64decode(href.split(',',1)[1]));record['figures'][-1]['extracted_full_photo']=str(target.relative_to(ROOT));record['figures'][-1]['extracted_full_photo_sha256']=sha(target.read_bytes())
+with sync_playwright() as pw:
+ browser=pw.chromium.launch(executable_path='/usr/bin/chromium',headless=True,args=['--no-sandbox'])
+ for width,content_width in [(1440,688),(358,311)]:
+  for name in FIGURES:
+   svg=ROOT/f'course/figures/{name}.svg'
+   html=OUT/f'{PREFIX}-{name}-{width}.html'
+   html.write_text(f'<!doctype html><html><meta charset="UTF-8"><style>body{{margin:0;background:white;}}main{{width:{content_width}px;margin:24px auto;}}img{{width:100%;height:auto;display:block;}}</style><main><img src="{"data:image/svg+xml;base64," + base64.b64encode(svg.read_bytes()).decode()}" alt="{name}"></main></html>')
+   page=browser.new_page(viewport={'width':width,'height':1200},device_scale_factor=1)
+   page.set_content(html.read_text());page.wait_for_function('document.querySelector("img").complete');page.evaluate('document.fonts.ready')
+   image=page.locator('img'); png=OUT/f'{PREFIX}-{name}-{width}.png'; image.screenshot(path=str(png))
+   record['renders'].append({'renderer':'independent Chromium current SVG in local HTML, no sticky-header overlay','viewport_width':width,'display_width':content_width,'source_svg':str(svg.relative_to(ROOT)),'source_svg_sha256':sha(svg.read_bytes()),'png':str(png.relative_to(ROOT)),'png_sha256':sha(png.read_bytes())});page.close()
+ browser.close()
+(OUT/f'{PREFIX}-first-capture.json').write_text(json.dumps(record,ensure_ascii=False,indent=2)+'\n')
+print('Saved independent first-read snapshots and 16 current-SVG Chromium renders.')

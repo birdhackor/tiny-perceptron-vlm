@@ -1,0 +1,99 @@
+from pathlib import Path
+import contextlib
+import hashlib
+import io
+import json
+import platform
+import subprocess
+import sys
+import torch
+import torch.nn.functional as F
+from tiny_perceptron.natural_concepts import picture_order_report, swapped_picture
+
+out = Path(__file__).resolve().parent
+assert torch.version.cuda is None, "This verification requires the installed CPU wheel"
+torch.set_num_threads(1)
+first, second = swapped_picture()
+report = picture_order_report()
+fence = out / "lesson-python.source.txt"
+raw = subprocess.run([sys.executable, str(fence)], text=True, capture_output=True, check=False)
+(out / "lesson-stdout.txt").write_text(raw.stdout)
+(out / "lesson-stderr.txt").write_text(raw.stderr)
+assert raw.returncode == 0, raw.stderr
+assert raw.stdout == "不同的像素數 128\n4乘4平均摘要相同 True\n完整像素序列相同 False\n"
+assert report == {"different_pixels": 128, "same_4_by_4_summary": True, "same_pixel_sequence": False}
+
+# Independent construction from the specified coordinates, without the helper.
+manual_first = torch.zeros(3, 32, 32, dtype=torch.float32)
+manual_first[0, 8:16, 0:4] = 1
+manual_first[2, 8:16, 4:8] = 1
+manual_second = torch.zeros_like(manual_first)
+manual_second[2, 8:16, 0:4] = 1
+manual_second[0, 8:16, 4:8] = 1
+assert torch.equal(first, manual_first) and torch.equal(second, manual_second)
+changed = first != second
+positions = changed.any(dim=0).nonzero()
+scalar_counts = changed.sum(dim=(1, 2)).tolist()
+manual_means = []
+pooled = []
+for image in (first, second):
+    # Explicit disjoint 8x8 bins; channel, bin-row, bin-column, inner-row, inner-column.
+    bins = image.reshape(3, 4, 8, 4, 8).permute(0, 1, 3, 2, 4)
+    means = bins.sum(dim=(-2, -1)) / 64
+    target = F.adaptive_avg_pool2d(image[None], (4, 4))[0]
+    assert torch.equal(means, target)
+    manual_means.append(means)
+    pooled.append(target)
+assert torch.equal(*pooled)
+assert pooled[0][:, 1, 0].tolist() == [0.5, 0.0, 0.5]
+assert int(torch.count_nonzero(pooled[0])) == 2
+
+# Exercise: move the red strip into the adjacent average cell, retaining blue.
+moved = first.clone()
+moved[0, 8:16, 0:4] = 0
+moved[0, 8:16, 8:12] = 1
+moved_means = F.adaptive_avg_pool2d(moved[None], (4, 4))[0]
+assert moved.sum(dim=(1, 2)).tolist() == first.sum(dim=(1, 2)).tolist()
+assert not torch.equal(moved_means, pooled[0])
+assert moved_means[:, 1, 0].tolist() == [0.0, 0.0, 0.5]
+assert moved_means[:, 1, 1].tolist() == [0.5, 0.0, 0.0]
+
+first_seq = first.flatten()
+second_seq = second.flatten()
+assert len(first_seq) == 3 * 32 * 32 == 3072
+assert not torch.equal(first_seq, second_seq)
+assert first_seq[8 * 32].item() == 1 and second_seq[8 * 32].item() == 0
+assert first_seq[2 * 32 * 32 + 8 * 32].item() == 0 and second_seq[2 * 32 * 32 + 8 * 32].item() == 1
+
+# Preserve actual installed API documentation for the software contract read separately.
+functional = Path(F.__file__)
+(out / "installed-functional.source.txt").write_bytes(functional.read_bytes())
+record = {
+    "reviewer_task": "/root/natural_factual_mobile_11_14",
+    "command": ".venv/bin/python docs/technical-reviews/artifacts/natural-mobile-11.14-second-factual/verify-cpu.source.txt",
+    "environment": {"python": platform.python_version(), "torch": torch.__version__, "torch_commit": torch.version.git_version, "device": "cpu", "dtype": str(first.dtype), "threads": str(torch.get_num_threads())},
+    "raw_fence": {"command": [sys.executable, str(fence)], "sha256": hashlib.sha256(fence.read_bytes()).hexdigest(), "returncode": raw.returncode, "stdout": raw.stdout, "stderr": raw.stderr},
+    "helper_report": report,
+    "first_shape": list(first.shape), "second_shape": list(second.shape),
+    "independent_construction_matches_helper": True,
+    "channel_sums": [x.sum(dim=(1, 2)).tolist() for x in (first, second, moved)],
+    "changed_channel_values": int(changed.sum()),
+    "changed_spatial_positions": len(positions),
+    "changed_per_channel": scalar_counts,
+    "changed_rows": [int(positions[:, 0].min()), int(positions[:, 0].max())],
+    "changed_columns": [int(positions[:, 1].min()), int(positions[:, 1].max())],
+    "mean_shape": list(pooled[0].shape),
+    "bin_bounds": [[8 * i, 8 * (i + 1)] for i in range(4)],
+    "pooled_arrays": [x.tolist() for x in pooled],
+    "manual_means_equal_pool_api": True,
+    "flattened_length": len(first_seq),
+    "sequence_equal": bool(torch.equal(first_seq, second_seq)),
+    "first_sequence_example": {"index": 256, "first": first_seq[256].item(), "second": second_seq[256].item()},
+    "exercise_moved_red_cell_1_0": moved_means[:, 1, 0].tolist(),
+    "exercise_moved_red_cell_1_1": moved_means[:, 1, 1].tolist(),
+    "exercise_summary_equal": bool(torch.equal(moved_means, pooled[0])),
+    "passed": True,
+    "scope": "Deterministic CPU input construction and summaries only. No model loading, model downloads, GPU calls, training, or model-quality evaluation.",
+}
+(out / "cpu-proof.json").write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n")
+print(json.dumps(record, ensure_ascii=False, indent=2))

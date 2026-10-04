@@ -1,0 +1,41 @@
+from pathlib import Path, PurePosixPath
+import collections, hashlib, json, tarfile
+ROOT = Path.cwd()
+MANIFEST = ROOT / 'docs/natural-assistant/manifest.json'
+EXPECTED_MANIFEST_SHA = '7604526c67da31a41940f16f9c87027c73cf2782c63522dbde8c7efbf015db91'
+def digest(data): return hashlib.sha256(data).hexdigest()
+raw = MANIFEST.read_bytes()
+assert digest(raw) == EXPECTED_MANIFEST_SHA, 'Root merged manifest changed; do not silently verify a different version'
+m = json.loads(raw)
+all_files = {x['path']:x for x in m['files']}
+assert len(all_files)==len(m['files']), 'Duplicate merged asset path'
+file_results=[]
+for name,spec in sorted(all_files.items()):
+    p=PurePosixPath(name);assert not p.is_absolute() and '..' not in p.parts
+    actual=(ROOT/'data/natural'/name).read_bytes()
+    assert len(actual)==spec['bytes'] and digest(actual)==spec['sha256'], name
+    file_results.append({'path':name,'bytes':len(actual),'sha256':digest(actual)})
+archive_results=[]
+for archive in m['archives']:
+    p=ROOT/archive['path'];raw=p.read_bytes()
+    assert len(raw)==archive['bytes'] and digest(raw)==archive['sha256'],archive['path']
+    expected={x['path']:x for x in archive['files']};seen={}
+    with tarfile.open(p,'r:gz') as tar:
+        for member in tar:
+            q=PurePosixPath(member.name);assert not q.is_absolute() and '..' not in q.parts
+            if member.isdir():continue
+            assert member.isfile(),f'Unsafe non-regular tar member {member.name}'
+            assert member.name not in seen and member.name in expected,member.name
+            data=tar.extractfile(member).read();spec=expected[member.name]
+            assert len(data)==spec['bytes'] and digest(data)==spec['sha256'],member.name
+            seen[member.name]={'path':member.name,'bytes':len(data),'sha256':digest(data)}
+    assert set(seen)==set(expected),archive['path']
+    archive_results.append({'path':archive['path'],'bytes':len(raw),'sha256':digest(raw),'all_member_sha256_verified':True,'regular_member_count':len(seen),'members':list(seen.values())})
+families=collections.defaultdict(set)
+for row in m['rows']+m['audio_rows']:families[row['family']].add(row['split'])
+assert all(len(s)==1 for s in families.values()),'Family crossing splits'
+text_rows=[x for x in m['rows'] if x['task']=='text_chat']
+chat_counts={s:{'rows':sum(x['split']==s for x in text_rows),'distinct_families':len(set(x['family'] for x in text_rows if x['split']==s))} for s in ['train','validation','test']}
+proof={'schema_version':1,'kind':'actual read-only local merged-manifest/asset/archive member audit; no model inference','merged_manifest_path':'docs/natural-assistant/manifest.json','merged_manifest_sha256':EXPECTED_MANIFEST_SHA,'verification_program_sha256':digest(Path(__file__).read_bytes()),'all_declared_disk_files_sha256_verified':True,'all_archive_regular_members_sha256_verified':True,'disk_file_count':len(file_results),'archives':archive_results,'disk_files':file_results,'row_counts':dict(collections.Counter(x['split'] for x in m['rows'])),'audio_counts':dict(collections.Counter(x['split'] for x in m['audio_rows'])),'tasks_by_split':{s:dict(collections.Counter(x['task'] for x in m['rows'] if x['split']==s)) for s in ['train','validation','test']},'text_chat_counts':chat_counts,'family_cross_split_count':0,'source_manifests':[{'path':str(p.relative_to(ROOT)),'sha256':digest(p.read_bytes())} for p in [ROOT/'data/natural/vision/manifest.json',ROOT/'data/natural/ocr/manifest.json',ROOT/'data/natural/speech/manifest.json']],'scope_limits':['File hashes and identity splits do not prove correct labels or broad model ability.','This did not reconstruct sources anew; separately preserved original owner reconstruction receipts cover that operation.','Public-source overlap with pretrained model training remains unknown.','No claim of full upstream audio archive download/hash verification or every-image-right audit.']}
+out=ROOT/'docs/natural-assistant/evidence/data/merged-assets-and-archive-audit.json';out.write_text(json.dumps(proof,ensure_ascii=False,indent=2)+'\n')
+print(json.dumps({k:proof[k] for k in ['disk_file_count','row_counts','audio_counts','text_chat_counts','family_cross_split_count']},indent=2));print('Archive results',[(x['path'],x['regular_member_count'],x['bytes']) for x in archive_results])

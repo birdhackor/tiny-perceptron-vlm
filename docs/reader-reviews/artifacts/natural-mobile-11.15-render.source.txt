@@ -1,0 +1,49 @@
+from pathlib import Path
+import hashlib
+import json
+from playwright.sync_api import sync_playwright
+
+root = Path('/workspace/tiny-perceptron-vlm')
+figure = root / 'course/figures/practical_stroke.svg'
+prefix = root / 'docs/reader-reviews/artifacts/natural-mobile-11.15'
+svg = figure.read_text()
+results = []
+with sync_playwright() as p:
+    browser = p.chromium.launch(executable_path='/usr/bin/chromium', headless=True,
+                                args=['--no-sandbox'])
+    for label, width in [('desktop', 688), ('mobile', 311)]:
+        page = browser.new_page(viewport={'width': width, 'height': 1200}, device_scale_factor=1)
+        page.set_content('<!doctype html><html lang="zh-Hant"><meta charset="utf-8">'
+                         '<style>html,body{margin:0;padding:0}svg{display:block;width:100%;height:auto}</style>'
+                         '<body>' + svg + '</body></html>')
+        page.evaluate('document.fonts.ready')
+        image = page.locator('svg')
+        target = Path(str(prefix) + '-' + label + '.png')
+        image.screenshot(path=str(target))
+        measurements = image.evaluate('''svg => {
+            const vb=svg.viewBox.baseVal;
+            const box=svg.getBoundingClientRect();
+            return {viewport: {width: innerWidth, height: innerHeight},
+              image: {width:box.width,height:box.height},
+              viewBox: {width:vb.width,height:vb.height},
+              text: Array.from(svg.querySelectorAll('text')).map(t => {
+                const b=t.getBBox();
+                const style=getComputedStyle(t);
+                return {text:t.textContent,x:b.x,y:b.y,width:b.width,height:b.height,
+                  fontFamily:style.fontFamily,fontSize:style.fontSize,
+                  displayedFontSize:parseFloat(style.fontSize)*box.width/vb.width,
+                  inside: b.x>=0 && b.y>=0 && b.x+b.width<=vb.width && b.y+b.height<=vb.height};
+              })};
+        }''')
+        results.append({'label':label,'file':str(target.relative_to(root)),
+                        'sha256':hashlib.sha256(target.read_bytes()).hexdigest(),
+                        'measurements':measurements})
+        page.close()
+    browser.close()
+manifest = {'reviewer_task':'/root/natural_reader_mobile_11_15',
+            'figure':str(figure.relative_to(root)),
+            'figure_sha256':hashlib.sha256(figure.read_bytes()).hexdigest(),
+            'renderer':'Chromium via Playwright, SVG element screenshot, device_scale_factor=1',
+            'results':results}
+Path(str(prefix)+'-render.json').write_text(json.dumps(manifest,ensure_ascii=False,indent=2)+'\n')
+print(json.dumps(manifest,ensure_ascii=False,indent=2))
