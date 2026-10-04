@@ -1021,18 +1021,36 @@ def backup_remote(checkpoint_repo, batch_id, stage, run_id, revision):
 
 
 def validate_release(approval):
-    if approval.get("approved") is not True or approval.get("reviewed") is not True:
-        raise ValueError("Release needs a concrete reviewed, committed adapter/file approval")
-    source = approval.get("source", {})
-    if not re.fullmatch(r"[a-f0-9]{40}", source.get("revision", "")):
-        raise ValueError("Private source must use an immutable HF commit")
-    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", source.get("repo", "")):
-        raise ValueError("Expected private source owner/repository")
-    prefix = safe_relative(source.get("prefix", ""))
-    if prefix.parts[0] != "natural-v3":
-        raise ValueError("Release source must belong to this versioned extension")
-    files = approval.get("files", [])
-    if not files or len(files) > 50:
+    if not isinstance(approval, dict) or approval.get("approved") is not True or approval.get("reviewed") is not True:
+        raise ValueError("Release needs a concrete reviewed, committed model/file approval")
+    variant = approval.get("selected_variant", "adapter")
+    if not isinstance(variant, str) or (
+        variant not in {"base", "adapter"} and not re.fullmatch(r"adapter-step-[0-9]{6}", variant)
+    ):
+        raise ValueError("Release must identify base or one reviewed adapter variant")
+    base_only = variant == "base"
+    source = approval.get("source")
+    if base_only:
+        if source is not None or (
+            "adapter_parameters" in approval
+            and (type(approval["adapter_parameters"]) is not int or approval["adapter_parameters"] != 0)
+        ):
+            raise ValueError("Base-only release cannot claim private adapter weights or parameters")
+    else:
+        if not isinstance(source, dict) or not re.fullmatch(r"[a-f0-9]{40}", source.get("revision", "")):
+            raise ValueError("Private source must use an immutable HF commit")
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", source.get("repo", "")):
+            raise ValueError("Expected private source owner/repository")
+        prefix = safe_relative(source.get("prefix", ""))
+        if prefix.parts[0] != "natural-v3":
+            raise ValueError("Release source must belong to this versioned extension")
+    files = approval.get("files")
+    if (
+        not isinstance(files, list)
+        or any(not isinstance(item, dict) for item in files)
+        or (bool(files) if base_only else not files)
+        or len(files) > 50
+    ):
         raise ValueError("Release needs a bounded explicit file allowlist")
     if any(type(item.get("bytes")) is not int or not 0 < item["bytes"] <= MAX_PRIVATE_BACKUP_BYTES for item in files):
         raise ValueError("Every released file needs a positive bounded integer byte length")
@@ -1073,7 +1091,7 @@ def validate_release(approval):
         if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", model.get("repo", "")) or not re.fullmatch(
             r"[a-f0-9]{40}", model.get("revision", "")
         ):
-            raise ValueError("Public adapter and speech route require explicit immutable pretrained model pins")
+            raise ValueError("Public model and speech route require explicit immutable pretrained model pins")
     safe_name(approval.get("release_id", ""))
     return approval
 
@@ -1098,8 +1116,8 @@ def release_remote(release_repo, approval_text, approval_sha, run_id, batch_id, 
         raise ValueError("Committed review bytes differ from the Actions approval hash")
     approval = validate_release(json.loads(approval_text))
     api = HfApi(token=os.environ["HF_TOKEN"])
-    source = approval["source"]
-    if not api.repo_info(source["repo"], repo_type="model").private:
+    source = approval.get("source")
+    if source is not None and not api.repo_info(source["repo"], repo_type="model").private:
         raise ValueError("Reviewed training source must be private")
     if api.repo_info(release_repo, repo_type="model").private:
         raise ValueError("Student release repository must be public")
@@ -1126,22 +1144,22 @@ def release_remote(release_repo, approval_text, approval_sha, run_id, batch_id, 
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(file, target)
         (export / "README.md").write_text(approval["model_card"], encoding="utf-8")
-        write_json(
-            export / "release-provenance.json",
-            {
-                "approval_sha256": approval_sha,
-                "git_revision": revision,
-                "manifest_sha256": manifest_sha,
-                "source": source,
-                "base_model": approval["base_model"],
-                "asr_model": approval["asr_model"],
-            },
-        )
+        provenance = {
+            "approval_sha256": approval_sha,
+            "git_revision": revision,
+            "manifest_sha256": manifest_sha,
+            "source": source,
+            "base_model": approval["base_model"],
+            "asr_model": approval["asr_model"],
+        }
+        if "selected_variant" in approval:
+            provenance["selected_variant"] = approval["selected_variant"]
+        write_json(export / "release-provenance.json", provenance)
         commit = api.upload_folder(
             repo_id=release_repo,
             folder_path=str(export),
             path_in_repo=prefix,
-            commit_message=f"Publish reviewed natural-assistant adapter: {run_id}",
+            commit_message=f"Publish reviewed natural-assistant {approval.get('selected_variant', 'adapter')}: {run_id}",
         )
         files = [
             {"path": f"{prefix}/{p.relative_to(export).as_posix()}", "bytes": p.stat().st_size, "sha256": sha256(p)}
@@ -1159,6 +1177,8 @@ def release_remote(release_repo, approval_text, approval_sha, run_id, batch_id, 
             if Path(file).stat().st_size != item["bytes"] or sha256(file) != item["sha256"]:
                 raise RuntimeError("Anonymous student download differs from approved export")
     result = {"repo": release_repo, "revision": commit.oid, "files": files, "anonymous_download_verified": True}
+    if "selected_variant" in approval:
+        result["selected_variant"] = approval["selected_variant"]
     directory = NATURAL_ROOT / batch_id / "release" / run_id
     write_json(directory / "result.json", result)
     volume.commit()
