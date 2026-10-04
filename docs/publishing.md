@@ -42,7 +42,7 @@ Windows PowerShell 使用 `.venv\Scripts\Activate.ps1` 啟用環境。`site` 群
 
 ## GitHub Pages
 
-repo 的 Settings → Pages → Build and deployment → Source 選 **GitHub Actions**。之後 `.github/workflows/pages.yml` 在 `main` 更新或手動觸發時，會重新執行目錄中的全部 Notebook（加入B.5–B.8後共226份）、核對輸出與網站連結，再部署到 Pages。核心 Linux／macOS／Windows CI 保留原本的流程。
+repo 的 Settings → Pages → Build and deployment → Source 選 **GitHub Actions**。之後 `.github/workflows/pages.yml` 在 `main` 更新或手動觸發時，會重新執行目錄中的全部 Notebook（本輪整合專題完成後共248份）、核對輸出與網站連結，再部署到 Pages。核心 Linux／macOS／Windows CI 保留原本的流程。
 
 網站 CI 使用一個 worker 逐份啟動獨立 kernel。GitHub runner 曾在並行啟動時發生 TCP 連接埠被占用、kernel 未開始執行就退出的情況；順序啟動避免多個 Notebook 同時爭用啟動資源。
 
