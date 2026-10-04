@@ -1,0 +1,96 @@
+---
+license: mit
+base_model: Qwen/Qwen3-VL-2B-Instruct
+language:
+  - zh
+  - en
+tags:
+  - educational
+  - image-text-to-text
+  - automatic-speech-recognition
+---
+
+# 照片、中文讀字與語音提問：教學用助理
+
+這份公開包固定 tiny-perceptron-vlm 第 20 章的選定配置與版本證明。圖文聊天使用上游 Qwen3-VL-2B-Instruct；真人語音由未微調的 Whisper-large-v3-turbo 轉成文字，再接入同一份對話。回覆是文字，沒有語音合成。
+
+本包只有說明與版本證明，沒有本課 LoRA、上游模型權重、更新器或隨機狀態。學生仍須下載固定版本的兩份上游模型。讀字、看圖與聊天能力主要來自圖文底座，不能歸功於本課訓練。語音辨識改善來自替換辨識器，也不是本課微調的成果。
+
+## 模型與選版
+
+- 圖文底座：[Qwen/Qwen3-VL-2B-Instruct](https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct/tree/89644892e4d85e24eaac8bacfd4f463576704203)，固定 commit `89644892e4d85e24eaac8bacfd4f463576704203`，上游 Apache-2.0；實讀 2,127,532,032 個不同參數。
+- 語音辨識：[openai/whisper-large-v3-turbo](https://huggingface.co/openai/whisper-large-v3-turbo/tree/41f01f3fe87f28c78e2fbf8b568835947dd65ed9)，固定 commit `41f01f3fe87f28c78e2fbf8b568835947dd65ed9`，上游 MIT；808,878,080 個參數。
+- 本公開配置不載入本課 LoRA，兩個模型共 2,936,410,112 個參數。它們是兩站，並非同一個原生音訊圖文模型。
+- 語音辨識器先依 16 段驗證錄音選定：turbo 的 NFKC 後去空白 CER 為 50/510（9.80%），small 為 117/510（22.94%）。這是固定朗讀樣本，不是一般語音錯誤率。
+- 本課確實完成增補資料的候選 LoRA 訓練；每次完整訓練 2,077 次更新、4,154 次資料取用，更新 1,605,632 個參數。候選在照片題上有進步，卻沒同時保住聊天與完整回答。最後依驗證選用原底座。最後測試只測已選配置，不再決定權重。
+
+選版證據固定於程式庫的 `docs/natural-assistant/v4/selection.json`，SHA-256 `8570755345e08c55ab77c165b405f41f6e5012b4c37a93909472b7f17334c42f`。完整訓練、逐題判讀與原始生成另外保存；本卡不把候選權重稱為公開成品。
+
+## 資料
+
+固定資料清單 SHA-256 `0c660490eb78bd82a8e092c2658646a6bae59c70058b6f5c2c944d138f732f60`，包含 2,371 筆圖文記錄（2,077 訓練、124 驗證、170 最後測試），另有 38 段留出錄音（16 驗證、22 最後測試）。衍生問答數不是獨立照片數。
+
+- [DOCCI](https://google.github.io/docci/)：Google LLC 提供，圖片由 Jason Baldridge and family 創作，CC BY 4.0。509 張照片按公開視覺相似群組分為 439/28/42；群組不等於已證明的拍攝場次。官方英文描述配上本課 AI 助理看圖後寫、另位助理核對的繁中題目與答案，並非官方人工中文標註。
+- [NVIDIA OCR-Synthetic-Multilingual-v1](https://huggingface.co/datasets/nvidia/OCR-Synthetic-Multilingual-v1)：CC BY 4.0。827 個文件裁切僅供訓練；不使用同類合成裁切作最後自然文字成績。
+- [Wikimedia Commons](https://commons.wikimedia.org/)：逐張核對作者與 CC BY 3.0/4.0、CC0 或公有領域依據。70 張全圖、62 個訓練裁切；自然文字最後測試來自 10 張保留全圖。裁切仍保留來源與修改說明。
+- [OpenAssistant OASST2](https://huggingface.co/datasets/OpenAssistant/oasst2)：Apache-2.0。公開中文對話與本課另寫練習按對話樹或題目家族切分；不能把相同前文的分支當成互不相關的試題。
+- [FLEURS](https://huggingface.co/datasets/google/fleurs)：CC BY 4.0。30 段真人朗讀只測轉寫，沒有杜撰助手回答來計聊天分數。
+- [AISHELL-1](https://www.openslr.org/33/)：Apache-2.0。8 段不同說話者的真人朗讀問句檢查語音入口與文字對照。問句後的回答判準由本課另訂；這不是自由對話錄音。
+
+來源版本、逐檔指紋、作者、授權全文或連結與修改記錄見[資料指引](https://birdhackor.github.io/tiny-perceptron-vlm/natural-v4-data.html)。同一來源家族不跨本課訓練、驗證與最後測試；公共素材可能曾被上游底座看過，本課無法證明其預訓練未見。
+
+## 最後測試
+
+| 最後測試用途 | 完整通過／原分母 |
+| --- | ---: |
+| 自然照片：完整短描述 | 25/42 |
+| 同組照片：可見事實問答 | 58/84 |
+| 其中：可見動作 | 3/11 |
+| 其中：關係 | 21/29 |
+| 有／無中文字 | 18/18 |
+| 自然中文字完整轉寫 | 8/10 |
+| 多區塊文字與閱讀順序 | 1/3 |
+| 文字聊天（含一題前文條件） | 2/13 |
+| 真人問句：來源正確文字後聊天 | 2/4 |
+| 同組問句：真正ASR轉寫後聊天 | 2/4 |
+
+22 段真人錄音的原樣 CER 是 112/674（16.62%）；NFKC 後移除 Unicode 空白為 96/661（14.52%）。保留標點、大小寫與簡繁字形差異，不偷偷訂正辨識結果。18 段 FLEURS 朗讀的兩項分別為 112/632 與 96/619；4 段 AISHELL 問句均為 0/42。這四段聽寫都正確，後續聊天仍只各通過 2/4，因此聽對問題並不等於回答正確。178 份 LM 回答中 171 份正常結束，另外 7 份文字聊天截斷，均留在原分母。EOS 完成數不是內容正確數。
+
+這是一份固定的小量留出教材測試。42 張照片的相關問題不是 126 個獨立試驗；動作與關係題分別只有 11 與 29 題。自然中文完整轉寫只有 10 題，多區塊閱讀順序只有 3 題。13 題文字對話包含 1 題保留前文的題目；4 段語音問句是人朗讀既定問題。這些數字不能代表任意照片、中文招牌、方言或日常自由語音聊天的成功率。
+
+照片與對話採未參與本次訓練及選版的助理逐題核對整份回答；看圖題真的查看來源圖片。完整性由實際生成 token、EOS 與截斷記錄核對。讀字整題成績與轉寫 CER 分開計；語音轉寫錯誤與聊天回答錯誤也分開。這是獨立 AI 助理評閱，沒有聲稱多人類盲評或統計顯著性。完整原文及判讀記錄見[課程證據](https://github.com/birdhackor/tiny-perceptron-vlm/tree/main/docs/natural-assistant/evidence/v4-runtime)。
+
+## 操作與範圍
+
+依[學生操作指引](https://birdhackor.github.io/tiny-perceptron-vlm/natural-v4-student.html)使用 Python 3.12 與固定套件。下載程式從固定公開 commit 匿名取得本包，逐檔核對大小與 SHA-256，再載入固定上游模型。兩份上游模型的 23 個檔案共 5,889,111,977 bytes；下載量不是 RAM 或顯示卡記憶體需求。CPU／GPU實測條件及資源範圍以操作指引為準。
+
+語音辨識先顯示原稿，使用者可更正再送出；更正稿不冒充辨識成功。可附圖追問並保留對話，重新開始才清除歷史。沒有文字轉語音、原生聲波推理、多人重疊語音驗證或通用安全性認證。圖片細節、中文筆畫、閱讀順序、語音轉寫與遵循指令都可能出錯。
+
+本包自行撰寫的說明與版本證明採專案 MIT 授權；上游 Qwen 與 Whisper 保留各自 Apache-2.0／MIT 授權。資料授權各自獨立。本包沒有重散佈上游權重或訓練圖片、錄音。
+
+
+## 本包說明與版本證明的 MIT 授權
+
+```text
+MIT License
+
+Copyright (c) 2026 birdhackor
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
