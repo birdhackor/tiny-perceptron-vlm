@@ -6,6 +6,7 @@ written after unauthenticated downloads at the specified HF commit match exports
 """
 
 import argparse
+import copy
 import json
 import re
 import sys
@@ -25,14 +26,20 @@ from scripts.course_release import (  # noqa: E402
     validate_export,
     write_model_card,
 )
-from tiny_perceptron.capstone import DATA_VERSION, STAGES, TOK, CapstoneModel  # noqa: E402
+from tiny_perceptron.capstone import (  # noqa: E402
+    DATA_VERSION,
+    STAGES,
+    TOK,
+    CapstoneModel,
+    digest,  # noqa: E402
+)
 from tiny_perceptron.capstone_quantization import FORMAT as PTQ_FORMAT  # noqa: E402
 from tiny_perceptron.capstone_quantization import restore_quantized_payload  # noqa: E402
 from tiny_perceptron.model import ModelConfig  # noqa: E402
 
 PUBLIC_REPO = "birdhackor/tiny-perceptron-course-models"
 MANIFEST = ROOT / "docs/course-experiments/capstone-public.json"
-STAGE_IDS = (*STAGES, "dpo-int4", "dpo-int8")
+STAGE_IDS = (*STAGES, "dpo-int4", "dpo-int8", "student-ce", "student-kd", "student-kd-int4")
 FORMATS = ("capstone-v1", PTQ_FORMAT)
 PROVENANCE_KEYS = {
     "revision",
@@ -56,6 +63,10 @@ PROVENANCE_KEYS = {
     "approval_git_revision",
     "approval_sha256",
     "scope",
+    "parent_checkpoint_sha256",
+    "student_branch",
+    "teacher_checkpoint_sha256",
+    "public_source_sha256",
 }
 
 
@@ -72,10 +83,39 @@ def _metadata(saved, provenance):
             raise ValueError("Capstone provenance must be an object")
         for key, value in source.items():
             if key in PROVENANCE_KEYS:
+                if value is None:
+                    continue
                 if not isinstance(value, (str, int)) or isinstance(value, bool):
                     raise ValueError("Capstone provenance accepts only explicit text/integer fields")
                 clean[key] = value
+        if isinstance(source.get("data_manifest"), dict):
+            clean["dataset_manifest_sha256"] = digest(source["data_manifest"])
     return clean
+
+
+def public_stage_id(saved):
+    """Training stage and approved student identity have different meanings."""
+    branch = saved.get("metadata", {}).get("student_branch")
+    bits = saved.get("quantization", {}).get("bits")
+    if branch is not None:
+        if (
+            branch not in ("student-ce", "student-kd")
+            or saved.get("stage") != "joint"
+            or saved.get("config", {}).get("experts") != 0
+        ):
+            raise ValueError("Student alias requires its explicit branch, joint stage and Dense architecture")
+        _pinned(saved["metadata"].get("teacher_checkpoint_sha256"), 64, "Student teacher checkpoint SHA-256")
+        _pinned(saved["metadata"].get("dataset_manifest_sha256"), 64, "Student dataset manifest SHA-256")
+        if bits is not None and (branch != "student-kd" or bits != 4 or saved.get("format_version") != PTQ_FORMAT):
+            raise ValueError("Only the measured student KD int4 variant has a public alias")
+        stage_id = f"{branch}-int{bits}" if bits else branch
+    else:
+        if "teacher_checkpoint_sha256" in saved.get("metadata", {}):
+            raise ValueError("Teacher provenance without an explicit student branch is ambiguous")
+        stage_id = f"{saved['stage']}-int{bits}" if bits else saved["stage"]
+    if stage_id not in STAGE_IDS:
+        raise ValueError("Checkpoint does not match an explicitly supported public capstone identity")
+    return stage_id
 
 
 def clean_capstone_payload(saved, provenance, specification):
@@ -101,6 +141,12 @@ def clean_capstone_payload(saved, provenance, specification):
     if saved["format_version"] == PTQ_FORMAT:
         clean.update(quantized=saved["quantized"], quantization=saved["quantization"])
     clean.update(inference_only=True, architecture={"type": "CapstoneModel"}, metadata=_metadata(saved, provenance))
+    if "public_source_sha256" in specification:
+        source_sha = _pinned(specification["public_source_sha256"], 64, "Approved public source SHA-256")
+        original = clean["metadata"].get("public_source_sha256")
+        if original is not None and original != source_sha:
+            raise ValueError("Approved public inference source disagrees with existing checkpoint provenance")
+        clean["metadata"]["public_source_sha256"] = source_sha
     # Validate state keys, dtypes and shapes before any serialized public output.
     validate_capstone_payload(clean)
     # A tensor view can otherwise serialize its larger, unrelated backing storage.
@@ -156,6 +202,7 @@ def validate_capstone_payload(saved):
         raise ValueError("Unsupported capstone configuration value or type")
     if _metadata(saved, {}) != saved.get("metadata"):
         raise ValueError("Capstone public metadata contains unapproved fields")
+    public_stage_id(saved)
     if saved.get("format_version") == PTQ_FORMAT:
         model = restore_quantized_payload(saved)
     elif saved.get("format_version") == "capstone-v1":
@@ -205,6 +252,7 @@ def prepare_approval(
     batch_id="capstone-v1",
     experiment_id="capstone",
     model_card=None,
+    public_source_sha256_by_stage=None,
 ):
     """Build an unapproved review draft from actual files; never fabricate a pass."""
     _pinned(training_revision, 40, "Training Git revision")
@@ -222,17 +270,23 @@ def prepare_approval(
         raise ValueError("Private repository must be owner/name")
     if not stage_files or set(stage_files) - set(STAGE_IDS):
         raise ValueError("Explicit capstone stage files are required")
+    public_sources = public_source_sha256_by_stage or {}
+    if not isinstance(public_sources, dict) or set(public_sources) - set(stage_files):
+        raise ValueError("Public source declarations must belong to explicitly reviewed stage files")
     directory = Path(directory).resolve()
     files = []
+    data_hashes = []
     for stage_id, relative in stage_files.items():
         path = directory / safe_relative(relative)
         if path.is_symlink() or not path.resolve().is_relative_to(directory) or not path.is_file():
             raise ValueError("Stage checkpoint must be a regular file under the reviewed source directory")
         saved = torch.load(path, map_location="cpu", weights_only=True)
         specification = {"architecture": {"type": "CapstoneModel"}}
+        if stage_id in public_sources:
+            specification["public_source_sha256"] = public_sources[stage_id]
         clean = clean_capstone_payload(saved, {}, specification)
-        bits = clean.get("quantization", {}).get("bits")
-        expected_id = f"{clean['stage']}-int{bits}" if bits else clean["stage"]
+        data_hashes.append(clean["metadata"].get("dataset_manifest_sha256"))
+        expected_id = public_stage_id(clean)
         if stage_id != expected_id:
             raise ValueError("Stage label disagrees with actual checkpoint stage/precision")
         files.append(
@@ -244,6 +298,31 @@ def prepare_approval(
                 "license": "MIT",
                 "redistribution_approved": False,
                 "architecture": {"type": "CapstoneModel"},
+                **({"public_source_sha256": public_sources[stage_id]} if stage_id in public_sources else {}),
+            }
+        )
+    data = directory / "data.json"
+    if data.is_file():
+        if data.is_symlink():
+            raise ValueError("Synthetic data export cannot be a symlink")
+        payload = json.loads(data.read_text(encoding="utf-8"))
+        if payload.get("license") != "MIT" or payload.get("manifest", {}).get("version") != DATA_VERSION:
+            raise ValueError("Capstone data export must declare its actual synthetic version and MIT license")
+        if set(payload.get("splits", {})) != {"train", "validation", "test"}:
+            raise ValueError("Capstone data export requires all three frozen splits")
+        for name, rows in payload["splits"].items():
+            if len(rows) != payload["manifest"]["counts"][name] or digest(rows) != payload["manifest"]["sha256"][name]:
+                raise ValueError("Exported synthetic training rows disagree with their frozen manifest")
+        if any(value != digest(payload["manifest"]) for value in data_hashes):
+            raise ValueError("Every released checkpoint must bind to the exported synthetic data manifest")
+        files.append(
+            {
+                "path": "data.json",
+                "output": "data.json",
+                "sha256": file_sha256(data),
+                "kind": "dataset",
+                "license": "MIT",
+                "redistribution_approved": False,
             }
         )
     return {
@@ -264,7 +343,7 @@ def prepare_approval(
             ],
             "training_data": [
                 {
-                    "source": "capstone-small-world-v1 synthetic data",
+                    "source": f"{DATA_VERSION} synthetic data",
                     "license": "MIT",
                     "modifications": "Generated by this MIT-licensed repository.",
                 }
@@ -294,6 +373,9 @@ def validate_manifest(manifest):
     for model in models:
         if model.get("id") not in STAGE_IDS or model.get("format_version") not in FORMATS:
             raise ValueError("Unsupported capstone stage or inference format")
+        expected_format = PTQ_FORMAT if model["id"].endswith(("-int4", "-int8")) else "capstone-v1"
+        if model["format_version"] != expected_format:
+            raise ValueError("Published stage identity and precision format must agree")
         files = model.get("files", [])
         outputs, paths = set(), set()
         if not files:
@@ -326,7 +408,10 @@ def build_public_manifest(export_directory, *, revision, prefix, repo=PUBLIC_REP
     directory = Path(export_directory)
     exported = json.loads((directory / "export-manifest.json").read_text(encoding="utf-8"))
     common = []
-    for name in ("README.md", "LICENSE", "THIRD_PARTY_NOTICES.md"):
+    common_names = ["README.md", "LICENSE", "THIRD_PARTY_NOTICES.md"]
+    if any(item["output"] == "data.json" and item.get("license") == "MIT" for item in exported["files"]):
+        common_names.append("data.json")
+    for name in common_names:
         path = directory / name
         if not path.is_file() or path.is_symlink():
             raise ValueError("Public model cards and license notices must accompany checkpoints")
@@ -346,8 +431,7 @@ def build_public_manifest(export_directory, *, revision, prefix, repo=PUBLIC_REP
             raise ValueError("Exported checkpoint changed before publication verification")
         validate_export(checkpoint)
         saved = torch.load(checkpoint, map_location="cpu", weights_only=True)
-        bits = saved.get("quantization", {}).get("bits")
-        stage_id = f"{saved['stage']}-int{bits}" if bits else saved["stage"]
+        stage_id = public_stage_id(saved)
         files = [
             {
                 "output": "model.pt",
@@ -410,8 +494,17 @@ def build_public_manifest_from_receipt(public_manifest):
 
     exported = json.loads(verified(by_output["export-manifest.json"]).read_text(encoding="utf-8"))
     common = []
-    for name in ("README.md", "LICENSE", "THIRD_PARTY_NOTICES.md"):
+    common_names = ["README.md", "LICENSE", "THIRD_PARTY_NOTICES.md"]
+    if any(item["output"] == "data.json" and item.get("license") == "MIT" for item in exported["files"]):
+        common_names.append("data.json")
+    for name in common_names:
+        if name not in by_output:
+            raise ValueError("Reviewed data export is missing from the actual public receipt")
         item = by_output[name]
+        if name == "data.json":
+            data_export = next(entry for entry in exported["files"] if entry["output"] == name)
+            if item["sha256"] != data_export["sha256"] or item["bytes"] != data_export["bytes"]:
+                raise ValueError("Published synthetic data disagree with the reviewed export manifest")
         verified(item)
         common.append({key: item[key] for key in ("path", "output", "sha256", "bytes")} | {"license": "MIT"})
     models = []
@@ -430,8 +523,7 @@ def build_public_manifest_from_receipt(public_manifest):
         checkpoint = verified(receipt)
         saved = torch.load(checkpoint, map_location="cpu", weights_only=True)
         validate_capstone_payload(saved)
-        bits = saved.get("quantization", {}).get("bits")
-        stage_id = f"{saved['stage']}-int{bits}" if bits else saved["stage"]
+        stage_id = public_stage_id(saved)
         download = {key: receipt[key] for key in ("path", "sha256", "bytes")}
         download.update(output="model.pt", license="MIT")
         models.append(
@@ -442,6 +534,74 @@ def build_public_manifest_from_receipt(public_manifest):
                 "files": [download, *common],
             }
         )
+    return validate_manifest({"schema_version": 1, "repo": PUBLIC_REPO, "revision": revision, "models": models})
+
+
+def merge_public_manifests(*manifests, revision):
+    """Pin main and student releases together only after rechecking all live bytes.
+
+    The supplied revision is an actual HF commit, never an assumed moving head.
+    Original release hashes are preserved and anonymously fetched at that commit.
+    """
+    from huggingface_hub import hf_hub_download
+
+    _pinned(revision, 40, "Merged public HF revision")
+    if not manifests:
+        raise ValueError("At least one concretely verified public manifest is required")
+    models, identities, verified, payloads = [], set(), {}, {}
+    for original in manifests:
+        validate_manifest(original)
+        for model in original["models"]:
+            if model["id"] in identities:
+                raise ValueError("Merged releases cannot collapse or replace an existing model identity")
+            identities.add(model["id"])
+            checkpoint_path = None
+            for item in model["files"]:
+                identity = (item["sha256"], item["bytes"])
+                prior = verified.get(item["path"])
+                if prior is not None and prior[:2] != identity:
+                    raise ValueError("Merged releases declare conflicting hashes for the same public path")
+                if prior is None:
+                    cached = Path(hf_hub_download(PUBLIC_REPO, item["path"], revision=revision, token=False))
+                    if file_sha256(cached) != item["sha256"] or cached.stat().st_size != item["bytes"]:
+                        raise ValueError("Target HF commit changed bytes from an original reviewed release")
+                    verified[item["path"]] = (*identity, cached)
+                if item["output"] == model["checkpoint"]:
+                    checkpoint_path = verified[item["path"]][2]
+            saved = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+            validate_capstone_payload(saved)
+            if public_stage_id(saved) != model["id"] or saved["format_version"] != model["format_version"]:
+                raise ValueError("Merged checkpoint identity differs from the reviewed public stage")
+            payloads[model["id"]] = saved
+            models.append(copy.deepcopy(model))
+    data_hashes = {
+        saved["metadata"]["dataset_manifest_sha256"]
+        for saved in payloads.values()
+        if "dataset_manifest_sha256" in saved["metadata"]
+    }
+    if len(data_hashes) > 1:
+        raise ValueError("Merged capstone stages do not share the same frozen dataset manifest")
+    teacher = payloads.get("dpo", {}).get("metadata", {}).get("public_source_sha256")
+    if any(identity.startswith("student-") for identity in payloads):
+        _pinned(teacher, 64, "Main DPO approved raw inference source SHA-256")
+        for identity, saved in payloads.items():
+            if identity.startswith("student-") and saved["metadata"]["teacher_checkpoint_sha256"] != teacher:
+                raise ValueError("Student teacher provenance does not match the published main DPO source")
+    shared_data = {}
+    for model in models:
+        for item in model["files"]:
+            if item["output"] == "data.json":
+                data = json.loads(verified[item["path"]][2].read_text(encoding="utf-8"))
+                if data.get("license") != "MIT" or data.get("manifest", {}).get("version") != DATA_VERSION:
+                    raise ValueError("Merged synthetic dataset requires its actual version and MIT license")
+                shared_data[digest(data["manifest"])] = item
+    for model in models:
+        if model["id"].startswith("student-") and not any(item["output"] == "data.json" for item in model["files"]):
+            data_hash = payloads[model["id"]]["metadata"]["dataset_manifest_sha256"]
+            if shared_data:
+                if data_hash not in shared_data:
+                    raise ValueError("Shared public training data do not match the student checkpoint")
+                model["files"].append(copy.deepcopy(shared_data[data_hash]))
     return validate_manifest({"schema_version": 1, "repo": PUBLIC_REPO, "revision": revision, "models": models})
 
 
@@ -459,6 +619,11 @@ def main():
     prepare.add_argument("--private-prefix", required=True)
     prepare.add_argument("--batch-id", default="capstone-v1")
     prepare.add_argument("--experiment-id", default="capstone")
+    prepare.add_argument(
+        "--public-sources",
+        type=Path,
+        help="JSON mapping stage IDs to the actual raw inference source SHA values reviewed from parent artifacts",
+    )
     prepare.add_argument("--output", type=Path, required=True)
     export = sub.add_parser("export")
     export.add_argument("--source", type=Path, required=True)
@@ -475,6 +640,18 @@ def main():
         "--receipt", type=Path, required=True, help="JSON object containing the completed Modal public_manifest"
     )
     receipt.add_argument("--output", type=Path, default=MANIFEST)
+    merge = sub.add_parser("merge")
+    merge.add_argument(
+        "--manifest",
+        type=Path,
+        action="append",
+        required=True,
+        help="An actually verified release manifest; repeat for main and student",
+    )
+    merge.add_argument(
+        "--revision", required=True, help="Actual latest student HF commit; every main and student byte is reverified"
+    )
+    merge.add_argument("--output", type=Path, default=MANIFEST)
     args = parser.parse_args()
     if args.command == "prepare":
         result = prepare_approval(
@@ -486,6 +663,9 @@ def main():
             private_prefix=args.private_prefix,
             batch_id=args.batch_id,
             experiment_id=args.experiment_id,
+            public_source_sha256_by_stage=None
+            if args.public_sources is None
+            else json.loads(args.public_sources.read_text(encoding="utf-8")),
         )
     elif args.command == "export":
         result = export_capstone(
@@ -495,9 +675,13 @@ def main():
         return
     elif args.command == "verify-public":
         result = build_public_manifest(args.export, revision=args.revision, prefix=args.prefix)
-    else:
+    elif args.command == "verify-receipt":
         value = json.loads(args.receipt.read_text(encoding="utf-8"))
         result = build_public_manifest_from_receipt(value.get("public_manifest", value))
+    else:
+        result = merge_public_manifests(
+            *(json.loads(path.read_text(encoding="utf-8")) for path in args.manifest), revision=args.revision
+        )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(str(args.output))
