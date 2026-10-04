@@ -1,0 +1,3 @@
+# Actual normalization correction kernel
+
+Lesson19.10 was regenerated after the actual RMSNorm clarification and executed in a genuinely new CPU Jupyter kernel: one passed, zero failed,3.583642551006051seconds. The native report and both native streams are copied byte for byte, including the observed stderr warning. The source and executed notebooks use inert .ipynb.json names. A separate actual comparison verified exact cell sources across all266current notebooks; the other notebooks retain their actual earlier executions. This does not claim a second complete266-kernel run or approve the still-pending factual, continuity, reading-time or final-publication stages. Original source and previous execution records remain preserved separately.
