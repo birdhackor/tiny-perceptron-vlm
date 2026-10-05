@@ -1,0 +1,1070 @@
+      Learning Transferable Visual Models From Natural Language Supervision
+
+
+      Alec Radford * 1 Jong Wook Kim * 1 Chris Hallacy 1 Aditya Ramesh 1 Gabriel Goh 1 Sandhini Agarwal 1
+       Girish Sastry 1 Amanda Askell 1 Pamela Mishkin 1 Jack Clark 1 Gretchen Krueger 1 Ilya Sutskever 1
+
+
+                           Abstract                             interface (McCann et al., 2018; Radford et al., 2019; Raffel
+                                                                et al., 2019) has enabled task-agnostic architectures to zero-
+       SOTA computer vision systems are trained to pre-
+                                                                shot transfer to downstream datasets. Flagship systems like
+       dict a fixed set of predetermined object categories.
+                                                                GPT-3 (Brown et al., 2020) are now competitive across
+       This restricted form of supervision limits their
+                                                                many tasks with bespoke models while requiring little to no
+       generality and usability since additional labeled
+                                                                dataset specific training data.
+       data is needed to specify any other visual con-
+       cept. Learning directly from raw text about im-          These results suggest that the aggregate supervision acces-
+       ages is a promising alternative which leverages a        sible to modern pre-training methods within web-scale col-
+       much broader source of supervision. We demon-            lections of text surpasses that of high-quality crowd-labeled
+       strate that the simple pre-training task of predict-     NLP datasets. However, in other fields such as computer
+       ing which caption goes with which image is an            vision it is still standard practice to pre-train models on
+       efficient and scalable way to learn SOTA image           crowd-labeled datasets such as ImageNet (Deng et al., 2009).
+       representations from scratch on a dataset of 400         Could scalable pre-training methods which learn directly
+       million (image, text) pairs collected from the inter-    from web text result in a similar breakthrough in computer
+       net. After pre-training, natural language is used to     vision? Prior work is encouraging.
+       reference learned visual concepts (or describe new
+                                                                Joulin et al. (2016) demonstrated that CNNs trained to pre-
+       ones) enabling zero-shot transfer of the model to
+                                                                dict words in image captions can learn representations com-
+       downstream tasks. We study performance on over
+                                                                petitive with ImageNet training. Li et al. (2017) then ex-
+       30 different computer vision datasets, spanning
+                                                                tended this approach to predicting phrase n-grams in ad-
+       tasks such as OCR, action recognition in videos,
+                                                                dition to individual words and demonstrated the ability of
+       geo-localization, and many types of fine-grained
+                                                                their system to zero-shot transfer to other image classifi-
+       object classification. The model transfers non-
+                                                                cation datasets. Adopting more recent architectures and
+       trivially to most tasks and is often competitive
+                                                                pre-training approaches, VirTex (Desai & Johnson, 2020),
+       with a fully supervised baseline without the need
+                                                                ICMLM (Bulent Sariyildiz et al., 2020), and ConVIRT
+       for any dataset specific training. For instance, we
+                                                                (Zhang et al., 2020) have recently demonstrated the po-
+       match the accuracy of the original ResNet50 on
+                                                                tential of transformer-based language modeling, masked
+       ImageNet zero-shot without needing to use any of
+                                                                language modeling, and contrastive objectives to learn im-
+       the 1.28 million training examples it was trained
+                                                                age representations from text.
+       on. We release our code and pre-trained model
+       weights at https://github.com/OpenAI/CLIP.               However, the aforementioned models still under-perform
+                                                                current SOTA computer vision models such as Big Trans-
+                                                                fer (Kolesnikov et al., 2019) and the weakly supervised
+1. Introduction and Motivating Work                             ResNeXt (Mahajan et al., 2018). A crucial difference is
+                                                                scale. While Mahajan et al. (2018) and Kolesnikov et al.
+Pre-training methods which learn directly from raw text         (2019) trained for accelerator years on millions to billions
+have revolutionized NLP over the last few years (Dai & Le,      of images, VirTex, ICMLM, and ConVIRT trained for ac-
+2015; Peters et al., 2018; Howard & Ruder, 2018; Radford        celerator days on one to two hundred thousand images. We
+et al., 2018; Devlin et al., 2018; Raffel et al., 2019). The    close this gap and study the behaviors of image models
+development of “text-to-text” as a standardized input-output    trained from natural language supervision at large scale. We
+  *                                                             demonstrate that a simplified version of ConVIRT trained
+   Equal contribution 1 OpenAI, San Francisco, CA 94110, USA.
+Correspondence to: <{alec, jongwook}@openai.com>.               from scratch, which we call CLIP, for Contrastive Language-
+                                                                Image Pre-training, is an efficient and scalable method of
+Proceedings of the 38 th International Conference on Machine    learning from natural language supervision. We find that
+Learning, PMLR 139, 2021. Copyright 2021 by the author(s).
+                                   Learning Transferable Visual Models From Natural Language Supervision
+
+(1) Contrastive pre-training                                                        (2) Create dataset classiﬁer from label text
+
+                                                                                      plane
+
+                                                                                       car
+  Pepper
+   Pepper the
+           the
+    Pepper
+  aussie    the
+          pup              Text                                                                       A photo of             Text
+     Pepper
+   aussie    the
+           pup                                                                         dog
+    aussie               Encoder
+     aussie pup
+             pup                                                        …                             a {object}.          Encoder
+                                                                                        ⋮      ⋮                                                                …
+                                                 T1      T2      T3     …    TN
+                                                                                      bird
+
+                                           I1   I1·T1   I1·T2   I1·T3   …   I1·TN
+                                                                                    (3) Use for zero-shot prediction
+                                           I2   I2·T1   I2·T2   I2·T3   …   I2·TN                                                        T1      T2      T3     …    TN
+
+                          Image            I3   I3·T1   I3·T2   I3·T3   …   I3·TN
+                         Encoder                                                                                 Image             I1   I1·T1   I1·T2   I1·T3   …   I1·TN
+                                                                                                                Encoder
+                                       ⋮   ⋮      ⋮       ⋮       ⋮     ⋱     ⋮
+
+
+                                           IN   IN·T1   IN·T2   IN·T3       IN·TN                                                                  A photo of
+                                                                        …
+                                                                                                                                                      a dog.
+
+
+
+Figure 1. Summary of our approach. While standard image models jointly train an image feature extractor and a linear classifier to predict
+some label, CLIP jointly trains an image encoder and a text encoder to predict the correct pairings of a batch of (image, text) training
+examples. At test time the learned text encoder synthesizes a zero-shot linear classifier by embedding the names or descriptions of the
+target dataset’s classes.
+
+
+
+CLIP learns to perform a wide set of tasks during pre-                               large quantities of data of this form available publicly on
+training including OCR, geo-localization, action recogni-                            the internet. To test this we constructed a new dataset of
+tion, and outperforms the best publicly available ImageNet                           400 million (image, text) pairs collected form a variety of
+model while being more computationally efficient. We also                            publicly available sources on the Internet. To attempt to
+find that zero-shot CLIP models are much more robust than                            cover as broad a set of visual concepts as possible, we
+equivalent accuracy supervised ImageNet models.                                      search for (image, text) pairs as part of the construction
+                                                                                     process whose text includes one of a set of 500,000 queries.
+2. Approach                                                                          We approximately class balance the results by including
+                                                                                     up to 20,000 (image, text) pairs per query. The resulting
+At the core of our work is the idea of learning perception                           dataset has a similar total word count as the WebText dataset
+from the supervision contained in natural language paired                            used to train GPT-2. We refer to this dataset as WIT for
+with images. In the following subsections we detail our                              WebImageText. 1
+specific approach.
+                                                                                     2.2. Selecting an Efficient Pre-Training Method
+2.1. Creating a Sufficiently Large Dataset
+                                                                                     Our initial approach, similar to VirTex, jointly trained an
+Existing work has mainly used three datasets, MS-COCO                                image CNN and text transformer from scratch to predict
+(Lin et al., 2014), Visual Genome (Krishna et al., 2017), and                        the caption of an image. However, we encountered difficul-
+YFCC100M (Thomee et al., 2016). While MS-COCO and                                    ties efficiently scaling this method. In Figure 2 we show
+Visual Genome are high quality crowd-labeled datasets, they                          that a 63 million parameter transformer language model,
+are small by modern standards with approximately 100,000                             which already uses twice the compute of its ResNet50 im-
+training photos each. By comparison, other computer vision                           age encoder, learns to recognize ImageNet classes three
+systems are trained on up to 3.5 billion Instagram photos                            times slower than an approach similar to Joulin et al. (2016)
+(Mahajan et al., 2018). YFCC100M, at 100 million photos,                             that predicts a bag-of-words encoding of the same text.
+is a possible alternative, but the metadata for each image is
+                                                                                     Recent work in contrastive representation learning has found
+sparse and of varying quality. Many images use automati-
+                                                                                     that contrastive objectives can outperform the equivalent
+cally generated filenames like 20160716 113957.JPG
+                                                                                     predictive objective (Tian et al., 2019). Noting this finding,
+as “titles” or contain “descriptions” of camera exposure
+settings. After filtering to keep only images with natural                               1
+                                                                                           The base query list is all words occurring at least 100 times in
+language titles and/or descriptions in English, the dataset                          the English version of Wikipedia. This is augmented with bi-grams
+shrunk by a factor of 6 to only 15 million photos. This is                           with high pointwise mutual information for the pair (Church &
+                                                                                     Hanks, 1990) as well as the names of all Wikipedia articles above a
+approximately the same size as ImageNet.                                             certain search volume. Finally all WordNet (Miller, 1995) synsets
+A major motivation for natural language supervision is the                           not already in the query list are added.
+                                                          Learning Transferable Visual Models From Natural Language Supervision
+
+                              40
+                                                                                                       # image_encoder - ResNet or Vision Transformer
+                                                                                                       # text_encoder - CBOW or Text Transformer
+                              35
+                                                                                                       # I[n, h, w, c] - minibatch of aligned images
+                                                                                                       # T[n, l]       - minibatch of aligned texts
+Zero-Shot ImageNet Accuracy
+
+
+
+
+                              30
+                                                                                                       # W_i[d_i, d_e] - learned proj of image to embed
+                                                                                                       # W_t[d_t, d_e] - learned proj of text to embed
+                              25
+                                                                                                       # t             - learned temperature parameter
+
+                                                                                                       # extract feature representations of each modality
+                              20
+                                                                                                       I_f = image_encoder(I) #[n, d_i]
+                                         4X efficiency                3X efficiency
+                                                                                                       T_f = text_encoder(T) #[n, d_t]
+                              15
+
+                                                                                                       # joint multimodal embedding [n, d_e]
+                              10
+                                                                                                       I_e = l2_normalize(np.dot(I_f, W_i), axis=1)
+                                                                  Bag of Words Contrastive (CLIP)      T_e = l2_normalize(np.dot(T_f, W_t), axis=1)
+                              5                                   Bag of Words Prediction
+                                                                  Transformer Language Model
+                                                                                                       # scaled pairwise cosine similarities [n, n]
+                              0
+                                   2M 33M 67M        134M                 268M                  400M   logits = np.dot(I_e, T_e.T) * np.exp(t)
+                                                       # of images processed
+                                                                                                       # symmetric loss function
+                                                                                                       labels = np.arange(n)
+Figure 2. CLIP is much more efficient at zero-shot transfer                                            loss_i = cross_entropy_loss(logits, labels, axis=0)
+than our image caption baseline. Although highly expressive,                                           loss_t = cross_entropy_loss(logits, labels, axis=1)
+we found that transformer-based language models are relatively                                         loss   = (loss_i + loss_t)/2
+weak at zero-shot ImageNet classification. Here, we see that it
+learns 3x slower than a baseline which predicts a bag-of-words                                         Figure 3. Numpy-like pseudocode for the core of an implementa-
+(BoW) encoding of the text (Joulin et al., 2016). Swapping the                                         tion of CLIP.
+prediction objective for the contrastive objective of CLIP further
+improves efficiency another 4x.
+
+                                                                                                       We also remove the text transformation function tu which
+we explored training a system to solve the potentially eas-                                            samples a single sentence at uniform from the text since
+ier proxy task of predicting only which text as a whole is                                             many of the (image, text) pairs in CLIP’s pre-training dataset
+paired with which image and not the exact words of that text.                                          are only a single sentence. We also simplify the image trans-
+Starting with the same bag-of-words encoding baseline, we                                              formation function tv . A random square crop from resized
+swapped the predictive objective for a contrastive objective                                           images is the only data augmentation used during training.
+in Figure 2, observed a further 4x efficiency improvement                                              Finally, the temperature parameter which controls the range
+in the rate of zero-shot transfer to ImageNet.                                                         of the logits in the softmax, τ , is directly optimized during
+  Given a batch of N (image, text) pairs, CLIP is trained to                                           training as a log-parameterized multiplicative scalar to avoid
+  predict which of the N × N possible (image, text) pairings                                           turning as a hyper-parameter.
+  across a batch actually occurred. To do this, CLIP learns a
+  multi-modal embedding space by jointly training an image                                             2.3. Choosing and Scaling a Model
+  encoder and text encoder to maximize the cosine similar-
+                                                                                                       We consider two different architectures for the image en-
+  ity of the image and text embeddings of the N real pairs
+                                                                                                       coder. For the first, we use ResNet50 (He et al., 2016a)
+  in the batch while minimizing the cosine similarity of the
+                                                                                                       as the base architecture for the image encoder due to its
+  embeddings of the N 2 − N incorrect pairings. We optimize
+                                                                                                       widespread adoption and proven performance. We make sev-
+  a symmetric cross entropy loss over these similarity scores.
+                                                                                                       eral modifications to the original version using the ResNetD
+  In Figure 3 we include pseudocode for the core of an imple-
+                                                                                                       improvements from He et al. (2019) and the antialiased
+  mentation of CLIP. This batch construction technique and
+                                                                                                       rect-2 blur pooling from Zhang (2019). We also replace
+  objective was first introduced as the multi-class N-pair loss
+                                                                                                       the global average pooling layer with an attention pooling
+  Sohn (2016) and was recently adapted for contrastive (text,
+                                                                                                       mechanism. The attention pooling is implemented as a sin-
+  image) representation learning in the domain of medical
+                                                                                                       gle layer of “transformer-style” multi-head QKV attention
+  imaging by Zhang et al. (2020).
+                                                                                                       where the query is conditioned on the global average-pooled
+Since over-fitting is not a major concern, the details of train-                                       representation of the image. For the second architecture, we
+ing CLIP are simplified compared to Zhang et al. (2020).                                               experiment with the recently introduced Vision Transformer
+We train CLIP from scratch instead of initializing with pre-                                           (ViT) (Dosovitskiy et al., 2020). We closely follow their
+trained weights. We remove the non-linear projection be-                                               implementation with only the minor modification of adding
+tween the representation and the contrastive embedding                                                 an additional layer normalization to the combined patch
+space. We use only a linear projection to map from each en-                                            and position embeddings before the transformer and use a
+coder’s representation to the multi-modal embedding space.                                             slightly different initialization scheme.
+                          Learning Transferable Visual Models From Natural Language Supervision
+
+The text encoder is a Transformer (Vaswani et al., 2017)
+with the architecture modifications described in Radford                                   aYahoo     ImageNet      SUN
+et al. (2019). As a base size we use a 12-layer 512-wide
+                                                                     Visual N-Grams         72.4         11.5        23.0
+model with 8 attention heads. The transformer operates on a
+                                                                     CLIP                   98.4         76.2        58.5
+lower-cased byte pair encoding (BPE) representation of the
+text (Sennrich et al., 2015). The text sequence is bracketed
+                                                                Table 1. Comparing CLIP to prior zero-shot transfer image classi-
+with [SOS] and [EOS] tokens and the activations of the          fication work. CLIP improves performance on all three datasets by
+highest layer of the transformer at the [EOS] token are         a large amount. This improvement reflects many differences since
+used as the feature representation of the text which is layer   the development of Visual N-Grams (Li et al., 2017).
+normalized and then linearly projected into the multi-modal
+embedding space. Masked self-attention was used in the text
+encoder to preserve the ability to add language modeling as
+an auxiliary objective, though exploration of this is left as
+future work.                                                    this as a way of measuring the task learning capability of a
+                                                                system (as opposed to its representation learning capability).
+While previous computer vision research has often scaled        For each dataset, we use the names of all the classes in the
+models by increasing the width (Mahajan et al., 2018) or        dataset as the set of potential text pairings and predict the
+depth (He et al., 2016a) in isolation, for the ResNet image     most probable (image, text) pair according to CLIP. We addi-
+encoders we adapt the approach of Tan & Le (2019) which         tionally experiment with providing CLIP with text prompts
+found that allocating additional compute across all of width,   to help specify the task as well as ensembling multiple of
+depth, and resolution outperforms allocating it to only one     these templates in order to boost performance. However,
+dimension. We use a simple variant which allocates addi-        since the vast majority of unsupervised and self-supervised
+tional compute equally to increasing the width, depth, and      computer vision research focuses on representation learning,
+resolution of the model. For the text encoder, we only scale    we also investigate this for CLIP using the common linear
+the width of the model to be proportional to the calculated     probe protocol.
+increase in width of the ResNet and do not scale the depth
+at all, as we found CLIP’s performance to be less sensitive
+to the text encoder.                                            3. Analysis
+                                                                3.1. Initial Comparison to Visual N-Grams
+2.4. Pre-training
+                                                                To our knowledge, Visual N-Grams (Li et al., 2017) first
+We train a series of 5 ResNets and 3 Vision Transformers.       studied zero-shot transfer to existing image classification
+For the ResNets we train a ResNet50, a ResNet101, and           datasets in the manner described above. It is also the only
+then 3 more which follow EfficientNet-style model scaling       other work we are aware of that has studied zero-shot trans-
+and use approximately 4x, 16x, and 64x the compute of a         fer to standard image classification datasets using a task
+ResNet50. They are denoted as RN50x4, RN50x16, and              agnostic pre-trained model. In Table 1 we compare Visual
+RN50x64 respectively. For the Vision Transformers we            N-Grams to CLIP. The best CLIP model improves accuracy
+train a ViT-B/32, a ViT-B/16, and a ViT-L/14. The largest       on ImageNet from a proof of concept 11.5% to 76.2% and
+ResNet model, RN50x64, took 18 days to train on 592 V100        matches the performance of the original ResNet50 despite
+GPUs while the largest Vision Transformer took 12 days on       using none of the 1.28 million crowd-labeled training exam-
+256 V100 GPUs. For the ViT-L/14 we also pre-train at a          ples. Additionally, the top-5 accuracy of CLIP models are
+higher 336 pixel resolution for one additional epoch to boost   noticeably higher and this model has a 95% top-5 accuracy,
+performance similar to FixRes (Touvron et al., 2019). We        matching Inception-V4 (Szegedy et al., 2016). The abil-
+denote this model as ViT-L/14@336px. Unless otherwise           ity to match the performance of a strong, fully supervised
+specified, all results reported in this paper as “CLIP” use     baseline in a zero-shot setting suggests CLIP is a signifi-
+this model which we found to perform best. Full model           cant step towards flexible and practical zero-shot computer
+hyperparameters and details are in supplementary material.      vision classifiers. This comparison is not direct because
+                                                                many differences between CLIP and Visual N-Grams were
+2.5. Using CLIP                                                 not controlled for. As a closer comparison, we trained a
+                                                                CLIP ResNet50 on the same YFCC100M dataset that Vi-
+CLIP is pre-trained to predict if an image and a text snip-
+                                                                sual N-Grams was trained on and found it matched their
+pet are paired together in WIT. To apply CLIP to down-
+                                                                reported ImageNet performance within a V100 GPU day.
+stream tasks, we reuse this capability and study the zero-
+                                                                This baseline was also trained from scratch instead of being
+shot transfer performance of CLIP on standard computer
+                                                                initialized from pre-trained ImageNet weights as in Visual
+vision datasets. Similar to Radford et al. (2019) we motivate
+                                                                N-Grams.
+                             Learning Transferable Visual Models From Natural Language Supervision
+
+                 StanfordCars                   +28.9                   results. To start, we look at how well CLIP’s zero-shot clas-
+                   Country211                +23.2
+                      Food101                +22.5                      sifiers perform when compared to the a simple off-the-shelf
+                   Kinetics700          +14.5                           baseline: fitting a fully supervised, regularized, logistic re-
+                           SST2        +12.4                            gression classifier on the features of the canonical ResNet50.
+                       SUN397       +7.8
+                       UCF101       +7.7                                In Figure 4 we show this comparison across 27 datasets.
+               HatefulMemes        +6.7
+                       CIFAR10 +3.9                                     Zero-shot CLIP outperforms this baseline slightly and wins
+                     CIFAR100 +3.0                                      on 16 of the 27 datasets. The dataset zero-shot CLIP im-
+                         STL10 +3.0
+                      FER2013 +2.8                                      proves by the most is STL10, a dataset designed to en-
+                    Caltech101 +2.0                                     courage unsupervised learning by containing only a limited
+                     ImageNet +1.9
+                    OxfordPets +1.1
+                                                                        number of labeled examples. Zero-shot CLIP, without using
+              PascalVOC2007 +0.5                                        any training examples, achieves 99.3% on this dataset which
+                          -3.2 Birdsnap                                 appears to be a new SOTA. On fine-grained classification
+                    -10.0       MNIST
+                   -11.3        FGVCAircraft                            tasks, we observe a wide spread in performance. On two of
+                   -11.9        RESISC45                                these datasets, Stanford Cars and Food101, zero-shot CLIP
+                  -12.5         Flowers102                              outperforms logistic regression on ResNet50 features by
+               -16.6            DTD
+              -18.2             CLEVRCounts                             over 20% while on Flowers102 and FGVCAircraft, zero-
+              -18.4             GTSRB                                   shot CLIP underperforms by over 10%. We suspect these
+             -19.5              PatchCamelyon
+  -34.0                         KITTI Distance                          differences are primarily due to varying amounts of per-task
+-37.1                           EuroSAT                                 supervision between WIT and ImageNet. On “general” ob-
+  −40 −30 −20 −10         0    10    20   30   40                       ject classification datasets such as ImageNet, CIFAR10, and
+                    Δ Score (%)                                         PascalVOC2007 performance is relatively similar with a
+    Zero-Shot CLIP vs. Linear Probe on ResNet50                         slight advantage for zero-shot CLIP. Zero-shot CLIP sig-
+                                                                        nificantly outperforms a ResNet50 on two datasets measur-
+Figure 4. Zero-shot CLIP is competitive with a fully super-             ing action recognition in videos. On Kinetics700, CLIP
+vised baseline. Across a 27 dataset eval suite, a zero-shot CLIP        outperforms a ResNet50 by 14.5%. Zero-shot CLIP also
+classifier outperforms a fully supervised linear classifier fitted on
+                                                                        outperforms a ResNet50’s features by 7.7% on UCF101.
+ResNet50 features on 16 datasets, including ImageNet.
+                                                                        We speculate this is due to natural language providing wider
+                                                                        supervision for visual concepts involving verbs, compared
+3.2. Zero-Shot Performance                                              to the noun-centric object supervision in ImageNet.
+In computer vision, zero-shot learning usually refers to the            Looking at where zero-shot CLIP notably underperforms,
+study of generalizing to unseen object categories in image              we see that zero-shot CLIP is quite weak on several spe-
+classification (Lampert et al., 2009). We instead use the               cialized, complex, or abstract tasks such as satellite image
+term in a broader sense and study generalization to unseen              classification (EuroSAT and RESISC45), lymph node tumor
+datasets. We motivate this as a proxy for performing un-                detection (PatchCamelyon), counting objects in synthetic
+seen tasks, as aspired to in the zero-data learning paper of            scenes (CLEVRCounts), self-driving related tasks such as
+Larochelle et al. (2008). While much research in the field of           German traffic sign recognition (GTSRB), recognizing dis-
+unsupervised learning focuses on the representation learn-              tance to the nearest car (KITTI Distance). These results
+ing capabilities of machine learning systems, we motivate               highlight the poor capability of zero-shot CLIP on more
+studying zero-shot transfer as a way of measuring the task-             complex tasks. By contrast, non-expert humans can robustly
+learning capabilities of machine learning systems. In this              perform several of these tasks, such as counting, satellite
+view, a dataset evaluates performance on a task on a spe-               image classification, and traffic sign recognition, suggesting
+cific distribution. However, many popular computer vision               significant room for improvement. However, we caution
+datasets were created by the research community primarily               that it is unclear whether measuring zero-shot transfer, as
+as benchmarks to guide the development of generic image                 opposed to few-shot transfer, is a meaningful evaluation for
+classification methods rather than measuring performance                difficult tasks that a learner has no prior experience with,
+on a specific task. To our knowledge, Visual N-Grams (Li                such as lymph node tumor classification for almost all hu-
+et al., 2017) first studied zero-shot transfer to existing image        mans (and possibly CLIP).
+classification datasets in the manner described above
+                                                                        While comparing zero-shot performance to fully supervised
+To conduct a more comprehensive analysis, we implement                  models contextualizes the task-learning capabilities of CLIP,
+a much larger evaluation suite detailed in the supplementary            comparing to few-shot methods is a more direct comparison,
+material. In total we expand from the 3 datasets reported in            since zero-shot is its limit. In Figure 5, we visualize how
+Visual N-Grams to include over 30 datasets and compare to               zero-shot CLIP compares to few-shot logistic regression on
+over 50 existing computer vision systems to contextualize
+                                                Learning Transferable Visual Models From Natural Language Supervision
+                    75
+                                                                        Linear Probe CLIP   3.3. Representation Learning
+                    70
+                                                                                            While we have focused on studying the task-learning capa-
+                    65   Zero-Shot
+                                                                    BiT-M (ImageNet-21K)
+                           CLIP                                                             bilities of CLIP through zero-shot transfer, it is more com-
+Average Score (%)
+
+
+
+
+                    60                                                          SimCLRv2
+                                                                                            mon to study the representation learning capabilities of a
+                    55                                                          ResNet50    model. We use a linear probe evaluation protocol because it
+                    50
+                                                                                            requires minimal hyper-parameter tuning and has standard-
+                                                                                            ized evaluation procedures. Please see the supplementary
+                    45
+                                                                                            material for further details on evaluation.
+                    40
+                                                                                            Figure 6 summarizes our findings. To minimize selection
+                    35
+                                                                                            effects that could raise concerns of confirmation or reporting
+                    30                                                                      bias, we first study performance on the 12 dataset evalua-
+                         0   1   2       4                8                            16
+                                     # of labeled training examples per class               tion suite from Kornblith et al. (2019). Models trained with
+                                                                                            CLIP scale very well with compute and our largest model
+ Figure 5. Zero-shot CLIP outperforms few-shot linear probes.                               slightly outperforms the best existing model (a Noisy Stu-
+ Zero-shot CLIP matches the average performance of a 4-shot linear                          dent EfficientNet-L2) on both overall score and compute
+ classifier trained on the same feature space and nearly matches the                        efficiency. We also find that CLIP vision transformers are
+ best results of a 16-shot linear classifier across publicly available                      about 3x more compute efficient than CLIP ResNets, which
+ models. For both BiT-M and SimCLRv2, the best performing                                   allows higher overall performance within our compute bud-
+ model is highlighted. Light gray lines are other models in the eval
+                                                                                            get. These results replicate the findings of Dosovitskiy et al.
+ suite. The 20 datasets with at least 16 examples per class were
+                                                                                            (2020) which reported that vision transformers are more
+ used in this analysis.
+                                                                                            compute efficient than convnets when trained on sufficiently
+                                                                                            large datasets. Our best overall model ViT-L/14@336px
+                                                                                            outperforms the best existing model across this evaluation
+ the features of many image models including the best pub-                                  suite by an average of 2.6%.
+ licly available ImageNet models, self-supervised learning
+ methods, and CLIP itself. While one might expect zero-shot                                 CLIP models learn a wider set of tasks than has previously
+ to underperform one-shot, we instead find that zero-shot                                   been demonstrated in a single computer vision model trained
+ CLIP matches the performance of 4-shot logistic regression                                 end-to-end from random initialization. These tasks include
+ on the same feature space. This is likely due to a key dif-                                geo-localization, optical character recognition, facial emo-
+ ference between the zero-shot and few-shot approach. First,                                tion recognition, and action recognition. None of these
+ CLIP’s zero-shot classifier is generated via natural language                              tasks are measured in the evaluation suite of Kornblith et al.
+ which allows for visual concepts to be directly specified                                  (2019). This could be argued to be a form of selection bias
+ (“communicated”). By contrast, “normal” supervised learn-                                  in Kornblith et al. (2019)’s study towards tasks that overlap
+ ing must infer concepts indirectly from training examples.                                 with ImageNet. To address this, we also measure perfor-
+ Context-less example-based learning has the drawback that                                  mance on a broader 27 dataset evaluation suite. This eval-
+ many different hypotheses can be consistent with the data,                                 uation suite, detailed in Appendix A includes datasets rep-
+ especially in the one-shot case. A single image often con-                                 resenting the aforementioned tasks, German Traffic Signs
+ tains many different visual concepts. Although a capable                                   Recognition Benchmark (Stallkamp et al., 2011), as well
+ learner is able to exploit visual cues and heuristics, such as                             as several other datasets adapted from VTAB (Zhai et al.,
+ assuming that the concept being demonstrated is the primary                                2019). On this broader evaluation suite, the benefits of CLIP
+ object in an image, there is no guarantee.                                                 are more clear. All CLIP models, regardless of scale, outper-
+                                                                                            form all evaluated systems in terms of compute efficiency.
+When comparing zero-shot CLIP to few-shot logistic re-                                      The improvement in average score of the best model over
+gression on the features of other models, zero-shot CLIP                                    previous systems increases from 2.6% to 5%.
+roughly matches the performance of the best performing
+16-shot classifier in our evaluation suite, which uses the fea-                             3.4. Robustness to Natural Distribution Shift
+tures of a BiT-M ResNet152x2 trained on ImageNet-21K.
+We are certain that a BiT-L model trained on JFT-300M                                       In 2015, it was announced that a deep learning model ex-
+would perform even better but these models have not been                                    ceeded human performance on the ImageNet test set (He
+publicly released. That a BiT-M ResNet152x2 performs                                        et al., 2015). However, research in the subsequent years has
+best in a 16-shot setting is somewhat surprising since, as                                  repeatedly found that these models still make many simple
+analyzed in Section 3.3, the Noisy Student EfficientNet-L2                                  mistakes (Dodge & Karam, 2017; Geirhos et al., 2018; Al-
+outperforms it in a fully supervised setting by almost 5% on                                corn et al., 2019), and new benchmarks testing these systems
+average across 27 datasets.                                                                 has often found their performance to be much lower than
+                                             Learning Transferable Visual Models From Natural Language Supervision
+
+                         Linear probe average over Kornblith et al.'s 12 datasets                            Linear probe average over all 27 datasets
+
+                    90
+                                                                                                        85
+
+
+
+
+                    85
+
+                                                                                                        80
+Average Score (%)
+
+
+
+
+                                                                                    Average Score (%)
+                    80
+
+                                                                                                        75
+
+
+
+
+                    75
+
+                                                                                                        70
+
+
+
+                                100              101             102                                         100              101             102
+                                        Forward-pass GFLOPs/image                                                    Forward-pass GFLOPs/image
+
+
+
+
+                                             CLIP-ViT                           Instagram-pretrained                       ViT (ImageNet-21k)
+                                             CLIP-ResNet                        SimCLRv2                                   BiT-M
+                                             EfficientNet-NoisyStudent          BYOL                                       BiT-S
+                                             EfficientNet                       MoCo                                       ResNet
+
+
+Figure 6. Linear probe performance of CLIP models in comparison with SOTA computer vision models, including EfficientNet
+(Tan & Le, 2019; Xie et al., 2020), MoCo (Chen et al., 2020b), Instagram-pretrained ResNeXt models (Mahajan et al., 2018; Touvron
+et al., 2019), BiT (Kolesnikov et al., 2019), ViT (Dosovitskiy et al., 2020), SimCLRv2 (Chen et al., 2020a), BYOL (Grill et al., 2020), and
+the original ResNet models (He et al., 2016b). (Left) Scores are averaged over 12 datasets studied by Kornblith et al. (2019). (Right)
+Scores are averaged over 27 datasets that contain a wider variety of distributions. Dotted lines indicate models fine-tuned or evaluated on
+images at a higher-resolution than pre-training. Please see supplementary material for individual model scores for each dataset.
+
+both human accuracy and ImageNet performance (Recht                                 trained or fine-tuned on the ImageNet dataset. Is training
+et al., 2019; Barbu et al., 2019). Taori et al. (2020) is a re-                     or adapting to the ImageNet dataset distribution the cause
+cent comprehensive study moving towards quantifying and                             of the observed robustness gap? Intuitively, a zero-shot
+understanding this for ImageNet models. Taori et al. (2020)                         model should not be able to exploit spurious correlations
+study how the performance of ImageNet models change                                 or patterns that hold only on a specific distribution, since it
+when evaluated on natural distribution shifts. They measure                         is not trained on that distribution. Thus it is possible that
+performance on a set of 7 distribution shifts. Taori et al.                         zero-shot models exhibit higher effective robustness. In
+(2020) find that accuracy under distribution shift increases                        Figure 7, we compare the performance of zero-shot CLIP
+predictably with ImageNet accuracy and is well modeled                              with existing ImageNet models on natural distribution shifts.
+as a linear function of logit-transformed accuracy. Taori                           All zero-shot CLIP models improve effective robustness
+et al. (2020) use this finding to propose that robustness                           by a large amount and reduce the gap between ImageNet
+analysis should distinguish between effective and relative                          accuracy and accuracy under distribution shift by up to
+robustness. Effective robustness measures improvements                              75%. Zero-shot CLIP models trace a completely distinct
+in accuracy under distribution shift above what is predicted                        robustness frontier from all 204 prior models studied in
+by the documented relationship between in-distribution and                          Taori et al. (2020). These results suggest that the recent shift
+out-of-distribution accuracy. Relative robustness captures                          towards large-scale task and dataset agnostic pre-training
+any improvement in out-of-distribution accuracy. Taori et al.                       combined with a reorientation towards zero-shot transfer
+(2020) argue that robustness techniques should aim to im-                           evaluation (as advocated by Yogatama et al. (2019) and
+prove both effective robustness and relative robustness.                            Linzen (2020)) promotes the development of more robust
+                                                                                    systems and provides a more accurate assessment of true
+However, almost all models studied in Taori et al. (2020) are
+                                                                                    model performance.
+                                                                                                        Learning Transferable Visual Models From Natural Language Supervision
+                                                                                                                                                                                  ImageNet Zero-Shot
+                                                               100                                                                                    Dataset Examples            ResNet101  CLIP      Δ Score
+                                                                            Ideal robust model (y = x)
+                                                               95           Zero-Shot CLIP
+ Average on 7 natural distribution shift datasets (top-1, %)
+
+
+
+
+                                                                            Standard ImageNet training
+                                                               90           Exisiting robustness techniques                       ImageNet                                          76.2     76.2       0%
+                                                               85
+
+                                                               80
+
+                                                               75                                                               ImageNetV2                                          64.3     70.1      +5.8%
+                                                               70
+
+                                                               65
+                                                                                                                                ImageNet-R                                          37.7     88.9      +51.2%
+                                                               60
+
+                                                               55
+
+                                                               50
+                                                                                                                                  ObjectNet                                         32.6     72.3      +39.7%
+                                                               45
+
+                                                               40
+
+                                                               35                                                                 ImageNet                                          25.2     60.2      +35.0%
+                                                               30                                                                   Sketch
+                                                               25
+
+                                                               20                                                               ImageNet-A                                           2.7     77.1      +74.4%
+                                                                     65      70      75      80     85     90      95     100
+                                                                          Average on class subsampled ImageNet (top-1, %)
+
+
+
+Figure 7. Zero-shot CLIP is much more robust to distribution shift than standard ImageNet models. (Left) An ideal robust model
+(dashed line) performs equally well on the ImageNet distribution and on other natural image distributions. Zero-shot CLIP models shrink
+this “robustness gap” by up to 75%. Linear fits on logit transformed values are shown with bootstrap estimated 95% confidence intervals.
+(Right) Visualizing distribution shift for bananas, a class shared across 5 of the 7 natural distribution shift datasets. The performance of
+the best zero-shot CLIP model is compared with a model that has the same performance on the ImageNet validation set, ResNet101.
+
+4. Data Overlap Analysis                                                                                                                      highlighting the potential for disparate impact even when
+                                                                                                                                              extreme care is taken for thoughtful class design.
+A concern with pre-training on a very large internet dataset
+is unintentional overlap with downstream evals. We con-                                                                                       Additionally, given that CLIP does not need task-specific
+ducted de-duplication analysis to investigate this with full                                                                                  training data, it can unlock certain niche tasks with greater
+details in the supplementary material. Out of 35 datasets                                                                                     ease. Some of these tasks may raise privacy or surveillance
+studied, 9 datasets have no detected overlap at all. There is                                                                                 related risks, which we explore by testing CLIP’s perfor-
+a median overlap of 2.2% and an average overlap of 3.2%.                                                                                      mance on celebrity identification using the CelebA dataset
+Due to this small amount of overlap, overall accuracy is                                                                                      (Liu et al., 2018). CLIP has a top-1 accuracy of 59.2% for
+rarely shifted by more than 0.1% with only 7 datasets above                                                                                   “in the wild” celebrity image classification when choosing
+this threshold. Of these, only 2 are statistically significant                                                                                from 100 candidates and of 43.3% when choosing from
+after Bonferroni correction. The max detected improve-                                                                                        1000 possible choices. Although it’s noteworthy to achieve
+ment is only 0.6% on Birdsnap. This echos the findings of                                                                                     these results with task agnostic pre-training, this perfor-
+similar duplicate analysis in previous work on large scale                                                                                    mance is not competitive with widely available production
+pre-training. Mahajan et al. (2018) and Kolesnikov et al.                                                                                     level models. We explore challenges that CLIP poses in our
+(2019) detected similar overlap rates for their models and                                                                                    supplemental materials and hope that this work motivates
+also observed minimal changes in overall performance.                                                                                         future research on the characterization of the capabilities,
+                                                                                                                                              shortcomings, and biases of such models.
+5. Broader Impacts
+                                                                                                                                              6. Limitations
+CLIP allows people to design their own classifiers and re-
+moves the need for task-specific training data. How these                                                                                     The performance of zero-shot CLIP is often just compet-
+classes are designed heavily influences both model per-                                                                                       itive with the supervised baseline of a linear classifier on
+formance and model biases. For example, we find that                                                                                          ResNet-50 features. This baseline is now well below the
+when given a set of labels including Fairface race labels                                                                                     overall SOTA. Significant work is still needed to improve
+(Kärkkäinen & Joo, 2019) and a handful of egregious terms                                                                                   the task learning and transfer capabilities of CLIP. We es-
+such as “criminal” and “animal” the model tends to classify                                                                                   timate around a 1000x increase in compute is required for
+images of people aged 0–20 in the egregious category at a                                                                                     zero-shot CLIP to reach overall SOTA performance across
+rate of 32.3%. However, when we add the class “child” to                                                                                      our evaluation suite. This is infeasible to train with cur-
+the list of possible classes, this behaviour drops to 8.7%.                                                                                   rent hardware. Further research into improving upon the
+We also found discrepancies across gender and race for peo-                                                                                   computational and data efficiency of CLIP will be necessary.
+ple categorized into the ‘crime’ and ‘non-human’ categories,                                                                                  Despite our emphasis on zero-shot transfer, we repeatedly
+                          Learning Transferable Visual Models From Natural Language Supervision
+
+queried performance on validation sets to guide develop-          at least Elhoseiny et al. (2013) and a form similar to CLIP’s
+ment. This is unrealistic for true zero-shot scenarios. Similar   zero-shot classifier was explored in Lei Ba et al. (2015).
+concerns have been raised in the field of semi-supervised
+                                                                  Natural language supervision has also been explored for
+learning (Oliver et al., 2018). Another potential issue is our
+                                                                  tasks beyond image classification including video under-
+selection of evaluation datasets. While we report results
+                                                                  standing (Ramanathan et al., 2013; Miech et al., 2019), Re-
+on Kornblith et al. (2019)’s 12 dataset evaluation suite as a
+                                                                  inforcement Learning (Hermann et al., 2017), and a burst of
+standardized collection, our main analysis uses a somewhat
+                                                                  recent work on learning joint models of vision and language
+haphazard collection of 27 datasets that is undeniably co-
+                                                                  (Lu et al., 2019; Tan & Bansal, 2019; Chen et al., 2019; Li
+adapted with the capabilities of CLIP. A new benchmark of
+                                                                  et al., 2020b; Yu et al., 2020) for complex joint tasks beyond
+tasks designed to evaluate broad zero-shot transfer capabili-
+                                                                  those studied here including visual question answering.
+ties would help address this issue.
+We emphasize that specifying image classifiers through nat-       8. Conclusion
+ural language is a flexible interface but this has its own
+limitations. Many complex tasks can be difficult to specify       We have investigated whether it is possible to transfer the
+just through text. Actual training examples are undeniably        success of task-agnostic web-scale pre-training in NLP to
+useful but CLIP does not optimize for few-shot performance        another domain. We find that adopting this formula re-
+directly. We fall back to fitting linear classifiers on top of    sults in similar behaviors emerging in the field of computer
+CLIP’s features. This results in a counter-intuitive drop         vision and discuss the social implications of this line of
+in performance when transitioning from a zero-shot to a           research. In order to optimize their training objective, CLIP
+few-shot setting.                                                 models learn to perform a wide variety of tasks during pre-
+                                                                  training. This task learning can then be leveraged via natural
+7. Related Work                                                   language prompting to enable zero-shot transfer to many
+                                                                  existing datasets. At sufficient scale, the performance of this
+The idea of learning to perform computer vision tasks from        approach can be competitive with task-specific supervised
+natural language supervision is by no means new. Rather,          models although there is still room for much improvement.
+our main contribution is studying its behavior at large scale.
+Over 20 years ago Mori et al. (1999) explored improving           ACKNOWLEDGMENTS
+content based image retrieval by training a model to predict
+                                                                  We’d like to thank the millions of people involved in creating
+the nouns and adjectives in text paired with images. Quat-
+                                                                  the data CLIP is trained on. We’d also like to thank Susan
+toni et al. (2007) demonstrated it was possible to learn more
+                                                                  Zhang for her work on image conditional language models
+data efficient image representations via manifold learning in
+                                                                  while at OpenAI, Ishaan Gulrajani for catching an error in
+the weight space of classifiers trained to predict words in im-
+                                                                  the pseudocode, and Irene Solaiman, Miles Brundage, and
+age captions. Srivastava & Salakhutdinov (2012) explored
+                                                                  Gillian Hadfield for their thoughtful feedback on the broader
+deep representation learning by training multimodal Deep
+                                                                  impacts section of the paper. We are also grateful to the
+Boltzmann Machines on top of low-level image and text tag
+                                                                  Acceleration and Supercomputing teams at OpenAI for their
+features. More recent work inspiring CLIP is described in
+                                                                  critical work on software and hardware infrastructure this
+the Introduction.
+                                                                  project used. Finally, we’d also like to thank the developers
+Learning from collections of internet images is commonly          of the many software packages used throughout this project
+investigated in webly supervised learning with Fergus et al.      including, but not limited, to Numpy (Harris et al., 2020),
+(2005) demonstrating the ability to train competitive com-        SciPy (Virtanen et al., 2020), ftfy (Speer, 2019), Tensor-
+puter vision classifiers by treating image search engine re-      Flow (Abadi et al., 2016), PyTorch (Paszke et al., 2019),
+sults as supervision. Of this line of work, Learning Every-       pandas (pandas development team, 2020), and scikit-learn
+thing about Anything: Webly-Supervised Visual Concept             (Pedregosa et al., 2011).
+Learning (Divvala et al., 2014) has a notably similar ambi-
+tion and goal as CLIP.
+                                                                  References
+Developments in zero-shot computer vision (Larochelle
+                                                                  Abadi, M., Barham, P., Chen, J., Chen, Z., Davis, A., Dean,
+et al., 2008; Lampert et al., 2009) were essential for CLIP.
+                                                                    J., Devin, M., Ghemawat, S., Irving, G., Isard, M., et al.
+Socher et al. (2013a) demonstrated that connecting image
+                                                                    Tensorflow: A system for large-scale machine learning. In
+and language representations enabled zero-shot transfer to
+                                                                   12th {USENIX} symposium on operating systems design
+unseen classes on CIFAR10 and Frome et al. (2013) im-
+                                                                    and implementation ({OSDI} 16), pp. 265–283, 2016.
+proved and scaled this finding to ImageNet. The idea of
+generating a classifier from natural language dates back to
+                                                                  Alayrac, J.-B., Recasens, A., Schneider, R., Arandjelović,
+                         Learning Transferable Visual Models From Natural Language Supervision
+
+  R., Ramapuram, J., De Fauw, J., Smaira, L., Dieleman, S.,      Carreira, J., Noland, E., Hillier, C., and Zisserman, A. A
+  and Zisserman, A. Self-supervised multimodal versatile           short note on the kinetics-700 human action dataset. arXiv
+  networks. arXiv preprint arXiv:2006.16228, 2020.                 preprint arXiv:1907.06987, 2019.
+
+Alcorn, M. A., Li, Q., Gong, Z., Wang, C., Mai, L., Ku, W.-      Chen, T., Kornblith, S., Swersky, K., Norouzi, M., and
+  S., and Nguyen, A. Strike (with) a pose: Neural networks         Hinton, G. Big self-supervised models are strong semi-
+  are easily fooled by strange poses of familiar objects. In       supervised learners. arXiv preprint arXiv:2006.10029,
+  Proceedings of the IEEE Conference on Computer Vision            2020a.
+  and Pattern Recognition, pp. 4845–4854, 2019.
+                                                                 Chen, X., Fan, H., Girshick, R., and He, K. Improved
+Assiri, Y. Stochastic optimization of plain convolutional          baselines with momentum contrastive learning. arXiv
+  neural networks with simple methods. arXiv preprint              preprint arXiv:2003.04297, 2020b.
+  arXiv:2001.08856, 2020.
+                                                                 Chen, Y.-C., Li, L., Yu, L., Kholy, A. E., Ahmed, F., Gan, Z.,
+Barbu, A., Mayo, D., Alverio, J., Luo, W., Wang, C., Gut-          Cheng, Y., and Liu, J. Uniter: Learning universal image-
+  freund, D., Tenenbaum, J., and Katz, B. Objectnet: A             text representations. arXiv preprint arXiv:1909.11740,
+  large-scale bias-controlled dataset for pushing the lim-         2019.
+  its of object recognition models. In Advances in Neural
+  Information Processing Systems, pp. 9453–9463, 2019.           Cheng, G., Han, J., and Lu, X. Remote sensing image scene
+                                                                   classification: Benchmark and state of the art. Proceed-
+Bechmann, A. and Bowker, G. C. Unsupervised by any                 ings of the IEEE, 105(10):1865–1883, 2017.
+  other name: Hidden layers of knowledge production in
+  artificial intelligence on social media. Big Data & Society,   Church, K. W. and Hanks, P. Word association norms,
+  6(1):205395171881956, January 2019. doi: 10.1177/                mutual information, and lexicography. Computational
+  2053951718819569. URL https://doi.org/10.                        Linguistics, 16(1):22–29, 1990. URL https://www.
+  1177/2053951718819569.                                           aclweb.org/anthology/J90-1003.
+
+Blaise Aguera y Arcas, M. M. and Todorov,                        Coates, A., Ng, A., and Lee, H. An analysis of single-
+  A.     Physiognomy’s new clothes.  2017.                         layer networks in unsupervised feature learning. In Pro-
+  URL        https://medium.com/@blaisea/                          ceedings of the fourteenth international conference on
+  physiognomys-new-clothes-f2d4b59fdd6a.                           artificial intelligence and statistics, pp. 215–223, 2011.
+
+Bolukbasi, T., Chang, K.-W., Zou, J. Y., Saligrama, V., and      Crawford, K. The trouble with bias. NIPS 2017
+  Kalai, A. T. Man is to computer programmer as woman              Keynote, 2017. URL https://www.youtube.com/
+  is to homemaker? debiasing word embeddings. Advances             watch?v=fMym_BKWQzk.
+  in neural information processing systems, 29:4349–4357,
+  2016.                                                          Dai, A. M. and Le, Q. V. Semi-supervised sequence learning.
+                                                                   In Advances in neural information processing systems,
+Bowker, G. C. and Star, S. L. Sorting things out: Classifica-      pp. 3079–3087, 2015.
+  tion and its consequences. MIT press, 2000.
+                                                                 D’Amour, A., Heller, K., Moldovan, D., Adlam, B., Ali-
+Brown, T. B., Mann, B., Ryder, N., Subbiah, M., Kaplan,            panahi, B., Beutel, A., Chen, C., Deaton, J., Eisenstein,
+  J., Dhariwal, P., Neelakantan, A., Shyam, P., Sastry, G.,        J., Hoffman, M. D., et al. Underspecification presents
+  Askell, A., et al. Language models are few-shot learners.        challenges for credibility in modern machine learning.
+  arXiv preprint arXiv:2005.14165, 2020.                           arXiv preprint arXiv:2011.03395, 2020.
+
+Browne, S. Dark Matters: Surveillance of Blackness. Duke         Deng, J., Dong, W., Socher, R., Li, L.-J., Li, K., and Fei-
+  University Press, 2015.                                          Fei, L. ImageNet: A Large-Scale Hierarchical Image
+                                                                   Database. In CVPR09, 2009.
+Bulent Sariyildiz, M., Perez, J., and Larlus, D. Learning
+  visual representations with caption annotations. arXiv         Deng, J., Berg, A. C., Satheesh, S., Su, H., Khosla, A.,
+  e-prints, pp. arXiv–2008, 2020.                                  and Fei-Fei, L. Ilsvrc 2012, 2012. URL http://www.
+                                                                   image-net.org/challenges/LSVRC/2012/.
+Buolamwini, J. and Gebru, T. Gender shades: Intersec-
+  tional accuracy disparities in commercial gender classi-       Desai, K. and Johnson, J. Virtex: Learning visual rep-
+  fication. In Conference on fairness, accountability and          resentations from textual annotations. arXiv preprint
+  transparency, pp. 77–91, 2018.                                   arXiv:2006.06666, 2020.
+                         Learning Transferable Visual Models From Natural Language Supervision
+
+Devlin, J., Chang, M.-W., Lee, K., and Toutanova, K. Bert:        biased towards texture; increasing shape bias improves ac-
+  Pre-training of deep bidirectional transformers for lan-        curacy and robustness. arXiv preprint arXiv:1811.12231,
+  guage understanding. arXiv preprint arXiv:1810.04805,           2018.
+  2018.
+                                                                Goodfellow, I. J., Erhan, D., Carrier, P. L., Courville, A.,
+Divvala, S. K., Farhadi, A., and Guestrin, C. Learning            Mirza, M., Hamner, B., Cukierski, W., Tang, Y., Thaler,
+  everything about anything: Webly-supervised visual con-         D., Lee, D.-H., et al. Challenges in representation learn-
+  cept learning. In Proceedings of the IEEE Conference            ing: A report on three machine learning contests. Neural
+  on Computer Vision and Pattern Recognition, pp. 3270–          Networks, 64:59–63, 2015.
+  3277, 2014.
+                                                                Google. Google cloud api: Celebrity recognition. URL
+Dodge, S. and Karam, L. A study and comparison of human           https://cloud.google.com/vision/docs/
+  and deep learning recognition performance under visual          celebrity-recognition.
+  distortions. In 2017 26th international conference on
+  computer communication and networks (ICCCN), pp. 1–           Grill, J.-B., Strub, F., Altché, F., Tallec, C., Richemond,
+  7. IEEE, 2017.                                                  P. H., Buchatskaya, E., Doersch, C., Pires, B. A., Guo,
+                                                                  Z. D., Azar, M. G., et al. Bootstrap your own latent: A
+Dosovitskiy, A., Beyer, L., Kolesnikov, A., Weissenborn,
+                                                                  new approach to self-supervised learning. arXiv preprint
+  D., Zhai, X., Unterthiner, T., Dehghani, M., Minderer, M.,
+                                                                  arXiv:2006.07733, 2020.
+  Heigold, G., Gelly, S., et al. An image is worth 16x16
+ words: Transformers for image recognition at scale. arXiv      Harris, C. R., Millman, K. J., van der Walt, S. J., Gommers,
+  preprint arXiv:2010.11929, 2020.                                R., Virtanen, P., Cournapeau, D., Wieser, E., Taylor, J.,
+Elhoseiny, M., Saleh, B., and Elgammal, A. Write a classi-        Berg, S., Smith, N. J., Kern, R., Picus, M., Hoyer, S., van
+  fier: Zero-shot learning using purely textual descriptions.     Kerkwijk, M. H., Brett, M., Haldane, A., Fernández del
+  In Proceedings of the IEEE International Conference on          Rı́o, J., Wiebe, M., Peterson, P., Gérard-Marchant, P.,
+  Computer Vision, pp. 2584–2591, 2013.                           Sheppard, K., Reddy, T., Weckesser, W., Abbasi, H.,
+                                                                  Gohlke, C., and Oliphant, T. E. Array programming
+Fergus, R., Fei-Fei, L., Perona, P., and Zisserman, A. Learn-     with NumPy. Nature, 585:357–362, 2020. doi: 10.1038/
+  ing object categories from google’s image search. In            s41586-020-2649-2.
+  Tenth IEEE International Conference on Computer Vision
+  (ICCV’05) Volume 1, volume 2, pp. 1816–1823. IEEE,            Hays, J. and Efros, A. A. Im2gps: estimating geographic
+  2005.                                                           information from a single image. In 2008 ieee confer-
+                                                                  ence on computer vision and pattern recognition, pp. 1–8.
+Frome, A., Corrado, G. S., Shlens, J., Bengio, S., Dean, J.,      IEEE, 2008.
+  Ranzato, M., and Mikolov, T. Devise: A deep visual-
+  semantic embedding model. In Advances in neural infor-        He, K., Zhang, X., Ren, S., and Sun, J. Delving deep
+  mation processing systems, pp. 2121–2129, 2013.                 into rectifiers: Surpassing human-level performance on
+                                                                  imagenet classification. In Proceedings of the IEEE inter-
+Gan, Z., Chen, Y.-C., Li, L., Zhu, C., Cheng, Y., and Liu, J.     national conference on computer vision, pp. 1026–1034,
+  Large-scale adversarial training for vision-and-language        2015.
+  representation learning. arXiv preprint arXiv:2006.06195,
+  2020.                                                         He, K., Zhang, X., Ren, S., and Sun, J. Deep residual learn-
+                                                                  ing for image recognition. In Proceedings of the IEEE
+Gao, T., Fisch, A., and Chen, D. Making pre-trained lan-          conference on computer vision and pattern recognition,
+  guage models better few-shot learners. arXiv preprint           pp. 770–778, 2016a.
+  arXiv:2012.15723, 2020.
+                                                                He, K., Zhang, X., Ren, S., and Sun, J. Deep residual learn-
+Garvie, C., May 2019.              URL https://www.
+                                                                  ing for image recognition. In Proceedings of the IEEE
+  flawedfacedata.com/.
+                                                                  conference on computer vision and pattern recognition,
+Geiger, A., Lenz, P., and Urtasun, R. Are we ready for            pp. 770–778, 2016b.
+  autonomous driving? the kitti vision benchmark suite. In
+  Conference on Computer Vision and Pattern Recognition         He, K., Fan, H., Wu, Y., Xie, S., and Girshick, R. Mo-
+ (CVPR), 2012.                                                    mentum contrast for unsupervised visual representation
+                                                                  learning. In Proceedings of the IEEE/CVF Conference
+Geirhos, R., Rubisch, P., Michaelis, C., Bethge, M., Wich-        on Computer Vision and Pattern Recognition, pp. 9729–
+  mann, F. A., and Brendel, W. Imagenet-trained cnns are          9738, 2020.
+                          Learning Transferable Visual Models From Natural Language Supervision
+
+He, T., Zhang, Z., Zhang, H., Zhang, Z., Xie, J., and Li, M.       visual reasoning. In Proceedings of the IEEE Confer-
+  Bag of tricks for image classification with convolutional        ence on Computer Vision and Pattern Recognition, pp.
+  neural networks. In Proceedings of the IEEE Conference           2901–2910, 2017.
+  on Computer Vision and Pattern Recognition, pp. 558–
+  567, 2019.                                                     Joulin, A., Van Der Maaten, L., Jabri, A., and Vasilache, N.
+                                                                   Learning visual features from large weakly supervised
+Helber, P., Bischke, B., Dengel, A., and Borth, D. Eurosat:        data. In European Conference on Computer Vision, pp.
+  A novel dataset and deep learning benchmark for land             67–84. Springer, 2016.
+  use and land cover classification. IEEE Journal of Se-
+  lected Topics in Applied Earth Observations and Remote         Kalfaoglu, M., Kalkan, S., and Alatan, A. A. Late temporal
+  Sensing, 12(7):2217–2226, 2019.                                  modeling in 3d cnn architectures with bert for action
+                                                                   recognition. arXiv preprint arXiv:2008.01232, 2020.
+Henaff, O. Data-efficient image recognition with contrastive
+  predictive coding. In International Conference on Ma-          Kaplan, J., McCandlish, S., Henighan, T., Brown, T. B.,
+  chine Learning, pp. 4182–4192. PMLR, 2020.                       Chess, B., Child, R., Gray, S., Radford, A., Wu, J., and
+                                                                   Amodei, D. Scaling laws for neural language models.
+Hendrycks, D. and Gimpel, K. Gaussian error linear units           arXiv preprint arXiv:2001.08361, 2020.
+  (gelus). arXiv preprint arXiv:1606.08415, 2016.
+                                                                 Keyes, O. The misgendering machines: Trans/hci implica-
+Hendrycks, D., Liu, X., Wallace, E., Dziedzic, A., Krishnan,       tions of automatic gender recognition. Proceedings of the
+  R., and Song, D. Pretrained transformers improve out-of-         ACM on Human-Computer Interaction, 2(CSCW):1–22,
+  distribution robustness. arXiv preprint arXiv:2004.06100,        2018.
+  2020.
+                                                                 Kiela, D., Firooz, H., Mohan, A., Goswami, V., Singh, A.,
+Hermann, K. M., Hill, F., Green, S., Wang, F., Faulkner, R.,       Ringshia, P., and Testuggine, D. The hateful memes
+  Soyer, H., Szepesvari, D., Czarnecki, W. M., Jaderberg,          challenge: Detecting hate speech in multimodal memes.
+  M., Teplyashin, D., et al. Grounded language learning in         arXiv preprint arXiv:2005.04790, 2020.
+  a simulated 3d world. arXiv preprint arXiv:1706.06551,
+  2017.                                                          Kolesnikov, A., Beyer, L., Zhai, X., Puigcerver, J., Yung,
+                                                                   J., Gelly, S., and Houlsby, N. Large scale learning of
+Hestness, J., Narang, S., Ardalani, N., Diamos, G., Jun, H.,       general visual representations for transfer. arXiv preprint
+  Kianinejad, H., Patwary, M., Ali, M., Yang, Y., and Zhou,        arXiv:1912.11370, 2019.
+ Y. Deep learning scaling is predictable, empirically. arXiv
+  preprint arXiv:1712.00409, 2017.                               Kornblith, S., Shlens, J., and Le, Q. V. Do better imagenet
+                                                                   models transfer better? In Proceedings of the IEEE
+Hongsuck Seo, P., Weyand, T., Sim, J., and Han, B. Cplanet:        conference on computer vision and pattern recognition,
+  Enhancing image geolocalization by combinatorial parti-          pp. 2661–2671, 2019.
+  tioning of maps. In Proceedings of the European Confer-
+  ence on Computer Vision (ECCV), pp. 536–551, 2018.             Krishna, R., Zhu, Y., Groth, O., Johnson, J., Hata, K.,
+                                                                   Kravitz, J., Chen, S., Kalantidis, Y., Li, L.-J., Shamma,
+Howard, J. and Ruder, S. Universal language model                  D. A., et al. Visual genome: Connecting language and
+  fine-tuning for text classification. arXiv preprint              vision using crowdsourced dense image annotations. In-
+  arXiv:1801.06146, 2018.                                          ternational journal of computer vision, 123(1):32–73,
+                                                                   2017.
+Ioffe, S. and Szegedy, C. Batch normalization: Accelerating
+   deep network training by reducing internal covariate shift.   Kärkkäinen, K. and Joo, J. Fairface: Face attribute dataset
+   arXiv preprint arXiv:1502.03167, 2015.                          for balanced race, gender, and age, 2019.
+Jaderberg, M., Simonyan, K., Vedaldi, A., and Zisserman,         Lake, B. M., Ullman, T. D., Tenenbaum, J. B., and Gersh-
+  A. Deep structured output learning for unconstrained text        man, S. J. Building machines that learn and think like
+  recognition. arXiv preprint arXiv:1412.5903, 2014.               people, 2016.
+Jaderberg, M., Simonyan, K., Zisserman, A., et al. Spatial       Lampert, C. H., Nickisch, H., and Harmeling, S. Learning
+  transformer networks. Advances in neural information             to detect unseen object classes by between-class attribute
+  processing systems, 28:2017–2025, 2015.                          transfer. In 2009 IEEE Conference on Computer Vision
+                                                                   and Pattern Recognition, pp. 951–958. IEEE, 2009.
+Johnson, J., Hariharan, B., van der Maaten, L., Fei-Fei, L.,
+  Lawrence Zitnick, C., and Girshick, R. Clevr: A diag-          Larochelle, H., Erhan, D., and Bengio, Y. Zero-data learning
+  nostic dataset for compositional language and elementary         of new tasks. 2008.
+                          Learning Transferable Visual Models From Natural Language Supervision
+
+LeCun, Y. The mnist database of handwritten digits.               Miech, A., Zhukov, D., Alayrac, J.-B., Tapaswi, M., Laptev,
+  http://yann. lecun. com/exdb/mnist/.                             I., and Sivic, J. Howto100m: Learning a text-video em-
+                                                                   bedding by watching hundred million narrated video clips.
+Lei Ba, J., Swersky, K., Fidler, S., et al. Predicting deep        In Proceedings of the IEEE international conference on
+  zero-shot convolutional neural networks using textual            computer vision, pp. 2630–2640, 2019.
+  descriptions. In Proceedings of the IEEE International
+  Conference on Computer Vision, pp. 4247–4255, 2015.             Miech, A., Alayrac, J.-B., Laptev, I., Sivic, J., and Zisser-
+                                                                   man, A. Rareact: A video dataset of unusual interactions.
+Li, A., Jabri, A., Joulin, A., and van der Maaten, L. Learning
+                                                                   arXiv preprint arXiv:2008.01018, 2020a.
+  visual n-grams from web data. In Proceedings of the
+  IEEE International Conference on Computer Vision, pp.           Miech, A., Alayrac, J.-B., Smaira, L., Laptev, I., Sivic, J.,
+  4183–4192, 2017.                                                 and Zisserman, A. End-to-end learning of visual represen-
+                                                                   tations from uncurated instructional videos. In Proceed-
+Li, G., Duan, N., Fang, Y., Gong, M., and Jiang, D.
+                                                                   ings of the IEEE/CVF Conference on Computer Vision
+  Unicoder-vl: A universal encoder for vision and language
+                                                                   and Pattern Recognition, pp. 9879–9889, 2020b.
+  by cross-modal pre-training. 2020a.
+Li, X., Yin, X., Li, C., Hu, X., Zhang, P., Zhang, L., Wang,      Miller, G. A. Wordnet: a lexical database for english. Com-
+  L., Hu, H., Dong, L., Wei, F., et al. Oscar: Object-             munications of the ACM, 38(11):39–41, 1995.
+  semantics aligned pre-training for vision-language tasks.       Miller, J., Krauth, K., Recht, B., and Schmidt, L. The effect
+  arXiv preprint arXiv:2004.06165, 2020b.                          of natural distribution shift on question answering models.
+Lin, T.-Y., Maire, M., Belongie, S., Hays, J., Perona, P., Ra-     arXiv preprint arXiv:2004.14444, 2020.
+  manan, D., Dollár, P., and Zitnick, C. L. Microsoft coco:      Mishra, A., Alahari, K., and Jawahar, C. Scene text recogni-
+  Common objects in context. In European conference on             tion using higher order language priors. 2012.
+  computer vision, pp. 740–755. Springer, 2014.
+                                                                  Mori, Y., Takahashi, H., and Oka, R. Image-to-word trans-
+Linzen, T. How can we accelerate progress towards
+                                                                   formation based on dividing and vector quantizing images
+  human-like linguistic generalization? arXiv preprint
+                                                                   with words. Citeseer, 1999.
+  arXiv:2005.00955, 2020.
+Lippe, P., Holla, N., Chandra, S., Rajamanickam, S., An-          Muller-Budack, E., Pustu-Iren, K., and Ewerth, R. Geolo-
+  toniou, G., Shutova, E., and Yannakoudakis, H. A mul-            cation estimation of photos using a hierarchical model
+  timodal framework for the detection of hateful memes.            and scene classification. In Proceedings of the European
+  arXiv preprint arXiv:2012.12871, 2020.                           Conference on Computer Vision (ECCV), pp. 563–579,
+                                                                   2018.
+Liu, Z., Luo, P., Wang, X., and Tang, X. Large-scale celeb-
+  faces attributes (celeba) dataset. Retrieved August, 15         Netzer, Y., Wang, T., Coates, A., Bissacco, A., Wu, B.,
+  (2018):11, 2018.                                                  and Ng, A. Y. Reading digits in natural images with
+                                                                    unsupervised feature learning. 2011.
+Lu, J., Batra, D., Parikh, D., and Lee, S. Vilbert: Pretraining
+  task-agnostic visiolinguistic representations for vision-       Noble, S. U. Algorithms of oppression: How search engines
+  and-language tasks. In Advances in Neural Information             reinforce racism. 2018.
+  Processing Systems, pp. 13–23, 2019.
+                                                                  Nosek, B. A., Banaji, M. R., and Greenwald, A. G. Harvest-
+Lu, Z., Xiong, X., Li, Y., Stroud, J., and Ross, D. Leveraging      ing implicit group attitudes and beliefs from a demonstra-
+  weakly supervised data and pose representation for action         tion web site. Group Dynamics: Theory, Research, and
+  recognition, 2020. URL https://www.youtube.                       Practice, 6(1):101, 2002.
+  com/watch?v=KOQFxbPPLOE&t=1390s.
+                                                                  Oh, S., Hoogs, A., Perera, A., Cuntoor, N., Chen, C.-C., Lee,
+Mahajan, D., Girshick, R., Ramanathan, V., He, K., Paluri,          J. T., Mukherjee, S., Aggarwal, J., Lee, H., Davis, L., et al.
+ M., Li, Y., Bharambe, A., and van der Maaten, L. Ex-               A large-scale benchmark dataset for event recognition in
+ ploring the limits of weakly supervised pretraining. In            surveillance video. In CVPR 2011, pp. 3153–3160. IEEE,
+ Proceedings of the European Conference on Computer                 2011.
+ Vision (ECCV), pp. 181–196, 2018.
+                                                                  Oliver, A., Odena, A., Raffel, C. A., Cubuk, E. D., and Good-
+McCann, B., Keskar, N. S., Xiong, C., and Socher, R. The            fellow, I. Realistic evaluation of deep semi-supervised
+ natural language decathlon: Multitask learning as ques-            learning algorithms. Advances in neural information pro-
+ tion answering. arXiv preprint arXiv:1806.08730, 2018.             cessing systems, 31:3235–3246, 2018.
+                         Learning Transferable Visual Models From Natural Language Supervision
+
+pandas development team, T. pandas-dev/pandas: Pan-             Raji, I. D., Gebru, T., Mitchell, M., Buolamwini, J., Lee,
+  das, February 2020. URL https://doi.org/10.                     J., and Denton, E. Saving face: Investigating the ethical
+  5281/zenodo.3509134.                                            concerns of facial recognition auditing, 2020.
+
+Parkhi, O. M., Vedaldi, A., Zisserman, A., and Jawahar,         Ramanathan, V., Liang, P., and Fei-Fei, L. Video event
+  C. V. Cats and dogs. In IEEE Conference on Computer             understanding using natural language descriptions. In
+  Vision and Pattern Recognition, 2012.                           Proceedings of the IEEE International Conference on
+                                                                  Computer Vision, pp. 905–912, 2013.
+Paszke, A., Gross, S., Massa, F., Lerer, A., Bradbury, J.,
+  Chanan, G., Killeen, T., Lin, Z., Gimelshein, N., Antiga,     Recht, B., Roelofs, R., Schmidt, L., and Shankar, V. Do im-
+  L., Desmaison, A., Kopf, A., Yang, E., DeVito, Z., Raison,      agenet classifiers generalize to imagenet? arXiv preprint
+  M., Tejani, A., Chilamkurthy, S., Steiner, B., Fang, L.,        arXiv:1902.10811, 2019.
+  Bai, J., and Chintala, S. Pytorch: An imperative style,       Salimans, T. and Kingma, D. P. Weight normalization: A
+  high-performance deep learning library. In Wallach, H.,         simple reparameterization to accelerate training of deep
+  Larochelle, H., Beygelzimer, A., d'Alché-Buc, F., Fox, E.,     neural networks. In Advances in neural information pro-
+  and Garnett, R. (eds.), Advances in Neural Information          cessing systems, pp. 901–909, 2016.
+  Processing Systems 32, pp. 8024–8035, 2019.
+                                                                Scheuerman, M. K., Paul, J. M., and Brubaker, J. R. How
+Pedregosa, F., Varoquaux, G., Gramfort, A., Michel, V.,           computers see gender: An evaluation of gender classifica-
+  Thirion, B., Grisel, O., Blondel, M., Prettenhofer, P.,         tion in commercial facial analysis services. Proceedings
+  Weiss, R., Dubourg, V., Vanderplas, J., Passos, A., Cour-       of the ACM on Human-Computer Interaction, 3(CSCW):
+  napeau, D., Brucher, M., Perrot, M., and Duchesnay, E.          1–33, 2019.
+  Scikit-learn: Machine learning in Python. Journal of
+  Machine Learning Research, 12:2825–2830, 2011.                Schwemmer, C., Knight, C., Bello-Pardo, E. D., Oklobdzija,
+                                                                  S., Schoonvelde, M., and Lockhart, J. W. Diagnosing
+Pennington, J., Socher, R., and Manning, C. D. Glove:             gender bias in image recognition systems. Socius, 6:
+  Global vectors for word representation. In Proceedings          2378023120967171, 2020.
+  of the 2014 conference on empirical methods in natural
+                                                                Sennrich, R., Haddow, B., and Birch, A. Neural machine
+  language processing (EMNLP), pp. 1532–1543, 2014.
+                                                                  translation of rare words with subword units. arXiv
+Peters, M. E., Neumann, M., Iyyer, M., Gardner, M., Clark,        preprint arXiv:1508.07909, 2015.
+  C., Lee, K., and Zettlemoyer, L. Deep contextualized          Singh, A., Natarajan, V., Shah, M., Jiang, Y., Chen, X.,
+  word representations. arXiv preprint arXiv:1802.05365,          Batra, D., Parikh, D., and Rohrbach, M. Towards vqa
+  2018.                                                           models that can read. In Proceedings of the IEEE Con-
+Qi, D., Su, L., Song, J., Cui, E., Bharti, T., and Sacheti,       ference on Computer Vision and Pattern Recognition, pp.
+  A. Imagebert: Cross-modal pre-training with large-              8317–8326, 2019.
+  scale weak-supervised image-text data. arXiv preprint         Socher, R., Ganjoo, M., Manning, C. D., and Ng, A. Zero-
+  arXiv:2001.07966, 2020.                                         shot learning through cross-modal transfer. In Advances
+                                                                  in neural information processing systems, pp. 935–943,
+Quattoni, A., Collins, M., and Darrell, T. Learning visual
+                                                                  2013a.
+  representations using images with captions. In 2007 IEEE
+ Conference on Computer Vision and Pattern Recognition,         Socher, R., Perelygin, A., Wu, J., Chuang, J., Manning,
+  pp. 1–8. IEEE, 2007.                                            C. D., Ng, A. Y., and Potts, C. Recursive deep models for
+                                                                  semantic compositionality over a sentiment treebank. In
+Radford, A., Narasimhan, K., Salimans, T., and Sutskever,         Proceedings of the 2013 conference on empirical methods
+  I. Improving language understanding by generative pre-          in natural language processing, pp. 1631–1642, 2013b.
+  training, 2018.
+                                                                Sohn, K. Improved deep metric learning with multi-class
+Radford, A., Wu, J., Child, R., Luan, D., Amodei, D., and         n-pair loss objective. In Advances in neural information
+  Sutskever, I. Language models are unsupervised multitask        processing systems, pp. 1857–1865, 2016.
+  learners. 2019.
+                                                                Solaiman, I., Brundage, M., Clark, J., Askell, A., Herbert-
+Raffel, C., Shazeer, N., Roberts, A., Lee, K., Narang, S.,        Voss, A., Wu, J., Radford, A., Krueger, G., Kim, J. W.,
+  Matena, M., Zhou, Y., Li, W., and Liu, P. J. Exploring          Kreps, S., McCain, M., Newhouse, A., Blazakis, J.,
+  the limits of transfer learning with a unified text-to-text     McGuffie, K., and Wang, J. Release strategies and the
+  transformer. arXiv preprint arXiv:1910.10683, 2019.             social impacts of language models, 2019.
+                         Learning Transferable Visual Models From Natural Language Supervision
+
+Soomro, K., Zamir, A. R., and Shah, M. Ucf101: A dataset      Vaswani, A., Shazeer, N., Parmar, N., Uszkoreit, J., Jones,
+  of 101 human actions classes from videos in the wild.         L., Gomez, A. N., Kaiser, Ł., and Polosukhin, I. Atten-
+  arXiv preprint arXiv:1212.0402, 2012.                         tion is all you need. In Advances in neural information
+                                                                processing systems, pp. 5998–6008, 2017.
+Speer, R. ftfy. Zenodo, 2019. URL https://doi.org/
+  10.5281/zenodo.2591652. Version 5.5.                        Veeling, B. S., Linmans, J., Winkens, J., Cohen, T., and
+                                                                Welling, M. Rotation equivariant CNNs for digital pathol-
+Srivastava, N. and Salakhutdinov, R. Multimodal learning        ogy. June 2018.
+  with deep boltzmann machines. In NIPS, 2012.
+                                                              Virtanen, P., Gommers, R., Oliphant, T. E., Haberland, M.,
+Stallkamp, J., Schlipsing, M., Salmen, J., and Igel, C. The     Reddy, T., Cournapeau, D., Burovski, E., Peterson, P.,
+  German Traffic Sign Recognition Benchmark: A multi-           Weckesser, W., Bright, J., van der Walt, S. J., Brett, M.,
+  class classification competition. In IEEE International       Wilson, J., Millman, K. J., Mayorov, N., Nelson, A. R. J.,
+  Joint Conference on Neural Networks, pp. 1453–1460,           Jones, E., Kern, R., Larson, E., Carey, C. J., Polat, İ.,
+  2011.                                                         Feng, Y., Moore, E. W., VanderPlas, J., Laxalde, D.,
+                                                                Perktold, J., Cimrman, R., Henriksen, I., Quintero, E. A.,
+Szegedy, C., Ioffe, S., Vanhoucke, V., and Alemi,               Harris, C. R., Archibald, A. M., Ribeiro, A. H., Pedregosa,
+  A. Inception-v4, inception-resnet and the impact              F., van Mulbregt, P., and SciPy 1.0 Contributors. SciPy
+  of residual connections on learning. arXiv preprint           1.0: Fundamental Algorithms for Scientific Computing
+  arXiv:1602.07261, 2016.                                       in Python. Nature Methods, 17:261–272, 2020. doi:
+                                                                10.1038/s41592-019-0686-2.
+Tan, H. and Bansal, M. Lxmert: Learning cross-modality
+  encoder representations from transformers. arXiv preprint   Vo, N., Jacobs, N., and Hays, J. Revisiting im2gps in the
+  arXiv:1908.07490, 2019.                                       deep learning era. In Proceedings of the IEEE Interna-
+                                                                tional Conference on Computer Vision, pp. 2621–2630,
+Tan, M. and Le, Q. V. Efficientnet: Rethinking model            2017.
+  scaling for convolutional neural networks. arXiv preprint
+  arXiv:1905.11946, 2019.                                     Wang, A., Singh, A., Michael, J., Hill, F., Levy, O., and
+                                                               Bowman, S. R. Glue: A multi-task benchmark and anal-
+Taori, R., Dave, A., Shankar, V., Carlini, N., Recht, B.,      ysis platform for natural language understanding. arXiv
+  and Schmidt, L. Measuring robustness to natural dis-         preprint arXiv:1804.07461, 2018.
+  tribution shifts in image classification. arXiv preprint
+  arXiv:2007.00644, 2020.                                     Wang, H., Lu, P., Zhang, H., Yang, M., Bai, X., Xu, Y., He,
+                                                               M., Wang, Y., and Liu, W. All you need is boundary: To-
+Thomee, B., Shamma, D. A., Friedland, G., Elizalde, B., Ni,    ward arbitrary-shaped text spotting. In Proceedings of the
+  K., Poland, D., Borth, D., and Li, L.-J. Yfcc100m: The       AAAI Conference on Artificial Intelligence, volume 34,
+  new data in multimedia research. Communications of the       pp. 12160–12167, 2020.
+  ACM, 59(2):64–73, 2016.
+                                                              Weyand, T., Kostrikov, I., and Philbin, J. Planet-photo geolo-
+Tian, Y., Krishnan, D., and Isola, P. Contrastive multiview    cation with convolutional neural networks. In European
+  coding. arXiv preprint arXiv:1906.05849, 2019.               Conference on Computer Vision, pp. 37–55. Springer,
+                                                               2016.
+Tian, Y., Wang, Y., Krishnan, D., Tenenbaum, J. B., and
+  Isola, P. Rethinking few-shot image classification: a       Wu, Y., Kirillov, A., Massa, F., Lo, W.-Y., and Gir-
+  good embedding is all you need?        arXiv preprint        shick, R. Detectron2. https://github.com/
+  arXiv:2003.11539, 2020.                                      facebookresearch/detectron2, 2019.
+
+Touvron, H., Vedaldi, A., Douze, M., and Jégou, H. Fix-      Xie, Q., Luong, M.-T., Hovy, E., and Le, Q. V. Self-training
+  ing the train-test resolution discrepancy. In Advances in     with noisy student improves imagenet classification. In
+  neural information processing systems, pp. 8252–8262,         Proceedings of the IEEE/CVF Conference on Computer
+  2019.                                                         Vision and Pattern Recognition, pp. 10687–10698, 2020.
+
+Varadarajan, J. and Odobez, J.-M. Topic models for scene      Yang, Z., Lu, Y., Wang, J., Yin, X., Florencio, D., Wang,
+  analysis and abnormality detection. In 2009 IEEE 12th         L., Zhang, C., Zhang, L., and Luo, J. Tap: Text-aware
+  International Conference on Computer Vision Workshops,        pre-training for text-vqa and text-caption. arXiv preprint
+  ICCV Workshops, pp. 1338–1345. IEEE, 2009.                    arXiv:2012.04638, 2020.
+                         Learning Transferable Visual Models From Natural Language Supervision
+
+Yogatama, D., d’Autume, C. d. M., Connor, J., Kocisky,
+  T., Chrzanowski, M., Kong, L., Lazaridou, A., Ling, W.,
+  Yu, L., Dyer, C., et al. Learning and evaluating general
+  linguistic intelligence. arXiv preprint arXiv:1901.11373,
+  2019.
+Yu, F., Tang, J., Yin, W., Sun, Y., Tian, H., Wu, H.,
+  and Wang, H. Ernie-vil: Knowledge enhanced vision-
+  language representations through scene graph. arXiv
+  preprint arXiv:2006.16934, 2020.
+Zeiler, M. D. and Fergus, R. Visualizing and understand-
+  ing convolutional networks. In European conference on
+  computer vision, pp. 818–833. Springer, 2014.
+
+Zhai, X., Puigcerver, J., Kolesnikov, A., Ruyssen, P.,
+  Riquelme, C., Lucic, M., Djolonga, J., Pinto, A. S., Neu-
+  mann, M., Dosovitskiy, A., et al. A large-scale study of
+  representation learning with the visual task adaptation
+  benchmark. arXiv preprint arXiv:1910.04867, 2019.
+
+Zhang, R. Making convolutional networks shift-invariant
+  again. arXiv preprint arXiv:1904.11486, 2019.
+Zhang, Y., Jiang, H., Miura, Y., Manning, C. D., and Lan-
+  glotz, C. P. Contrastive learning of medical visual repre-
+  sentations from paired images and text. arXiv preprint
+  arXiv:2010.00747, 2020.
+Zuboff, S. Big other: surveillance capitalism and the
+  prospects of an information civilization. Journal of Infor-
+  mation Technology, 30(1):75–89, 2015.
+

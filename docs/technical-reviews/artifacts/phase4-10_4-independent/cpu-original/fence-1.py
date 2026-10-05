@@ -1,0 +1,9 @@
+import torch
+
+patches = torch.ones(1, 4, 3)
+position = torch.arange(4.0)[None, :, None]
+x = patches + position
+print("形狀", tuple(x.shape))
+print("位置0", x[0, 0].tolist())
+print("位置3", x[0, 3].tolist())
+print("仍相同", torch.equal(x[:, 0], x[:, 3]))

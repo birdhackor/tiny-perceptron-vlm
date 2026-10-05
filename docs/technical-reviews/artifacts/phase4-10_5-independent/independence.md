@@ -1,0 +1,11 @@
+# Independent technical review 10.5, initial version
+
+Reviewer: /root/phase4_factual_coordinator/factual_10_5. Fresh technical context; no authored lesson changes, no reuse of reader identity, no subagent delegation.
+
+Read current course/chapters/10.md section 10.5 in full and necessary preceding sections 10.1–10.4; current multimodal implementation patchify, VisionEncoder and scene; notebook bootstrap contract; experiment implementation _hash/_manifest/_fit/_vision_records/run_encoders. Read factual review instructions, checker schema, section_facts, review-round checker and clear-tutorial skill/protocol. The skill's linked known-issue example was not opened. Initial filename discovery exposed prior artifact filenames only; no old report/history/author note content was opened. No prior factual conclusions used.
+
+The original encoders JSON was preserved whole with its SHA. Top-level and needed nested key types were inspected before named raw measurement/provenance/config/samples pointers. The actual pointers and selected raw values are in probes/history-selected-pointers.json. No notes, review, scope-correction, calibration, audio, scope summary or evidence/status summary values were inspected. These original bytes are preserved without removing annotations.
+
+Original fence executed with section_facts and again in a new process without bootstrap or prior notebook variables. CPU probes inspect backward, default freeze state, all parameter values before/after, opposite labels, mean/CE denominators and derivatives, a central finite difference, a hand-coded color shortcut, actual SVG pixels and raw historic sample totals. No optimizer training, existing-model inference, model/data download, GPU, paid resource, or neural .pt evidence was used.
+
+Initial verdict is revise: the historical link's relation to the present two-class/no-update example needs clarification, and the figure arrows need to separate image/target inputs and show the reverse path. The original code itself is independently runnable and agrees with its stated shapes, nonzero gradient, and no-update boundary. Minimal proposed corrections are in the initial report; no course, figure or implementation files were changed.
