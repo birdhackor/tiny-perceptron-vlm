@@ -37,5 +37,6 @@
 - [自行訓練成品的來源與範圍](sources/selftrained-capstone.md)：有限任務、合法來源與驗收限制。
 - [大綱與新增小節](outline.md)：第一階段完成後的寫作依據。
 - [狀態](status.json)：只記實際完成的階段，不將規劃標成成果。
+- [逐節易讀性審閱進度](review-progress.json)：列出實際派出的讀者、當前判定、逐段閱讀紀錄與修正後的複查；此表不代表技術或銜接審閱已通過。
 
 本輪審閱方法依 repo 的 [clear-tutorial skill](../../.agents/skills/clear-tutorial/SKILL.md) 與 [分段閱讀流程](../../.agents/skills/clear-tutorial/references/review-protocol.md)。較早的審閱紀錄保留作歷史，不以修改指紋冒充新審閱。
