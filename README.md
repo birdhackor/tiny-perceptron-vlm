@@ -8,7 +8,7 @@
 
 教材預覽版：網站提供正文、SVG 圖解與實際 CPU 輸出。每節按「在 Colab 動手做」可開啟同一課的完整 Notebook；有程式的Notebook會在第一個程式格準備專案與套件，小實驗不必先租 GPU。也可下載本節 `.ipynb` 後依下方步驟在本機練習。Colab 雲端執行尚未實機驗證。
 
-![文字與識別編號的對照](course/figures/character_ids.svg)
+![文字與識別編號的對照](course/figures/rewrite-01-character-ids.svg)
 
 ## 教材提供什麼
 

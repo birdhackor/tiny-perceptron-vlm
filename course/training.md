@@ -110,7 +110,7 @@ mkdir -p outputs checkpoints
 
 73表示A，2表示EOS，所以只新增兩個單位就結束，沒有用滿32。`answer`只顯示正文A；只看可讀文字，無法分辨模型主動結束還是到上限截停。這份摘錄也沒有證明A符合原問題；內容與停止要分開檢查。
 
-要重做本節四種固定模型比較，用：
+固定比較包含兩類模型、四個設定：接字表，以及一字、三字、五字視窗的 MLP。視窗取幾個位置的差別見[2.5](chapters/02.md#2.5)；要重做這組比較，用：
 
 ```bash
 .venv/bin/python -m scripts.course_experiments.run --experiment simple_models --device cpu
@@ -501,7 +501,14 @@ for path in paths:
 
 完整教師、學生、對照與生成見[蒸餾報告](../docs/course-experiments/results/distillation.json)，不同任務有各自分母，不用單一數字代表全部能力。
 
-多模態蒸餾另依賴固定 `encoders`、`projector`、`vqa` 與 `joint` 來源，再執行 `--experiment multimodal_distillation`。先保留來源權重和原始切分；僅下載推論包不足以恢復訓練資料。操作與格式見[實驗說明](../docs/course-experiments/README.md)。
+多模態蒸餾使用固定 `vqa` 與 `joint` 兩份教師，以及各自的原始切分。先完成[T.4](training.md#T.4)的固定 `sft`，再按[T.6](training.md#T.6)的固定入口完成 `encoders`、`projector`、`vqa`，接著在相容的 CUDA 環境依序執行：
+
+```bash
+.venv/bin/python -m scripts.course_experiments.run --experiment joint --device cuda
+.venv/bin/python -m scripts.course_experiments.run --experiment multimodal_distillation --device cuda
+```
+
+第一行是[12.12](chapters/12.md#12.12)的固定圖音聯合訓練，直接讀取 `sft` 與 `encoders`，不承接 `vqa`。這份 `joint`、T.6 手動保存的 `checkpoints/joint.pt` 和第19章的 `capstone_joint` 各有自己的配方，不能互換來源。實驗工具每次只執行指定項，不自動補齊依賴；上述命令沿用同一個預設 `outputs/course-experiments/course-v1/` 根目錄，第二行會讀取 `vqa/` 與 `joint/` 各自的 `model.pt`、`dataset.json`。先保留來源權重和原始切分；僅下載推論包不足以恢復訓練資料。操作與格式見[實驗說明](../docs/course-experiments/README.md)。
 
 </details>
 
