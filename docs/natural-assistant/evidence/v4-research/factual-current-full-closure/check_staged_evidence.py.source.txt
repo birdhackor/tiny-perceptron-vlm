@@ -1,0 +1,57 @@
+from pathlib import Path
+import hashlib
+import json
+import subprocess
+
+root = Path.cwd()
+index = {}
+for row in subprocess.check_output(['git', 'ls-files', '-s', '-z']).split(b'\0'):
+    if row:
+        meta, path = row.split(b'\t', 1)
+        mode, oid, stage = meta.split()
+        if stage != b'0':
+            raise RuntimeError('Unmerged index')
+        index[path.decode()] = oid.decode()
+proc = subprocess.Popen(['git', 'cat-file', '--batch'], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+cache = {}
+def staged_hash(path):
+    oid = index.get(path)
+    if oid is None:
+        return None
+    if oid not in cache:
+        proc.stdin.write((oid + '\n').encode())
+        proc.stdin.flush()
+        header = proc.stdout.readline().split()
+        size = int(header[2])
+        content = proc.stdout.read(size)
+        assert len(content) == size and proc.stdout.read(1) == b'\n'
+        cache[oid] = hashlib.sha256(content).hexdigest()
+    return cache[oid]
+errors = []
+references = set()
+for report in sorted(Path('docs/technical-reviews').glob('*.json')):
+    data = json.loads(report.read_bytes())
+    for kind in ('sources', 'artifacts'):
+        for item in data.get(kind, []):
+            if isinstance(item, dict) and item.get('path') and item.get('sha256'):
+                path, expected = item['path'], item['sha256']
+                references.add(path)
+                actual = staged_hash(path)
+                if actual != expected:
+                    errors.append({'report': str(report), 'path': path, 'expected': expected, 'index': actual})
+staged = [p.decode() for p in subprocess.check_output(['git', 'diff', '--cached', '--name-only', '-z', '--diff-filter=ACMR']).split(b'\0') if p]
+for path in staged:
+    # LFS objects intentionally become Git pointer blobs.
+    if path.startswith('assets/training/') and path.endswith('.tar.gz'):
+        continue
+    expected = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    actual = staged_hash(path)
+    if actual != expected:
+        errors.append({'scope': 'staged-worktree-byte-exact', 'path': path, 'expected': expected, 'index': actual})
+proc.stdin.close()
+proc.stdout.close()
+assert proc.wait() == 0
+result = {'technical_evidence_paths': len(references), 'staged_paths': len(staged), 'distinct_blobs_read': len(cache), 'errors': errors}
+Path('outputs/natural-extension/staged-evidence-check.json').write_text(json.dumps(result, ensure_ascii=False, indent=2) + '\n')
+print(json.dumps({'technical_evidence_paths': len(references), 'staged_paths': len(staged), 'error_count': len(errors), 'first_errors': errors[:8]}, ensure_ascii=False))
+raise SystemExit(bool(errors))

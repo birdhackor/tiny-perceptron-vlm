@@ -1,0 +1,132 @@
+"""Inventory genuine completed factual owners; do not stage or alter reports."""
+
+import argparse
+import hashlib
+import json
+import re
+from datetime import UTC, datetime
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[3]
+HERE = Path(__file__).resolve().parent
+ARTIFACTS = ROOT / "docs/technical-reviews/artifacts/natural-v4-factual"
+ALLOWED = {".json", ".md", ".py", ".txt", ".svg", ".png", ".csv", ".tsv", ".log", ".diff", ".sh", ".snapshot", ".bytes"}
+RAW_DIRECTORIES = {"workspace", "data", "dataset", "datasets", "model", "models", "cache", "venv", "node_modules", "__pycache__"}
+
+
+# Exact manually read own logs, failed program originals and a current-source Notebook.
+# These seven bounded originals are not raw third-party data or documents.
+OWN_PUBLICATION_EXCEPTIONS = {'docs/technical-reviews/artifacts/natural-v4-factual/R.2/cpu-command.stdout': '245e8b821400bab674181fd5a3a1db8f8eda88e869827c66be166d5290003806', 'docs/technical-reviews/artifacts/natural-v4-factual/R.2/cpu-command.stderr': '356920e74a6b9fda2ec73231a0d02364badbf73b37976d8af4927769220befa8', 'docs/technical-reviews/artifacts/natural-v4-factual/R.2/browser-completion.stdout': '4b42f22c41a756c710830d43e7aae74aa2ef83c523f3dfad78d94e476f7ddde9', 'docs/technical-reviews/artifacts/natural-v4-factual/R.2/browser-command.stderr': '029c04c3a0a1eb5b775a3be5e041b90fc14f491f81fab7603a044b5af0a97cf9', 'docs/technical-reviews/artifacts/natural-v4-factual/R.2/browser_routes.py.first-attempt': '56a0433459347fa29eaa31420a7d34322b631347e38fee3c537f98e4eabc2ff8', 'docs/technical-reviews/artifacts/natural-v4-factual/R.2/browser-command.stderr.first-attempt': '7ed08fe72488c31f8f75ba6650fcd368c3843e7ff3d573f2ca16af56b1eee967', 'docs/technical-reviews/artifacts/natural-v4-factual/R.2/downloaded17.1.ipynb': 'c3586eabf90e8692a04a1a905ded82e52f013dba0102f96abb92709da85babeb'}
+
+def sha(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def record(path):
+    return {"path": path.relative_to(ROOT).as_posix(), "bytes": path.stat().st_size, "sha256": sha(path)}
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--output", type=Path, required=True)
+    args = parser.parse_args()
+    if args.output.exists():
+        parser.error("Preserve the earlier inventory; choose a new output path")
+    journal_path = HERE / "factual-current-dispatch-plan.json"
+    journal = json.loads(journal_path.read_bytes())
+    dispatches = {row["lesson_id"]: row for row in journal["dispatches"]}
+    # Original REVISION events and same-owner rechecks remain in the journal.
+    # Select only an observed PASS event matching the actual current report.
+    completed, omitted, seen = [], [], set()
+    events = journal["completions"] + journal.get("recheck_completions", [])
+    events.sort(key=lambda row: row.get("observed_at", ""))
+    for event in reversed(events):
+        lesson = event["lesson_id"]
+        path = ROOT / event["report_path"]
+        if (
+            lesson not in seen
+            and event.get("owner_verdict") == "pass"
+            and event.get("actual_observed_owner_final") is True
+            and event.get("actual_official_checker_exit_code") == 0
+            and path.is_file()
+            and sha(path) == event["report_sha256"]
+        ):
+            completed.append(event)
+            seen.add(lesson)
+        else:
+            omitted.append({"lesson_id": lesson, "owner_verdict": event.get("owner_verdict"), "report_sha256": event["report_sha256"], "reason": "Historical revision, earlier completion or no exact current PASS report"})
+    completed.reverse()
+    selected, excluded, owners = {}, [], []
+    notice = ARTIFACTS / "NOTICE.txt"
+    if notice.is_file():
+        selected[notice] = record(notice)
+    for completion in completed:
+        lesson = completion["lesson_id"]
+        dispatch = dispatches[lesson]
+        path = ROOT / completion["report_path"]
+        report = json.loads(path.read_bytes())
+        assert completion["actual_observed_owner_final"] is True, lesson
+        assert completion["actual_official_checker_exit_code"] == 0, lesson
+        assert completion["owner_verdict"] == report["verdict"] == "pass", lesson
+        assert completion["actual_owner"] == dispatch["actual_owner"] == report["reviewer_task"], lesson
+        assert report["reviewer_context"] == "fresh", lesson
+        assert sha(path) == completion["report_sha256"], lesson
+        source_path, separator, selector = report["source"].partition("#")
+        assert separator and selector == lesson, lesson
+        source = (ROOT / source_path).read_text(encoding="utf-8")
+        headings = list(re.finditer(r"^## [A-Z\d]+\.\d+ .+$", source, re.M))
+        position = next(i for i, heading in enumerate(headings) if heading[0].startswith("## " + lesson + " "))
+        end = headings[position + 1].start() if position + 1 < len(headings) else len(source)
+        body = source[headings[position].start():end]
+        assert hashlib.sha256(body.encode()).hexdigest() == report["source_sha256"], lesson
+        if report.get("introduction_sha256"):
+            intro = source[:headings[0].start()]
+            assert hashlib.sha256(intro.encode()).hexdigest() == report["introduction_sha256"], lesson
+        for figure, expected in report.get("figure_sha256", {}).items():
+            assert sha(ROOT / figure) == expected, figure
+        selected[path] = record(path)
+        owner_directory = ARTIFACTS / lesson
+        assert owner_directory.is_dir(), lesson
+        for original in sorted(owner_directory.rglob("*")):
+            if not original.is_file():
+                continue
+            parts = original.relative_to(owner_directory).parts[:-1]
+            exception_name = original.relative_to(ROOT).as_posix()
+            if exception_name in OWN_PUBLICATION_EXCEPTIONS:
+                assert sha(original) == OWN_PUBLICATION_EXCEPTIONS[exception_name], exception_name
+                original.read_bytes().decode("utf-8")
+            if (
+                any(part.lower() in RAW_DIRECTORIES for part in parts)
+                or (original.suffix.lower() not in ALLOWED and original.relative_to(ROOT).as_posix() not in OWN_PUBLICATION_EXCEPTIONS)
+                or original.stat().st_size > 8 * 1024 * 1024
+            ):
+                excluded.append(record(original))
+                continue
+            selected[original] = record(original)
+        for artifact in report.get("artifacts", []):
+            if not artifact.get("path"):
+                continue
+            original = ROOT / artifact["path"]
+            assert original.is_file() and sha(original) == artifact["sha256"], artifact["path"]
+            if original.is_relative_to(owner_directory):
+                assert original in selected, "A required local artifact needs explicit publication review: " + str(original)
+        owners.append({"lesson_id": lesson, "actual_owner": completion["actual_owner"], "canonical_report": record(path)})
+    result = {
+        "schema_version": 1,
+        "record_kind": "actual_completed_factual_small_evidence_inventory_not_review_or_stage",
+        "created_at": datetime.now(UTC).isoformat(),
+        "scope": "Only observed completed numbered owners with exact current canonical reports. Unfinished owners and supplemental whole-file checks are not included. This inventories provenance; it does not certify truth, create judgments, or edit/stage files. Full external papers/HTML/PDF and raw workspaces remain outside ordinary Git.",
+        "journal_sha256_at_capture": sha(journal_path),
+        "completed_owners": owners,
+        "omitted_historical_or_non_current_events": omitted,
+        "selected_files": [selected[path] for path in sorted(selected)],
+        "excluded_files": excluded,
+        "counts": {"completed_owners": len(owners), "selected_files": len(selected), "selected_bytes": sum(row["bytes"] for row in selected.values()), "excluded_files": len(excluded)},
+    }
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n")
+    print(json.dumps(result["counts"]))
+
+
+if __name__ == "__main__":
+    main()

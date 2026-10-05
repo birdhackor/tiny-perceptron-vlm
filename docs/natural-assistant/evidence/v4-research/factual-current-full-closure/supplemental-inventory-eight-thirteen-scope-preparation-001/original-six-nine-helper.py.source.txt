@@ -1,0 +1,98 @@
+"""Index six genuinely completed whole-file factual owners, without staging."""
+
+import argparse
+import hashlib
+import importlib.util
+import json
+from datetime import UTC, datetime
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[3]
+HERE = Path(__file__).resolve().parent
+ARTIFACTS = ROOT / "docs/technical-reviews/artifacts/natural-v4-supplemental"
+ALLOWED = {".json", ".md", ".py", ".txt", ".svg", ".png", ".csv", ".tsv", ".log", ".diff", ".sh", ".snapshot", ".bytes", ".read-snapshot", ".ipynb"}
+RAW = {"workspace", "data", "dataset", "datasets", "model", "models", "cache", "venv", "node_modules", "__pycache__"}
+
+
+def sha(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def record(path):
+    return {"path": path.relative_to(ROOT).as_posix(), "bytes": path.stat().st_size, "sha256": sha(path)}
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--output", type=Path, required=True)
+    args = parser.parse_args()
+    assert not args.output.exists(), "Preserve earlier original inventories."
+    journal_path = HERE / "factual-supplemental-dispatch-journal.json"
+    journal = json.loads(journal_path.read_bytes())
+    assert set(journal["scope_groups"]) == {row["group_id"] for row in journal["dispatches"]}
+    assert len(journal["dispatches"]) == 6
+    spec = importlib.util.spec_from_file_location("read_only_official_checker", ROOT / "scripts/check_technical_reviews.py")
+    checker = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(checker)
+    selected, excluded, owners = {}, [], []
+    notice = ARTIFACTS / "NOTICE.txt"
+    assert notice.is_file()
+    selected[notice] = record(notice)
+    for dispatch in journal["dispatches"]:
+        group = dispatch["group_id"]
+        assert dispatch["completion_status"] == "actual_owner_current_pass_and_provenance_validated", group
+        assert dispatch["actual_spawn_receipt_observed"] and dispatch["fork_turns"] == "none"
+        report_path = ROOT / dispatch.get("current_observed_actual_owner_report_path", dispatch["report_path"])
+        assert sha(report_path) == dispatch["actual_owner_report_sha256"], group
+        report = json.loads(report_path.read_bytes())
+        assert report["reviewer_task"] == dispatch["actual_owner"]
+        assert report["reviewer_context"] == "fresh" and report["verdict"] == "pass"
+        assert not report.get("lesson_id")
+        errors = []
+        for path, expected in report["current_document_sha256"].items():
+            checker._hash_file(ROOT, path, expected, errors, "full_document")
+        for path, expected in report["figure_sha256"].items():
+            checker._hash_file(ROOT, path, expected, errors, "figure")
+        artifacts = checker._artifacts(ROOT, report["artifacts"], errors)
+        sources = checker._sources(ROOT, report["sources"], artifacts, errors)
+        checker._claims(report["claims"], sources, artifacts, errors)
+        assert not errors, errors
+        selected[report_path] = record(report_path)
+        folder = ARTIFACTS / group
+        assert folder.is_dir()
+        for original in sorted(folder.rglob("*")):
+            if not original.is_file():
+                continue
+            directories = original.relative_to(folder).parts[:-1]
+            if any(part.lower() in RAW for part in directories) or original.suffix.lower() not in ALLOWED or original.stat().st_size > 8 * 1024 * 1024:
+                excluded.append(record(original))
+            else:
+                selected[original] = record(original)
+        for artifact in report["artifacts"]:
+            if artifact.get("path"):
+                original = ROOT / artifact["path"]
+                assert sha(original) == artifact["sha256"]
+                if original.is_relative_to(folder):
+                    assert original in selected, "Required artifact needs explicit publication review: " + str(original)
+        owners.append({"group_id": group, "actual_owner": dispatch["actual_owner"], "canonical_report": record(report_path), "actual_current_document_sha256": report["current_document_sha256"]})
+    assert len({row["actual_owner"] for row in owners}) == 6
+    count = sum(len(row["actual_current_document_sha256"]) for row in owners)
+    assert count == journal["current_authorized_full_document_count"] == 9
+    result = {
+        "schema_version": 1,
+        "record_kind": "actual_completed_whole_file_factual_small_evidence_inventory_not_review_or_stage",
+        "created_at": datetime.now(UTC).isoformat(),
+        "scope": "Six genuine returned independent current whole-file owners covering nine complete files. Native unchanged official evidence/source/claim components are checked. Original judgments and revisions are preserved. This inventory does not close the separate69-section factual phase or approve continuity, reading times or publication.",
+        "journal_sha256_at_capture": sha(journal_path),
+        "completed_owners": owners,
+        "selected_files": [selected[path] for path in sorted(selected)],
+        "excluded_files": excluded,
+        "counts": {"completed_owners": len(owners), "complete_documents": count, "selected_files": len(selected), "selected_bytes": sum(row["bytes"] for row in selected.values()), "excluded_files": len(excluded)},
+    }
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n")
+    print(json.dumps(result["counts"]))
+
+
+if __name__ == "__main__":
+    main()
