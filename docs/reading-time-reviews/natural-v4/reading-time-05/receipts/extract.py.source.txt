@@ -1,0 +1,31 @@
+from pathlib import Path
+import hashlib, json, subprocess
+from playwright.sync_api import sync_playwright
+root = Path('/workspace/tiny-perceptron-vlm')
+assignment_path = root/'outputs/natural-v4/review-plan/reading-time-current-assignments/reading-time-05.json'
+a = json.loads(assignment_path.read_text())
+out = root/'docs/reading-time-reviews/natural-v4/reading-time-05/receipts'
+records=[]
+with sync_playwright() as p:
+    browser=p.chromium.launch(executable_path='/usr/bin/chromium', args=['--no-sandbox'], headless=True)
+    page=browser.new_page(viewport={'width':1400,'height':1000})
+    for r in a['pages']:
+        url=a['preview']+r['page_id']+'.html'
+        response=page.goto(url,wait_until='domcontentloaded')
+        article=page.locator('article.md-content__inner')
+        record={'page_id':r['page_id'],'url':url,'http_status':response.status,'html_sha256':hashlib.sha256(response.body()).hexdigest(),'snapshot_sha256':hashlib.sha256((root/r['snapshot']).read_bytes()).hexdigest(),'output_text':article.locator('.output').all_inner_texts(),'rendered_code':article.locator('div.highlight').all_inner_texts(),'images':article.locator('img').evaluate_all('(xs)=>xs.map(x=>({src:x.src,alt:x.alt,complete:x.complete,width:x.naturalWidth,height:x.naturalHeight,in_cpu_output:!!x.closest(".output")}))'),'pinned_notebook_links':article.locator('a[href*="/blob/"]').evaluate_all('(xs)=>xs.map(x=>x.href)')}
+        records.append(record)
+        print(json.dumps({'page_id':r['page_id'],'status':record['http_status'],'outputs':len(record['output_text']),'images':record['images']},ensure_ascii=False))
+    browser.close()
+(out/'dom-reading.json').write_text(json.dumps(records,ensure_ascii=False,indent=2)+'\n')
+figures={k:v for r in a['pages'] for k,v in r['figures_sha256'].items()}
+render_records=[]
+for source,expected in figures.items():
+    target=out/(Path(source).stem+'.png')
+    command=['inkscape',str(root/source),'--export-type=png','--export-filename='+str(target)]
+    result=subprocess.run(command,text=True,capture_output=True)
+    record={'source':source,'source_sha256':hashlib.sha256((root/source).read_bytes()).hexdigest(),'expected_sha256':expected,'command':command,'exit_code':result.returncode,'stdout':result.stdout,'stderr':result.stderr,'render':str(target.relative_to(root))}
+    if target.exists():record['render_sha256']=hashlib.sha256(target.read_bytes()).hexdigest()
+    render_records.append(record)
+    print(json.dumps(record,ensure_ascii=False))
+(out/'figure-render.json').write_text(json.dumps(render_records,ensure_ascii=False,indent=2)+'\n')

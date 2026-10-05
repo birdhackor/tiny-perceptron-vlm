@@ -1,0 +1,158 @@
+# 用自己的 GPU 重做照片與中文問答微調
+
+<!-- 作者發布前核對並刪除此區。
+本稿預期正式位置 docs/natural-assistant/v4/TRAINING.md，相對連結按正式位置書寫。
+本稿是local CLI主路線，root填新實際配方/ASR選版/manifest pins後才可匿名端到端重做；不是正式重現已通過的宣告。
+1. 固定checkout與public-release code SHA，填一次新GPU設備/軟體/精度/實測記憶體/計時範圍，不引用v3 180steps/149.47s/5.23GiB。
+2. 模型保持Qwen/Qwen3-VL-2B-Instruct@89644892e4d85e24eaac8bacfd4f463576704203；ASR已按validation選turbo。LoRA q/v rank8 alpha16；validation-protocol允許保留base，總參數與實際更新數仍待root核新train輸出，不預填舊結果。
+3. 填所有 AUTHOR_*_COMMAND 的完整可複製指令，明寫steps/lr/gacc/pixels/tokens/seed/asr_variant/time limit；不讓正文露出待填變數。
+4. fetch_natural_data.py的v4 archive白名單已更新；root核新公開Git pin/manifest SHA，同DATA.md匿名核對後插入命令。
+5. 有效targets是實際最後助手回答＋模板後綴；prefix/mask與超長報錯已讀 source，仍需新資料token audit及新run完成證據。
+6. 新學習率可能是CLI允許的1e-4或3e-5，不憑舊實驗選值。新steps/選用checkpoint/finaltest/資源都從root最後固定結果。
+7. 本稿不揭露私人HF checkpoint path、內部帳本、批准或幾輪審查史；Modal只是另處GPU配置入口，不把目前專案作者憑證給學生當可用配套。
+-->
+
+試用成品時，公開清單告訴你最後選定的底座配置，以及是否加上 LoRA。重新訓練則從指定底座建立自己的候選修正，給它同一版練習題，再和原底座比較新題回答。這份指引帶你做後一件事：保留原模型，只更新語言注意力的 LoRA，照片、中文讀字及聊天題一起練習；驗證沒有支持改善時，可以保留底座。
+
+語音仍先由現成辨識器聽寫，本次不重新訓練它。真人錄音留給驗證兩站流程，因此不必把語音轉寫當成這次 LoRA 的訓練成果。理解範圍可先讀[20.5 的家族切分](../../../course/chapters/20.md#20.5)、[20.6 的修正分支](../../../course/chapters/20.md#20.6)與[20.7 的答案計分](../../../course/chapters/20.md#20.7)。
+
+以下使用 Linux、Python 3.12 與自己的 NVIDIA GPU，指令都在專案根目錄執行。需要另外預留安裝、下載與 GPU 運算時間；短 Python 概念例子不會代替這次實際微調。
+
+## 1. 先確認 GPU 環境
+
+依[學生操作指引](STUDENT.md)第 1、2 步取得程式、建立 `.venv-natural`，安裝 CUDA 12.8 的 PyTorch 與 torchvision 配套，再安裝 `requirements-natural.txt`。保留前面小實驗使用的 `.venv`，不在兩套環境之間混裝。
+
+訓練路線使用 bfloat16，先檢查設備：
+
+```bash
+.venv-natural/bin/python -c "import torch; print('GPU 可用：', torch.cuda.is_available()); print('支援 bfloat16：', torch.cuda.is_bf16_supported())"
+```
+
+兩項應為 True。如果找不到 GPU，先處理驅動與套件；如果換精度或圖片預算，就把它記成自己的另一份配方，再驗證結果。推論的小份 LoRA 檔很小，訓練仍須載入完整底座、保存梯度和更新器狀態，不能用檔案大小推算設備最低容量。
+
+<!-- AUTHOR_TRAIN_RESOURCE_BOX
+此處最多一個新run實測短框：GPU型號/VRAM、CPU RAM、Python/Torch配套、dtype、pixels/tokens/gacc、實際峰值的量測定義、訓練計時起止範圍、磁盤下載範圍。
+不照抄v3運行時間，不宣稱量測峰值是硬體最低容量，也不在本文複製完整能力總表。
+-->
+
+## 2. 取得固定資料，確認真正的資料目錄
+
+先依[資料說明](DATA.md)取得這一版的照片、OCR 與語音快照，並完成逐檔核對。它們解包到 `data/natural-v4`，題目由 `docs/natural-assistant/v4/manifest.json` 配對；來源、授權與修改另保留在包內及來源清單。
+
+<!-- AUTHOR_TRAIN_DATA_COMMAND
+插入與DATA.md一致的v4 --list/fetch/--verify命令，明寫新revision及manifest-sha256。
+下載目錄 data/natural-v4；不要用舊v3默認pin/archives。
+-->
+
+訓練讀 `rows` 中的 `train` 題目，驗證與最後測試分開保留。`audio_rows` 在這份微調中不進入更新器；FLEURS 檢查聽寫，AISHELL 問句再比較兩路聊天。錄音來源叫訓練集，也不會因此被這次訓練讀入。
+
+下載核對說明「資料與清單相同」，不能代替「答案寫得正確」。你若自行修改資料，請另存清單、素材與資料版本，避免改動教材固定答案；後面的 `--manifest` 與 `--data-root` 必須指向同一份配對資料。
+
+## 3. 準備底座，固定各個元件版本
+
+先下載正式配方使用的圖文底座與 ASR，保存模型準備紀錄。LoRA 將從固定底座新建，ASR 留給之後的轉寫驗證。它們分別有版本，不用「抓最新」代替原配方。
+
+<!-- AUTHOR_MODEL_PREPARE_COMMAND
+插入已核對的命令；目前實際parser字段：
+.venv-natural/bin/python scripts/natural_assistant.py prepare --output outputs/natural-my-v4/models --cache-dir .cache/natural-v4-models --model Qwen/Qwen3-VL-2B-Instruct --model-revision 89644892e4d85e24eaac8bacfd4f463576704203 --asr-variant AUTHOR_SELECTED_SMALL_OR_TURBO --device cuda --dtype bfloat16
+ASR已validation選turbo；此prepare命令用--asr-variant turbo並與public-release.json匹配。不要假定默認small會自動隨新版清單變turbo。
+-->
+
+完成後保留 `.cache/natural-v4-models`。後續命令的 `--local-files-only` 只使用這份本機快取，缺檔時停止，不暗中換版本。模型下載與訓練計時不同；準備好權重，只表示拿到指定零件，尚未更新任何參數。
+
+## 4. 保存配方，開始自己的新訓練
+
+使用 `outputs/natural-my-v4` 保存自己的工作。若這個名稱已用過，換成新的實驗名稱，並同步改後面的輸出與 adapter 路徑。先把完整命令保存為腳本，再執行，之後才知道用了哪種設定。
+
+<!-- AUTHOR_TRAIN_COMMAND
+插入已經執行核對的新v4訓練完整Bash block（可cat為outputs/natural-my-v4/train.sh），實際parser支持：
+.venv-natural/bin/python scripts/natural_assistant.py train --manifest docs/natural-assistant/v4/manifest.json --data-root data/natural-v4 --output outputs/natural-my-v4/train --cache-dir .cache/natural-v4-models --model Qwen/Qwen3-VL-2B-Instruct --model-revision 89644892e4d85e24eaac8bacfd4f463576704203 --asr-variant AUTHOR_SELECTED --device cuda --dtype bfloat16 --min-pixels AUTHOR_MIN_PIXELS --max-pixels AUTHOR_MAX_PIXELS --max-tokens AUTHOR_MAX_TOKENS --steps AUTHOR_TOTAL_UPDATES --learning-rate AUTHOR_RATE --lora-rank 8 --gradient-accumulation AUTHOR_ACCUMULATION --seed AUTHOR_SEED --checkpoint-every AUTHOR_SAVE_INTERVAL --max-seconds AUTHOR_SOFT_LIMIT --local-files-only
+若recipe archive候選，中途最多兩個 --checkpoint-steps increasing值，且不超過steps；學生正文只用正式配方，不揭露多輪lr歷史。
+-->
+
+LoRA 加在語言注意力的 q、v 投影，rank 為 8，alpha 為 16；底座仍參與前向計算，只有修正參數進入更新器。視覺底座與 ASR 不因這個步驟重新訓練。這種做法保留原權重，把可更新範圍縮小；能否維持舊用途並完成新用途，仍要在後面驗收。
+
+每道題都讀取問題、歷史與照片，直接計分的是最後助手回答及配套模板的結束部分。程式先核對提問編碼是完整對話的精確前綴，再遮住問題與歷史的直接代價；這就是「可以讀，但不要求抄成答案」的差別。輸入超出宣告長度時報錯，不偷偷切掉答案繼續訓練。
+
+步數指更新器真正改權重的次數。若每次累積多道題再更新，題目讀取次數會更多；讀到相同題目也不代表有更多獨立資料。訓練紀錄保存實際題目 ID、有效答案位置與已完成更新，讓這些數字可以回查。
+
+圖片預算與編碼長度限制每題的運算範圍，不是直接聲明「讀得懂多少中文字」。把圖片壓小可能省運算，也可能抹掉筆畫；需要改設定時，另存配方並重新驗證。時間上限會在更新前檢查，到時保存目前進度；模型載入、單次更新和存檔仍可能使整個命令超過這個軟上限。
+
+## 5. 檢查完成狀態；必要時從自己的檢查點續訓
+
+訓練結束後，先讀 `train/result.json` 的 `status`、`requested_steps` 與 `completed_steps`。只有完成所求更新，才稱完成這份訓練。代價下降是訓練訊號，還不是照片、讀字與聊天都通過的證據。
+
+輸出內容各有用途：
+
+| 路徑（省略 `outputs/natural-my-v4/`） | 用來做什麼 |
+| --- | --- |
+| `train/adapter/adapter_model.safetensors`、`train/adapter/adapter_config.json` | 載入修正權重及配對設定，進行推論。 |
+| `train/adapter/training_state.pt`、`train/adapter/training.json` | 保存更新器、隨機狀態與進度，搭配完整 adapter 目錄續訓。 |
+| `train/result.json`、`train/training.json` | 核對完成狀態、更新步數、有效答案位置與配方。 |
+| `train/provenance.json` | 核對底座、資料指紋及軟體配套。 |
+
+`optimizer_only_lora` 表示更新器範圍符合設定；修正張量的前後指紋檢查是否真的改變。凍結檢查讀取底座的一些披露樣本，不能把抽查說成二十億個數全部逐位比較。這些檢查證明執行方式，回答品質仍由驗收決定。
+
+遇到時間上限或中斷，先讀最近完整檢查點的 `completed_steps`，未保存的更新不能恢復。只在未到目標總步數時續訓，保持相同底座、資料、rank、累積方式、種子與學習率，並另開 `resumed` 輸出目錄。
+
+<!-- AUTHOR_RESUME_COMMAND
+填與上方同一recipe的完整train命令，額外 --adapter outputs/natural-my-v4/train/adapter、--output outputs/natural-my-v4/resumed。
+--steps仍目標總數，不是再增加相同步數。其它model/asr/pixels/tokens/gacc/lr/seed一致；新archive步驟只能大於已有completed_steps。
+-->
+
+若用了續訓，以下驗證與最後測試的 adapter 路徑都改成 `resumed/adapter`。公開試用小包只有推論需要的修正，不含更新器和進度，不能替你恢復這張訓練工作桌。
+
+## 6. 先驗證用途，再選定自己的版本
+
+用 `validation` 比較同一底座關閉與開啟 LoRA 的結果。圖片、題目、歷史、處理預算與生成設定相同，才能知道差別來自哪個候選。這一刻還不讀最後 `test`。
+
+<!-- AUTHOR_VALIDATION_COMMAND
+填核對完的新完整validation命令：同上model/asr/pixels/tokens/seed/cache/data配方，--adapter outputs/natural-my-v4/train/adapter --output outputs/natural-my-v4/validation --max-new-tokens AUTHOR_GENERATION_CAP --split validation --local-files-only --max-seconds AUTHOR_EVAL_LIMIT。
+若走resumed則adapter替換。不可照抄v3 base/adapter各64條生成固定數量；以requested/completed核本版。
+-->
+
+輸出保存 `generations-base.json`、adapter 對應的完整生成檔與 `result.json`；語音逐字稿另存 `transcripts.json`。先看是否完成全部所求題目，再按用途閱讀回答。僅保存部分結果，就不是整份驗證已完成。
+
+照片看物件、動作、關係和無根據新增；OCR 看逐字、正規化規則、換行與順序；聊天看請求和歷史條件。語音先比較逐字稿，再讀正確文字與真正 ASR 輸入的兩份回答。分開的判尺見[20.9–20.12](../../../course/chapters/20.md#20.9)，不拿關鍵字碰巧出現當成整段正確。
+
+選版前先約定哪些能力必須保留，以及可以接受哪些取捨。只看一個混合總分，可能讓讀字進步掩蓋聊天退步。候選按驗證判準決定，選定後保存權重、資料、生成設定與這次決定；教材作者的選版紀錄不能替代你自己跑出的結果。
+
+原底座也列在候選中；只有 LoRA 達到事前約定的改進與能力保留標準，才採用修正。轉寫比較已選好的 ASR 在各個圖文候選中保持相同，使用同一份實際逐字稿，不能把換 ASR 的改善當成微調的效果。
+
+## 7. 固定選定版本，再做最後測試
+
+確定不再改本版設定後，先保存指紋：
+
+```bash
+sha256sum \
+  outputs/natural-my-v4/train/adapter/adapter_model.safetensors \
+  outputs/natural-my-v4/train/adapter/adapter_config.json \
+  docs/natural-assistant/v4/manifest.json \
+  outputs/natural-my-v4/validation/result.json \
+  > outputs/natural-my-v4/chosen-before-test.sha256
+```
+
+上例以選用LoRA的情況保存指紋。若選的是自己的中途檢查點或續訓版，換成那份實際路徑；若保留底座，則保存底座版本、資料與驗證配置並在最後命令省略`--adapter`。同時保存已約定的判準與完整生成設定。指紋確定的是同一組檔案，回答能力仍須讀取最後結果。
+
+<!-- AUTHOR_FINAL_EVALUATION_COMMAND
+填完整evaluate --split test命令，除split與output outputs/natural-my-v4/final以外沿用凍結的model/asr/adapter/pixels/tokens/seed/generation/cache/data；不要換ASR或用test比較候選。
+-->
+
+最後報告保留完整回答、停止原因與評分範圍。正式摘要使用相同配套的完整結果；照片題數、OCR 區域數、錄音句數及助手回答數各有分母，不合成一個通用正確率。
+
+最後測試發現的不足，可以成為下一版的練習目標。若你已根據這些錯題更改資料或設定，它們就成了已知回歸題；下一版需要另一份尚未參與決策的最後考卷。這樣才能區分「修好了已知題」與「學會了新情境」。
+
+## 8. 使用自己的模型，或換一台 GPU 執行
+
+驗收後，可以用自己選定的配置開啟相同本機介面。採用修正時載入自己的 adapter，保留底座時省略它；兩種情況都配對自己固定的底座與 ASR，不讓教材的公開下載清單替新版本背書。
+
+<!-- AUTHOR_OWN_SERVE_COMMAND
+填actual scripts/natural_assistant.py serve --adapter STUDENT_CHOSEN_ADAPTER --output outputs/natural-my-v4/ui --cache-dir .cache/natural-v4-models --model/--model-revision/--asr-variant明寫 --device cuda --dtype bfloat16 --min-pixels/--max-pixels/--max-tokens/--max-new-tokens/--seed與驗收一致 --local-files-only。
+這條直接CLI目前不消費public-release.json，不能拿教材fetch_release --serve直接加載自訓新adapter。
+-->
+
+沒有自己的 GPU，可以按[GPU 環境指南](../../gpu-training.md)準備 Modal，再使用[自然助理工作流程](../../../.github/workflows/natural-assistant.yml)。底座、資料與驗收概念相同；遠端執行另需設定自己的運算服務與權重儲存。操作時明寫新版 manifest、配方與 ASR 選擇，別把工作流程的舊預設值當成本章正式配方。
+
+若卡在資料核對，先分清清單與 `--data-root`；若快取缺檔，先完成模型準備；若是記憶體不足，檢查設備、其他程序與本題大小。非有限代價、梯度或凍結樣本改變時，保留錯誤和輸出，這次不算完成訓練。驗證若只跑到部分題目，另存完整驗證後才選版。
+
+最後把模型版本、配方、資料來源、實際驗收與資源範圍寫進自己的能力卡，格式可參考[20.13](../../../course/chapters/20.md#20.13)。別人拿到你的 LoRA 時，才能知道它對應哪本原書、學過哪份練習，以及已確認哪些用途。

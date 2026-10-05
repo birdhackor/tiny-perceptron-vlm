@@ -1,0 +1,73 @@
+from pathlib import Path
+import hashlib, json
+root=Path('/workspace/tiny-perceptron-vlm')
+base=root/'docs/reading-time-reviews/natural-v4/reading-time-05'
+a_path=root/'outputs/natural-v4/review-plan/reading-time-current-assignments/reading-time-05.json'
+a=json.loads(a_path.read_text())
+records=json.loads((base/'receipts/dom-reading.json').read_text())
+judgments=json.loads((base/'receipts/manual-judgments.json').read_text())
+sha=lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
+assert a['source_version']=='160fd47dede5c2453c8a08dd535290ddfd0b915d'
+assert sha(root/a['inventory'])==a['inventory_sha256']
+assert [j[0] for j in judgments]==a['canonical_page_ids']==[r['page_id'] for r in records]
+assert len(judgments)==50 and len({j[0] for j in judgments})==50
+assert all(type(j[1]) is int and type(j[2]) is int and 0<j[1]<=j[2] for j in judgments)
+inv=json.loads((root/a['inventory']).read_text())
+inv_pages=inv['pages'] if isinstance(inv,dict) else inv
+if isinstance(inv_pages,dict):inv_pages=list(inv_pages.values())
+inv_by_id={r['page_id']:r for r in inv_pages}
+bindings=[]
+notebooks=[]
+for s,r in zip(a['pages'],records):
+    snapshot=root/s['snapshot']
+    original=root/s['source']
+    assert sha(snapshot)==s['source_sha256']==r['snapshot_sha256']
+    assert original.read_bytes().count(snapshot.read_bytes())==1
+    assert r['http_status']==200
+    assert all(sha(root/path)==expected for path,expected in s['figures_sha256'].items())
+    current=inv_by_id[s['page_id']]
+    assert current['source_sha256']==s['source_sha256'] and current['figures_sha256']==s['figures_sha256']
+    bindings.append({key:s[key] for key in ('page_id','source','selector','snapshot','source_sha256','figures_sha256')} | {'current_source_file_sha256':sha(original),'current_source_exact_slice_occurrences':1,'html_sha256':r['html_sha256']})
+    if s['kind']=='chapter_introduction':
+        assert not r['output_text'] and not r['rendered_code']
+        continue
+    path=root/'outputs/notebooks'/s['page_id'].split('.')[0]/(s['page_id']+'.ipynb')
+    notebook=json.loads(path.read_text())
+    outputs=[output for cell in notebook['cells'] for output in cell.get('outputs',[])]
+    assert not [output for output in outputs if output['output_type']=='error']
+    streams=[''.join(output['text']) if isinstance(output['text'],list) else output['text'] for output in outputs if output['output_type']=='stream' and output['name']=='stdout']
+    visible=[x.removeprefix('實際執行結果 · CPU').strip() for x in r['output_text']]
+    joined='\n'.join(streams).strip()
+    assert all(x in joined for x in visible), s['page_id']
+    assert len(visible)==1
+    executed=[cell['execution_count'] for cell in notebook['cells'] if cell['cell_type']=='code' and cell.get('execution_count') is not None]
+    assert executed and all(n>0 for n in executed)
+    assert any('/blob/'+a['source_version']+'/notebooks/' in link for link in r['pinned_notebook_links'])
+    notebooks.append({'page_id':s['page_id'],'notebook':str(path.relative_to(root)),'notebook_sha256':sha(path),'actual_execution_counts':executed,'browser_output_blocks':len(visible),'cpu_stdout_matches_notebook':True,'error_output_count':0,'output_image_count':sum(i['in_cpu_output'] for i in r['images'])})
+(base/'receipts/current-bindings.json').write_text(json.dumps(bindings,ensure_ascii=False,indent=2)+'\n')
+(base/'receipts/notebook-bindings.json').write_text(json.dumps(notebooks,ensure_ascii=False,indent=2)+'\n')
+views={
+'packing':'Viewed all four query rows: document B cannot read document A; each document retains causal within-document order.',
+'causal':'Viewed lower-triangular allowed cells including the diagonal; query zero reads one key, final query reads four.',
+'architecture_online_softmax':'Followed first-block 1.5/25 through old-statistic ×0.5 and addition to 1.75/42.5, yielding 24.2857.',
+'flash_allocated_memory':'Compared four bars with common 65.00 MiB grey baseline and separate orange/green increments; total forward/backward peaks remain labelled.',
+'architecture_quantize_grid':'Traced both input rows through division by 0.5, nearest integer, and restoration; the original offsets of 0.2 are lost.',
+'architecture_int4_packing':'Followed crossed low/high nibble arrows for -8,-1 and 0,1; decoded bytes 112 and 152 preserve the original value order.',
+'qat_training_deployment':'Read FP32 master weights, recurrent forward rounding/STE updates, and final separate packed4 deployment; FP32 computation and storage/training-memory limits remain distinct.',
+'architecture_distillation_temperature':'Compared full 100% bars at T=1,2,4 with candidate colors fixed; candidate 4 stays first while candidates 3/5 gain probability.',
+'architecture_vocab_alignment':'Followed cat-to-cat and dog-to-dog crossed arrows despite different ID positions; reordering student ID1 then ID0 restores teacher order.',
+'architecture_modal_answer_alignment':'Matched teacher query15/16/17 to student query3/4/5 by predicted A0/A1/A2; first answer is predicted before its input position.',
+'capstone_resources':'Read shared rules plus all four stored expert boxes, with only experts 1 and 3 active for this token; storage, work and dispatch remain separate.',
+'capstone_pipeline':'Followed A→B→C snapshots and dashed DPO comparison branch D; read dataset freeze and joint recommendation alongside repeated capability checks.',
+'capstone_tool_loop':'Followed model request, validated runtime calculation, and second model-generated DIRECT:3; read the separate action/parameters/execution/final-answer checks.'
+}
+rendered=json.loads((base/'receipts/figure-render.json').read_text())
+view_receipts=[]
+for render in rendered:
+    name=Path(render['source']).stem
+    assert render['exit_code']==0 and render['source_sha256']==render['expected_sha256']
+    assert sha(root/render['render'])==render['render_sha256']
+    view_receipts.append({key:render[key] for key in ('source','source_sha256','render','render_sha256')} | {'view_tool':'tools.view_image, image content personally examined','view_order':len(view_receipts)+1,'observation':views[name]})
+assert len(view_receipts)==13
+(base/'receipts/figure-views.json').write_text(json.dumps(view_receipts,ensure_ascii=False,indent=2)+'\n')
+print(json.dumps({'assigned_and_manual_pages':len(judgments),'current_exact_source_slice_bindings':len(bindings),'executed_cpu_notebooks_matched':len(notebooks),'unique_rendered_and_personally_viewed_figures':len(view_receipts),'inventory_sha256':sha(root/a['inventory']),'cpu_output_images':sum(n['output_image_count'] for n in notebooks),'validation':'pass'},ensure_ascii=False))

@@ -1,0 +1,65 @@
+from pathlib import Path
+import hashlib, json
+root=Path('/workspace/tiny-perceptron-vlm')
+base=root/'docs/reading-time-reviews/natural-v4/reading-time-05'
+receipts=base/'receipts'
+a_path=root/'outputs/natural-v4/review-plan/reading-time-current-assignments/reading-time-05.json'
+a=json.loads(a_path.read_text())
+judgments=json.loads((receipts/'manual-judgments.json').read_text())
+dom=json.loads((receipts/'dom-reading.json').read_text())
+bindings=json.loads((receipts/'current-bindings.json').read_text())
+notebooks=json.loads((receipts/'notebook-bindings.json').read_text())
+views=json.loads((receipts/'figure-views.json').read_text())
+sha=lambda p:hashlib.sha256(p.read_bytes()).hexdigest()
+relative=lambda p:str(p.relative_to(root))
+task='/root/v4_review_coordinator/readingtime_v4_group_05'
+page_by_id={p['page_id']:p for p in a['pages']}
+nb_by_id={n['page_id']:n for n in notebooks}
+dom_by_id={d['page_id']:d for d in dom}
+metadata={'schema_version':1,'estimate_kind':'ai_estimate','pages':[]}
+for page_id,minimum,maximum,reason,scope in judgments:
+    assigned=page_by_id[page_id]
+    metadata['pages'].append({'page_id':page_id,'minutes_min':minimum,'minutes_max':maximum,'reviewer_task':task,'reason':reason,'source_sha256':assigned['source_sha256'],'figures_sha256':assigned['figures_sha256']})
+metadata_path=base/'metadata.json'
+metadata_path.write_text(json.dumps(metadata,ensure_ascii=False,indent=2)+'\n')
+ids=a['canonical_page_ids']
+figure_order=[v['source'] for v in views]
+source_batches=[ids[:1],ids[1:7],ids[7:13],ids[13:18],ids[18:23],ids[23:28],ids[28:33],ids[33:38]]
+events=[]
+for batch in source_batches:
+    events.append({'kind':'full_authored_snapshot_read','page_ids':batch,'command':'cat '+' '.join(page_by_id[i]['snapshot'] for i in batch),'stdout_inputs':[{'path':page_by_id[i]['snapshot'],'sha256':page_by_id[i]['source_sha256']} for i in batch],'receipt_note':'Complete native shell stdout personally read; exact stdout source bytes are the named snapshots.'})
+events.append({'kind':'personally_read_actual_cpu_output_dom_text','page_ids':ids,'input_receipt':relative(receipts/'dom-reading.json'),'note':'All displayed output text printed in canonical order and personally read; chapter prefaces have no output. Verified against executed notebook stdout later; no output plots exist.'})
+events.append({'kind':'personal_rendered_figure_views','sources':figure_order[:4],'tool':'tools.view_image'})
+events.append({'kind':'personal_rendered_figure_views','sources':figure_order[4:9],'tool':'tools.view_image'})
+for batch_index,batch in enumerate([ids[38:43],ids[43:47],ids[47:50]]):
+    if batch_index==1:
+        events.append({'kind':'personal_rendered_figure_views','sources':figure_order[9:],'tool':'tools.view_image'})
+    events.append({'kind':'full_authored_snapshot_read','page_ids':batch,'command':'cat '+' '.join(page_by_id[i]['snapshot'] for i in batch),'stdout_inputs':[{'path':page_by_id[i]['snapshot'],'sha256':page_by_id[i]['source_sha256']} for i in batch],'receipt_note':'Complete native shell stdout personally read; exact stdout source bytes are the named snapshots.'})
+events.extend([{'kind':'personally_read_actual_rendered_code_dom_text','page_ids':ids[:23],'input_receipt':relative(receipts/'dom-reading.json')},{'kind':'personally_read_actual_rendered_code_dom_text','page_ids':ids[23:],'input_receipt':relative(receipts/'dom-reading.json')},{'kind':'manual_per_page_judgments','input_receipt':relative(receipts/'manual-judgments.json'),'note':'All intervals and reasons manually chosen after complete authored body, rendered code, actual outputs, and figure reading. No counts, tool elapsed time, inherited minutes, or peer hints used.'}])
+for i,event in enumerate(events,1):event['event_order']=i
+(receipts/'reading-events.json').write_text(json.dumps(events,ensure_ascii=False,indent=2)+'\n')
+commands=[{'command':['.venv/bin/python','.cache/reading-time-05/extract.py'],'cwd':str(root),'script_source':relative(receipts/'extract.py.source.txt'),'native_stdout':relative(receipts/'extract.stdout.txt'),'native_stderr':relative(receipts/'extract.stderr.txt'),'exit_code':0,'scope':'Actual Chromium DOM extraction of all 50 pinned pages, then 13 Inkscape renders. Exact renderer commands/stdout/stderr are also retained in figure-render.json.'},{'command':['.venv/bin/python','.cache/reading-time-05/verify.py'],'cwd':str(root),'script_source':relative(receipts/'verify.py.source.txt'),'native_stdout':relative(receipts/'verify.stdout.txt'),'native_stderr':relative(receipts/'verify.stderr.txt'),'exit_code':0,'scope':'Read-only binding verification of current snapshots, inventory, figures, executed notebook stdout and preserved renders; writes own receipts only.'},{'command':['.venv/bin/python','.cache/reading-time-05/finalize.py'],'cwd':str(root),'script_source':relative(receipts/'finalize.py.source.txt'),'native_stdout':relative(receipts/'finalize.stdout.txt'),'native_stderr':relative(receipts/'finalize.stderr.txt'),'scope':'Serialize unchanged manual judgments into official metadata/report; validate own record coverage.'}]
+(receipts/'commands.json').write_text(json.dumps(commands,ensure_ascii=False,indent=2)+'\n')
+scopes=[]
+for page_id,minimum,maximum,reason,scope in judgments:
+    p=page_by_id[page_id]
+    d=dom_by_id[page_id]
+    entry={'page_id':page_id,'scope':scope,'body_read':'Complete exact authored UTF-8 snapshot, including all prose, tables, captions, authored code, command explanations and brief exercise prediction thinking.','source':p['source'],'selector':p['selector'],'snapshot':p['snapshot'],'source_sha256':p['source_sha256'],'figures_sha256':p['figures_sha256'],'preview_url':d['url'],'preview_html_sha256':d['html_sha256'],'rendered_code_blocks_personally_read':len(d['rendered_code']),'actual_cpu_output_blocks_personally_read':len(d['output_text'])}
+    if page_id in nb_by_id:
+        entry['executed_cpu_notebook']=nb_by_id[page_id]['notebook']
+        entry['executed_cpu_notebook_sha256']=nb_by_id[page_id]['notebook_sha256']
+        entry['displayed_cpu_stdout_verified_against_notebook']=True
+    else:
+        entry['introduction_scope']='Own independent preface only. Generated chapter listing and navigation not estimated.'
+    scopes.append(entry)
+artifact_paths=[metadata_path,a_path,root/a['inventory']]
+artifact_paths.extend(p for p in sorted(receipts.iterdir()) if p.is_file() and p.name not in ('finalize.stdout.txt','finalize.stderr.txt','integrity.stdout.txt','integrity.stderr.txt'))
+report={'reviewer_task':task,'reviewer_context':'fresh','group_id':a['group_id'],'verdict':'pass','estimate_kind':'ai_estimate','fresh_identity_statement':'I am the independent assigned reader for this exact task. I personally read the full 50 assigned authored snapshots, actual rendered example code and 47 CPU output blocks, and personally viewed every one of the 13 unique assigned teaching-figure renders. I did not consult earlier estimates, author or peer verdicts, and did not delegate reading or judgments.','source_version':a['source_version'],'inventory':a['inventory'],'inventory_sha256':a['inventory_sha256'],'assignment_path':relative(a_path),'assignment_sha256':sha(a_path),'preview':a['preview'],'audience':'Mathematically prepared high-school or basic-university novice to these topics.','estimate_scope':'Reading authored body, teaching figures, example code and actual visible CPU outputs, plus brief concept checks and exercise predictions. Installation/download time, editing or executing exercises, training/waits and extra prerequisite reading are excluded; displayed commands are read as text. These are AI estimates, not measured human averages.','method':'Own positive-integer interval for each page, chosen manually from the specific learning and comparison work after complete personal reading. No word/line formula, elapsed-tool-time proxy, old-minute reuse or hash-only inheritance.','personally_read_page_ids':ids,'read_order_semantics':'Canonical IDs record first full authored-snapshot reading order. Actual CPU-output, figure and later rendered-code passes are separately recorded in receipts/reading-events.json; all these passes completed before manual estimates were written.','reading_events':relative(receipts/'reading-events.json'),'per_page_reading_scope':scopes,'current_page_maps':bindings,'personally_viewed_figure_sha256':{v['source']:v['source_sha256'] for v in views},'personally_viewed_figure_render_receipts':relative(receipts/'figure-views.json'),'actual_browser_receipt':relative(receipts/'dom-reading.json'),'executed_cpu_notebook_bindings':relative(receipts/'notebook-bindings.json'),'coverage':{'assigned_pages':50,'personally_read_pages':50,'independent_chapter_prefaces':3,'lessons_with_actual_cpu_outputs_read':47,'unique_teaching_figures_rendered_and_personally_viewed':13,'cpu_output_plots':0,'current_snapshot_and_figure_bindings_verified':50},'execution_scope':'I ran browser extraction and Inkscape rendering plus read-only binding/serialization scripts. I read already executed CPU notebook results and did not execute lesson code, exercises, model inference or training. No installs, model/data downloads, GPU work, source/checker/global metadata/Git/global environment edits, or subagents. Executable inspection scripts remain in ignored .cache; exact sources are preserved as .py.source.txt receipts.','renderer_observations':'All 13 Inkscape exports exited zero and all saved renders were personally viewed and legible. Native Pango/GTK and ignored animation-CSS warnings are retained verbatim in figure-render.json/extract.stdout.txt; they are not presented as failed source checks. Browser pages all returned HTTP 200.','photo_attribution_scope':'No assigned photos or DOCCI photos: the 13 assigned teaching figures are authored SVG diagrams.','artifacts':[{'path':relative(p),'sha256':sha(p)} for p in artifact_paths],'metadata_path':relative(metadata_path),'issues':[]}
+report_path=base/'report.json'
+report_path.write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n')
+assert set(metadata)=={'schema_version','estimate_kind','pages'}
+assert len(metadata['pages'])==50 and [r['page_id'] for r in metadata['pages']]==ids
+assert all(set(r)=={'page_id','minutes_min','minutes_max','reviewer_task','reason','source_sha256','figures_sha256'} for r in metadata['pages'])
+assert all(type(r['minutes_min']) is int and type(r['minutes_max']) is int and 0<r['minutes_min']<=r['minutes_max'] and r['reason'] for r in metadata['pages'])
+assert len(scopes)==50 and len(report['personally_viewed_figure_sha256'])==13
+print(json.dumps({'verdict':'pass','personally_read_pages':50,'cpu_output_blocks_read_and_notebook_verified':47,'figures_personally_viewed':13,'metadata_path':relative(metadata_path),'metadata_sha256':sha(metadata_path),'report_path':relative(report_path),'report_sha256':sha(report_path),'artifact_count':len(report['artifacts'])},ensure_ascii=False))

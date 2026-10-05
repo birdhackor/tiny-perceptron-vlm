@@ -1,0 +1,38 @@
+from pathlib import Path
+import json,hashlib,re
+ROOT=Path('/workspace/tiny-perceptron-vlm')
+BASE=ROOT/'docs/reading-time-reviews/natural-v4/reading-time-02'
+ASSIGN=ROOT/'outputs/natural-v4/review-plan/reading-time-current-assignments/reading-time-02.json'
+a=json.loads(ASSIGN.read_text()); m=json.loads((BASE/'metadata.json').read_text()); report=json.loads((BASE/'report.json').read_text()); dom=json.loads((BASE/'receipts/rendered-pages.json').read_text()); figures=json.loads((BASE/'receipts/figure-renders.json').read_text())
+def sha(p): return hashlib.sha256(p.read_bytes()).hexdigest()
+assert m['schema_version']==1 and m['estimate_kind']=='ai_estimate'
+assert [x['page_id'] for x in m['pages']]==a['canonical_page_ids']==report['personally_read_page_ids']==[x['page_id'] for x in dom]
+assert len(m['pages'])==51 and len(report['per_page_reading_scope'])==51
+assert sha(ROOT/a['inventory'])==a['inventory_sha256']
+for source in set(x['source'] for x in a['pages']):
+ text=(ROOT/source).read_text()
+ headings=list(re.finditer(r'^## ([A-Z\d]+\.\d+) .+$',text,re.M))
+ slices={h[1]:text[h.start():(headings[i+1].start() if i+1<len(headings) else len(text))] for i,h in enumerate(headings)}
+ for page in [p for p in a['pages'] if p['source']==source]:
+  live=re.split(r'^## ',text,maxsplit=1,flags=re.M)[0] if page['selector']=='before-first-section' else slices[page['page_id']]
+  assert hashlib.sha256(live.encode()).hexdigest()==page['source_sha256'],page['page_id']
+  assert (ROOT/page['snapshot']).read_bytes()==live.encode(),page['page_id']
+for rec,p,d in zip(m['pages'],a['pages'],dom):
+ assert type(rec['minutes_min']) is int and type(rec['minutes_max']) is int and 0<rec['minutes_min']<=rec['minutes_max']
+ assert rec['reviewer_task']==report['reviewer_task']
+ assert rec['reason'] and rec['source_sha256']==p['source_sha256'] and rec['figures_sha256']==p['figures_sha256']
+ assert d['status']==200 and not d['errors']
+ if p['kind']=='lesson': assert len(d['cpu_outputs'])==1 and 'CPU' in d['cpu_outputs'][0]
+ else: assert not d['cpu_outputs']
+ for f,h in p['figures_sha256'].items(): assert sha(ROOT/f)==h
+assert len(figures)==7 and all(f['returncode']==0 for f in figures)
+assert set(report['personally_viewed_figure_sha256'])==set(f['source'] for f in figures)
+report['artifacts']=[{'path':str(p.relative_to(ROOT)),'sha256':sha(p)} for p in sorted((BASE/'receipts').iterdir()) if p.name!='validation-native-output.txt']
+report['artifacts'].append({'path':str((BASE/'metadata.json').relative_to(ROOT)),'sha256':sha(BASE/'metadata.json')})
+(BASE/'report.json').write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n')
+print('PASS: 51 manual estimates, exact canonical order, 51 live authored slices/snapshots, 48 actual saved CPU output blocks, 7 current figure sources and successful personally viewed renders.')
+print('Total assigned interval:',sum(x['minutes_min'] for x in m['pages']),sum(x['minutes_max'] for x in m['pages']))
+print('metadata.json SHA256',sha(BASE/'metadata.json'))
+print('report.json SHA256',sha(BASE/'report.json'))
+print('Original browser extraction byte-preserved:',sha(Path('/tmp/readingtime02_extract.py'))==sha(BASE/'receipts/extraction.py.source.txt'))
+print('Original validation script byte-preserved:',sha(Path('/tmp/readingtime02_finalize.py'))==sha(BASE/'receipts/validation.py.source.txt'))

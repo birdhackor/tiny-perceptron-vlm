@@ -1,0 +1,26 @@
+import json, hashlib
+from pathlib import Path
+from playwright.sync_api import sync_playwright
+root = Path('/workspace/tiny-perceptron-vlm')
+out = root / 'docs/reading-time-reviews/natural-v4/reading-time-04/receipts'
+a = json.loads((root / 'outputs/natural-v4/review-plan/reading-time-current-assignments/reading-time-04.json').read_text())
+records = []
+with sync_playwright() as p:
+    browser = p.chromium.launch(executable_path='/usr/bin/chromium', args=['--no-sandbox'])
+    page = browser.new_page(viewport={'width':1280, 'height':960})
+    for item in a['pages']:
+        source = root / item['snapshot']
+        source_hash = hashlib.sha256(source.read_bytes()).hexdigest()
+        assert source_hash == item['source_sha256'], item['page_id']
+        response = page.goto(a['preview'] + item['page_id'] + '.html', wait_until='networkidle')
+        assert response.status == 200, item['page_id']
+        article = page.locator('article.md-content__inner')
+        body = article.inner_text()
+        outputs = article.locator('.output').all_inner_texts()
+        images = article.locator('img').evaluate_all('(imgs) => imgs.map(i => ({src:i.getAttribute("src"),alt:i.alt,complete:i.complete,width:i.naturalWidth,height:i.naturalHeight}))')
+        receipt = out / (item['page_id'] + '.render.txt')
+        receipt.write_text('URL: ' + page.url + '\nHTTP: ' + str(response.status) + '\nSource SHA256: ' + source_hash + '\n\n' + body + '\n', encoding='utf-8')
+        records.append({'page_id':item['page_id'],'url':page.url,'http_status':response.status,'snapshot':item['snapshot'],'source_sha256':source_hash,'render_receipt':str(receipt.relative_to(root)), 'render_sha256':hashlib.sha256(receipt.read_bytes()).hexdigest(),'cpu_output_blocks':outputs,'images':images})
+        print(item['page_id'], 'HTTP', response.status, 'CPU blocks', len(outputs), 'figures', len(images), flush=True)
+    browser.close()
+(out / 'browser-extraction.json').write_text(json.dumps({'browser':'/usr/bin/chromium','launch_args':['--no-sandbox'],'viewport':{'width':1280,'height':960},'records':records}, ensure_ascii=False, indent=2)+'\n')

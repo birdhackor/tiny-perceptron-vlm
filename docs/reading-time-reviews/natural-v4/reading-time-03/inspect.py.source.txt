@@ -1,0 +1,42 @@
+from pathlib import Path
+import hashlib
+import json
+import sys
+from playwright.sync_api import sync_playwright
+
+ROOT = Path('/workspace/tiny-perceptron-vlm')
+OWN = ROOT / 'docs/reading-time-reviews/natural-v4/reading-time-03'
+ASSIGNMENT = ROOT / 'outputs/natural-v4/review-plan/reading-time-current-assignments/reading-time-03.json'
+assignment = json.loads(ASSIGNMENT.read_text())
+requested = sys.argv[1:]
+pages = {x['page_id']: x for x in assignment['pages']}
+OWN.mkdir(parents=True, exist_ok=True)
+receipts = []
+with sync_playwright() as p:
+    browser = p.chromium.launch(executable_path='/usr/bin/chromium', args=['--no-sandbox'])
+    page = browser.new_page(viewport={'width': 1440, 'height': 1000})
+    for page_id in requested:
+        entry = pages[page_id]
+        source = (ROOT / entry['snapshot']).read_bytes()
+        source_sha = hashlib.sha256(source).hexdigest()
+        assert source_sha == entry['source_sha256'], (page_id, source_sha)
+        url = assignment['preview'] + page_id + '.html'
+        response = page.goto(url, wait_until='domcontentloaded')
+        assert response.status == 200, (page_id, response.status)
+        article = page.locator('article')
+        rendered_code = article.locator('.language-python pre').all_text_contents()
+        outputs = article.locator('.output').all_text_contents()
+        imgs = article.locator('.output img').evaluate_all('(els) => els.map(x=>({src:x.src,width:x.naturalWidth,height:x.naturalHeight,alt:x.alt}))')
+        receipt = {'page_id':page_id, 'url':url, 'http_status':response.status,
+                   'snapshot':entry['snapshot'], 'source_sha256':source_sha,
+                   'html_sha256':hashlib.sha256(response.body()).hexdigest(),
+                   'rendered_python_code':rendered_code, 'actual_cpu_outputs':outputs,
+                   'output_images':imgs}
+        receipts.append(receipt)
+        print('\n===== COMPLETE AUTHORED SNAPSHOT ' + page_id + ' =====\n' + source.decode())
+        print('===== ACTUAL RENDERED CPU OUTPUTS ' + page_id + ' =====')
+        print(json.dumps(outputs, ensure_ascii=False, indent=2))
+        print('OUTPUT IMAGES: ' + json.dumps(imgs, ensure_ascii=False))
+    browser.close()
+batch = requested[0] + '--' + requested[-1]
+(OWN / ('browser-' + batch + '.json')).write_text(json.dumps(receipts, ensure_ascii=False, indent=2) + '\n')

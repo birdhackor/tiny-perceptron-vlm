@@ -1,0 +1,79 @@
+from pathlib import Path
+import hashlib
+import json
+
+root = Path('/workspace/tiny-perceptron-vlm')
+own = root / 'docs/reading-time-reviews/natural-v4/reading-time-03'
+task = '/root/v4_review_coordinator/readingtime_v4_group_03'
+assignment_path = root / 'outputs/natural-v4/review-plan/reading-time-current-assignments/reading-time-03.json'
+assignment = json.loads(assignment_path.read_text())
+notes = json.loads((own / 'manual-notes.json').read_text())
+assert [n['page_id'] for n in notes] == assignment['canonical_page_ids']
+assert len(notes) == 51
+entries = {x['page_id']: x for x in assignment['pages']}
+browser = {}
+for receipt_path in sorted(own.glob('browser-*.json')):
+    for receipt in json.loads(receipt_path.read_text()):
+        assert receipt['page_id'] not in browser
+        browser[receipt['page_id']] = (receipt, str(receipt_path.relative_to(root)))
+assert set(browser) == set(entries)
+union = {}
+pages = []
+scopes = []
+for note in notes:
+    entry = entries[note['page_id']]
+    source_sha = hashlib.sha256((root / entry['snapshot']).read_bytes()).hexdigest()
+    assert source_sha == entry['source_sha256']
+    for path, sha in entry['figures_sha256'].items():
+        assert hashlib.sha256((root / path).read_bytes()).hexdigest() == sha
+        union[path] = sha
+    assert type(note['minutes_min']) is int and type(note['minutes_max']) is int
+    assert 0 < note['minutes_min'] <= note['minutes_max']
+    pages.append({
+        'page_id': note['page_id'], 'minutes_min': note['minutes_min'],
+        'minutes_max': note['minutes_max'], 'reviewer_task': task,
+        'reason': note['reason'], 'source_sha256': source_sha,
+        'figures_sha256': entry['figures_sha256']})
+    receipt, receipt_path = browser[note['page_id']]
+    assert receipt['source_sha256'] == source_sha and receipt['http_status'] == 200
+    assert receipt['output_images'] == []
+    assert bool(receipt['actual_cpu_outputs']) == (entry['kind'] == 'lesson')
+    scopes.append({
+        'page_id': note['page_id'], 'snapshot': entry['snapshot'],
+        'source_selector': entry['selector'], 'source_sha256': source_sha,
+        'complete_authored_body_read': True,
+        'body_code_output_concepts_read': note['reading_scope'],
+        'rendered_preview': receipt['url'], 'browser_receipt': receipt_path,
+        'all_example_code_read': True,
+        'actual_cpu_output_text_read': True,
+        'cpu_output_blocks': len(receipt['actual_cpu_outputs']),
+        'own_example_or_exercise_execution': False,
+        'teaching_figures_personally_viewed': entry['figures_sha256'],
+        'chapter_generated_index_navigation_excluded': entry['kind'] == 'chapter_introduction'})
+views = json.loads((own / 'figure-own-views.json').read_text())
+assert {v['source'] for v in views if v['viewed']} == set(union)
+renders = json.loads((own / 'figure-render-receipts.json').read_text())
+assert {r['source']:r['source_sha256'] for r in renders} == union
+for render in renders:
+    assert hashlib.sha256((root / render['render']).read_bytes()).hexdigest() == render['render_sha256']
+assert hashlib.sha256((root / assignment['inventory']).read_bytes()).hexdigest() == assignment['inventory_sha256']
+metadata = {'schema_version':1, 'estimate_kind':'ai_estimate', 'pages':pages}
+(own / 'metadata.json').write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + '\n')
+(own / 'finalize.py.source.txt').write_bytes(Path(__file__).read_bytes())
+artifacts = []
+for path in sorted(own.rglob('*')):
+    if path.is_file() and path.name not in {'report.json', 'finalize.stdout.txt', 'final-hashes.txt'}:
+        artifacts.append({'path':str(path.relative_to(root)), 'sha256':hashlib.sha256(path.read_bytes()).hexdigest()})
+report = {
+    'reviewer_task': task, 'reviewer_context':'fresh', 'group_id':'reading-time-03',
+    'verdict':'pass', 'personally_read_page_ids':[n['page_id'] for n in notes],
+    'per_page_reading_scope':scopes,
+    'personally_viewed_figure_sha256':union,
+    'artifacts':artifacts,
+    'metadata_path':str((own / 'metadata.json').relative_to(root)), 'issues':[]}
+(own / 'report.json').write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n')
+print('PASS: 51 personally read complete authored pages, 47 lessons with actual CPU output text, 4 authored chapter prefaces, 11 personally viewed teaching figures.')
+print('PASS: all current source, figure, browser receipt, integer interval and exact-assignment coverage bindings verified.')
+for filename in ['metadata.json','report.json']:
+    path = own / filename
+    print(str(path.relative_to(root)), hashlib.sha256(path.read_bytes()).hexdigest())

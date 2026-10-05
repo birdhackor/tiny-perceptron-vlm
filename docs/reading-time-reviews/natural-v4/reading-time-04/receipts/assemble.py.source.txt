@@ -1,0 +1,74 @@
+import json, hashlib
+from pathlib import Path
+root = Path('/workspace/tiny-perceptron-vlm')
+base = root / 'docs/reading-time-reviews/natural-v4/reading-time-04'
+receipts = base / 'receipts'
+task = '/root/v4_review_coordinator/readingtime_v4_group_04'
+a = json.loads((root / 'outputs/natural-v4/review-plan/reading-time-current-assignments/reading-time-04.json').read_text())
+judgments = [json.loads(x) for x in (receipts/'manual-judgments.jsonl').read_text().splitlines()]
+assert len(judgments) == 51
+assert [j['page_id'] for j in judgments] == a['canonical_page_ids']
+browser = json.loads((receipts/'browser-extraction.json').read_text())['records']
+assert [p['page_id'] for p in browser] == a['canonical_page_ids']
+assert all(p['http_status'] == 200 for p in browser)
+assert all(i['complete'] and i['width'] > 0 for p in browser for i in p['images'])
+assert sum(len(p['cpu_output_blocks']) for p in browser) == 48
+current = json.loads((receipts/'current-bindings.json').read_text())
+assert [p['page_id'] for p in current['pages']] == a['canonical_page_ids']
+figures = json.loads((receipts/'figure-rendering.json').read_text())
+assert len(figures) == 14
+view_order = ['fsdd_speaker_holdout','natural_shared_chat','multimodal_preference_pair','multimodal_dpo_direction','ppo_clip','ppo_roles','ppo_dpo_routes','rope','rotation_components','normalization','dispatch','architecture_dispatch_example','cache','architecture_gqa_cache']
+assert [Path(f['source']).stem for f in figures] == view_order
+pages = []
+scopes = []
+for assignment, judgment, render, binding in zip(a['pages'], judgments, browser, current['pages']):
+    for field in ['minutes_min','minutes_max']:
+        assert type(judgment[field]) is int and judgment[field] > 0
+    assert judgment['minutes_max'] >= judgment['minutes_min']
+    assert judgment['reason'] and judgment['scope']
+    pages.append({k:judgment[k] for k in ['page_id','minutes_min','minutes_max','reason']} | {'reviewer_task':task,'source_sha256':binding['source_sha256'],'figures_sha256':binding['figures_sha256']})
+    scopes.append({'page_id':judgment['page_id'],'source':assignment['source'],'selector':assignment['selector'],'snapshot':assignment['snapshot'],'source_sha256':binding['source_sha256'],'figures_sha256':binding['figures_sha256'],'source_reading':'complete','rendered_article_reading':'complete','scope':judgment['scope'],'render_url':render['url'],'render_receipt':render['render_receipt'],'render_sha256':render['render_sha256'],'cpu_output_blocks_personally_read':len(render['cpu_output_blocks']),'figures_personally_viewed':list(binding['figures_sha256'])})
+metadata = {'schema_version':1,'estimate_kind':'ai_estimate','pages':pages}
+metadata_path = base/'metadata.json'
+metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2)+'\n')
+artifacts = [{'path':str(p.relative_to(root)),'sha256':hashlib.sha256(p.read_bytes()).hexdigest()} for p in sorted(receipts.iterdir()) if p.is_file()]
+artifacts.append({'path':str(metadata_path.relative_to(root)),'sha256':hashlib.sha256(metadata_path.read_bytes()).hexdigest()})
+report = {
+    'reviewer_task':task,
+    'reviewer_context':'fresh',
+    'group_id':'reading-time-04',
+    'verdict':'pass',
+    'verdict_scope':'Complete independent AI reading-time contribution for the assigned current 51 pages; not a claim that every demonstrated model succeeds at its task.',
+    'fresh_identity':{'actual_task':task,'role':'Independent reader, not author','context':'Fresh dispatched reader for the frozen assignment; no earlier estimates, author review verdicts or peer review verdicts were opened.'},
+    'task_request_path':str((receipts/'task-request.txt').relative_to(root)),
+    'reader_contract':'outputs/natural-v4/review-plan/reading-time-reader-contract.md',
+    'assignment':'outputs/natural-v4/review-plan/reading-time-current-assignments/reading-time-04.json',
+    'assignment_sha256':current['assignment_sha256'],
+    'source_version':a['source_version'],
+    'source_version_provenance':'Version supplied by the frozen assignment; every assigned original current authored slice was independently recomputed and matched byte-for-byte to its snapshot and assigned SHA256.',
+    'inventory':a['inventory'],
+    'inventory_sha256':a['inventory_sha256'],
+    'preview':a['preview'],
+    'audience':'Mathematically prepared high-school or basic-university reader new to these topics.',
+    'method':'Personally read every full authored snapshot, every complete Chromium-rendered assigned article and example code, all actual visible CPU result blocks, and each unique referenced teaching figure. Manually assigned each positive integer interval from its concepts, mathematical/code tracing, diagrams, output interpretation and brief thinking. No word/line counts, formulas, tool durations or inherited estimates were used.',
+    'included_time':['authored body reading','teaching figure viewing','understanding example code and actual outputs','brief pauses to think'],
+    'excluded_time':['installation','downloads','modifying or executing exercises','training wait','extra prerequisite reading','generated navigation/index material'],
+    'personally_read_page_ids':[j['page_id'] for j in judgments],
+    'personally_read_page_count':len(judgments),
+    'reading_order_note':'Snapshots were read in assignment order in batches, followed by the corresponding complete saved Chromium DOM/code/CPU outputs; each batch was personally judged. Figure views occurred in the explicit order below. Generated chapter indexes were observed in DOM but excluded from the estimate.',
+    'per_page_reading_scope':scopes,
+    'personally_viewed_figure_sha256':{f['source']:f['source_sha256'] for f in figures},
+    'personally_viewed_figures':[{'source':f['source'],'source_sha256':f['source_sha256'],'render':f['render'],'render_sha256':f['render_sha256'],'view_method':'Native Inkscape PNG render opened personally with view_image','view_order':i+1} for i,f in enumerate(figures)],
+    'actual_render_coverage':{'browser':'Installed /usr/bin/chromium through Playwright','launch_args':['--no-sandbox'],'article_selector':'article.md-content__inner','page_count':51,'http_200_count':51,'cpu_output_blocks_personally_read':48,'unique_figures_personally_viewed':14,'per_page_screenshots':0},
+    'source_cpu_output_reading_vs_execution':'Read actual visible CPU outputs from the pinned executed preview. This reviewer executed only read/DOM extraction, native figure rendering, current-byte verification and contribution assembly helpers, not lesson/example/exercise code, training or benchmarks.',
+    'current_byte_binding':'All 51 current authored source slices and complete local figure maps match the frozen snapshots/assignment; current-bindings.json and raw stdout preserve the verification.',
+    'metadata_path':str(metadata_path.relative_to(root)),
+    'metadata_sha256':hashlib.sha256(metadata_path.read_bytes()).hexdigest(),
+    'artifacts':artifacts,
+    'issues':[],
+    'validation':'Official load_estimates accepted all 51 own records with require_complete=True; report coverage and finalized artifact bindings passed. The first artifact check failed on an in-progress redirected assembly stdout digest; the failure traceback is preserved and finalization ordering was corrected.',
+    'nonblocking_observations':['Inkscape returned status 0 for all fourteen figure renders, with library wrapping and unsupported CSS animation/background warnings preserved in raw stdout. The personally opened static teaching diagrams were readable and contained their labeled content.','Several lessons explicitly report failed or partial task results. Reasons and reading scopes preserve these distinctions rather than treating lower training loss, nonzero gradients or EOS completion as successful task capability.'],
+    'repository_changes':'Only this reviewer\'s own contribution and receipts under docs/reading-time-reviews/natural-v4/reading-time-04 were written; no textbook, checker, official minutes, global journal, Git, product or environment changes were made.'
+}
+(base/'report.json').write_text(json.dumps(report, ensure_ascii=False, indent=2)+'\n')
+print(json.dumps({'page_count':51,'cpu_output_blocks':48,'unique_figures':14,'metadata_path':str(metadata_path.relative_to(root)),'metadata_sha256':report['metadata_sha256'],'report_path':str((base/'report.json').relative_to(root)),'report_sha256':hashlib.sha256((base/'report.json').read_bytes()).hexdigest(),'verdict':report['verdict']}, indent=2))

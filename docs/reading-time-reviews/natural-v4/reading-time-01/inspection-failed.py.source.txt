@@ -1,0 +1,46 @@
+from pathlib import Path
+from hashlib import sha256
+import json, platform, xml.etree.ElementTree as ET
+from playwright.sync_api import sync_playwright
+root=Path.cwd()
+out=root/'docs/reading-time-reviews/natural-v4/reading-time-01'
+assignment_path=root/'outputs/natural-v4/review-plan/reading-time-current-assignments/reading-time-01.json'
+a=json.loads(assignment_path.read_text())
+records=[]; figures={}; events=[]
+def emit(s):
+ print(s,flush=True);events.append(s)
+emit('Inspection: source snapshot bytes, pinned executed-preview article DOM, rendered code/CPU outputs, and local assigned SVG browser renders. No lesson code executed by this reader.')
+emit('Python '+platform.python_version()+'; Chromium /usr/bin/chromium; Playwright launch --no-sandbox; article selector article.md-content__inner')
+with sync_playwright() as pw:
+ browser=pw.chromium.launch(executable_path='/usr/bin/chromium',args=['--no-sandbox'])
+ page=browser.new_page(viewport={'width':1280,'height':900})
+ for item in a['pages']:
+  pid=item['page_id']; snap=root/item['snapshot']; source=snap.read_bytes(); source_hash=sha256(source).hexdigest()
+  assert source_hash==item['source_sha256'],pid
+  url=a['preview']+pid+'.html';response=page.goto(url,wait_until='networkidle')
+  assert response.status==200,(pid,response.status)
+  article=page.locator('article.md-content__inner')
+  assert article.count()==1,pid
+  imgs=article.locator('img').evaluate_all('(els)=>els.map(e=>({src:e.getAttribute("src"),alt:e.alt,complete:e.complete,naturalWidth:e.naturalWidth,naturalHeight:e.naturalHeight}))')
+  assert all(i['complete'] and i['naturalWidth'] for i in imgs),pid
+  text=article.inner_text()
+  pres=article.locator('pre').evaluate_all('(els)=>els.map(e=>({text:e.innerText,parentClass:e.parentElement.className,parentText:e.parentElement.innerText}))')
+  records.append({'page_id':pid,'snapshot':item['snapshot'],'source_sha256':source_hash,'url':url,'http_status':response.status,'document_title':page.title(),'article_text':text,'rendered_pre_blocks':pres,'images':imgs,'figures_sha256':item['figures_sha256']})
+  emit(pid+': source SHA matched; HTTP 200; article and '+str(len(pres))+' rendered pre blocks extracted; '+str(len(imgs))+' loaded image(s).')
+  for figure,expected in item['figures_sha256'].items():
+   if figure in figures:continue
+   fp=root/figure;raw=fp.read_bytes();actual=sha256(raw).hexdigest();assert actual==expected,figure
+   svg=ET.fromstring(raw)
+   metadata=[ET.tostring(x,encoding='unicode') for x in svg.iter() if x.tag.split('}')[-1]=='metadata']
+   png=out/(fp.stem+'.png')
+   vp=browser.new_page(viewport={'width':1400,'height':1000})
+   vp.goto(fp.as_uri(),wait_until='load')
+   vp.locator('svg').screenshot(path=str(png))
+   vp.close()
+   figures[figure]={'source_sha256':actual,'source_svg_metadata':metadata,'browser_render':str(png.relative_to(root)),'browser_render_sha256':sha256(png.read_bytes()).hexdigest(),'referenced_page_ids':[p['page_id'] for p in a['pages'] if figure in p['figures_sha256']]}
+   emit('SVG render '+figure+': source SHA matched; metadata retained in figure-render-receipts.json; PNG '+str(png.relative_to(root)))
+ browser.close()
+(out/'rendered-reading-inputs.json').write_text(json.dumps(records,ensure_ascii=False,indent=2)+'\n')
+(out/'figure-render-receipts.json').write_text(json.dumps(figures,ensure_ascii=False,indent=2)+'\n')
+(out/'inspection.stdout.txt').write_text('\n'.join(events)+'\n')
+(out/'inspection-command.txt').write_text('.venv/bin/python docs/reading-time-reviews/natural-v4/reading-time-01/_inspect.py\nAfter execution, copied exact script bytes to inspection.py.source.txt and removed the original .py.\n')

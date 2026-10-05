@@ -1,0 +1,46 @@
+from pathlib import Path
+import json, hashlib, subprocess
+from playwright.sync_api import sync_playwright
+ROOT=Path('/workspace/tiny-perceptron-vlm')
+OUT=ROOT/'docs/reading-time-reviews/natural-v4/reading-time-02/receipts'
+ASSIGN=ROOT/'outputs/natural-v4/review-plan/reading-time-current-assignments/reading-time-02.json'
+a=json.loads(ASSIGN.read_text())
+def sha(p): return hashlib.sha256(p.read_bytes()).hexdigest()
+print('Extraction only: rendered body/code and existing saved CPU outputs, no examples executed.',flush=True)
+print('assignment_sha256',sha(ASSIGN),flush=True)
+records=[]
+with sync_playwright() as play:
+ browser=play.chromium.launch(executable_path='/usr/bin/chromium',args=['--no-sandbox'])
+ page=browser.new_page(viewport={'width':1280,'height':1000})
+ for x in a['pages']:
+  record={k:x[k] for k in ('page_id','source','selector','source_sha256','figures_sha256','snapshot')}
+  record['snapshot_sha256']=sha(ROOT/x['snapshot'])
+  record['url']=a['preview']+x['page_id']+'.html'
+  try:
+   response=page.goto(record['url'],wait_until='domcontentloaded',timeout=30000)
+   article=page.locator('article.md-content__inner')
+   article.wait_for()
+   record['status']=response.status
+   record['rendered_text']=article.inner_text()
+   record['rendered_text_sha256']=hashlib.sha256(record['rendered_text'].encode()).hexdigest()
+   record['code_blocks']=article.locator('div.highlight pre').all_inner_texts()
+   record['cpu_outputs']=article.locator('div.output').all_inner_texts()
+   record['figure_browser_status']=article.locator('img').evaluate_all('(imgs) => imgs.map(i => ({src:i.getAttribute("src"),alt:i.alt,complete:i.complete,naturalWidth:i.naturalWidth,naturalHeight:i.naturalHeight}))')
+   record['errors']=[]
+  except Exception as e:
+   record['errors']=[repr(e)]
+  records.append(record)
+  print(x['page_id'],'HTTP',record.get('status'),'code_blocks',len(record.get('code_blocks',[])),'saved_cpu_output_blocks',len(record.get('cpu_outputs',[])),'errors',record['errors'],flush=True)
+ browser.close()
+(OUT/'rendered-pages.json').write_text(json.dumps(records,ensure_ascii=False,indent=2)+'\n')
+figures={k:v for x in a['pages'] for k,v in x['figures_sha256'].items()}
+views=[]
+for source,expected in figures.items():
+ destination=OUT/(Path(source).stem+'.png')
+ command=['inkscape',str(ROOT/source),'--export-type=png','--export-filename='+str(destination)]
+ r=subprocess.run(command,capture_output=True,text=True)
+ views.append({'source':source,'source_sha256':sha(ROOT/source),'expected_source_sha256':expected,'render_path':str(destination.relative_to(ROOT)),'command':command,'returncode':r.returncode,'stdout':r.stdout,'stderr':r.stderr,'render_sha256':sha(destination) if destination.exists() else None})
+ print('FIGURE',source,'returncode',r.returncode,'source_match',sha(ROOT/source)==expected,flush=True)
+ if r.stderr: print(r.stderr,end='',flush=True)
+(OUT/'figure-renders.json').write_text(json.dumps(views,ensure_ascii=False,indent=2)+'\n')
+print('Extraction complete. Actual personal reading and actual viewing occur afterward.',flush=True)
