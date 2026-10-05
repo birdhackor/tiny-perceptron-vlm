@@ -40,6 +40,7 @@
 - [逐節易讀性審閱進度](review-progress.json)：列出實際派出的讀者、當前判定、逐段閱讀紀錄與修正後的複查；此表不代表技術或銜接審閱已通過。
 - [逐節正確性查證進度](factual-review-progress.json)：記錄獨立審閱者、原始證據、必要修正及原審閱者的複查。停止或撤回的任務保留為歷史，不計入目前通過的小節；此表也不代表前後銜接已完成。
 - [正確性審閱交接](factual-round-handoff.md)：309 節查證與原讀者回查完成；保留完整檢查及修正歷史，另列尚未逐頁查證的公開參考頁。
+- [前後銜接審閱進度](continuity/progress.json)：六位新的讀者實際分組閱讀全部 321 個公開頁面；圖解另在桌機與手機正文確認。進行中的紀錄不代表全書已通過。
 - [獨立 CPU kernel 執行紀錄](verification/cpu-kernels-20261005/execution-retention-audit.json)：283 份 Notebook、652 個程式 cell 已實際執行，零失敗；保存執行前輸入指紋與原驗證結果。這只驗證程式執行與版本，不代替教材正確性、易讀性或模型能力驗收。
 
 本輪審閱方法依 repo 的 [clear-tutorial skill](../../.agents/skills/clear-tutorial/SKILL.md) 與 [分段閱讀流程](../../.agents/skills/clear-tutorial/references/review-protocol.md)。較早的審閱紀錄保留作歷史，不以修改指紋冒充新審閱。
