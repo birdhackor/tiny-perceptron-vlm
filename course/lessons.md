@@ -1,44 +1,44 @@
 # 全部小節
 
-每節可獨立開啟，所需背景在正文提供具體連結。需要時查[基礎暖身](first-steps.md)，也可從[閱讀指南](README.md)挑一條路線。
+每節聚焦一個問題，網站與Notebook使用同一份正文。需要時查[基礎暖身](first-steps.md)，也可從[閱讀指南](README.md)挑一條路線。
 
 | 小節 | 正文 | Notebook |
 | --- | --- | --- |
-| 1.1 文字怎麼變成數字？ | [閱讀](../course/chapters/01.md#1.1) | [開啟](../notebooks/01/1.1.ipynb) |
-| 1.2 記住資料等於學會嗎？ | [閱讀](../course/chapters/01.md#1.2) | [開啟](../notebooks/01/1.2.ipynb) |
-| 1.3 模型到底在猜什麼？ | [閱讀](../course/chapters/01.md#1.3) | [開啟](../notebooks/01/1.3.ipynb) |
-| 1.4 不看上下文能怎麼猜？ | [閱讀](../course/chapters/01.md#1.4) | [開啟](../notebooks/01/1.4.ipynb) |
-| 1.5 前一個字提供什麼資訊？ | [閱讀](../course/chapters/01.md#1.5) | [開啟](../notebooks/01/1.5.ipynb) |
-| 1.6 如何用參數列示預測偏好？ | [閱讀](../course/chapters/01.md#1.6) | [開啟](../notebooks/01/1.6.ipynb) |
-| 1.7 分數怎麼變成機率？ | [閱讀](../course/chapters/01.md#1.7) | [開啟](../notebooks/01/1.7.ipynb) |
-| 1.8 猜錯要付出多少代價？ | [閱讀](../course/chapters/01.md#1.8) | [開啟](../notebooks/01/1.8.ipynb) |
-| 1.9 梯度代表多敏感？ | [閱讀](../course/chapters/01.md#1.9) | [開啟](../notebooks/01/1.9.ipynb) |
-| 1.10 影響怎麼穿過多個運算？ | [閱讀](../course/chapters/01.md#1.10) | [開啟](../notebooks/01/1.10.ipynb) |
-| 1.11 參數往哪裡改？ | [閱讀](../course/chapters/01.md#1.11) | [開啟](../notebooks/01/1.11.ipynb) |
-| 1.12 更新一次有什麼效果？ | [閱讀](../course/chapters/01.md#1.12) | [開啟](../notebooks/01/1.12.ipynb) |
-| 1.13 第二次 backward 為什麼梯度變大？ | [閱讀](../course/chapters/01.md#1.13) | [開啟](../notebooks/01/1.13.ipynb) |
-| 1.14 如何接著寫下去？ | [閱讀](../course/chapters/01.md#1.14) | [開啟](../notebooks/01/1.14.ipynb) |
-| 1.15 同一模型為什麼會寫出不同答案？ | [閱讀](../course/chapters/01.md#1.15) | [開啟](../notebooks/01/1.15.ipynb) |
-| 2.1 ID 怎麼變成可學習的特徵？ | [閱讀](../course/chapters/02.md#2.1) | [開啟](../notebooks/02/2.1.ipynb) |
-| 2.2 怎麼同時看前面幾個字？ | [閱讀](../course/chapters/02.md#2.2) | [開啟](../notebooks/02/2.2.ipynb) |
-| 2.3 怎麼混合上下文特徵？ | [閱讀](../course/chapters/02.md#2.3) | [開啟](../notebooks/02/2.3.ipynb) |
-| 2.4 為什麼需要非線性？ | [閱讀](../course/chapters/02.md#2.4) | [開啟](../notebooks/02/2.4.ipynb) |
-| 2.5 記憶範圍怎麼影響預測？ | [閱讀](../course/chapters/02.md#2.5) | [開啟](../notebooks/02/2.5.ipynb) |
-| 3.1 怎麼彙整多個位置？ | [閱讀](../course/chapters/03.md#3.1) | [開啟](../notebooks/03/3.1.ipynb) |
-| 3.2 權重能由內容決定嗎？ | [閱讀](../course/chapters/03.md#3.2) | [開啟](../notebooks/03/3.2.ipynb) |
-| 3.3 查詢與被查詢為什麼分開？ | [閱讀](../course/chapters/03.md#3.3) | [開啟](../notebooks/03/3.3.ipynb) |
-| 3.4 找到位置後取回什麼？ | [閱讀](../course/chapters/03.md#3.4) | [開啟](../notebooks/03/3.4.ipynb) |
-| 3.5 分數為什麼需要縮放？ | [閱讀](../course/chapters/03.md#3.5) | [開啟](../notebooks/03/3.5.ipynb) |
-| 3.6 能不能偷看答案？ | [閱讀](../course/chapters/03.md#3.6) | [開啟](../notebooks/03/3.6.ipynb) |
-| 3.7 能同時找不同關聯嗎？ | [閱讀](../course/chapters/03.md#3.7) | [開啟](../notebooks/03/3.7.ipynb) |
-| 4.1 怎麼知道字的順序？ | [閱讀](../course/chapters/04.md#4.1) | [開啟](../notebooks/04/4.1.ipynb) |
-| 4.2 怎麼保留原本的資訊？ | [閱讀](../course/chapters/04.md#4.2) | [開啟](../notebooks/04/4.2.ipynb) |
-| 4.3 各位置的數值尺度怎麼控制？ | [閱讀](../course/chapters/04.md#4.3) | [開啟](../notebooks/04/4.3.ipynb) |
-| 4.4 混合位置後怎麼處理特徵？ | [閱讀](../course/chapters/04.md#4.4) | [開啟](../notebooks/04/4.4.ipynb) |
-| 4.5 一層模型怎麼組成？ | [閱讀](../course/chapters/04.md#4.5) | [開啟](../notebooks/04/4.5.ipynb) |
-| 4.6 隱藏向量怎麼變成下一字的分數？ | [閱讀](../course/chapters/04.md#4.6) | [開啟](../notebooks/04/4.6.ipynb) |
-| 4.7 一次訓練多個位置怎麼對齊答案？ | [閱讀](../course/chapters/04.md#4.7) | [開啟](../notebooks/04/4.7.ipynb) |
-| 4.8 增加深度改變了什麼？ | [閱讀](../course/chapters/04.md#4.8) | [開啟](../notebooks/04/4.8.ipynb) |
+| 1.1 文字怎麼變成可還原的編號？ | [閱讀](../course/chapters/01.md#1.1) | [開啟](../notebooks/01/1.1.ipynb) |
+| 1.2 怎樣留下真正沒練過的題目？ | [閱讀](../course/chapters/01.md#1.2) | [開啟](../notebooks/01/1.2.ipynb) |
+| 1.3 「猜下一字」該配哪個答案？ | [閱讀](../course/chapters/01.md#1.3) | [開啟](../notebooks/01/1.3.ipynb) |
+| 1.4 完全不讀前文，能用什麼猜法？ | [閱讀](../course/chapters/01.md#1.4) | [開啟](../notebooks/01/1.4.ipynb) |
+| 1.5 知道前一字，怎樣改變下一字的機率？ | [閱讀](../course/chapters/01.md#1.5) | [開啟](../notebooks/01/1.5.ipynb) |
+| 1.6 怎樣把接字偏好存成可調的數字？ | [閱讀](../course/chapters/01.md#1.6) | [開啟](../notebooks/01/1.6.ipynb) |
+| 1.7 候選分數怎麼變成機率？ | [閱讀](../course/chapters/01.md#1.7) | [開啟](../notebooks/01/1.7.ipynb) |
+| 1.8 怎樣用正確答案評分這次猜法？ | [閱讀](../course/chapters/01.md#1.8) | [開啟](../notebooks/01/1.8.ipynb) |
+| 1.9 參數微動時，代價會改多少？ | [閱讀](../course/chapters/01.md#1.9) | [開啟](../notebooks/01/1.9.ipynb) |
+| 1.10 參數的影響怎樣穿過兩段計算？ | [閱讀](../course/chapters/01.md#1.10) | [開啟](../notebooks/01/1.10.ipynb) |
+| 1.11 很多參數各自該往哪邊動？ | [閱讀](../course/chapters/01.md#1.11) | [開啟](../notebooks/01/1.11.ipynb) |
+| 1.12 真的更新一次，代價會怎樣？ | [閱讀](../course/chapters/01.md#1.12) | [開啟](../notebooks/01/1.12.ipynb) |
+| 1.13 沒更新參數，第二次梯度為什麼變大？ | [閱讀](../course/chapters/01.md#1.13) | [開啟](../notebooks/01/1.13.ipynb) |
+| 1.14 下一字怎樣接成一段新文字？ | [閱讀](../course/chapters/01.md#1.14) | [開啟](../notebooks/01/1.14.ipynb) |
+| 1.15 參數不動，選字規則怎樣改變輸出？ | [閱讀](../course/chapters/01.md#1.15) | [開啟](../notebooks/01/1.15.ipynb) |
+| 2.1 每字的一排可調數字，為什麼能幫忙猜下一字？ | [閱讀](../course/chapters/02.md#2.1) | [開啟](../notebooks/02/2.1.ipynb) |
+| 2.2 三個位置怎樣一起送進猜字計算？ | [閱讀](../course/chapters/02.md#2.2) | [開啟](../notebooks/02/2.2.ipynb) |
+| 2.3 一條長卡怎樣混成新的特徵？ | [閱讀](../course/chapters/02.md#2.3) | [開啟](../notebooks/02/2.3.ipynb) |
+| 2.4 為什麼多接線性配方仍不夠？ | [閱讀](../course/chapters/02.md#2.4) | [開啟](../notebooks/02/2.4.ipynb) |
+| 2.5 視窗多長，才把必要線索交給模型？ | [閱讀](../course/chapters/02.md#2.5) | [開啟](../notebooks/02/2.5.ipynb) |
+| 3.1 幾個位置的資訊，怎樣按比例混在一起？ | [閱讀](../course/chapters/03.md#3.1) | [開啟](../notebooks/03/3.1.ipynb) |
+| 3.2 能不能根據當前需求，改變讀取比例？ | [閱讀](../course/chapters/03.md#3.2) | [開啟](../notebooks/03/3.2.ipynb) |
+| 3.3 同一個位置，為什麼要有查詢與匹配兩份表示？ | [閱讀](../course/chapters/03.md#3.3) | [開啟](../notebooks/03/3.3.ipynb) |
+| 3.4 找到位置後，實際取回的是什麼？ | [閱讀](../course/chapters/03.md#3.4) | [開啟](../notebooks/03/3.4.ipynb) |
+| 3.5 匹配特徵越多，為什麼要除以平方根？ | [閱讀](../course/chapters/03.md#3.5) | [開啟](../notebooks/03/3.5.ipynb) |
+| 3.6 整段一起算，怎樣禁止讀後面的答案？ | [閱讀](../course/chapters/03.md#3.6) | [開啟](../notebooks/03/3.6.ipynb) |
+| 3.7 幾種讀法怎樣並行，再交回同一位置？ | [閱讀](../course/chapters/03.md#3.7) | [開啟](../notebooks/03/3.7.ipynb) |
+| 4.1 同一個字放不同位置，怎樣提供不同線索？ | [閱讀](../course/chapters/04.md#4.1) | [開啟](../notebooks/04/4.1.ipynb) |
+| 4.2 新計算怎樣加回去，又保留已有表示？ | [閱讀](../course/chapters/04.md#4.2) | [開啟](../notebooks/04/4.2.ipynb) |
+| 4.3 每位置的一排數字，怎樣先整理尺度？ | [閱讀](../course/chapters/04.md#4.3) | [開啟](../notebooks/04/4.3.ipynb) |
+| 4.4 讀完前文後，每位置自己的特徵怎樣加工？ | [閱讀](../course/chapters/04.md#4.4) | [開啟](../notebooks/04/4.4.ipynb) |
+| 4.5 注意力、FFN與殘差怎樣接成一層？ | [閱讀](../course/chapters/04.md#4.5) | [開啟](../notebooks/04/4.5.ipynb) |
+| 4.6 每位置的八個特徵，怎樣變成候選字分數？ | [閱讀](../course/chapters/04.md#4.6) | [開啟](../notebooks/04/4.6.ipynb) |
+| 4.7 一次算整段時，答案該怎樣對齊？ | [閱讀](../course/chapters/04.md#4.7) | [開啟](../notebooks/04/4.7.ipynb) |
+| 4.8 多一層，是多了什麼計算與成本？ | [閱讀](../course/chapters/04.md#4.8) | [開啟](../notebooks/04/4.8.ipynb) |
 | 5.1 訓練迴圈真的正常嗎？ | [閱讀](../course/chapters/05.md#5.1) | [開啟](../notebooks/05/5.1.ipynb) |
 | 5.2 一次看多少例子？ | [閱讀](../course/chapters/05.md#5.2) | [開啟](../notebooks/05/5.2.ipynb) |
 | 5.3 更新方向怎麼累積？ | [閱讀](../course/chapters/05.md#5.3) | [開啟](../notebooks/05/5.3.ipynb) |
@@ -83,19 +83,23 @@
 | 7.16 舊例子混回去有用嗎？ | [閱讀](../course/chapters/07.md#7.16) | [開啟](../notebooks/07/7.16.ipynb) |
 | 7.17 為什麼先大量讀文章，再練習當助理？ | [閱讀](../course/chapters/07.md#7.17) | [開啟](../notebooks/07/7.17.ipynb) |
 | 7.18 後訓練有哪些不同教法？ | [閱讀](../course/chapters/07.md#7.18) | [開啟](../notebooks/07/7.18.ipynb) |
-| 8.1 「有靈性」如何觀察？ | [閱讀](../course/chapters/08.md#8.1) | [開啟](../notebooks/08/8.1.ipynb) |
-| 8.2 換 prompt 能改變什麼？ | [閱讀](../course/chapters/08.md#8.2) | [開啟](../notebooks/08/8.2.ipynb) |
-| 8.3 權重能學到穩定風格嗎？ | [閱讀](../course/chapters/08.md#8.3) | [開啟](../notebooks/08/8.3.ipynb) |
-| 8.4 能依情境切換風格嗎？ | [閱讀](../course/chapters/08.md#8.4) | [開啟](../notebooks/08/8.4.ipynb) |
-| 8.5 有個性也能遵守限制嗎？ | [閱讀](../course/chapters/08.md#8.5) | [開啟](../notebooks/08/8.5.ipynb) |
-| 8.6 遇到模糊指令怎麼辦？ | [閱讀](../course/chapters/08.md#8.6) | [開啟](../notebooks/08/8.6.ipynb) |
-| 8.7 文筆更活潑等於洞察更深嗎？ | [閱讀](../course/chapters/08.md#8.7) | [開啟](../notebooks/08/8.7.ipynb) |
-| 8.8 只更新少量參數能改風格嗎？ | [閱讀](../course/chapters/08.md#8.8) | [開啟](../notebooks/08/8.8.ipynb) |
-| 8.9 同一個基模能切換不同風格版本嗎？ | [閱讀](../course/chapters/08.md#8.9) | [開啟](../notebooks/08/8.9.ipynb) |
-| 8.10 評分者真的分得出目標風格嗎？ | [閱讀](../course/chapters/08.md#8.10) | [開啟](../notebooks/08/8.10.ipynb) |
-| 8.11 裁判會因答案排列而改判嗎？ | [閱讀](../course/chapters/08.md#8.11) | [開啟](../notebooks/08/8.11.ipynb) |
-| 8.12 裁判只是喜歡長答案嗎？ | [閱讀](../course/chapters/08.md#8.12) | [開啟](../notebooks/08/8.12.ipynb) |
-| 8.13 同名 LoRA 參數代表同樣更新幅度嗎？ | [閱讀](../course/chapters/08.md#8.13) | [開啟](../notebooks/08/8.13.ipynb) |
+| 7.19 回答能寫多長，和前文能放多少，有何不同？ | [閱讀](../course/chapters/07.md#7.19) | [開啟](../notebooks/07/7.19.ipynb) |
+| 8.1 「有趣的回答」要符合什麼要求？ | [閱讀](../course/chapters/08.md#8.1) | [開啟](../notebooks/08/8.1.ipynb) |
+| 8.2 只改提示，回答為什麼可能改變？ | [閱讀](../course/chapters/08.md#8.2) | [開啟](../notebooks/08/8.2.ipynb) |
+| 8.3 示範回答如何把寫法教進權重？ | [閱讀](../course/chapters/08.md#8.3) | [開啟](../notebooks/08/8.3.ipynb) |
+| 8.4 同一模型如何依要求切換寫法？ | [閱讀](../course/chapters/08.md#8.4) | [開啟](../notebooks/08/8.4.ipynb) |
+| 8.5 答案正確，為什麼JSON仍可能不合格？ | [閱讀](../course/chapters/08.md#8.5) | [開啟](../notebooks/08/8.5.ipynb) |
+| 8.6 缺少哪一項資訊時，應先追問？ | [閱讀](../course/chapters/08.md#8.6) | [開啟](../notebooks/08/8.6.ipynb) |
+| 8.7 風格分數提高，代表內容更好嗎？ | [閱讀](../course/chapters/08.md#8.7) | [開啟](../notebooks/08/8.7.ipynb) |
+| 8.8 保留原權重，能只學一條小修正嗎？ | [閱讀](../course/chapters/08.md#8.8) | [開啟](../notebooks/08/8.8.ipynb) |
+| 8.9 切回一套修正，需要恢復哪些東西？ | [閱讀](../course/chapters/08.md#8.9) | [開啟](../notebooks/08/8.9.ipynb) |
+| 8.10 自動裁判與清楚的判準一致嗎？ | [閱讀](../course/chapters/08.md#8.10) | [開啟](../notebooks/08/8.10.ipynb) |
+| 8.11 交換位置後，裁判仍選同一份內容嗎？ | [閱讀](../course/chapters/08.md#8.11) | [開啟](../notebooks/08/8.11.ipynb) |
+| 8.12 裁判偏好的是新資訊，還是更多字？ | [閱讀](../course/chapters/08.md#8.12) | [開啟](../notebooks/08/8.12.ipynb) |
+| 8.13 同名設定，為什麼可能給不同修正幅度？ | [閱讀](../course/chapters/08.md#8.13) | [開啟](../notebooks/08/8.13.ipynb) |
+| 8.14 答案對了，為什麼仍沒完成要求？ | [閱讀](../course/chapters/08.md#8.14) | [開啟](../notebooks/08/8.14.ipynb) |
+| 8.15 同一份材料，如何依不同要求作答？ | [閱讀](../course/chapters/08.md#8.15) | [開啟](../notebooks/08/8.15.ipynb) |
+| 8.16 範圍、格式與結束，如何各自教與檢查？ | [閱讀](../course/chapters/08.md#8.16) | [開啟](../notebooks/08/8.16.ipynb) |
 | 9.1 想讓模型學到哪些行為？ | [閱讀](../course/chapters/09.md#9.1) | [開啟](../notebooks/09/9.1.ipynb) |
 | 9.2 不知道時怎麼回答？ | [閱讀](../course/chapters/09.md#9.2) | [開啟](../notebooks/09/9.2.ipynb) |
 | 9.3 如何避免一味附和？ | [閱讀](../course/chapters/09.md#9.3) | [開啟](../notebooks/09/9.3.ipynb) |
@@ -106,70 +110,78 @@
 | 9.8 學到規則還是記住字句？ | [閱讀](../course/chapters/09.md#9.8) | [開啟](../notebooks/09/9.8.ipynb) |
 | 9.9 最大 softmax 機率很高就可靠嗎？ | [閱讀](../course/chapters/09.md#9.9) | [開啟](../notebooks/09/9.9.ipynb) |
 | 9.10 信心和正確率對得上嗎？ | [閱讀](../course/chapters/09.md#9.10) | [開啟](../notebooks/09/9.10.ipynb) |
-| 10.1 圖片是什麼 tensor？ | [閱讀](../course/chapters/10.md#10.1) | [開啟](../notebooks/10/10.1.ipynb) |
-| 10.2 圖片怎麼切成序列？ | [閱讀](../course/chapters/10.md#10.2) | [開啟](../notebooks/10/10.2.ipynb) |
-| 10.3 Patch 怎麼變成向量？ | [閱讀](../course/chapters/10.md#10.3) | [開啟](../notebooks/10/10.3.ipynb) |
-| 10.4 怎麼保留圖片的空間位置？ | [閱讀](../course/chapters/10.md#10.4) | [開啟](../notebooks/10/10.4.ipynb) |
-| 10.5 怎麼學到可用的視覺特徵？ | [閱讀](../course/chapters/10.md#10.5) | [開啟](../notebooks/10/10.5.ipynb) |
-| 10.6 視覺與文字維度不同怎麼接？ | [閱讀](../course/chapters/10.md#10.6) | [開啟](../notebooks/10/10.6.ipynb) |
-| 10.7 模型怎麼知道圖片放在哪？ | [閱讀](../course/chapters/10.md#10.7) | [開啟](../notebooks/10/10.7.ipynb) |
-| 10.8 原本的文字功能還能正常嗎？ | [閱讀](../course/chapters/10.md#10.8) | [開啟](../notebooks/10/10.8.ipynb) |
-| 10.9 圖片和描述怎麼比較配對程度？ | [閱讀](../course/chapters/10.md#10.9) | [開啟](../notebooks/10/10.9.ipynb) |
-| 10.10 正確描述怎麼比其他描述更接近？ | [閱讀](../course/chapters/10.md#10.10) | [開啟](../notebooks/10/10.10.ipynb) |
-| 10.11 能反過來用描述找圖片嗎？ | [閱讀](../course/chapters/10.md#10.11) | [開啟](../notebooks/10/10.11.ipynb) |
-| 11.1 維度相同就能理解圖片嗎？ | [閱讀](../course/chapters/11.md#11.1) | [開啟](../notebooks/11/11.1.ipynb) |
-| 11.2 哪些參數正在學習？ | [閱讀](../course/chapters/11.md#11.2) | [開啟](../notebooks/11/11.2.ipynb) |
-| 11.3 只訓練 projector 能學到什麼？ | [閱讀](../course/chapters/11.md#11.3) | [開啟](../notebooks/11/11.3.ipynb) |
-| 11.4 圖片描述怎麼擴展成問答？ | [閱讀](../course/chapters/11.md#11.4) | [開啟](../notebooks/11/11.4.ipynb) |
-| 11.5 哪些文字層需要一起調整？ | [閱讀](../course/chapters/11.md#11.5) | [開啟](../notebooks/11/11.5.ipynb) |
-| 11.6 對齊和 SFT 能合併嗎？ | [閱讀](../course/chapters/11.md#11.6) | [開啟](../notebooks/11/11.6.ipynb) |
-| 11.7 怎麼維持文字能力？ | [閱讀](../course/chapters/11.md#11.7) | [開啟](../notebooks/11/11.7.ipynb) |
-| 11.8 模型有看圖還是猜答案？ | [閱讀](../course/chapters/11.md#11.8) | [開啟](../notebooks/11/11.8.ipynb) |
-| 11.9 縮圖與裁切會丟掉什麼？ | [閱讀](../course/chapters/11.md#11.9) | [開啟](../notebooks/11/11.9.ipynb) |
-| 11.10 視覺 token 預算怎麼影響能力？ | [閱讀](../course/chapters/11.md#11.10) | [開啟](../notebooks/11/11.10.ipynb) |
-| 11.11 平均高分掩蓋了哪些弱項？ | [閱讀](../course/chapters/11.md#11.11) | [開啟](../notebooks/11/11.11.ipynb) |
-| 11.12 圖片裡的字也能辨識嗎？ | [閱讀](../course/chapters/11.md#11.12) | [開啟](../notebooks/11/11.12.ipynb) |
-| 11.13 多個字怎麼依序讀出？ | [閱讀](../course/chapters/11.md#11.13) | [開啟](../notebooks/11/11.13.ipynb) |
-| 11.14 看見物件，和看懂整張圖，有什麼距離？ | [閱讀](../course/chapters/11.md#11.14) | [開啟](../notebooks/11/11.14.ipynb) |
-| 11.15 中文的小筆畫，能靠放大模型救回來嗎？ | [閱讀](../course/chapters/11.md#11.15) | [開啟](../notebooks/11/11.15.ipynb) |
-| 11.16 認對每個字，就等於讀對整段文字嗎？ | [閱讀](../course/chapters/11.md#11.16) | [開啟](../notebooks/11/11.16.ipynb) |
-| 12.1 音訊是什麼 tensor？ | [閱讀](../course/chapters/12.md#12.1) | [開啟](../notebooks/12/12.1.ipynb) |
-| 12.2 每秒多少樣本？ | [閱讀](../course/chapters/12.md#12.2) | [開啟](../notebooks/12/12.2.ipynb) |
-| 12.3 怎麼看聲音隨時間變化？ | [閱讀](../course/chapters/12.md#12.3) | [開啟](../notebooks/12/12.3.ipynb) |
-| 12.4 時間框的邊緣如何處理？ | [閱讀](../course/chapters/12.md#12.4) | [開啟](../notebooks/12/12.4.ipynb) |
-| 12.5 一小段聲音有哪些頻率？ | [閱讀](../course/chapters/12.md#12.5) | [開啟](../notebooks/12/12.5.ipynb) |
-| 12.6 怎麼組合頻率區段？ | [閱讀](../course/chapters/12.md#12.6) | [開啟](../notebooks/12/12.6.ipynb) |
-| 12.7 大小差很多的能量怎麼顯示？ | [閱讀](../course/chapters/12.md#12.7) | [開啟](../notebooks/12/12.7.ipynb) |
-| 12.8 頻譜怎麼變成特徵序列？ | [閱讀](../course/chapters/12.md#12.8) | [開啟](../notebooks/12/12.8.ipynb) |
-| 12.9 音訊怎麼進入既有模型？ | [閱讀](../course/chapters/12.md#12.9) | [開啟](../notebooks/12/12.9.ipynb) |
-| 12.10 模型有聽聲音嗎？ | [閱讀](../course/chapters/12.md#12.10) | [開啟](../notebooks/12/12.10.ipynb) |
-| 12.11 先轉成文字會少掉什麼？ | [閱讀](../course/chapters/12.md#12.11) | [開啟](../notebooks/12/12.11.ipynb) |
-| 12.12 答案需要同時看圖和聽聲音時怎麼辦？ | [閱讀](../course/chapters/12.md#12.12) | [開啟](../notebooks/12/12.12.ipynb) |
-| 12.13 聽寫一句話，和回答一句話，是同一件事嗎？ | [閱讀](../course/chapters/12.md#12.13) | [開啟](../notebooks/12/12.13.ipynb) |
-| 12.14 打字或說話，怎麼交給同一位聊天助手？ | [閱讀](../course/chapters/12.md#12.14) | [開啟](../notebooks/12/12.14.ipynb) |
-| 13.1 同一問題哪個回答更好？ | [閱讀](../course/chapters/13.md#13.1) | [開啟](../notebooks/13/13.1.ipynb) |
-| 13.2 偏好資料怎麼表示？ | [閱讀](../course/chapters/13.md#13.2) | [開啟](../notebooks/13/13.2.ipynb) |
-| 13.3 模型給整段回答多大機率？ | [閱讀](../course/chapters/13.md#13.3) | [開啟](../notebooks/13/13.3.ipynb) |
-| 13.4 為什麼要有參考模型？ | [閱讀](../course/chapters/13.md#13.4) | [開啟](../notebooks/13/13.4.ipynb) |
-| 13.5 偏好怎麼產生梯度？ | [閱讀](../course/chapters/13.md#13.5) | [開啟](../notebooks/13/13.5.ipynb) |
-| 13.6 Beta 如何影響參考約束與更新？ | [閱讀](../course/chapters/13.md#13.6) | [開啟](../notebooks/13/13.6.ipynb) |
-| 13.7 模型是否只學到回答更長？ | [閱讀](../course/chapters/13.md#13.7) | [開啟](../notebooks/13/13.7.ipynb) |
-| 13.8 討喜會不會變成附和？ | [閱讀](../course/chapters/13.md#13.8) | [開啟](../notebooks/13/13.8.ipynb) |
-| 13.9 只優化一種偏好會失去什麼？ | [閱讀](../course/chapters/13.md#13.9) | [開啟](../notebooks/13/13.9.ipynb) |
-| 13.10 比較能不能教一位評分員？ | [閱讀](../course/chapters/13.md#13.10) | [開啟](../notebooks/13/13.10.ipynb) |
-| 13.11 分數怎樣讓回答更常出現？ | [閱讀](../course/chapters/13.md#13.11) | [開啟](../notebooks/13/13.11.ipynb) |
-| 13.12 更新前後回答機率差多少？ | [閱讀](../course/chapters/13.md#13.12) | [開啟](../notebooks/13/13.12.ipynb) |
-| 13.13 為什麼別一次改太多？ | [閱讀](../course/chapters/13.md#13.13) | [開啟](../notebooks/13/13.13.ipynb) |
-| 13.14 誰在估計這題平常能拿多少分？ | [閱讀](../course/chapters/13.md#13.14) | [開啟](../notebooks/13/13.14.ipynb) |
-| 13.15 選擇、評分、更新，可以串起來嗎？ | [閱讀](../course/chapters/13.md#13.15) | [開啟](../notebooks/13/13.15.ipynb) |
-| 13.16 拿高分也可能學壞嗎？ | [閱讀](../course/chapters/13.md#13.16) | [開啟](../notebooks/13/13.16.ipynb) |
-| 13.17 為什麼DPO不用另外教評分員？ | [閱讀](../course/chapters/13.md#13.17) | [開啟](../notebooks/13/13.17.ipynb) |
-| 14.1 怎麼表示相對位置？ | [閱讀](../course/chapters/14.md#14.1) | [開啟](../notebooks/14/14.1.ipynb) |
+| 10.1 一張紅色方塊，怎麼存成圖片 tensor？ | [閱讀](../course/chapters/10.md#10.1) | [開啟](../notebooks/10/10.1.ipynb) |
+| 10.2 圖片切成小塊後，如何排成序列？ | [閱讀](../course/chapters/10.md#10.2) | [開啟](../notebooks/10/10.2.ipynb) |
+| 10.3 每塊 48 個像素值，如何變成 8 個特徵？ | [閱讀](../course/chapters/10.md#10.3) | [開啟](../notebooks/10/10.3.ipynb) |
+| 10.4 相同圖塊，如何知道它在左邊還是右邊？ | [閱讀](../course/chapters/10.md#10.4) | [開啟](../notebooks/10/10.4.ipynb) |
+| 10.5 形狀答案如何把梯度送回圖片入口？ | [閱讀](../course/chapters/10.md#10.5) | [開啟](../notebooks/10/10.5.ipynb) |
+| 10.6 8 維圖片特徵，如何接到 12 維文字介面？ | [閱讀](../course/chapters/10.md#10.6) | [開啟](../notebooks/10/10.6.ipynb) |
+| 10.7 圖片展開後，答案目標如何跟著移動？ | [閱讀](../course/chapters/10.md#10.7) | [開啟](../notebooks/10/10.7.ipynb) |
+| 10.8 沒附圖時，包裝會改變原文字計算嗎？ | [閱讀](../course/chapters/10.md#10.8) | [開啟](../notebooks/10/10.8.ipynb) |
+| 10.9 怎麼從向量方向比較圖文配對？ | [閱讀](../course/chapters/10.md#10.9) | [開啟](../notebooks/10/10.9.ipynb) |
+| 10.10 配對標籤怎麼決定分數的調整方向？ | [閱讀](../course/chapters/10.md#10.10) | [開啟](../notebooks/10/10.10.ipynb) |
+| 10.11 圖找文和文找圖，為什麼要分開算？ | [閱讀](../course/chapters/10.md#10.11) | [開啟](../notebooks/10/10.11.ipynb) |
+| 11.1 接頭輸出不同，就算理解圖片了嗎？ | [閱讀](../course/chapters/11.md#11.1) | [開啟](../notebooks/11/11.1.ipynb) |
+| 11.2 怎麼確認真正被更新的是哪一批參數？ | [閱讀](../course/chapters/11.md#11.2) | [開啟](../notebooks/11/11.2.ipynb) |
+| 11.3 只調圖片接頭，梯度怎麼穿過固定文字核心？ | [閱讀](../course/chapters/11.md#11.3) | [開啟](../notebooks/11/11.3.ipynb) |
+| 11.4 同一張圖片，換問題後應怎麼改答案？ | [閱讀](../course/chapters/11.md#11.4) | [開啟](../notebooks/11/11.4.ipynb) |
+| 11.5 多開一些文字層，怎麼比較成本與效果？ | [閱讀](../course/chapters/11.md#11.5) | [開啟](../notebooks/11/11.5.ipynb) |
+| 11.6 先對齊再問答，怎麼和直接問答公平比較？ | [閱讀](../course/chapters/11.md#11.6) | [開啟](../notebooks/11/11.6.ipynb) |
+| 11.7 新圖文能力進步時，舊文字能力有沒有退步？ | [閱讀](../course/chapters/11.md#11.7) | [開啟](../notebooks/11/11.7.ipynb) |
+| 11.8 換圖後答對新圖，才能說用了圖片嗎？ | [閱讀](../course/chapters/11.md#11.8) | [開啟](../notebooks/11/11.8.ipynb) |
+| 11.9 裁切後，模型還收得到作答線索嗎？ | [閱讀](../course/chapters/11.md#11.9) | [開啟](../notebooks/11/11.9.ipynb) |
+| 11.10 切得更細，圖片會佔多少序列空間？ | [閱讀](../course/chapters/11.md#11.10) | [開啟](../notebooks/11/11.10.ipynb) |
+| 11.11 平均九成，為什麼稀少題仍可能全錯？ | [閱讀](../course/chapters/11.md#11.11) | [開啟](../notebooks/11/11.11.ipynb) |
+| 11.12 像素寫的0與標籤字串0，怎麼對應？ | [閱讀](../course/chapters/11.md#11.12) | [開啟](../notebooks/11/11.12.ipynb) |
+| 11.13 四個字對三個，整串編號就正確嗎？ | [閱讀](../course/chapters/11.md#11.13) | [開啟](../notebooks/11/11.13.ipynb) |
+| 11.14 平均物件線索，還能知道左右順序嗎？ | [閱讀](../course/chapters/11.md#11.14) | [開啟](../notebooks/11/11.14.ipynb) |
+| 11.15 筆畫已被縮掉，較大的模型能確定補回嗎？ | [閱讀](../course/chapters/11.md#11.15) | [開啟](../notebooks/11/11.15.ipynb) |
+| 11.16 字都出現了，為什麼仍可能讀錯順序？ | [閱讀](../course/chapters/11.md#11.16) | [開啟](../notebooks/11/11.16.ipynb) |
+| 11.17 有限物件與短字詞，如何做成可學的看圖問答？ | [閱讀](../course/chapters/11.md#11.17) | [開啟](../notebooks/11/11.17.ipynb) |
+| 11.18 指定哪一塊文字，如何只讀那一塊？ | [閱讀](../course/chapters/11.md#11.18) | [開啟](../notebooks/11/11.18.ipynb) |
+| 12.1 一段聲音，怎麼存成一串數字？ | [閱讀](../course/chapters/12.md#12.1) | [開啟](../notebooks/12/12.1.ipynb) |
+| 12.2 同樣 1600 個數字，為什麼可能長短不同？ | [閱讀](../course/chapters/12.md#12.2) | [開啟](../notebooks/12/12.2.ipynb) |
+| 12.3 短聲音如何分成重疊的時間框？ | [閱讀](../course/chapters/12.md#12.3) | [開啟](../notebooks/12/12.3.ipynb) |
+| 12.4 截取時間框時，為什麼要讓兩端變小？ | [閱讀](../course/chapters/12.md#12.4) | [開啟](../notebooks/12/12.4.ipynb) |
+| 12.5 怎麼找出一段單音的主要頻率？ | [閱讀](../course/chapters/12.md#12.5) | [開啟](../notebooks/12/12.5.ipynb) |
+| 12.6 相鄰頻率怎麼合成少量頻帶？ | [閱讀](../course/chapters/12.md#12.6) | [開啟](../notebooks/12/12.6.ipynb) |
+| 12.7 功率相差很大，取 log 有什麼效果？ | [閱讀](../course/chapters/12.md#12.7) | [開啟](../notebooks/12/12.7.ipynb) |
+| 12.8 每個時間框，如何變成一條聲音特徵？ | [閱讀](../course/chapters/12.md#12.8) | [開啟](../notebooks/12/12.8.ipynb) |
+| 12.9 聲音特徵怎麼接進文字模型的回答位置？ | [閱讀](../course/chapters/12.md#12.9) | [開啟](../notebooks/12/12.9.ipynb) |
+| 12.10 怎樣判斷回答真的受聲音影響？ | [閱讀](../course/chapters/12.md#12.10) | [開啟](../notebooks/12/12.10.ipynb) |
+| 12.11 把聲音轉成文字後，哪些問題仍答不了？ | [閱讀](../course/chapters/12.md#12.11) | [開啟](../notebooks/12/12.11.ipynb) |
+| 12.12 一個答案同時需要圖與聲音，怎麼檢查兩條線索？ | [閱讀](../course/chapters/12.md#12.12) | [開啟](../notebooks/12/12.12.ipynb) |
+| 12.13 整段平均後，還分得出哪個聲音先來嗎？ | [閱讀](../course/chapters/12.md#12.13) | [開啟](../notebooks/12/12.13.ipynb) |
+| 12.14 先聽寫成文字，怎麼共用聊天歷史？ | [閱讀](../course/chapters/12.md#12.14) | [開啟](../notebooks/12/12.14.ipynb) |
+| 12.15 幾種真人語音問題，如何從零學會回應？ | [閱讀](../course/chapters/12.md#12.15) | [開啟](../notebooks/12/12.15.ipynb) |
+| 12.16 說話和打字，如何保留同一段對話？ | [閱讀](../course/chapters/12.md#12.16) | [開啟](../notebooks/12/12.16.ipynb) |
+| 13.1 偏好為什麼必須連同問題一起記？ | [閱讀](../course/chapters/13.md#13.1) | [開啟](../notebooks/13/13.1.ipynb) |
+| 13.2 同一提問的兩份回答，如何對齊成資料？ | [閱讀](../course/chapters/13.md#13.2) | [開啟](../notebooks/13/13.2.ipynb) |
+| 13.3 逐字機率如何合成整篇答案的分數？ | [閱讀](../course/chapters/13.md#13.3) | [開啟](../notebooks/13/13.3.ipynb) |
+| 13.4 固定參考在比較什麼？ | [閱讀](../course/chapters/13.md#13.4) | [開啟](../notebooks/13/13.4.ipynb) |
+| 13.5 DPO如何把一對偏好變成更新方向？ | [閱讀](../course/chapters/13.md#13.5) | [開啟](../notebooks/13/13.5.ipynb) |
+| 13.6 beta加大，單次推動一定更大嗎？ | [閱讀](../course/chapters/13.md#13.6) | [開啟](../notebooks/13/13.6.ipynb) |
+| 13.7 偏好資料會不會把長度當成捷徑？ | [閱讀](../course/chapters/13.md#13.7) | [開啟](../notebooks/13/13.7.ipynb) |
+| 13.8 怎樣教禮貌，而不教附和錯誤？ | [閱讀](../course/chapters/13.md#13.8) | [開啟](../notebooks/13/13.8.ipynb) |
+| 13.9 新偏好改善時，哪些原能力也要檢查？ | [閱讀](../course/chapters/13.md#13.9) | [開啟](../notebooks/13/13.9.ipynb) |
+| 13.10 偏好比較能教另一個評分模型嗎？ | [閱讀](../course/chapters/13.md#13.10) | [開啟](../notebooks/13/13.10.ipynb) |
+| 13.11 拿到分數後，為什麼還要扣掉預期？ | [閱讀](../course/chapters/13.md#13.11) | [開啟](../notebooks/13/13.11.ipynb) |
+| 13.12 同一批作答重用時，如何記住它來自哪個策略？ | [閱讀](../course/chapters/13.md#13.12) | [開啟](../notebooks/13/13.12.ipynb) |
+| 13.13 PPO裁切的是鼓勵，還是所有機率？ | [閱讀](../course/chapters/13.md#13.13) | [開啟](../notebooks/13/13.13.ipynb) |
+| 13.14 評分員、估計員與兩種基準各做什麼？ | [閱讀](../course/chapters/13.md#13.14) | [開啟](../notebooks/13/13.14.ipynb) |
+| 13.15 一輪選卡與更新，如何接起來？ | [閱讀](../course/chapters/13.md#13.15) | [開啟](../notebooks/13/13.15.ipynb) |
+| 13.16 獎勵提高，如何知道任務真的完成？ | [閱讀](../course/chapters/13.md#13.16) | [開啟](../notebooks/13/13.16.ipynb) |
+| 13.17 PPO與DPO，為什麼是兩條路？ | [閱讀](../course/chapters/13.md#13.17) | [開啟](../notebooks/13/13.17.ipynb) |
+| 14.1 兩個詞一起往後移，位置比對能保持嗎？ | [閱讀](../course/chapters/14.md#14.1) | [開啟](../notebooks/14/14.1.ipynb) |
 | 14.2 正規化能否簡化？ | [閱讀](../course/chapters/14.md#14.2) | [開啟](../notebooks/14/14.2.ipynb) |
 | 14.3 Q／K 的尺度怎麼影響注意力？ | [閱讀](../course/chapters/14.md#14.3) | [開啟](../notebooks/14/14.3.ipynb) |
-| 14.4 MLP activation 可以怎麼選？ | [閱讀](../course/chapters/14.md#14.4) | [開啟](../notebooks/14/14.4.ipynb) |
+| 14.4 逐項改數字，為何能增加表達方式？ | [閱讀](../course/chapters/14.md#14.4) | [開啟](../notebooks/14/14.4.ipynb) |
 | 14.5 怎麼讓特徵控制另一組特徵？ | [閱讀](../course/chapters/14.md#14.5) | [開啟](../notebooks/14/14.5.ipynb) |
 | 14.6 輸入輸出權重應該共享嗎？ | [閱讀](../course/chapters/14.md#14.6) | [開啟](../notebooks/14/14.6.ipynb) |
+| 14.7 為什麼位置公式算得出，長文章卻未必讀得好？ | [閱讀](../course/chapters/14.md#14.7) | [開啟](../notebooks/14/14.7.ipynb) |
+| 14.8 位置插值如何延長窗口？ | [閱讀](../course/chapters/14.md#14.8) | [開啟](../notebooks/14/14.8.ipynb) |
+| 14.9 所有位置都壓近，會遇到什麼取捨？ | [閱讀](../course/chapters/14.md#14.9) | [開啟](../notebooks/14/14.9.ipynb) |
+| 14.10 YaRN如何兼顧近處與遠處？ | [閱讀](../course/chapters/14.md#14.10) | [開啟](../notebooks/14/14.10.ipynb) |
 | 15.1 Dense 的計算方式是什麼？ | [閱讀](../course/chapters/15.md#15.1) | [開啟](../notebooks/15/15.1.ipynb) |
 | 15.2 能否準備多組 FFN？ | [閱讀](../course/chapters/15.md#15.2) | [開啟](../notebooks/15/15.2.ipynb) |
 | 15.3 如何決定找誰處理？ | [閱讀](../course/chapters/15.md#15.3) | [開啟](../notebooks/15/15.3.ipynb) |
@@ -183,7 +195,7 @@
 | 15.11 少算一些就一定更快嗎？ | [閱讀](../course/chapters/15.md#15.11) | [開啟](../notebooks/15/15.11.ipynb) |
 | 15.12 Expert 容量不夠怎麼辦？ | [閱讀](../course/chapters/15.md#15.12) | [開啟](../notebooks/15/15.12.ipynb) |
 | 15.13 如何公平比較 Dense／MoE？ | [閱讀](../course/chapters/15.md#15.13) | [開啟](../notebooks/15/15.13.ipynb) |
-| 16.1 最慢或最佔空間的是哪裡？ | [閱讀](../course/chapters/16.md#16.1) | [開啟](../notebooks/16/16.1.ipynb) |
+| 16.1 怎麼從一種運算的耗時找下一個瓶頸？ | [閱讀](../course/chapters/16.md#16.1) | [開啟](../notebooks/16/16.1.ipynb) |
 | 16.2 讀提示和生成下一字有何差別？ | [閱讀](../course/chapters/16.md#16.2) | [開啟](../notebooks/16/16.2.ipynb) |
 | 16.3 生成時重算了什麼？ | [閱讀](../course/chapters/16.md#16.3) | [開啟](../notebooks/16/16.3.ipynb) |
 | 16.4 KV cache 怎麼縮小？ | [閱讀](../course/chapters/16.md#16.4) | [開啟](../notebooks/16/16.4.ipynb) |
@@ -194,21 +206,23 @@
 | 16.9 Attention 中間矩陣為何佔空間？ | [閱讀](../course/chapters/16.md#16.9) | [開啟](../notebooks/16/16.9.ipynb) |
 | 16.10 怎麼用重算換記憶體？ | [閱讀](../course/chapters/16.md#16.10) | [開啟](../notebooks/16/16.10.ipynb) |
 | 16.11 編譯有何代價與收益？ | [閱讀](../course/chapters/16.md#16.11) | [開啟](../notebooks/16/16.11.ipynb) |
-| 17.1 權重到底佔多少空間？ | [閱讀](../course/chapters/17.md#17.1) | [開啟](../notebooks/17/17.1.ipynb) |
-| 17.2 浮點數怎麼放進少量整數格子？ | [閱讀](../course/chapters/17.md#17.2) | [開啟](../notebooks/17/17.2.ipynb) |
-| 17.3 轉回浮點會差多少？ | [閱讀](../course/chapters/17.md#17.3) | [開啟](../notebooks/17/17.3.ipynb) |
-| 17.4 零點偏移有什麼作用？ | [閱讀](../course/chapters/17.md#17.4) | [開啟](../notebooks/17/17.4.ipynb) |
-| 17.5 一組 scale 應該管多大範圍？ | [閱讀](../course/chapters/17.md#17.5) | [開啟](../notebooks/17/17.5.ipynb) |
-| 17.6 從 8-bit 降到 4-bit 會發生什麼？ | [閱讀](../course/chapters/17.md#17.6) | [開啟](../notebooks/17/17.6.ipynb) |
-| 17.7 先只量化權重可以嗎？ | [閱讀](../course/chapters/17.md#17.7) | [開啟](../notebooks/17/17.7.ipynb) |
-| 17.8 4-bit 如何真的存成較小檔案？ | [閱讀](../course/chapters/17.md#17.8) | [開啟](../notebooks/17/17.8.ipynb) |
-| 17.9 已訓練模型怎麼直接轉換？ | [閱讀](../course/chapters/17.md#17.9) | [開啟](../notebooks/17/17.9.ipynb) |
-| 17.10 壓縮後怎麼實際運算？ | [閱讀](../course/chapters/17.md#17.10) | [開啟](../notebooks/17/17.10.ipynb) |
-| 17.11 Activation 也量化會改變什麼？ | [閱讀](../course/chapters/17.md#17.11) | [開啟](../notebooks/17/17.11.ipynb) |
-| 17.12 如何決定 activation 的量化範圍？ | [閱讀](../course/chapters/17.md#17.12) | [開啟](../notebooks/17/17.12.ipynb) |
-| 17.13 極端值為什麼讓其他值難表示？ | [閱讀](../course/chapters/17.md#17.13) | [開啟](../notebooks/17/17.13.ipynb) |
-| 17.14 模型能預先適應量化誤差嗎？ | [閱讀](../course/chapters/17.md#17.14) | [開啟](../notebooks/17/17.14.ipynb) |
-| 17.15 品質與行為保留了多少？ | [閱讀](../course/chapters/17.md#17.15) | [開啟](../notebooks/17/17.15.ipynb) |
+| 16.12 滑動窗口省下什麼，也限制了什麼？ | [閱讀](../course/chapters/16.md#16.12) | [開啟](../notebooks/16/16.12.ipynb) |
+| 16.13 分塊處理，是否代表看不到其他塊？ | [閱讀](../course/chapters/16.md#16.13) | [開啟](../notebooks/16/16.13.ipynb) |
+| 17.1 數字個數相同，為什麼空間不同？ | [閱讀](../course/chapters/17.md#17.1) | [開啟](../notebooks/17/17.1.ipynb) |
+| 17.2 整數格子如何代表0.7這樣的小數？ | [閱讀](../course/chapters/17.md#17.2) | [開啟](../notebooks/17/17.2.ipynb) |
+| 17.3 每個權重只差0.2，輸出也只差0.2嗎？ | [閱讀](../course/chapters/17.md#17.3) | [開啟](../notebooks/17/17.3.ipynb) |
+| 17.4 碼0一定代表浮點零嗎？ | [閱讀](../course/chapters/17.md#17.4) | [開啟](../notebooks/17/17.4.ipynb) |
+| 17.5 不同大小的權重，應共用一把刻度尺嗎？ | [閱讀](../course/chapters/17.md#17.5) | [開啟](../notebooks/17/17.5.ipynb) |
+| 17.6 少四個位元，精度與容器各改了什麼？ | [閱讀](../course/chapters/17.md#17.6) | [開啟](../notebooks/17/17.6.ipynb) |
+| 17.7 只量化權重時，輸入與運算用什麼？ | [閱讀](../course/chapters/17.md#17.7) | [開啟](../notebooks/17/17.7.ipynb) |
+| 17.8 兩個4-bit值，如何裝進一個byte？ | [閱讀](../course/chapters/17.md#17.8) | [開啟](../notebooks/17/17.8.ipynb) |
+| 17.9 不更新權重，也能做量化嗎？ | [閱讀](../course/chapters/17.md#17.9) | [開啟](../notebooks/17/17.9.ipynb) |
+| 17.10 文件變小，為什麼運算不一定更快？ | [閱讀](../course/chapters/17.md#17.10) | [開啟](../notebooks/17/17.10.ipynb) |
+| 17.11 中間特徵也量化，多了哪一種誤差？ | [閱讀](../course/chapters/17.md#17.11) | [開啟](../notebooks/17/17.11.ipynb) |
+| 17.12 中間特徵的範圍，在何時決定？ | [閱讀](../course/chapters/17.md#17.12) | [開啟](../notebooks/17/17.12.ipynb) |
+| 17.13 保住大值與保住小值，如何看取捨？ | [閱讀](../course/chapters/17.md#17.13) | [開啟](../notebooks/17/17.13.ipynb) |
+| 17.14 訓練時能先體驗量化誤差嗎？ | [閱讀](../course/chapters/17.md#17.14) | [開啟](../notebooks/17/17.14.ipynb) |
+| 17.15 平均誤差很小，答案為什麼仍會改變？ | [閱讀](../course/chapters/17.md#17.15) | [開啟](../notebooks/17/17.15.ipynb) |
 | 18.1 教師能提供什麼學習訊號？ | [閱讀](../course/chapters/18.md#18.1) | [開啟](../notebooks/18/18.1.ipynb) |
 | 18.2 怎麼讓學生本身更小？ | [閱讀](../course/chapters/18.md#18.2) | [開啟](../notebooks/18/18.2.ipynb) |
 | 18.3 只能看到教師回答也能學嗎？ | [閱讀](../course/chapters/18.md#18.3) | [開啟](../notebooks/18/18.3.ipynb) |
@@ -255,6 +269,9 @@
 | A.5 答錯是沒找到還是沒用好？ | [閱讀](../course/chapters/0A.md#A.5) | [開啟](../notebooks/0A/A.5.ipynb) |
 | A.6 找不到或文件不可靠時怎麼辦？ | [閱讀](../course/chapters/0A.md#A.6) | [開啟](../notebooks/0A/A.6.ipynb) |
 | A.7 多輪對話和答案怎麼分配長度？ | [閱讀](../course/chapters/0A.md#A.7) | [開啟](../notebooks/0A/A.7.ipynb) |
+| A.8 同一條線索，放在哪裡會有差嗎？ | [閱讀](../course/chapters/0A.md#A.8) | [開啟](../notebooks/0A/A.8.ipynb) |
+| A.9 找到一條資訊，就代表讀懂長文嗎？ | [閱讀](../course/chapters/0A.md#A.9) | [開啟](../notebooks/0A/A.9.ipynb) |
+| A.10 對話很長，最新的條件如何驗收？ | [閱讀](../course/chapters/0A.md#A.10) | [開啟](../notebooks/0A/A.10.ipynb) |
 | B.1 模型怎麼要求程式幫忙？ | [閱讀](../course/chapters/0B.md#B.1) | [開啟](../notebooks/0B/B.1.ipynb) |
 | B.2 文字怎麼變成有效呼叫？ | [閱讀](../course/chapters/0B.md#B.2) | [開啟](../notebooks/0B/B.2.ipynb) |
 | B.3 工具結果怎麼回到對話？ | [閱讀](../course/chapters/0B.md#B.3) | [開啟](../notebooks/0B/B.3.ipynb) |
@@ -262,7 +279,7 @@
 | B.5 同樣有數字，何時需要計算器？ | [閱讀](../course/chapters/0B.md#B.5) | [開啟](../notebooks/0B/B.5.ipynb) |
 | B.6 模型如何學會選擇下一個動作？ | [閱讀](../course/chapters/0B.md#B.6) | [開啟](../notebooks/0B/B.6.ipynb) |
 | B.7 工具選擇怎樣才算可靠？ | [閱讀](../course/chapters/0B.md#B.7) | [開啟](../notebooks/0B/B.7.ipynb) |
-| B.8 依能力與成本，何時值得借助工具？ | [閱讀](../course/chapters/0B.md#B.8) | [開啟](../notebooks/0B/B.8.ipynb) |
+| B.8 依能力與成本，何時值得藉助工具？ | [閱讀](../course/chapters/0B.md#B.8) | [開啟](../notebooks/0B/B.8.ipynb) |
 | C.1 寫出中間步驟能幫忙嗎？ | [閱讀](../course/chapters/0C.md#C.1) | [開啟](../notebooks/0C/C.1.ipynb) |
 | C.2 最後答對代表過程正確嗎？ | [閱讀](../course/chapters/0C.md#C.2) | [開啟](../notebooks/0C/C.2.ipynb) |
 | C.3 多試幾次能找到正確答案嗎？ | [閱讀](../course/chapters/0C.md#C.3) | [開啟](../notebooks/0C/C.3.ipynb) |

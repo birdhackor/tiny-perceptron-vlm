@@ -51,6 +51,14 @@ def test_execution_text_is_escaped():
     assert "<script>" not in result
 
 
+def test_details_parse_markdown_in_the_published_site():
+    source = '<details>\n<summary>補充</summary>\n\n### 操作\n\n[查資料](https://example.com)\n\n</details>\n'
+    result = reading_markdown(source, Path("lesson.md"), {}, {}, "main")
+    assert '<details markdown="1">' in result
+    assert "[查資料](https://example.com)" in result
+    assert "### 操作 {#操作}" in result
+
+
 @pytest.mark.parametrize(
     ("filename", "page"),
     [("STUDENT.md", "natural-v4-student"), ("DATA.md", "natural-v4-data"), ("TRAINING.md", "natural-v4-training")],
