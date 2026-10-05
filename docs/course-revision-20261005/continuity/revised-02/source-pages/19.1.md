@@ -1,0 +1,65 @@
+## 19.1 一個成品，為什麼要試好幾種問題？
+
+把「只列包和短靴」打給助理，再送一張左包右短靴的圖，接著改問「右邊是什麼」，最後請它算小整數加法。這些問題分別需要指令、圖片、對話條件與工具。整合的目標是讓它們交給**同一個文字核心**，而且加上新入口後，先前能完成的要求仍能完成。
+
+本章主線是從隨機權重訓練的有限助手：文字核心採小 MoE，影像、讀字、語音入口與投影也自行訓練。下面是要教與要核對的材料範圍，不是已完成的新能力表。
+
+| 材料與請求 | 希望得到的行為 | 範圍 |
+| --- | --- | --- |
+| 短清單；只選兩項、照抄或改成兩點 | 選對內容、範圍與格式，完整結束 | 教過類型的新問法與組合 |
+| Fashion-MNIST 褲子、包、短靴商品圖 | 辨識物件；兩物件圖依左右位置回答 | 三類灰階商品與自製位置場景 |
+| 12字「大小上下左右開關入出人口」的2–4字卡 | 只讀指定框，保留字序及要求的換行 | 已知字表、有限字體與版面 |
+| MInDS-14 中文三種銀行意圖的真人聲音 | 用同一核心回短答或澄清，沿用歷史與格式 | address、app_error、card_issues；不是聽寫 |
+| 小整數計算問題 | 提出工具請求、讀取真結果、再生成答案 | 有界的計算器往返 |
+
+![自行訓練的文字、圖片及聲音入口接到同一MoE核心；核心生成答覆或工具請求。](../figures/rewrite-19-shared-core.svg)
+
+先把助理的動作分清楚：`DIRECT:` 是直接回答，`ASK:` 是要補資料，`TOOL:` 是請程式執行工具。以下沿用舊合成任務的簡短協定，讓程式能讀出這三種動作；它沒有替模型選擇正確動作。
+
+```python
+from tiny_perceptron.capstone import parse_action
+
+examples = ["DIRECT:red", "ASK:請提供數量", "TOOL:calculator:1+2"]
+for text in examples:
+    action = parse_action({"raw": text, "eos": True})
+    print(text, "→", action)
+```
+
+輸入是三份人工請求紀錄，`eos=True` 也是此例給定的完整結束條件。解析後依次得到 direct、ask、tool；工具那份還讀出名稱 calculator 與整數1、2。空的 `DIRECT:` 不算完整回答。之後真正驗收時，動作標記、參數、回答內容與實際生成的 EOS 都要分開留下，工具題還要檢查第二次生成。
+
+既有可下載的小模型只教過合成顏色／形狀、兩群純音、固定句型與加法。新任務的模型尺寸、訓練與能力尚待後續實作確認；閱讀本章時，先看清每條路要把什麼交給同一核心。
+
+<details>
+<summary>補充：試用已發布的舊合成任務模型</summary>
+
+現在可以下載這份成品，在自己的CPU上重做一次工具迴圈。這不是重新訓練，也不需要GPU。第一次使用本機專案，先安裝[Git](https://git-scm.com/downloads)與[uv](https://docs.astral.sh/uv/getting-started/installation/)，再在終端機執行下列三行；已經有專案的讀者，只需進入專案資料夾並確認套件已安裝。
+
+```bash
+git clone https://github.com/birdhackor/tiny-perceptron-vlm.git
+cd tiny-perceptron-vlm
+uv sync --frozen --extra cpu
+```
+
+接著啟用剛建立的Python環境。macOS／Linux用`source .venv/bin/activate`；Windows PowerShell用`.venv\Scripts\Activate.ps1`。後面的`python`都指這個環境；若不方便啟用，可把每行開頭的`python`改成`uv run --frozen --extra cpu python`。更完整的裝置選擇見[環境說明](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/environment.md)。
+
+先取得joint，再試一個完整問題：
+
+```bash
+python scripts/fetch_capstone.py --stage joint
+python scripts/capstone.py infer --checkpoint checkpoints/capstone/joint/model.pt --prompt "1+2等於多少？" --device cpu
+```
+
+第一行依正式清單下載固定版本，核對檔案指紋，最後印出`checkpoints/capstone/joint`所在的完整路徑。第二行才真正呼叫模型。輸出是JSON，一種保留欄位名稱的文字紀錄：先找`action_trace`裡的`raw`，應為`TOOL:calculator:1+2`；再找`runtime`裡的`result`，應為`3`；最後看`final_trace`裡的`raw`，應為`DIRECT:3`，總結欄位`answer`也是`3`。較長的`generated_ids`是原始編號，不必先逐個讀。這裡的1+2是舊合成資料事先留出的數字家族之一，切分方式見[19.3](19.md#19.3)。本機試用只檢查這個問題，不能代替整套評測。
+
+若同一問題加上`--calculator-disabled`，這份權重應改答`ASK:計算器未開`，`runtime`為`null`，表示沒有執行工具。若下載資料夾已存在，程式會保留舊檔並拒絕覆蓋；直接重用它，或依[19.11](19.md#19.11)選另一個下載位置。只想先看成功與失敗，不必因此重跑訓練。
+
+喜歡用網頁操作，可以在同一終端機啟動本機介面：
+
+```bash
+python scripts/capstone.py serve --checkpoint checkpoints/capstone/joint/model.pt
+```
+
+看到啟動訊息後，用這臺電腦的瀏覽器開啟`http://127.0.0.1:8765/`。先按一個問題範例，把題目填入輸入框，再按「送出，讓模型回答」；範例按鈕本身不會執行模型。等待回答後，再看「模型原始回答 → 工具執行 → 最後回答」。也可選綠色方形，輸入「圖片是什麼形狀？」並送出，觀察它答成圓形的已知失敗。介面選項會產生真正的RGB圖片與純音波形，不是在文字問題中偷偷附上正解。停止時回終端機按Ctrl+C。這個網址只連到執行程式的那臺電腦，手機不能直接用同一網址連到桌機。本機介面目前使用FP32檔，也就是以32-bit浮點數儲存的權重；量化版的命令試用與11份公開檔清單放在[19.11](19.md#19.11)。
+
+</details>
+

@@ -217,7 +217,7 @@
 | 17.7 只量化權重時，輸入與運算用什麼？ | [閱讀](../course/chapters/17.md#17.7) | [開啟](../notebooks/17/17.7.ipynb) |
 | 17.8 兩個4-bit值，如何裝進一個byte？ | [閱讀](../course/chapters/17.md#17.8) | [開啟](../notebooks/17/17.8.ipynb) |
 | 17.9 不更新權重，也能做量化嗎？ | [閱讀](../course/chapters/17.md#17.9) | [開啟](../notebooks/17/17.9.ipynb) |
-| 17.10 文件變小，為什麼運算不一定更快？ | [閱讀](../course/chapters/17.md#17.10) | [開啟](../notebooks/17/17.10.ipynb) |
+| 17.10 檔案變小，為什麼運算不一定更快？ | [閱讀](../course/chapters/17.md#17.10) | [開啟](../notebooks/17/17.10.ipynb) |
 | 17.11 中間特徵也量化，多了哪一種誤差？ | [閱讀](../course/chapters/17.md#17.11) | [開啟](../notebooks/17/17.11.ipynb) |
 | 17.12 中間特徵的範圍，在何時決定？ | [閱讀](../course/chapters/17.md#17.12) | [開啟](../notebooks/17/17.12.ipynb) |
 | 17.13 保住大值與保住小值，如何看取捨？ | [閱讀](../course/chapters/17.md#17.13) | [開啟](../notebooks/17/17.13.ipynb) |

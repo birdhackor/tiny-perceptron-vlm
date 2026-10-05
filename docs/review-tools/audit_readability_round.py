@@ -36,11 +36,7 @@ def trace_errors(header, notes, *, task, source, body, intro, figures, units, fi
         errors.append("trace incomplete or checkpoint order mismatch")
     if [note.get("unit_sha256") for note in notes] != [digest(unit.encode()) for unit in units]:
         errors.append("trace revealed unit hashes mismatch")
-    if any(
-        not isinstance(note.get(field), str) or not note[field].strip()
-        for note in notes
-        for field in fields
-    ):
+    if any(not isinstance(note.get(field), str) or not note[field].strip() for note in notes for field in fields):
         errors.append("actual checkpoint notes missing")
     return errors
 
@@ -80,9 +76,7 @@ def audit(current_passes_only=False):
                 failures.append(f"{lesson}: no corresponding fresh dispatch record")
             if report.get("verdict") != "pass" or report.get("source_sha256") != digest(body.encode()):
                 failures.append(f"{lesson}: report verdict/body mismatch")
-            if intro and (
-                report.get("intro_sha256") != digest(intro.encode()) or not report.get("intro_summary")
-            ):
+            if intro and (report.get("intro_sha256") != digest(intro.encode()) or not report.get("intro_summary")):
                 failures.append(f"{lesson}: report introduction missing or stale")
             figures = reader.figure_records(body, path)
             for name, hash_value in figures.items():
@@ -154,7 +148,10 @@ def main():
         args.output.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(
         json.dumps(
-            {key: result[key] for key in ("status", "checked_current_pass_sections", "distinct_reader_tasks", "actual_checkpoints")},
+            {
+                key: result[key]
+                for key in ("status", "checked_current_pass_sections", "distinct_reader_tasks", "actual_checkpoints")
+            },
             ensure_ascii=False,
         )
     )
