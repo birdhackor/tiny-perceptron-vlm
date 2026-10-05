@@ -1,0 +1,3 @@
+# Preserved current factual evidence
+
+This inventory preserves 8 genuinely returned current factual owners and their unchanged original reports and small evidence. The numbered scope has 69 fresh current owners; the supplemental scope has 8 independent owners covering 13 complete files. Baseline numbered reports remain independently checked by the genuine whole-book closure. Full external papers, training data, weights and caches are excluded. This packet does not approve continuity, reading times or publication. Exact-byte staging is a preservation check, not a substitute for the original reviewers.
