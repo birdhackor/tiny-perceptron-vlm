@@ -1,0 +1,42 @@
+# 4.7 independent inspection — 2026-10-05
+
+Reviewer task: `/root/phase4_factual_coordinator/factual_4_7`; fresh independent context. Only section 4.7 is judged. I read the original bytes from lines 264–end of section, its sole SVG, and the relevant original implementations. I did not read old technical or reader reports, chapter introduction, or other section text. I read the review method and checker/helper source before reviewing.
+
+## Primary-source reading
+
+- **Vaswani et al., Attention Is All You Need**, arXiv `1706.03762v7`: downloaded the original PDF from `https://arxiv.org/pdf/1706.03762v7`; read PDF pp. 2–5, sections 3, 3.1, 3.2.3, 3.3, 3.4. The extracted original text lines 115–116 describe autoregressive generation consuming previous generated symbols; lines 140–143 combine subsequent-position masking and offset embeddings; lines 234–238 allow current and earlier decoder positions and set illegal softmax entries to minus infinity. This source establishes causal next-token construction, not the exact local shapes or whether the local model learned. The paper is encoder-decoder; the claim checked here is its masked decoder principle, not an assertion that TinyLM implements the complete architecture.
+- **PyTorch official source, v2.9.0, torch/_tensor.py**: read `Tensor.backward`, lines 570–638, especially 573–582 and 610–613. It differentiates the graph and accumulates leaf gradients. The source supports the backward contract; parameter immutability in this original fence is verified directly because it has no optimizer/manual update.
+- **PyTorch official source, v2.9.0, torch/nn/functional.py**: read `cross_entropy`, lines 3375–3465. Logits and class indices are compared in aligned batches; `ignore_index=-100`, reduction semantics and class range `[0,C)` are documented. There is no next-token shift in this function. The local helper does its own flattening/sum/count. It is checked in the installed CPU runtime, not assumed from an identical version.
+- **PyTorch official source, v2.9.0, torch/nn/modules/sparse.py**: read `Embedding`, lines 15–44 and constructor/forward lines 135–199. A fixed lookup table has `(num_embeddings, embedding_dim)` weights; input index axes are preserved and width appended. With local vocab size 5, the five output classes and target indices 0–4 agree with the CE contract. The exercise executes ID 0 as a real target.
+
+Downloaded official source version v2.9.0 differs from installed `.venv` PyTorch `2.14.1+cpu`, Python 3.13.5; official sources are used for the stable API contracts. Actual shape, averaging, backward behavior and causal alternatives are independently executed in the installed version. No API version identity is claimed.
+
+## Local implementation reading and question resolution
+
+- `tiny_perceptron/data.py:46–51`: returns original sequence except last and original sequence except first; one shift, dtype long.
+- `tiny_perceptron/model.py:15–28,31–50,53–86,92–105,108–131`: default one causal block; embedding and position embedding; LayerNorm over width; output has vocab-size axis. `forward` takes input IDs, not targets. `loss_sum` flattens matching positions without slicing, sums CE and counts non-ignored labels. `masked_loss` divides by that count. `generate` selects final-position logits and appends one new ID per iteration.
+- `tiny_perceptron/attention.py:10–28,48–74`: key position <= query position is allowed; forbidden scores are minus infinity before softmax. `tiny_perceptron/modern.py:35–53` FFN acts independently on the last axis. This prevents hidden cross-position paths around the attention mask for the default model.
+
+The question was whether supplying the whole training data lets earlier predictions see the target. The correct distinction is data availability versus forward permission: x contains 2 and 3 at later positions, but row 0 sees only 1 and row 1 only 1,2. Target ID 4 is outside x altogether. All three known-prefix predictions can therefore be computed in one causal forward. Their targets are already available to the loss. During generation a newly selected ID must exist before the next position can use it. The paper and actual forward/score/loss contracts independently support this explanation.
+
+`verify.py` executes the exact original fence, checks the CE arithmetic `logsumexp(logits)-target_logit` in natural-log units averaged over 3 labels, checks a single ignored label averages over 2, and compares parameters to the exact seed-42 initial state after backward. There are 17 parameter tensors with finite gradients, with bitwise unchanged parameter values. This demonstrates a data→scores→loss→gradients route and no learning update.
+
+Each parallel output is compared with a separately evaluated prefix: differences `[1.1920928955078125e-07,0,0]`, within absolute 1e-6. Future-only changes produce exactly zero earlier-score changes. Disabling the mask for a positive control yields 0.19549769163131714, so this probe can detect future information flow. Small checks support only these executed inputs; the generic causal mechanism is established by code and the paper.
+
+The extra-shift variation uses conventional internal alignment `logits[:,:-1]` versus already-shifted `y[:,1:]`: it produces `(1,3),(2,4)` and finite CE. Unshifted targets produce `(1,1),(2,2),(3,3)` and finite CE. The latter makes each target ID already visible in its own input; no claim is made that a random model has learned to copy. The extension `[1,2,3,4,0]` produces the stated four pairs and `[1,4,5]` scores.
+
+## Existing measurement, original version, and denominators
+
+I parsed the original `docs/course-experiments/results/text_foundation.json`, SHA-256 `a81dfcbc0cdac92e3d21956e0857eeb34cc5aad32fdaa5d979988decbb53d2b0`. It records revision `b52935d99f58b694cd932ac158c10c4d8d92d4c2`, run `gha-37038665524-1`, NVIDIA L4/CUDA, PyTorch 2.14.1+cu126/Python 3.13.3; it is not this CPU review's run.
+
+I read `scripts/prepare_data.py:22–29`, whose 3 colors × 2 shapes × 2 sides give 12 documents. I reconstructed only those tiny records and the seeded family split; all 3 saved split hashes and training records hash match the original report. Counts are train/validation/test 9/1/2. The raw report records 600 optimizer steps and the original `fit_lm:133–144` actually calls `optimizer.step()`. Replaying only the sampler and counting known labels yields 342462 effective training tokens, exactly the recorded value. No training, checkpoint loading, or dataset/model downloading occurred.
+
+The original `run_text_foundation:272–276` compares `[1,10,11,12,13]` with only final ID changed to 14; `[:, :-1]` covers the first four positions, all 264 candidates, 1056 scalar scores. The JSON records maximum absolute difference 0.0. It is one causal probe and cannot prove every input or replace implementation inspection.
+
+The first audit script run incorrectly expected complete current helper files to match the recorded code hashes and failed at that extra audit assertion. The failure code/stdout/stderr are retained as `verify-initial.*`; this is not a curriculum defect. I then fetched the two original helper files from the local Git object at the recorded revision and read their relevant contracts, not another review. Their SHA-256s match the original JSON. The saved diff shows current changes only in readable evaluation prefix handling and tokenizer checkpoint metadata. ASTs of `_steps`, `run_text_foundation`, `split_records`, `records_sha256`, `text_examples`, `fit_lm` match exactly. The revised bounded check passes. Model/data/attention/FFN whole-file hashes already match the recorded run.
+
+## Figure rendering and limits
+
+I rendered the actual SVG with Inkscape 1.4 at its native 640×905 and used `view_image` on `figure.png`. All labels are visible: x `[1,2,3]`, y `[2,3,4]`; position 0/1/2 read `[1]`/`[1,2]`/`[1,2,3]` and compare with ID 2/3/4. The final data-vs-permission explanation agrees with both code and prose. There are no data-flow arrows to interpret. Inkscape emits Pango/GTK initialization warnings but exits 0 and yields a complete readable image. No browser or responsive-page render was attempted; this figure review does not certify desktop/mobile page layout.
+
+No substantive uncertainty or contradiction remains in section 4.7. No text, figure, model checkpoint, or Git commit was modified by this reviewer. All permanent evidence is under this section's artifact directory; ignored checkpoints are not used as required evidence.
