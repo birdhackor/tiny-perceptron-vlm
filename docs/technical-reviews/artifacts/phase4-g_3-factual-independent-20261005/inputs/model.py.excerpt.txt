@@ -1,0 +1,38 @@
+
+# original tiny_perceptron/model.py lines 31-50
+class Block(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        norm = nn.LayerNorm if config.norm == "layer" else RMSNorm
+        self.norm1, self.norm2 = norm(config.width), norm(config.width)
+        self.attention = CausalAttention(config.width, config.heads, config.kv_heads, config.backend, config.rotary)
+        self.ffn = (
+            MoEFFN(config.width, config.experts, config.top_k)
+            if config.experts
+            else DenseFFN(config.width, activation=config.activation)
+        )
+
+    def forward(self, x, valid=None, positions=None, segments=None, cache=None):
+        attended, new_cache = self.attention(self.norm1(x), valid, positions, segments, cache)
+        x = x + attended
+        h = self.ffn(self.norm2(x))
+        auxiliary = x.new_zeros(())
+        if isinstance(h, tuple):
+            h, auxiliary, _ = h
+        return x + h, new_cache, auxiliary
+
+# original tiny_perceptron/model.py lines 92-100
+def loss_sum(logits, labels):
+    """先求和再數有效 token，才能正確合併長短不同的 micro-batch。"""
+    count = (labels != IGNORE).sum()
+    if count.item() == 0:
+        raise ValueError("所有 labels 都被忽略：没有可學習的答案")
+    loss = F.cross_entropy(
+        logits.reshape(-1, logits.shape[-1]), labels.reshape(-1), ignore_index=IGNORE, reduction="sum"
+    )
+    return loss, count
+
+# original tiny_perceptron/model.py lines 103-105
+def masked_loss(logits, labels):
+    total, count = loss_sum(logits, labels)
+    return total / count

@@ -1,0 +1,264 @@
+                                         FlashAttention: Fast and Memory-Efficient Exact Attention
+                                                          with IO-Awareness
+                                                 Tri Dao† , Daniel Y. Fu† , Stefano Ermon† , Atri Rudra‡ , and Christopher Ré†
+                                                               † Department of Computer Science, Stanford University
+                                               ‡ Department of Computer Science and Engineering, University at Buffalo, SUNY
+arXiv:2205.14135v2 [cs.LG] 23 Jun 2022
+
+
+
+
+                                                 {trid,danfu}@cs.stanford.edu, ermon@stanford.edu, atri@buffalo.edu,
+                                                                     chrismre@cs.stanford.edu
+
+                                                                                         June 24, 2022
+
+                                                                                            Abstract
+                                                  Transformers are slow and memory-hungry on long sequences, since the time and memory complexity
+                                              of self-attention are quadratic in sequence length. Approximate attention methods have attempted
+                                              to address this problem by trading off model quality to reduce the compute complexity, but often do
+                                              not achieve wall-clock speedup. We argue that a missing principle is making attention algorithms IO-
+                                              aware—accounting for reads and writes between levels of GPU memory. We propose FlashAttention,
+                                              an IO-aware exact attention algorithm that uses tiling to reduce the number of memory reads/writes
+                                              between GPU high bandwidth memory (HBM) and GPU on-chip SRAM. We analyze the IO complexity
+                                              of FlashAttention, showing that it requires fewer HBM accesses than standard attention, and is
+                                              optimal for a range of SRAM sizes. We also extend FlashAttention to block-sparse attention, yielding
+                                              an approximate attention algorithm that is faster than any existing approximate attention method.
+                                              FlashAttention trains Transformers faster than existing baselines: 15% end-to-end wall-clock speedup
+                                              on BERT-large (seq. length 512) compared to the MLPerf 1.1 training speed record, 3× speedup on
+                                              GPT-2 (seq. length 1K), and 2.4× speedup on long-range arena (seq. length 1K-4K). FlashAttention
+                                              and block-sparse FlashAttention enable longer context in Transformers, yielding higher quality models
+                                              (0.7 better perplexity on GPT-2 and 6.4 points of lift on long-document classification) and entirely new
+                                              capabilities: the first Transformers to achieve better-than-chance performance on the Path-X challenge
+                                              (seq. length 16K, 61.4% accuracy) and Path-256 (seq. length 64K, 63.1% accuracy).
+
+
+                                         1    Introduction
+                                         Transformer models [82] have emerged as the most widely used architecture in applications such as natural
+                                         language processing and image classification. Transformers have grown larger [5] and deeper [83], but
+                                         equipping them with longer context remains difficult [80], since the self-attention module at their heart
+                                         has time and memory complexity quadratic in sequence length. An important question is whether making
+                                         attention faster and more memory-efficient can help Transformer models address their runtime and memory
+                                         challenges for long sequences.
+                                             Many approximate attention methods have aimed to reduce the compute and memory requirements of
+                                         attention. These methods range from sparse-approximation [51, 74] to low-rank approximation [12, 50, 84],
+                                         and their combinations [3, 9, 92]. Although these methods reduce the compute requirements to linear or
+                                         near-linear in sequence length, many of them do not display wall-clock speedup against standard attention
+                                         and have not gained wide adoption. One main reason is that they focus on FLOP reduction (which may not
+                                         correlate with wall-clock speed) and tend to ignore overheads from memory access (IO).
+                                             In this paper, we argue that a missing principle is making attention algorithms IO-aware [1]—that is,
+                                         carefully accounting for reads and writes to different levels of fast and slow memory (e.g., between fast GPU
+                                         on-chip SRAM and relatively slow GPU high bandwidth memory, or HBM [45], Figure 1 left). On modern
+
+
+                                                                                                 1
+                                                                                          Outer Loop
+
+                                                                    KT: d x N
+                                                                                                                                                                      Attention on GPT-2
+                                                                                          Copy Block to SRAM
+
+                                                               Q: N x d
+                                                                                               Outer Loop
+                                                                                                                             V: N X d                                          Matmul
+                                                                                                                                                             15
+
+
+
+
+                                                                          QKT: N x N
+                  GPU   SRAM: 19 TB/s (20 MB)                                                                                                                                  Dropout
+                 SRAM
+
+
+
+
+                                                                                                                                                     Time (ms)
+                GPU       HBM: 1.5 TB/s (40 GB)                                                                 Copy                                         10
+
+
+
+
+                                                                                                                                        Outer Loop
+                                                  Inner Loop
+                HBM                                                                       Compute Block                                                                        Softmax
+                                                                                            on SRAM
+
+
+
+
+                                                                                                                Inner Loop
+                                                                      Copy
+            Main Memory        DRAM: 12.8 GB/s                                                                                                                   5
+                                                                                                                                                                                          Fused
+            (CPU DRAM)               (>1 TB)                                                                                                                                   Mask       Kernel
+
+                                                                                                                                                                               Matmul
+             Memory Hierarchy with                                                              Output to HBM                                                    0
+            Bandwidth & Memory Size                  sm(QKT)V: N x d
+                                                                                                                                                                     PyTorch          FlashAttention
+
+                                                                                          Inner Loop
+                                                                                       FlashAttention
+
+Figure 1: Left: FlashAttention uses tiling to prevent materialization of the large 𝑁 × 𝑁 attention matrix
+(dotted box) on (relatively) slow GPU HBM. In the outer loop (red arrows), FlashAttention loops through
+blocks of the K and V matrices and loads them to fast on-chip SRAM. In each block, FlashAttention
+loops over blocks of Q matrix (blue arrows), loading them to SRAM, and writing the output of the attention
+computation back to HBM. Right: Speedup over the PyTorch implementation of attention on GPT-2.
+FlashAttention does not read and write the large 𝑁 × 𝑁 attention matrix to HBM, resulting in an 7.6×
+speedup on the attention computation.
+
+
+GPUs, compute speed has out-paced memory speed [61, 62, 63], and most operations in Transformers are
+bottlenecked by memory accesses [43]. IO-aware algorithms have been critical for similar memory-bound
+operations, when reading and writing data can account for a large portion of the runtime—such as database
+joins [71], image processing [70], numerical linear algebra [4], and more [40, 85]. However, common Python
+interfaces to deep learning such as PyTorch and Tensorflow do not allow fine-grained control of memory
+access.
+    We propose FlashAttention, a new attention algorithm that computes exact attention with far fewer
+memory accesses. Our main goal is to avoid reading and writing the attention matrix to and from HBM.
+This requires (i) computing the softmax reduction without access to the whole input (ii) not storing the large
+intermediate attention matrix for the backward pass. We apply two well-established techniques to address
+these challenges. (i) We restructure the attention computation to split the input into blocks and make several
+passes over input blocks, thus incrementally performing the softmax reduction (also known as tiling). (ii) We
+store the softmax normalization factor from the forward pass to quickly recompute attention on-chip in the
+backward pass, which is faster than the standard approach of reading the intermediate attention matrix from
+HBM. We implement FlashAttention in CUDA to achieve fine-grained control over memory access and
+fuse all the attention operations into one GPU kernel. Even with the increased FLOPs due to recomputation,
+our algorithm both runs faster (up to 7.6x on GPT-2 [67], Figure 1 right) and uses less memory—linear
+in sequence length—than standard attention, thanks to the massively reduced amount of HBM access.
+    We analyze the IO complexity [1] of FlashAttention, proving that it requires 𝑂 (𝑁 2 𝑑 2 𝑀 −1 ) HBM
+accesses where 𝑑 is the head dimension and 𝑀 is the size of SRAM, as compared to Ω(𝑁 𝑑 + 𝑁 2 ) of standard
+attention. For typical values of 𝑑 and 𝑀, FlashAttention requires many times fewer HBM accesses
+compared to standard attention (up to 9× fewer, as shown in Fig. 2). Moreover, we provide a lower bound,
+showing that no exact attention algorithm can asymptotically improve on the number of HBM accesses over
+all SRAM sizes.
+    We also show that FlashAttention can serve as a useful primitive for realizing the potential of
+approximate attention algorithms by overcoming their issues with memory access overhead. As a proof of
+concept, we implement block-sparse FlashAttention, a sparse attention algorithm that is 2-4× faster than
+even FlashAttention, scaling up to sequence length of 64k. We prove that block-sparse FlashAttention
+has better IO complexity than FlashAttention by a factor proportional to the sparsity ratio. We discuss
+further extensions to other operations (attention on multi-GPU, kernel regression, block-sparse matrix
+
+
+
+
+                                                                                           2
+multiply) in Section 5. We open-source FlashAttention to make it easier to build on this primitive.1
+    We empirically validate that FlashAttention speeds up model training and improves model quality by
+modeling longer context. We also benchmark the runtime and memory footprint of FlashAttention and
+block-sparse FlashAttention compared to prior attention implementations.
+• Faster Model Training. FlashAttention trains Transformer models faster in wall-clock time. We
+  train BERT-large (seq. length 512) 15% faster than the training speed record in MLPerf 1.1 [58], GPT2
+  (seq. length 1K) 3× faster than baseline implementations from HuggingFace [87] and Megatron-LM [77],
+  and long-range arena (seq. length 1K-4K) 2.4× faster than baselines.
+• Higher Quality Models. FlashAttention scales Transformers to longer sequences, which improves
+  their quality and enables new capabilities. We observe a 0.7 improvement in perplexity on GPT-2 and
+  6.4 points of lift from modeling longer sequences on long-document classification [13]. FlashAttention
+  enables the first Transformer that can achieve better-than-chance performance on the Path-X [80] challenge,
+  solely from using a longer sequence length (16K). Block-sparse FlashAttention enables a Transformer
+  to scale to even longer sequences (64K), resulting in the first model that can achieve better-than-chance
+  performance on Path-256.
+• Benchmarking Attention. FlashAttention is up to 3× faster than the standard attention implemen-
+  tation across common sequence lengths from 128 to 2K and scales up to 64K. Up to sequence length of 512,
+  FlashAttention is both faster and more memory-efficient than any existing attention method, whereas
+  for sequence length beyond 1K, some approximate attention methods (e.g., Linformer) start to become
+  faster. On the other hand, block-sparse FlashAttention is faster than all existing approximate attention
+  methods that we know of.
+
+
+2      Background
+We provide some background on the performance characteristics of common deep learning operations on
+modern hardware (GPUs). We also describe the standard implementation of attention.
+
+2.1     Hardware Performance
+We focus here on GPUs. Performance on other hardware accelerators are similar [46, 48].
+    GPU Memory Hierarchy. The GPU memory hierarchy (Fig. 1 left) comprises multiple forms of
+memory of different sizes and speeds, with smaller memory being faster. As an example, the A100 GPU
+has 40-80GB of high bandwidth memory (HBM) with bandwidth 1.5-2.0TB/s and 192KB of on-chip SRAM
+per each of 108 streaming multiprocessors with bandwidth estimated around 19TB/s [44, 45]. The on-chip
+SRAM is an order of magnitude faster than HBM but many orders of magnitude smaller in size. As compute
+has gotten faster relative to memory speed [61, 62, 63], operations are increasingly bottlenecked by memory
+(HBM) accesses. Thus exploiting fast SRAM becomes more important.
+    Execution Model. GPUs have a massive number of threads to execute an operation (called a kernel).
+Each kernel loads inputs from HBM to registers and SRAM, computes, then writes outputs to HBM.
+    Performance characteristics. Depending on the balance of computation and memory accesses, op-
+erations can be classified as either compute-bound or memory-bound. This is commonly measured by the
+arithmetic intensity [85], which is the number of arithmetic operations per byte of memory access.
+1. Compute-bound: the time taken by the operation is determined by how many arithmetic operations there
+   are, while time accessing HBM is much smaller. Typical examples are matrix multiply with large inner
+   dimension, and convolution with large number of channels.
+2. Memory-bound: the time taken by the operation is determined by the number of memory accesses, while
+   time spent in computation is much smaller. Examples include most other operations: elementwise (e.g.,
+   activation, dropout), and reduction (e.g., sum, softmax, batch norm, layer norm).
+    Kernel fusion. The most common approach to accelerate memory-bound operations is kernel fusion: if
+there are multiple operations applied to the same input, the input can be loaded once from HBM, instead of
+multiple times for each operation. Compilers can automatically fuse many elementwise operations [53, 65, 75].
+    1 FlashAttention code is available at https://github.com/HazyResearch/flash-attention
+
+
+
+
+                                                          3
+However, in the context of model training, the intermediate values still need to be written to HBM to save
+for the backward pass, reducing the effectiveness of naive kernel fusion.
+
+2.2    Standard Attention Implementation
+Given input sequences Q, K, V ∈ R 𝑁 ×𝑑 where 𝑁 is the sequence length and 𝑑 is the head dimension, we want
+to compute the attention output O ∈ R 𝑁 ×𝑑 :
+
+                      S = QK> ∈ R 𝑁 ×𝑁 ,         P = softmax(S) ∈ R 𝑁 ×𝑁 ,         O = PV ∈ R 𝑁 ×𝑑 ,
+
+where softmax is applied row-wise.
+    Standard attention implementations materialize the matrices S and P to HBM, which takes 𝑂 (𝑁 2 ) memory.
+Often 𝑁  𝑑 (e.g., for GPT2, 𝑁 = 1024 and 𝑑 = 64). We describe the standard attention implementation
+in Algorithm 0. As some or most of the operations are memory-bound (e.g., softmax), the large number of
+memory accesses translates to slow wall-clock time.
+    This problem is exacerbated by other elementwise operations applied to the attention matrix, such as
+masking applied to S or dropout applied to P. As a result, there have been many attempts to fuse several
+elementwise operations, such as fusing masking with softmax [77].
+    In Section 3.2, we will show that the standard attention implementation performs HBM accesses quadratic
+in the sequence length 𝑁. We also compare the number of FLOPs and number of HBM accesses of standard
+attention and of our method (FlashAttention).
+
+Algorithm 0 Standard Attention Implementation
+Require: Matrices Q, K, V ∈ R 𝑁 ×𝑑 in HBM.
+ 1: Load Q, K by blocks from HBM, compute S = QK> , write S to HBM.
+ 2: Read S from HBM, compute P = softmax(S), write P to HBM.
+ 3: Load P and V by blocks from HBM, compute O = PV, write O to HBM.
+ 4: Return O.
+
+
+
+3     FlashAttention: Algorithm, Analysis, and Extensions
+We show how to compute exact attention with fewer HBM reads/writes and without storing large intermediate
+matrices for the backward pass. This yields an attention algorithm that is both memory efficient and faster in
+wall-clock time. We analyze its IO complexity, showing that our method requires much fewer HBM accesses
+compared to standard attention. We further show that FlashAttention can serve as a useful primitive by
+extending it to handle block-sparse attention.
+   We focus here on the forward pass for ease of exposition; Appendix B contains details for the backward.
+
+3.1    An Efficient Attention Algorithm With Tiling and Recomputation
+Given the inputs Q, K, V ∈ R 𝑁 ×𝑑 in HBM, we aim to compute the attention output O ∈ R 𝑁 ×𝑑 and write it to
+HBM. Our goal is to reduce the amount of HBM accesses (to sub-quadratic in 𝑁).
+    We apply two established techniques (tiling, recomputation) to overcome the technical challenge of
+computing exact attention in sub-quadratic HBM accesses. We describe this in Algorithm 1. The main idea
+is that we split the inputs Q, K, V into blocks, load them from slow HBM to fast SRAM, then compute the
+attention output with respect to those blocks. By scaling the output of each block by the right normalization
+factor before adding them up, we get the correct result at the end.
+    Tiling. We compute attention by blocks. Softmax couples columns of K, so we decompose the large
+softmax with scaling [51, 60, 66]. For numerical stability, the softmax of vector 𝑥 ∈ R 𝐵 is computed as:
+                                                                                   ∑︁                              𝑓 (𝑥)
+                          𝑓 (𝑥) := 𝑒 𝑥1 −𝑚( 𝑥)           𝑒 𝑥𝐵 −𝑚( 𝑥) ,
+                                                                   
+      𝑚(𝑥) := max 𝑥 𝑖 ,                            ...                   ℓ(𝑥) :=        𝑓 (𝑥)𝑖 ,   softmax(𝑥) :=         .
+                𝑖
+                                                                                    𝑖
+                                                                                                                   ℓ(𝑥)
+
+
+
+
+                                                             4
+

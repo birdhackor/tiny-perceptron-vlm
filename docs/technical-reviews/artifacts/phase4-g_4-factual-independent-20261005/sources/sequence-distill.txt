@@ -1,0 +1,125 @@
+                                                                      Sequence-Level Knowledge Distillation
+
+
+                                                            Yoon Kim                                         Alexander M. Rush
+                                                    yoonkim@seas.harvard.edu                             srush@seas.harvard.edu
+
+
+
+                                                                                        Harvard University
+arXiv:1606.07947v1 [cs.CL] 25 Jun 2016
+
+
+
+
+                                                                Abstract                          the whole system can be directly trained end-to-end
+                                                                                                  on a large set of supervised data.
+                                              Neural machine translation (NMT) offers a
+                                              novel alternative formulation of translation
+                                                                                                     While both simple and surprisingly accurate,
+                                              that is potentially simpler than statistical ap-    NMT systems typically need to be very high capac-
+                                              proaches. However to reach competitive per-         ity in order to perform well: Sutskever et al. (2014)
+                                              formance, NMT models need to be exceed-             used a 4-layer LSTM with 1000 hidden units per
+                                              ingly large. In this paper we consider applying     layer (herein 4 × 1000) and Zhou et al. (2016) ob-
+                                              knowledge distillation approaches (Bucila et        tained state-of-the-art results on English → French
+                                              al., 2006; Hinton et al., 2015) that have proven    with a 16-layer LSTM with 512 units per layer. The
+                                              successful for reducing the size of neural mod-
+                                                                                                  sheer size of the models requires cutting-edge hard-
+                                              els in other domains to the problem of NMT.
+                                              We demonstrate that standard knowledge dis-         ware for training and makes using the models on
+                                              tillation applied to word-level prediction can      standard setups very challenging.
+                                              be effective for NMT, and also introduce two           This issue of excessively large networks has been
+                                              novel sequence-level versions of knowledge          observed in several other domains, with much fo-
+                                              distillation that further improve performance,      cus on fully-connected and convolutional networks
+                                              and somewhat surprisingly, seem to elimi-
+                                                                                                  for multi-class classification. Researchers have par-
+                                              nate the need for beam search (even when ap-
+                                              plied on the original teacher model). Our best
+                                                                                                  ticularly noted that large networks seem to be nec-
+                                              student model runs 10 times faster than its         essary for training, but learn redundant representa-
+                                              state-of-the-art teacher with only a decrease of    tions in the process (Denil et al., 2013). Therefore
+                                              0.2 BLEU. It is also significantly better than      compressing deep models into smaller networks has
+                                              a baseline model trained without knowledge          been an active area of research. As deep learning
+                                              distillation: by 4.2/1.7 BLEU with greedy de-       systems obtain better results on NLP tasks, compres-
+                                              coding/beam search.                                 sion also becomes an important practical issue with
+                                                                                                  applications such as running deep learning models
+                                         1   Introduction                                         for speech and translation locally on cell phones.
+                                         Neural machine translation (NMT) (Kalchbrenner              Existing compression methods generally fall into
+                                         and Blunsom, 2013; Cho et al., 2014; Sutskever et        two categories: (1) pruning and (2) knowledge distil-
+                                         al., 2014) is a deep learning-based method for trans-    lation.1 Pruning methods (LeCun et al., 1990; Has-
+                                         lation that has recently shown promising results as      sibi and Stork, 1993; He et al., 2014; Han et al.,
+                                         an alternative to statistical approaches. NMT sys-       2016; Mariet and Sra, 2016), zero-out weights based
+                                         tems directly model the probability of the next-word        1
+                                                                                                       There has also been work on reducing the memory footprint
+                                         in the target sentence, simply by conditioning a re-     of models through quantization of weights (Chen et al., 2015;
+                                         current neural network on the source sentence and        Han et al., 2016; Courbariaux et al., 2016) as a postprocessing
+                                         previously generated target words. Under this setup,     step.
+on an importance criterion: LeCun et al. (1990) use       2     Background
+(a diagonal approximation to) the Hessian to iden-
+                                                          For notation we denote vectors with bold lower-case
+tify weights whose removal minimally impact the
+                                                          (e.g. hi , b), matrices with bold upper-case (e.g. W,
+objective function, while Han et al. (2016) remove
+                                                          U), and sets with cursive upper-case (e.g. V, T ). We
+weights based on thresholding their absolute val-
+                                                          assume words are represented by their indices.
+ues. Knowledge distillation approaches (Bucila et
+al., 2006; Ba and Caruana, 2014; Li et al., 2014;         2.1    Sequence-to-Sequence with Attention
+Hinton et al., 2015; Romero et al., 2015; Mou et
+                                                          We begin by describing our baseline NMT model,
+al., 2015) learn a smaller student network to mimic
+                                                          which was proposed by Luong et al. (2015) and
+the original teacher network by minimizing the loss
+                                                          achieved state-of-the-art results on English → Ger-
+(typically L2 or cross-entropy) between the student
+                                                          man translation. Let s = [s1 , . . . , sI ] and t =
+and teacher output.
+                                                          [t1 , . . . , tJ ] be (random variable sequences repre-
+   In this work, we investigate knowledge distilla-       senting) the source/target sentence, with I and J re-
+tion in the context of neural machine translation,        spectively being the source/target lengths. Machine
+with the goal of reducing the test-time computa-          translation involves finding the most probable target
+tion burden (as opposed to memory footprint). We          sentence given the source:
+note that NMT differs from previous work which
+has mainly explored non-recurrent models in set-                               argmax p(t | s)
+tings where the prediction is a single class. For                                t∈T
+NMT, while the model is trained on multi-class pre-
+                                                          where T is the set of all possible sequences. NMT
+diction at the word-level, it is tasked with predicting
+                                                          models parameterize p(t | s) with an encoder neural
+complete sequence outputs conditioned on previous
+                                                          network which reads the source sentence and a de-
+decisions. With this difference in mind, we experi-
+                                                          coder neural network which produces a distribution
+ment with standard knowledge distillation for NMT
+                                                          over the target sentence (one word at a time) given
+and also propose two new versions of the approach
+                                                          the source.
+that attempt to approximately match the sequence-
+level (as opposed to word-level) distribution of the      Encoder In attention-based models (Bahdanau et
+teacher network. This sequence-level approximation        al., 2015; Luong et al., 2015), the encoder reads the
+leads to a simple training procedure wherein the stu-     source sentence and outputs a sequence of vectors
+dent network is trained on the output of beam search      (one vector for each time step) to be attended to
+from the teacher network.                                 during decoding. Concretely, we use a Long Short-
+   To examine these approaches we run experiments         Term Memory (LSTM) (Hochreiter and Schmidhu-
+to compress a large state-of-the-art 4 × 1000 LSTM        ber, 1997) network to obtain the hidden states hsi ∈
+model. With sequence-level knowledge distillation         Rn for each time step i,
+we are able to learn a 2 × 500 LSTM that roughly
+matches the performance of the full system. We see                        hsi = LSTM(hsi−1 , xsi )
+similar results compressing a 2×500 model down to
+                                                          where xsi ∈ Rm is the word embedding for si ,
+2 × 100 on a smaller data set. Furthermore, we find
+                                                          the i-th word in the source sentence. Output of
+that our proposed approach has other benefits, such
+                                                          the encoder is the sequence of hidden state vectors
+as not requiring any beam search at test-time. As a
+                                                          [hs1 , . . . , hsI ]. Initial hidden state of the encoder is
+result we are able to perform greedy decoding on the
+                                                          set to zero (i.e. hs0 ← 0).
+2 × 500 model 10 times faster than beam search on
+the 4 × 1000 model, with comparable performance.          Decoder The decoder is another LSTM that pro-
+Our student models can even be run efficiently on a       duces a distribution over the next target word con-
+standard smart phone. We have released all code for       ditioned on the source vectors [hs1 , . . . , hsI ] and the
+the models described in this paper.2                      previous target words t<j = [t1 , . . . tj−1 ]. Let
+   2
+       https://github.com/harvardnlp/seq2seq-attn                         htj = LSTM(htj−1 , xtj )
+
