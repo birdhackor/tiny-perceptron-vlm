@@ -8,6 +8,8 @@
 
 技術審閱用的 `section_facts.py` 只提取原始 UTF-8 小節、程式區塊與 SVG 指紋；加 `--execute` 才在新的 CPU 程序執行本節 Python。它不產生審閱報告或通過判定。審閱者仍須自行閱讀文本、圖、原始論文與實測證據，依 [技術審閱規約](../technical-review-guide.md)判斷主張。
 
+本輪派工另使用 [單節正確性工作說明](factual-reviewer-instructions.md)：全部易讀性修正完成後才啟動，使用不同的新審閱者；明確區分原碼執行、既有結果核對與尚未實作的成品計畫，不為文字修訂重跑 GPU 訓練。
+
 在專案根目錄執行：
 
 ```bash
