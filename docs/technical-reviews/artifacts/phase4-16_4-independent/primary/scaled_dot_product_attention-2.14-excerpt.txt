@@ -1,0 +1,174 @@
+6367: scaled_dot_product_attention = _add_docstr(
+6368:     torch._C._nn.scaled_dot_product_attention,
+6369:     r"""scaled_dot_product_attention(query, key, value, attn_mask=None, dropout_p=0.0,
+6370:         is_causal=False, scale=None, enable_gqa=False) -> Tensor:
+6371: 
+6372:     Computes scaled dot product attention on query, key and value tensors, using an optional attention mask if passed,
+6373:     and applying dropout if a probability greater than 0.0 is specified. The optional scale argument can only be
+6374:     specified as a keyword argument.
+6375: 
+6376:     .. code-block:: python
+6377: 
+6378:         # Efficient implementation equivalent to the following:
+6379:         def scaled_dot_product_attention(query, key, value, attn_mask=None, dropout_p=0.0,
+6380:                 is_causal=False, scale=None, enable_gqa=False) -> torch.Tensor:
+6381:             L, S = query.size(-2), key.size(-2)
+6382:             scale_factor = 1 / math.sqrt(query.size(-1)) if scale is None else scale
+6383:             attn_bias = torch.zeros(L, S, dtype=query.dtype, device=query.device)
+6384:             if is_causal:
+6385:                 assert attn_mask is None
+6386:                 temp_mask = torch.ones(L, S, dtype=torch.bool, device=query.device).tril(diagonal=0)
+6387:                 attn_bias.masked_fill_(temp_mask.logical_not(), float("-inf"))
+6388: 
+6389:             if attn_mask is not None:
+6390:                 if attn_mask.dtype == torch.bool:
+6391:                     attn_bias.masked_fill_(attn_mask.logical_not(), float("-inf"))
+6392:                 else:
+6393:                     attn_bias = attn_mask + attn_bias
+6394: 
+6395:             if enable_gqa:
+6396:                 key = key.repeat_interleave(query.size(-3)//key.size(-3), -3)
+6397:                 value = value.repeat_interleave(query.size(-3)//value.size(-3), -3)
+6398: 
+6399:             attn_weight = query @ key.transpose(-2, -1) * scale_factor
+6400:             attn_weight += attn_bias
+6401:             attn_weight = torch.softmax(attn_weight, dim=-1)
+6402:             attn_weight = torch.dropout(attn_weight, dropout_p, train=True)
+6403:             return attn_weight @ value
+6404: 
+6405:     .. warning::
+6406:         This function is beta and subject to change.
+6407: 
+6408:     .. warning::
+6409:         This function always applies dropout according to the specified ``dropout_p`` argument.
+6410:         To disable dropout during evaluation, be sure to pass a value of ``0.0`` when the module
+6411:         that makes the function call is not in training mode.
+6412: 
+6413:         For example:
+6414: 
+6415:         .. code-block:: python
+6416: 
+6417:             class MyModel(nn.Module):
+6418:                 def __init__(self, p=0.5):
+6419:                     super().__init__()
+6420:                     self.p = p
+6421: 
+6422:                 def forward(self, ...):
+6423:                     return F.scaled_dot_product_attention(...,
+6424:                         dropout_p=(self.p if self.training else 0.0))
+6425: 
+6426:     Note:
+6427: 
+6428:         The boolean mask semantics for ``attn_mask`` are the inverse of
+6429:         :class:`~torch.nn.MultiheadAttention`'s ``key_padding_mask``.
+6430: 
+6431:         In :func:`scaled_dot_product_attention`, ``True`` indicates values
+6432:         to **participate** in attention.
+6433: 
+6434:         In :class:`~torch.nn.MultiheadAttention`, ``True`` indicates values
+6435:         to be **masked out** (padding).
+6436: 
+6437:         If migrating from MHA, ensure you invert your boolean mask (e.g.,
+6438:         using ``~mask`` or ``mask.logical_not()``).
+6439: 
+6440: 
+6441:     Note:
+6442: 
+6443:         There are currently three supported implementations of scaled dot product attention:
+6444: 
+6445:             - `FlashAttention-2: Faster Attention with Better Parallelism and Work Partitioning`_
+6446:             - `Memory-Efficient Attention`_
+6447:             - A PyTorch implementation defined in C++ matching the above formulation
+6448: 
+6449:         The function may call optimized kernels for improved performance when using the CUDA backend.
+6450:         For all other backends, the PyTorch implementation will be used.
+6451: 
+6452:         All implementations are enabled by default. Scaled dot product attention attempts to automatically select the
+6453:         most optimal implementation based on the inputs. In order to provide more fine-grained control over what implementation
+6454:         is used, the following functions are provided for enabling and disabling implementations.
+6455:         The context manager is the preferred mechanism:
+6456: 
+6457:             - :func:`torch.nn.attention.sdpa_kernel`: A context manager used to enable or disable any of the implementations.
+6458:             - :func:`torch.backends.cuda.enable_flash_sdp`: Globally enables or disables FlashAttention.
+6459:             - :func:`torch.backends.cuda.enable_mem_efficient_sdp`: Globally enables or disables  Memory-Efficient Attention.
+6460:             - :func:`torch.backends.cuda.enable_math_sdp`: Globally enables or disables  the PyTorch C++ implementation.
+6461: 
+6462:         Each of the fused kernels has specific input limitations. If the user requires the use of a specific fused implementation,
+6463:         disable the PyTorch C++ implementation using :func:`torch.nn.attention.sdpa_kernel`.
+6464:         In the event that a fused implementation is not available, a warning will be raised with the
+6465:         reasons why the fused implementation cannot run.
+6466: 
+6467:         Due to the nature of fusing floating point operations, the output of this function may be different
+6468:         depending on what backend kernel is chosen.
+6469:         The c++ implementation supports torch.float64 and can be used when higher precision is required.
+6470:         For math backend, all intermediates are kept in torch.float if inputs are in torch.half or torch.bfloat16.
+6471:     For more information please see :doc:`/notes/numerical_accuracy`
+6472: 
+6473:         Grouped Query Attention (GQA) is an experimental feature. It works with FlashAttention,
+6474:         cuDNN attention, and the math kernel on CUDA tensors. Memory-efficient attention also supports
+6475:         GQA on NVIDIA CUDA. GQA does not support Nested tensors.
+6476:         Constraints for GQA:
+6477: 
+6478:             - number_of_heads_query % number_of_heads_key_value == 0 and,
+6479:             - number_of_heads_key == number_of_heads_value
+6480: 
+6481:     Note:
+6482: 
+6483:         {cudnn_reproducibility_note}
+6484:     """.format(**reproducibility_notes)
+6485:     + r"""
+6486:     Args:
+6487:         query (Tensor): Query tensor; shape :math:`(N, ..., Hq, L, E)`.
+6488:         key (Tensor): Key tensor; shape :math:`(N, ..., H, S, E)`.
+6489:         value (Tensor): Value tensor; shape :math:`(N, ..., H, S, Ev)`.
+6490:         attn_mask (optional Tensor): Attention mask; shape must be broadcastable to the shape of attention weights,
+6491:             which is :math:`(N,..., Hq, L, S)`. Two types of masks are supported.
+6492:             A boolean mask where a value of True indicates that the element *should* take part in attention.
+6493:             A float mask of the same type as query, key, value that is added to the attention score.
+6494:         dropout_p (float): Dropout probability; if greater than 0.0, dropout is applied
+6495:         is_causal (bool): If set to true, the attention masking is a lower triangular matrix when the mask is a
+6496:             square matrix. The attention masking has the form of the upper left causal bias due to the alignment
+6497:             (see :class:`torch.nn.attention.bias.CausalBias`) when the mask is a non-square matrix.
+6498:             An error is thrown if both attn_mask and is_causal are set.
+6499:         scale (optional float, keyword-only): Scaling factor applied prior to softmax. If None, the default value is set
+6500:             to :math:`\frac{1}{\sqrt{E}}`.
+6501:         enable_gqa (bool): If set to True, Grouped Query Attention (GQA) is enabled, by default it is set to False.
+6502: 
+6503:     Returns:
+6504:         output (Tensor): Attention output; shape :math:`(N, ..., Hq, L, Ev)`.
+6505: 
+6506:     Shape legend:
+6507:         - :math:`N: \text{Batch size} ... : \text{Any number of other batch dimensions (optional)}`
+6508:         - :math:`S: \text{Source sequence length}`
+6509:         - :math:`L: \text{Target sequence length}`
+6510:         - :math:`E: \text{Embedding dimension of the query and key}`
+6511:         - :math:`Ev: \text{Embedding dimension of the value}`
+6512:         - :math:`Hq: \text{Number of heads of query}`
+6513:         - :math:`H: \text{Number of heads of key and value}`
+6514: 
+6515:     Examples:
+6516: 
+6517:         >>> # Optionally use the context manager to ensure one of the fused kernels is run
+6518:         >>> query = torch.rand(32, 8, 128, 64, dtype=torch.float16, device="cuda")
+6519:         >>> key = torch.rand(32, 8, 128, 64, dtype=torch.float16, device="cuda")
+6520:         >>> value = torch.rand(32, 8, 128, 64, dtype=torch.float16, device="cuda")
+6521:         >>> with sdpa_kernel(backends=[SDPBackend.FLASH_ATTENTION]):
+6522:         >>>     F.scaled_dot_product_attention(query,key,value)
+6523: 
+6524: 
+6525:         >>> # Sample for GQA for llama3
+6526:         >>> query = torch.rand(32, 32, 128, 64, dtype=torch.float16, device="cuda")
+6527:         >>> key = torch.rand(32, 8, 128, 64, dtype=torch.float16, device="cuda")
+6528:         >>> value = torch.rand(32, 8, 128, 64, dtype=torch.float16, device="cuda")
+6529:         >>> with sdpa_kernel(backends=[SDPBackend.MATH]):
+6530:         >>>     F.scaled_dot_product_attention(query,key,value,enable_gqa=True)
+6531: 
+6532: 
+6533:     .. _FlashAttention-2\: Faster Attention with Better Parallelism and Work Partitioning:
+6534:         https://arxiv.org/abs/2307.08691
+6535:     .. _Memory-Efficient Attention:
+6536:         https://github.com/facebookresearch/xformers
+6537:     .. _Grouped-Query Attention:
+6538:         https://arxiv.org/pdf/2305.13245
+6539:     """,
+6540: )

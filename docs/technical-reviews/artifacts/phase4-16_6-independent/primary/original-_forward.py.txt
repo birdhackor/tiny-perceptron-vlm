@@ -1,0 +1,21 @@
+def _forward(model, ids, valid, forward=None):
+    """MoE 的輔助目標只計有效輸入；stock FFN 本身不知道 PAD 遮罩。"""
+    auxiliary, handles = [], []
+    if model.config.experts:
+
+        def collect(module, args, result):
+            flat = args[0][valid]
+            probability = module.router(flat).float().softmax(-1)
+            chosen = result[2][valid.reshape(-1)]
+            load = F.one_hot(chosen, len(module.experts)).float().mean((0, 1))
+            auxiliary.append(len(module.experts) * (load.detach() * probability.mean(0)).sum())
+
+        handles = [block.ffn.register_forward_hook(collect) for block in model.blocks]
+    try:
+        result = (forward or model)(ids, valid=valid)
+    finally:
+        for handle in handles:
+            handle.remove()
+    if auxiliary:
+        result["auxiliary"] = torch.stack(auxiliary).sum()
+    return result

@@ -1,0 +1,20 @@
+def _accumulation_probe(model, examples, ctx):
+    whole, accumulated = copy.deepcopy(model), copy.deepcopy(model)
+    chosen = [(x[:n], y[:n]) for (x, y), n in zip(examples[:3], (13, 23, 37), strict=True)]
+    x, y, valid = (t.to(ctx.device) for t in pad_batch(chosen))
+    _, whole_gradients, _ = _gradients(whole, x, y, valid)
+    denominator = sum(int((label != IGNORE).sum()) for _, label in chosen)
+    accumulated.zero_grad(set_to_none=True)
+    counts = []
+    for group in (chosen[:1], chosen[1:]):
+        a, b, mask = (t.to(ctx.device) for t in pad_batch(group))
+        total, count = loss_sum(accumulated(a, valid=mask)["logits"], b)
+        (total / denominator).backward()
+        counts.append(int(count))
+    gradients = {name: p.grad.detach().clone() for name, p in accumulated.named_parameters() if p.grad is not None}
+    return {
+        "micro_batch_sizes": [1, 2],
+        "effective_token_counts": counts,
+        "shared_denominator": denominator,
+        "gradient_max_error": _gradient_error(whole_gradients, gradients),
+    }

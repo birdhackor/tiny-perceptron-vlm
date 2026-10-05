@@ -1,0 +1,61 @@
+def run_efficiency(ctx):
+    started = time.perf_counter()
+    data = _sft_dataset(ctx)
+    initial = load_lm(ctx.dependency("sft"), ctx.device)
+    examples = text_examples(data["train"], mode="sft", max_length=initial.config.max_length)
+    heads = 4 if initial.config.width % 4 == 0 else initial.config.heads
+    models, trained = {}, {}
+    for name, kv in (("mha", heads), ("gqa", 1)):
+        model, shared = _clone_config(initial, ctx, heads=heads, kv_heads=kv, experts=0, backend="manual")
+        training = _train(
+            model, data["train"], ctx, name=name, steps=_steps(ctx, 100), mode="sft", deadline=started + 345
+        )
+        trained[name] = model
+        models[name] = {
+            "model": _description(model),
+            "copied_initial_tables": shared,
+            "training": training,
+            "heldout": _heldout(model, data, "sft"),
+            "cache": _cache_probe(model, ctx),
+        }
+    base = trained["mha"]
+    sdpa = _sdpa_probe(base, examples, ctx)
+    packing = _packing_probe(base, data["train"], ctx)
+    accumulation = _accumulation_probe(base, _mechanism_examples(data["train"], base.config.max_length), ctx)
+    recomputation = _checkpoint_probe(base, examples, ctx)
+    update_variants = {}
+    final_models = {}
+    for name in ("ordinary", "accumulated", "activation_checkpoint", "sdpa"):
+        model = copy.deepcopy(base)
+        forward = None
+        if name == "activation_checkpoint":
+
+            def forward(ids, valid=None, model=model):
+                return _checkpoint_forward(model, ids, valid=valid)
+
+        if name == "sdpa":
+            for block in model.blocks:
+                block.attention.backend = "sdpa"
+            model.config.backend = "sdpa"
+        training = _train(
+            model,
+            data["train"],
+            ctx,
+            name=name,
+            steps=_steps(ctx, 40),
+            mode="sft",
+            batch_size=8,
+            forward=forward,
+            micro_sizes=[3, 5] if name == "accumulated" else None,
+            deadline=started + 345,
+        )
+        update_variants[name] = {"training": training, "heldout": _heldout(model, data, "sft")}
+        final_models[name] = model
+    reference = final_models["ordinary"].state_dict()
+    for name in ("accumulated", "activation_checkpoint", "sdpa"):
+        update_variants[name]["weight_max_error_from_ordinary_after_updates"] = max(
+            float((reference[key] - final_models[name].state_dict()[key]).abs().max()) for key in reference
+        )
+    (ctx.output / "model.pt").write_bytes((ctx.output / "ordinary.pt").read_bytes())
+    packing["actual_updates"] = _packing_updates(base, data, ctx, steps=_steps(ctx, 40), deadline=started + 345)
+    compilation = _compile_probe(base, ctx, timeout=min(150, max(0, int(started + 535 - time.perf_counter()))))
