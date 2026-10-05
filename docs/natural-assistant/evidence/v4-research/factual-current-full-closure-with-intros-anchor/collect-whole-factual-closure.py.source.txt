@@ -1,0 +1,142 @@
+"""Dormant provenance collector; run only after all actual factual owners close."""
+import argparse
+import hashlib
+import importlib.util
+import json
+import subprocess
+from datetime import UTC, datetime
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[3]
+BASE = ROOT / "outputs/natural-v4/review-plan"
+spec = importlib.util.spec_from_file_location("read_only_official_technical_checker", ROOT / "scripts/check_technical_reviews.py")
+checker = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(checker)
+
+
+def sha(raw):
+    return hashlib.sha256(raw).hexdigest()
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--output", required=True)
+    parser.add_argument("--reader-closure", required=True)
+    parser.add_argument("--source-version", required=True)
+    parser.add_argument("--observed-all-required-owner-finals", action="store_true", required=True)
+    args = parser.parse_args()
+    output = ROOT / args.output
+    assert not output.exists(), "Keep original phase receipts byte-exact."
+    plan = json.loads((BASE / "factual-current-dispatch-plan.json").read_bytes())
+    for sid, gate in plan.get("required_current_necessary_context_rechecks", {}).items():
+        assert gate["current_context_FINAL_closed"] and gate["completion_status"] == "actual_owner_current_pass_and_checker_pass", sid
+        result = gate["actual_context_recheck_result"]
+        assert result["actual_observed_owner_final"] and result["actual_owner"] == gate["actual_same_owner"]
+    scope = plan["ordered_authorized_unique_section_scope"]
+    assert len(scope) == len(set(scope)) == plan["current_authorized_unique_section_count"]
+    dispatches = {r["lesson_id"]: r for r in plan["dispatches"]}
+    assert set(scope) <= set(dispatches)
+    reader = json.loads((ROOT / args.reader_closure).read_bytes())
+    assert reader["whole_readability_phase_complete"] and reader["actual_checker_exit_code"] == 0
+    reader_tasks = {r["actual_owner"] for r in reader["numbered_current58"] + reader["supplemental_current8"]}
+    numbered = []
+    for sid in scope:
+        dispatch = dispatches[sid]
+        assert dispatch["actual_dispatch_observed"] and dispatch["fork_turns"] == "none"
+        assert dispatch["completion_status"] == "actual_owner_current_pass_and_checker_pass", sid
+        raw = (ROOT / dispatch["report_path"]).read_bytes()
+        report = json.loads(raw)
+        assert sha(raw) == dispatch["actual_owner_report_sha256"], sid
+        assert report["reviewer_task"] == dispatch["actual_owner"] and report["reviewer_task"] not in reader_tasks
+        assert report["reviewer_context"] == "fresh" and report["verdict"] == "pass"
+        numbered.append({"lesson_id": sid, "actual_owner": dispatch["actual_owner"],
+                         "report_path": dispatch["report_path"], "report_sha256": sha(raw),
+                         "current_source_sha256": report["source_sha256"],
+                         "introduction_sha256": report.get("intro_sha256", report.get("introduction_sha256")),
+                         "figure_sha256": report["figure_sha256"], "actual_claim_count": len(report["claims"]),
+                         "actual_owner_issues_unchanged": report["issues"]})
+    assert len({r["actual_owner"] for r in numbered}) == len(scope)
+    supplemental_journal = json.loads((BASE / "factual-supplemental-dispatch-journal.json").read_bytes())
+    assert set(supplemental_journal["scope_groups"]) == {r["group_id"] for r in supplemental_journal["dispatches"]}
+    supplemental = []
+    for dispatch in supplemental_journal["dispatches"]:
+        assert dispatch["completion_status"] == "actual_owner_current_pass_and_provenance_validated", dispatch["group_id"]
+        assert dispatch["actual_spawn_receipt_observed"] and dispatch["fork_turns"] == "none"
+        actual_report_path = dispatch.get("current_observed_actual_owner_report_path", dispatch["report_path"])
+        raw = (ROOT / actual_report_path).read_bytes()
+        assert sha(raw) == dispatch["actual_owner_report_sha256"]
+        report = json.loads(raw)
+        assert report["reviewer_task"] == dispatch["actual_owner"] and report["reviewer_task"] not in reader_tasks
+        assert report["verdict"] == "pass" and report["reviewer_context"] == "fresh" and not report.get("lesson_id")
+        errors = []
+        for doc, expected in report["current_document_sha256"].items():
+            checker._hash_file(ROOT, doc, expected, errors, "full_document")
+        for fig, expected in report["figure_sha256"].items():
+            checker._hash_file(ROOT, fig, expected, errors, "figure")
+        artifacts = checker._artifacts(ROOT, report["artifacts"], errors)
+        sources = checker._sources(ROOT, report["sources"], artifacts, errors)
+        checker._claims(report["claims"], sources, artifacts, errors)
+        assert not errors, errors
+        supplemental.append({"group_id": dispatch["group_id"], "actual_owner": dispatch["actual_owner"],
+                             "report_path": actual_report_path, "report_sha256": sha(raw),
+                             "actual_complete_document_sha256": report["current_document_sha256"],
+                             "actual_figure_sha256": report["figure_sha256"],
+                             "actual_claim_count": len(report["claims"]), "actual_owner_issues_unchanged": report["issues"]})
+    assert len(supplemental) == len(supplemental_journal["scope_groups"])
+    supplemental_file_count = sum(len(r["actual_complete_document_sha256"]) for r in supplemental)
+    assert supplemental_file_count == supplemental_journal.get("current_authorized_full_document_count", 8)
+    assert len({r["actual_owner"] for r in numbered + supplemental}) == len(scope) + len(supplemental_journal["scope_groups"])
+    command = [str(ROOT / ".venv/bin/python"), "scripts/check_technical_reviews.py"]
+    result = subprocess.run(command, cwd=ROOT, capture_output=True)
+    stdout = output.with_name(output.stem + ".checker.stdout.txt")
+    stderr = output.with_name(output.stem + ".checker.stderr.txt")
+    stdout.write_bytes(result.stdout)
+    stderr.write_bytes(result.stderr)
+    assert result.returncode == 0, result.stdout.decode() + result.stderr.decode()
+    intro_journal_path = BASE / "intro-metadata-current-corrective-journal.json"
+    if intro_journal_path.is_file():
+        intro_journal = json.loads(intro_journal_path.read_bytes())
+        assert intro_journal["all_actual_same_owner_intro_FINALs_received"]
+        assert all(r["completion_status"] == "actual_same_owner_current_intro_metadata_FINAL_and_native_pass" for r in intro_journal["entries"])
+    round_output = output.with_name(output.stem + ".review-round.json")
+    assert not round_output.exists()
+    round_command = [str(ROOT / ".venv/bin/python"), "docs/review-tools/check_review_round.py", "--stage", "all", "--output", str(round_output)]
+    round_result = subprocess.run(round_command, cwd=ROOT, capture_output=True)
+    round_stdout = output.with_name(output.stem + ".review-round.stdout.txt")
+    round_stderr = output.with_name(output.stem + ".review-round.stderr.txt")
+    round_stdout.write_bytes(round_result.stdout)
+    round_stderr.write_bytes(round_result.stderr)
+    assert round_result.returncode == 0, round_result.stdout.decode() + round_result.stderr.decode()
+    if intro_journal_path.is_file():
+        intro_journal.update({"additional_intro_round_gate_complete": True,
+                              "actual_identity_introduction_round_exit_code": round_result.returncode,
+                              "actual_identity_introduction_round_output": round_output.relative_to(ROOT).as_posix(),
+                              "actual_identity_introduction_round_stdout": round_stdout.relative_to(ROOT).as_posix(),
+                              "actual_identity_introduction_round_stderr": round_stderr.relative_to(ROOT).as_posix()})
+        intro_journal_path.write_text(json.dumps(intro_journal, ensure_ascii=False, indent=2) + "\n")
+    receipt = {"kind": "genuine_observed_current_whole_factual_phase_closure_not_continuity_or_time_approval",
+               "captured_at": datetime.now(UTC).isoformat(), "source_version": args.source_version,
+               "actual_fresh_numbered_owner_count": len(numbered), "unchanged_current_baseline_numbered_count": 292 - len(numbered),
+               "actual_supplemental_owner_groups": len(supplemental), "actual_complete_supplemental_files": supplemental_file_count,
+               "whole_factual_phase_complete": True, "reader_closure": args.reader_closure,
+               "reader_closure_sha256": sha((ROOT / args.reader_closure).read_bytes()),
+               "actual_numbered_owner_reports": numbered, "actual_supplemental_owner_reports": supplemental,
+               "actual_official_checker_command": command, "actual_official_checker_exit_code": result.returncode,
+               "actual_checker_stdout": stdout.relative_to(ROOT).as_posix(), "actual_checker_stderr": stderr.relative_to(ROOT).as_posix(),
+               "actual_identity_introduction_round_command": round_command,
+               "actual_identity_introduction_round_exit_code": round_result.returncode,
+               "actual_identity_introduction_round_output": round_output.relative_to(ROOT).as_posix(),
+               "actual_identity_introduction_round_stdout": round_stdout.relative_to(ROOT).as_posix(),
+               "actual_identity_introduction_round_stderr": round_stderr.relative_to(ROOT).as_posix(),
+               "actual_same_owner_intro_correction_journal": intro_journal_path.relative_to(ROOT).as_posix() if intro_journal_path.is_file() else None,
+               "scope_limit": "Genuine actual owner FINALs and original judgment histories required. This collector checks current bytes/unique actual identities/evidence and native checker, does not substitute for reading/authority/CPU/viewing or alter official reports/rules. Continuity and reading-time not yet approved."}
+    output.write_text(json.dumps(receipt, ensure_ascii=False, indent=2) + "\n")
+    plan["whole_factual_phase_complete"] = True
+    plan["actual_whole_factual_closure_receipt"] = args.output
+    (BASE / "factual-current-dispatch-plan.json").write_text(json.dumps(plan, ensure_ascii=False, indent=2) + "\n")
+    print(json.dumps({"actual_numbered": len(numbered), "actual_complete_supplemental_files": supplemental_file_count,
+                      "native_official_checker_exit_code": result.returncode, "closure": args.output}))
+
+
+if __name__ == "__main__":
+    main()

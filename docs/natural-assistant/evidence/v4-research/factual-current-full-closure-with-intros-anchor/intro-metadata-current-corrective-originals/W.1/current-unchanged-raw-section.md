@@ -1,0 +1,40 @@
+## W.1 第一次開啟教材
+
+讀程式和動手改程式的感覺不同。你可以先把教材當作書讀，等某個數字引起好奇，再打開那一節的工作頁執行。本課每節會先交代一個問題，再用小例子說明做法；程式不是需要全部背起來的答案，而是讓你核對「剛才的解釋是否真的會產生這個結果」。暖身各節也可按需閱讀：遇到清單就看 [W.2](#W.2)，遇到數字表的形狀就看 [W.3](#W.3)，不用先修完一套數學課才開始第 1 章。
+
+線上閱讀入口是[教材網站](https://birdhackor.github.io/tiny-perceptron-vlm/)。選一節後，「在 Colab 動手做」會開啟雲端 Notebook，也就是把正文和可執行程式放在同一份文件。登入 Google 並連線到 CPU 執行環境後，可從「執行階段 → 全部執行」跑完整份；第一個程式框（「準備本節的工具」）會下載專案並安裝工具，要等它完成才能使用後面的程式。雲端介面和服務狀態可能改變，若下載失敗，可先讀正文或改用下述本機方式。
+
+本機方式先準備 [uv](https://docs.astral.sh/uv/getting-started/installation/) 和 [Git](https://git-scm.com/install/)；Git 是下載與管理專案檔案的工具，安裝後在終端機執行 `git --version`，應顯示版本號。終端機是輸入指令的視窗；下列三行依序下載專案、進入專案資料夾、安裝 CPU 與 Notebook 所需工具。每行完成、回到可輸入狀態後再輸入下一行。
+
+```bash
+git clone https://github.com/birdhackor/tiny-perceptron-vlm.git
+cd tiny-perceptron-vlm
+uv sync --frozen --extra cpu --group notebook
+```
+
+`uv sync` 根據專案的套件清單建立 `.venv`，這是只供本專案使用的工具箱。`--frozen` 採用已記錄的套件版本；`--extra cpu` 選 CPU 用的 PyTorch；`--group notebook` 加入開工作頁的工具。GPU 選擇另見 [環境說明](../docs/environment.md)，現在用 CPU 足夠做短實驗。下載和安裝需要網路。完成後可在本機 CPU 環境執行本書的小型示範程式；若需要下載新的專案版本、套件或實驗檔案，請保持網路連線。
+
+在 macOS 或 Linux 執行 `source .venv/bin/activate` 啟用工具箱；Windows PowerShell 執行 `.venv\Scripts\Activate.ps1`。啟用後，`python` 指向剛安裝的 Python 工具箱。仍在專案資料夾內，接著執行：
+
+```bash
+python scripts/check_env.py
+python -m ipykernel install --sys-prefix --name tiny-perceptron --display-name "Tiny Perceptron"
+jupyter lab notebooks
+```
+
+如果 Windows PowerShell 在啟用時顯示「此系統上已停用指令碼執行」或 `PSSecurityException`，被擋住的是 `Activate.ps1` 啟用腳本，不表示 Python 工具箱沒有裝好。仍在專案資料夾內，改用以下三行，直接指定工具箱裡的 Python，不必先啟用：
+
+```powershell
+.\.venv\Scripts\python.exe scripts/check_env.py
+.\.venv\Scripts\python.exe -m ipykernel install --sys-prefix --name tiny-perceptron --display-name "Tiny Perceptron"
+.\.venv\Scripts\python.exe -m jupyterlab notebooks
+```
+
+往後若教材寫 `python ...` 或 `.venv/bin/python ...`，也可把 Python 的路徑換成 `.\.venv\Scripts\python.exe`，其後的參數保持相同。
+
+兩組指令做的是同樣三件事。第一行檢查 Python 與 PyTorch 能否使用；看到 `compute` 那列為 `OK（cpu）`，且套件沒有「未安裝」或最後的紅色錯誤，才表示 CPU 計算檢查完成。第二行登記工作頁要用的執行環境，第三行啟動 JupyterLab，終端機會提供瀏覽器網址。開啟 `01/1.1.ipynb`，選 **Tiny Perceptron**，點進一個程式框並按 **Shift+Enter**。一個框叫 cell；負責執行它的程序叫 kernel，可想成工作桌：上一格取過的名字還留在桌上，後面才能使用。
+
+要試讀暖身中的短程式，可以在 Colab 用上方「＋程式碼」新增程式框；JupyterLab 則用工具列的「＋」。把暖身的整段程式貼入新框，先跑完「準備本節的工具」程式框，再選新框按 Shift+Enter。貼入時保留每行開頭的空格，它們可能是 Python 分辨重複動作範圍的縮排。
+
+因此更改前面的輸入後，需要重跑依賴它的後續格子；只跑最後一格可能仍使用舊資料。第一次開啟、或想檢查整份能否從零重現時，在 JupyterLab 選「Kernel → Restart Kernel and Run All Cells」，清空工作桌再由上到下跑；Colab 則在「執行階段」選單找「重新啟動工作階段並全部執行」（介面也可能稱重新啟動執行階段）。練習打開 [1.1 正文](chapters/01.md#1.1) 對應的工作頁，先執行一次，再把輸入那行 `text = "貓看狗，狗看貓。"` 改成 `text = "鳥看狗，狗看鳥。"`，重啟並全部執行。程式最後的文字輸出應為 `鳥看狗，狗看鳥。`，而非舊句；這就是要核對的還原結果。若看到紅色錯誤，先讀最後一行再查 [W.7](#W.7)，不要急著重裝所有工具。
+
