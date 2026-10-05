@@ -1,0 +1,31 @@
+import hashlib,json,pathlib,subprocess
+from playwright.sync_api import sync_playwright
+ROOT=pathlib.Path('/workspace/tiny-perceptron-vlm')
+OUT=ROOT/'docs/reading-time-reviews/natural-v4/reading-time-06/answer-mask-correction'
+INVENTORY=ROOT/'outputs/natural-v4/review-plan/answer-mask-corrective-review-001/reading-time-current-freeze-9e/inventory.json'
+item=next(r for r in json.loads(INVENTORY.read_text())['pages'] if r['page_id']=='20.7')
+raw=(ROOT/item['snapshot']).read_bytes()
+assert hashlib.sha256(raw).hexdigest()==item['source_sha256']
+assert raw in (ROOT/item['source']).read_bytes()
+with sync_playwright() as p:
+ browser=p.chromium.launch(executable_path='/usr/bin/chromium',args=['--no-sandbox'])
+ page=browser.new_page(viewport={'width':1440,'height':1000})
+ page.route('https://**/*',lambda route:route.abort())
+ response=page.goto('http://127.0.0.1:8790/20.7.html',wait_until='domcontentloaded',timeout=30000)
+ article=page.locator('article.md-content__inner')
+ article.wait_for()
+ extracted={'page_id':'20.7','url':page.url,'http_status':response.status,'html_sha256':hashlib.sha256(response.body()).hexdigest(),'article_text_sha256':hashlib.sha256(article.inner_text().encode()).hexdigest(),'pre_blocks':article.locator('pre').all_inner_texts(),'images':article.locator('img').evaluate_all('(xs)=>xs.map(x=>({src:x.getAttribute("src"),alt:x.alt,complete:x.complete,naturalWidth:x.naturalWidth,naturalHeight:x.naturalHeight}))')}
+ assert response.status==200
+ browser.close()
+(OUT/'rendered-code-output.json').write_text(json.dumps(extracted,ensure_ascii=False,indent=2)+'\n')
+for i,block in enumerate(extracted['pre_blocks']): print('ACTUAL RENDERED PRE BLOCK',i,'\n'+block,flush=True)
+figpath,figsha=next(iter(item['figures_sha256'].items()))
+fig=ROOT/figpath
+assert hashlib.sha256(fig.read_bytes()).hexdigest()==figsha
+png=OUT/'natural-v4-answer-mask.png'
+command=['inkscape',str(fig),'--export-type=png','--export-width=1200','--export-filename='+str(png)]
+r=subprocess.run(command,capture_output=True,text=True)
+print(json.dumps({'command':command,'exit_code':r.returncode,'stdout':r.stdout,'stderr':r.stderr},ensure_ascii=False),flush=True)
+assert r.returncode==0
+receipt={'page':item,'inventory_path':str(INVENTORY.relative_to(ROOT)),'inventory_sha256':hashlib.sha256(INVENTORY.read_bytes()).hexdigest(),'current_source_contains_exact_snapshot':True,'rendered_figure':{'source':figpath,'source_sha256':figsha,'png':str(png.relative_to(ROOT)),'png_sha256':hashlib.sha256(png.read_bytes()).hexdigest()},'original_50_page_files_sha256':{str((ROOT/'docs/reading-time-reviews/natural-v4/reading-time-06'/name).relative_to(ROOT)):hashlib.sha256((ROOT/'docs/reading-time-reviews/natural-v4/reading-time-06'/name).read_bytes()).hexdigest() for name in ['metadata.json','report.json']}}
+(OUT/'input-and-render-receipt.json').write_text(json.dumps(receipt,ensure_ascii=False,indent=2)+'\n')

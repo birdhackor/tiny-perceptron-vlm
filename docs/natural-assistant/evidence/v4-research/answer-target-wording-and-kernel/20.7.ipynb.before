@@ -1,0 +1,147 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 20.7 題目和答案都在輸入裡，模型究竟練哪一段？\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "老師出題「桌上有幾隻貓」，希望你學會回答「兩隻」。練習紙上同時有題目和答案，不表示你要學著把題目也當回答抄一遍。訓練對話時，同樣要分清可以讀的線索與應該學的輸出。\n",
+    "\n",
+    "[7.3](https://birdhackor.github.io/tiny-perceptron-vlm/7.3.html)已介紹回答遮罩。遮罩是一份計分標記：這些位置的預測計入代價，其他位置不直接計分。問題、歷史與圖片仍供模型讀取；我們把監督集中在指定助手回答與正常結束。這種照示範回答繼續訓練的方式，叫SFT（supervised fine-tuning，監督式微調）。\n",
+    "\n",
+    "下圖用最短的Q與A示意。第一個答案A由它前面的助理邊界位置預測，接著由A的位置預測結束。圖畫的是這個小例子的輸入與目標，不是把完整Qwen圖片輸入假定成六格。\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "metadata": {
+    "course_setup": true,
+    "tags": [
+     "hide-input"
+    ],
+    "jupyter": {
+     "source_hidden": true
+    },
+    "cellView": "form"
+   },
+   "source": [
+    "# @title 準備本節的工具（首次執行）\n",
+    "from pathlib import Path\n",
+    "import os\n",
+    "import subprocess\n",
+    "import sys\n",
+    "\n",
+    "# Colab 會先下載專案；本機 Jupyter 沿用已開啟的 repo。\n",
+    "try:\n",
+    "    import google.colab\n",
+    "except ImportError:\n",
+    "    in_colab = False\n",
+    "else:\n",
+    "    in_colab = True\n",
+    "\n",
+    "if in_colab:\n",
+    "    root = Path(\"/content/tiny-perceptron-vlm\")\n",
+    "    if not root.exists():\n",
+    "        subprocess.run(\n",
+    "            [\"git\", \"clone\", \"--depth\", \"1\", \"https://github.com/birdhackor/tiny-perceptron-vlm.git\", str(root)],\n",
+    "            env={**os.environ, \"GIT_LFS_SKIP_SMUDGE\": \"1\"},\n",
+    "            check=True,\n",
+    "        )\n",
+    "    subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"--quiet\", \"-e\", str(root)], check=True)\n",
+    "    os.chdir(root)\n",
+    "\n",
+    "root = Path.cwd().resolve()\n",
+    "while not (root / \"pyproject.toml\").exists() and root != root.parent:\n",
+    "    root = root.parent\n",
+    "if not (root / \"tiny_perceptron\").is_dir():\n",
+    "    raise RuntimeError(\"本機請先依 course/first-steps.md 開啟 repo；免安裝練習可使用本節的 Colab 入口\")\n",
+    "sys.path.insert(0, str(root))\n",
+    "import torch\n",
+    "\n",
+    "torch.set_num_threads(1)\n",
+    "torch.manual_seed(42)"
+   ],
+   "execution_count": null,
+   "outputs": []
+  },
+  {
+   "cell_type": "code",
+   "metadata": {
+    "course_figure": {
+     "name": "natural-v4-answer-mask",
+     "alt": "問題仍可讀取，只有助手答案A與結束符號的目標計入代價"
+    },
+    "tags": [
+     "hide-input"
+    ],
+    "jupyter": {
+     "source_hidden": true
+    },
+    "cellView": "form"
+   },
+   "source": [
+    "# @title 本節圖解\n",
+    "from IPython.display import SVG, display\n",
+    "\n",
+    "display(SVG(filename=str(root / \"course/figures/natural-v4-answer-mask.svg\")))"
+   ],
+   "execution_count": null,
+   "outputs": []
+  },
+  {
+   "cell_type": "code",
+   "metadata": {},
+   "source": [
+    "from tiny_perceptron.data import render_chat\n",
+    "\n",
+    "x, y = render_chat(\n",
+    "    [\n",
+    "        {\"role\": \"user\", \"content\": \"Q\"},\n",
+    "        {\"role\": \"assistant\", \"content\": \"A\"},\n",
+    "    ]\n",
+    ")\n",
+    "active = y != -100\n",
+    "first = active.nonzero()[0].item()\n",
+    "print(\"輸入位置數\", len(x))\n",
+    "print(\"計分目標數\", active.sum().item())\n",
+    "print(\"第一個計分目標的位置\", first)\n",
+    "print(\"計分目標ID\", y[active].tolist())"
+   ],
+   "execution_count": null,
+   "outputs": []
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "`render_chat`使用本教材的小型byte編碼，Q與A各佔一格。它給出六格輸入，計分目標有兩格：A與結束符號；第一格有效目標在從0起算的位置4。`-100`表示這份目標不直接計代價，它不是輸入字表中的文字ID，也沒有刪掉問題。這個右移關係可回看[7.4](https://birdhackor.github.io/tiny-perceptron-vlm/7.4.html)。\n",
+    "\n",
+    "真正圖文資料要由底座配套的處理器與對話模板編碼。處理器把圖片轉成模型能接收的尺寸與位置；模板整理角色與回答邊界。中文字數不等於編碼長度，圖片位置也不是普通文字。如果長度截斷把完整答案或結束切掉，模型學到的就不是原本示範，所以訓練前要逐筆核對有效目標與保留範圍。\n",
+    "\n",
+    "本次2,077道訓練題編碼後，共有39,436個有效目標位置，包含最後助手答案及模板後綴。每題讀兩次，實際訓練合計計分78,872個位置。這是在數編碼後的預測目標，不是78,872個中文字或獨立答案；問題與歷史仍供模型讀取，但沒有因此加入這個計分總數。\n",
+    "\n",
+    "練習把答案A改成AB。有效目標應從2增加到3，問題仍在輸入裡。現在我們知道如何選出訓練要計分的目標；下一節會把「真的更新」與「可以交付」分開。\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Tiny Perceptron",
+   "language": "python",
+   "name": "tiny-perceptron"
+  },
+  "language_info": {
+   "name": "python",
+   "version": "3.13"
+  },
+  "lesson_id": "20.7"
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}

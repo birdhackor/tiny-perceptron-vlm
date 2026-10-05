@@ -1,0 +1,35 @@
+## 7.4 回答第一個 token 在哪個位置被預測？
+
+你可能直覺把回答A所在位置標成「學習A」，但模型該格其實在猜A後面的東西。首答案必須由前一個位置預測，在目前格式就是assistant邊界所在格。這是對話訓練最容易差一格的地方：mask若按原角色貼完就直接用，可能漏掉首字或讓模型學複製答案。
+
+接續 [7.2](#7.2) 的回答起點和 [7.3](#7.3) 的監督選擇，我們用ASCII單字Q、A讓每字只一byte。原完整序列是 `[BOS,user,Q,EOS,assistant,A,EOS]`。在原序列上給A與最後EOS有效標籤，再取X為原序列除末項、Y為標籤除首項，就與 [1.3](01.md#1.3) 保持同一個右移。
+
+```python
+from tiny_perceptron.data import ByteTokenizer, render_chat
+
+tok = ByteTokenizer()
+x, y = render_chat(
+    [
+        {"role": "user", "content": "Q"},
+        {"role": "assistant", "content": "A"},
+    ]
+)
+first = (y != -100).nonzero()[0].item()
+print("X", x.tolist(), "Y", y.tolist())
+print("首答案預測位置", first, "輸入", x[first].item(), "答案", y[first].item())
+assert x[first].item() == tok.assistant_id
+assert y[first].item() == tok.encode("A")[0]
+```
+
+輸入兩消息，Q的ASCII81加8為89，A的65加8為73。輸出X是 `[1,3,89,2,4,73]`，Y是四個-100後接73、2。`nonzero()` 找出條件為True的位置，取第一個得到first=4；該位置X=4，即assistant，而Y=73，即A。下一格X=73則負責預測EOS2。原句索引、當前輸入ID與目標ID，三種數字的用途要分開。
+
+下圖把這六個位置逐列排開。中欄是模型已看到的輸入X，右欄是同位置要預測的下一項Y，點號後的數字是token ID；左欄0到5才是位置索引。綠列有有效答案，箭頭從assistant指向A、從A指向EOS，表示這兩個預測事件。灰列的-100只表示不計該列的直接loss，中欄的問題與角色邊界仍保留在輸入，後面仍可以讀它們。
+
+![逐位置核對輸入與下一項答案，首答案由assistant格預測](../figures/foundations_answer_alignment.svg)
+
+如果監督mask沒有同步右移，就可能把有效首目標放到X已經是A的格子，而真正assistant格沒有代價。這會改變學習事件，即使有效目標數量看起來還正確。檢查不應只數有幾格學，還要驗證「首格輸入是assistant，答案是首回答byte」這個具體關係。
+
+也不要為了修正對齊再讓模型內部shift一次。render已經完成一次，TinyLM與masked_loss按同位置對應即可，接口見 [4.7](04.md#4.7)。後續插入影像或其他前文時，雖然first索引可能變，assistant格預測回答首項的關係仍應保持。
+
+練習把問題Q改成 `"QQ"`，先預測首答案位置從4變5，但X[first]仍4、Y[first]仍73，再執行核對。接着只把答案A改成B，first仍5、答案ID變74。兩次分別改變前文長度與回答內容，可看清「首目標在哪」取決於哪些材料。
+

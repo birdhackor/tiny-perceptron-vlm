@@ -1,0 +1,69 @@
+import json
+from pathlib import Path
+from playwright.sync_api import sync_playwright
+
+out = Path('docs/continuity-reviews/artifacts/natural-v4/natural-public/answer-mask-current-delta')
+records = []
+errors = []
+clicks = []
+with sync_playwright() as p:
+    browser = p.chromium.launch(executable_path='/usr/bin/chromium', args=['--no-sandbox'], headless=True)
+    page = browser.new_page(viewport={'width': 1440, 'height': 1000})
+    page.on('pageerror', lambda exc: errors.append(str(exc)))
+    def record(name):
+        article = page.locator('article').first
+        records.append({
+            'name': name,
+            'url': page.url,
+            'title': page.title(),
+            'headings': article.locator('h1,h2,h3').all_text_contents(),
+            'article_text': article.inner_text(),
+            'preformatted_blocks': article.locator('pre').all_text_contents(),
+            'article_links': article.locator('a[href]').evaluate_all('els => els.map(e=>({text:e.textContent.trim(),href:e.href}))'),
+            'images': article.locator('img').evaluate_all('els => els.map(e=>({alt:e.alt,src:e.currentSrc,complete:e.complete,naturalWidth:e.naturalWidth,naturalHeight:e.naturalHeight}))'),
+        })
+        print(name, page.url, records[-1]['headings'])
+    def visible_link_to(suffix):
+        loc = page.locator('a[href]').filter(has_text='')
+        for i in range(loc.count()):
+            item = loc.nth(i)
+            href = item.get_attribute('href') or ''
+            if href.split('#')[0].endswith(suffix) and item.is_visible():
+                return item
+        raise RuntimeError('No visible navigation link to '+suffix)
+    def follow(suffix):
+        link = visible_link_to(suffix)
+        clicks.append({'from':page.url,'visible_link_text':link.inner_text(),'href':link.get_attribute('href')})
+        print('CLICK',clicks[-1])
+        link.click()
+        page.wait_for_load_state('networkidle')
+        clicks[-1]['destination'] = page.url
+    page.goto('http://127.0.0.1:8790/20.6.html', wait_until='networkidle')
+    record('20.6-before')
+    page.locator('article').first.locator('h1,h2').first.scroll_into_view_if_needed()
+    page.screenshot(path=str(out/'20.6-visible.png'))
+    follow('20.7.html')
+    record('20.7-current')
+    image = page.locator('article img[src*="natural-v4-answer-mask"]').first
+    image.scroll_into_view_if_needed()
+    page.screenshot(path=str(out/'20.7-answer-mask-visible.png'))
+    blocks = page.locator('article pre')
+    for i in range(blocks.count()):
+        print('20.7 PRE',i,repr(blocks.nth(i).inner_text()))
+    page.locator('article').get_by_text('輸入位置數 6',exact=False).last.scroll_into_view_if_needed()
+    page.screenshot(path=str(out/'20.7-output-visible.png'))
+    link = page.locator('article').get_by_role('link',name='7.4',exact=True).first
+    clicks.append({'from':page.url,'visible_link_text':link.inner_text(),'href':link.get_attribute('href')})
+    link.click()
+    page.wait_for_load_state('networkidle')
+    clicks[-1]['destination'] = page.url
+    record('7.4-shift-prerequisite')
+    page.go_back(wait_until='networkidle')
+    follow('20.8.html')
+    record('20.8-after')
+    page.locator('article').first.locator('h1,h2').first.scroll_into_view_if_needed()
+    page.screenshot(path=str(out/'20.8-visible.png'))
+    result = {'base':'http://127.0.0.1:8790/','browser_version':browser.version,'launch':{'executable_path':'/usr/bin/chromium','args':['--no-sandbox'],'headless':True},'viewport':{'width':1440,'height':1000},'records':records,'clicks':clicks,'page_errors':errors,'scope':'Localized visible Chapter 20.6→20.7→20.8 and the 7.4 prerequisite link; no all-book browser claim or reviewer model rerun.'}
+    (out/'browser.json').write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\n')
+    print('BROWSER',browser.version,'PAGE_ERRORS',errors)
+    browser.close()

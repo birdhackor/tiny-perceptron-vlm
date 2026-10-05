@@ -1,0 +1,91 @@
+"""Same factual owner: substantive new registered figure check, unchanged guide reuse."""
+from pathlib import Path
+import datetime, difflib, hashlib, json
+OUT = Path(__file__).resolve().parent
+EVIDENCE = OUT.parent
+ROOT = Path(__file__).resolve().parents[6]
+PREFIX = EVIDENCE.relative_to(ROOT).as_posix()
+ROUND = 'round3-answer-mask'
+TASK = '/root/v4_review_coordinator/factual_guide_training_v4'
+sha = lambda p: hashlib.sha256(Path(p).read_bytes()).hexdigest()
+def save(path, value):
+    assert not path.exists(), str(path)
+    path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + '\n')
+prior_path = OUT / 'report.prior.original.json'
+assert sha(prior_path) == 'aafd27515cb0415bb187c001795df9130e7284deabcc256a83f04597f02a3ce1'
+report = json.loads(prior_path.read_text())
+alignment = json.loads((OUT / 'alignment-v2.stdout.json').read_text())
+browser = json.loads((OUT / 'browser-execution.json').read_text())
+guide = 'docs/natural-assistant/v4/TRAINING.md'
+figure = 'course/figures/natural-v4-answer-mask.svg'
+assert sha(ROOT / guide) == report['current_document_sha256'][guide] == alignment['guide_sha256']
+assert sha(ROOT / figure) == alignment['new_svg_sha256'] == browser['served_svg_sha256']
+old_contract = ROOT / 'outputs/natural-v4/review-plan/supplemental-factual-contract.before-c9cd483.ce854ea9a59cc69bab9028b69fd5ad4b47cfa4bef34538701966eabc8e1d8ceb.md'
+contract = ROOT / 'outputs/natural-v4/review-plan/supplemental-factual-contract.md'
+assert sha(old_contract) == 'ce854ea9a59cc69bab9028b69fd5ad4b47cfa4bef34538701966eabc8e1d8ceb'
+assert sha(contract) == 'fac646830b1352efd552a870cdc50866e40ea2d62d5e2e5074ef8133216b2dc3'
+contract_change = {'path': contract.relative_to(ROOT).as_posix(), 'prior_sha256': sha(old_contract), 'current_sha256': sha(contract), 'actual_diff_read': ''.join(difflib.unified_diff(old_contract.read_text().splitlines(True), contract.read_text().splitlines(True), fromfile='own initial contract version', tofile='current contract')), 'nature': 'Review coordination/provenance metadata: then-authorized readability scope replaces fixed eight-group wording; reference preview8782/307c325 changes to8786/c9cd483 plus actual current-dispatch routing; scoped search and incidental-exposure directions added. No guide/model/training code/data change. Current explicit dispatch8790/9e963 supersedes the reference preview for this correction.', 'effect_on_probe': 'First strict baseline probe stopped on this genuine changed metadata hash. Current contract fully read, real old/new diff read, then separately classified in v2. It did not cause a broad release rerun.'}
+preserved_failure_files = ['alignment_probe.py', 'alignment.stdout.json', 'alignment.stderr.txt', 'browser_probe.py', 'browser.stdout.json', 'browser.stderr.txt']
+failures = [{'path': PREFIX + '/' + ROUND + '/' + f, 'sha256': sha(OUT / f)} for f in preserved_failure_files]
+old_preservation = json.loads((EVIDENCE / 'round2/preserved-original-bytes.json').read_text())['actually_checked']
+for item in old_preservation: assert sha(ROOT / item['path']) == item['sha256']
+save(OUT / 'recheck-receipt.json', {
+    'reviewer_task': TASK, 'reviewer_context': 'fresh', 'scope': 'Corrective registered-figure review by the same genuine original factual owner. Personally read complete current20.6,20.7,20.8; personally rendered/viewed newSVG and current8790 browser. Original entire327-line guide reading/audit is reused after byte equality. No new327-line read or whole1881-release execution claimed.',
+    'prior_report': {'path': PREFIX + '/' + ROUND + '/report.prior.original.json', 'sha256': sha(prior_path), 'copied_unread_before_opening': True},
+    'current_document_sha256': {guide: sha(ROOT / guide)}, 'current_section_source_hashes': alignment['current_section_snapshots'],
+    'current_dependency_sha256': {figure: sha(ROOT / figure), 'course/chapters/20.md': sha(ROOT / 'course/chapters/20.md'), 'tiny_perceptron/data.py': sha(ROOT / 'tiny_perceptron/data.py'), 'tiny_perceptron/natural_assistant.py': sha(ROOT / 'tiny_perceptron/natural_assistant.py'), 'outputs/notebooks/20/20.7.ipynb': alignment['existing_notebook_audit']['sha256'], contract.relative_to(ROOT).as_posix(): sha(contract)},
+    'unchanged_baseline': {'count': len(alignment['unchanged_baseline']), 'execution_output': PREFIX + '/' + ROUND + '/alignment-v2.stdout.json', 'details': 'Original guide matches prior fullread raw bytes;74 prior necessary code/data/actualGPU-record/original-authority/durable-evidence inputs match exactly. All35 registered previous report artifacts and repository-code sources were additionally checked. Chapter20/newSVG and coordination contract explicitly recorded as changed.'},
+    'personally_read_original_authority': {'url': 'https://raw.githubusercontent.com/huggingface/transformers/v4.57.6/src/transformers/loss/loss_utils.py', 'version': 'v4.57.6', 'retrieval_sha256': alignment['source_locators']['original_transformers_loss']['retrieval_sha256'], 'locator': 'ForCausalLMLoss46–68 and fixed_cross_entropy29–39', 'inspection_note': 'Original labels are padded then labels[...,1:] defines next-token targets; ignore_index=-100 excludes direct target loss. Toy render_chat already returns the aligned target and must not be shifted again. Prompt remains input. Original retrieved source bytes retained; no fresh download claimed.'},
+    'render': {'svg_path': figure, 'svg_sha256': sha(ROOT / figure), 'path': PREFIX + '/' + ROUND + '/natural-v4-answer-mask.current.png', 'sha256': sha(OUT / 'natural-v4-answer-mask.current.png'), 'command': 'inkscape ' + figure + ' --export-type=png --export-width=1150 --export-filename=' + PREFIX + '/' + ROUND + '/natural-v4-answer-mask.current.png', 'exit_code': 0, 'stderr_path': PREFIX + '/' + ROUND + '/render.stderr.txt', 'personally_viewed': True, 'tool': 'functions.exec tools.view_image', 'inspection_note': 'Six input boxes keep Q and the assistant boundary; blue arrows remain assistant→A andA→EOS. Next-target labelY no longer adds a directional-shift instruction; effective targets occupy positions4,5. Grey loss exclusion, blueA/EOS and the real-VLM length caveat are consistent with code and authority. InkscapePango/Gtk warnings retained despite successful render.'},
+    'browser': dict(browser, screenshot_personally_viewed=True), 'own_cpu_result': alignment['exact_current_20_7_code'], 'existing_notebook': alignment['existing_notebook_audit'],
+    'contract_change': contract_change, 'initial_probe_failures_preserved': failures,
+    'other_read_failure': {'command': 'cat tiny_perceptron/tokenizer.py', 'exit_code': 1, 'stderr_exact': 'cat: tiny_perceptron/tokenizer.py: No such file or directory\n', 'resolution': 'Scoped rg located ByteTokenizer at tiny_perceptron/data.py14–30, which was personally read. Subsequent source/CPU check uses the actual file.'},
+    'first_issue_and_first_report_original_bytes_rechecked': old_preservation,
+    'independence': 'No peer factual/readability judgments, author notes or coordinator closure contents read. Current review-contract role/routing metadata and its exact earlier version diff were read as necessary instructions.',
+    'verdict': 'pass', 'remaining_issue_ids': [], 'limits': 'CPU-only exact tiny example, existing notebook/record audit, real SVG/book browser. No packages/heavy model or dataset download/GPU/fulltrain/model inference/new blind grading/whole release rerun. Authoring preview reading time remains pending and this is not final publication approval.'})
+
+def artifact(identifier, kind, file, description, **extra):
+    return dict(id=identifier, kind=kind, path=PREFIX + '/' + ROUND + '/' + file, sha256=sha(OUT / file), description=description, **extra)
+env = {'python': '3.13.5', 'torch': '2.14.1+cpu', 'device': 'cpu'}
+report['artifacts'] += [
+    artifact('a_round3_prior_report', 'source_snapshot', 'report.prior.original.json', 'Genuine prior fullguide factualPASS preserved unread exactly before this corrective check.'),
+    artifact('a_round3_alignment_code', 'code', 'alignment_probe_v2.py', 'Own bounded current toy-target alignment and unchanged original baseline probe; genuine first failed probe is retained.'),
+    artifact('a_round3_alignment', 'execution', 'alignment-v2.stdout.json', 'Actual CPU exact current20.7 example/A→AB alignment, current notebook saved-output audit and74 unchanged original input checks.', command='.venv/bin/python ' + PREFIX + '/' + ROUND + '/alignment_probe_v2.py > ' + PREFIX + '/' + ROUND + '/alignment-v2.stdout.json 2> ' + PREFIX + '/' + ROUND + '/alignment-v2.stderr.txt', result='Exit0; empty stderr. Q→A:6inputs,2targets at4/5,[73,2];AB:3targets. Existing notebook output agrees; current guide/code/data/GPU-record/original-authority baseline reused after exact equality.', environment=env),
+    artifact('a_round3_mask_render', 'figure_render', 'natural-v4-answer-mask.current.png', 'New actual Inkscape render of currentffc11…SVG personally viewed; assistant→A andA→EOS alignment, grey mask and next-targetY label consistent.'),
+    artifact('a_round3_browser_code', 'code', 'browser_probe_v2.py', 'Actual new8790 lesson20.7/currentSVG provenance and screenshot script; first dependency failure retained.'),
+    artifact('a_round3_browser', 'execution', 'browser-execution.json', 'Actual HTTP200 Chromium8790 lesson20.7; current subsection matches literal9e963cb…; servedSVG isffc11…; screenshot personally viewed.', command='.venv/bin/python ' + PREFIX + '/' + ROUND + '/browser_probe_v2.py > ' + PREFIX + '/' + ROUND + '/browser-v2.stdout.json 2> ' + PREFIX + '/' + ROUND + '/browser-v2.stderr.txt', result='Exit0; empty stderr; literal subsection/current source exact equality, served SVG exact equality and actual screenshot succeeded.', environment=dict(env, browser='Chromium151.0.7922.173')),
+    artifact('a_round3_browser_view', 'source_snapshot', 'preview-current-answer-mask.png', 'Actual new browser screenshot personally inspected; current labels and complete arrows visible.'),
+    artifact('a_round3_receipt', 'source_snapshot', 'recheck-receipt.json', 'Actual source read/unchanged baseline/authority/render/personalview/CPU/browser/metadata and firstfailure preservation receipt.')]
+for key in ['20.6', '20.7', '20.8']:
+    report['artifacts'].append(artifact('a_round3_source_' + key.replace('.', '_'), 'source_snapshot', key + '.current.raw.md', 'Complete current necessary prerequisite' + key + ' source personally read; exact raw subsection snapshot.'))
+old_render = next(a for a in report['artifacts'] if a['id'] == 'a_figure_natural_v4_answer_mask')
+old_render['description'] = 'Historical previousSVG render kept byte-identical; superseded for currentfigure checks by a_round3_mask_render. ' + old_render['description']
+report['sources'] += [
+    {'id': 's_round3_alignment', 'kind': 'execution', 'title': 'Own current answer-mask boundedCPU and original baseline byte check', 'artifact_id': 'a_round3_alignment', 'verified': True},
+    {'id': 's_round3_toy_renderer', 'kind': 'repository_code', 'title': 'Actual toy byte-tokenizer and answer-target renderer', 'path': 'tiny_perceptron/data.py', 'sha256': sha(ROOT / 'tiny_perceptron/data.py'), 'version': 'current exact file bytes personally inspected2026-10-05', 'verified': True, 'inspection_note': 'Personally read lines1–68; ByteTokenizer14–30 mapsA to73,EOS2;render_chat54–68 returnsids[:-1],targets[1:] with only assistant content/EOS active. Current exact example genuinely executed onCPU.'}]
+c10 = next(c for c in report['claims'] if c['id'] == 'c10')
+c10['artifact_ids'] = [('a_round3_mask_render' if a == 'a_figure_natural_v4_answer_mask' else a) for a in c10['artifact_ids']]
+c10['artifact_ids'] += ['a_round3_alignment', 'a_round3_browser', 'a_round3_receipt']
+c10['evidence'] += [{'source_id': 's_round3_toy_renderer', 'locator': 'ByteTokenizer14–30;render_chat54–68;current necessary20.7 example', 'supports': 'The prerequisite figure toy targets are already aligned and do not require another shift; assistantposition4→A andAposition5→EOS.'}, {'source_id': 's_round3_alignment', 'locator': 'exact_current_20_7_code.cases;existing_notebook_audit', 'supports': 'Fresh actual tinyCPU example and matching saved notebook output support currentfigure alignment; productionVLM was not rerun.'}]
+c10['verification']['expected'] += ' Necessary newfigure toy must show6inputs andA/EOS targets already aligned atpositions4/5, without an extra shift.'
+c10['verification']['observed'] += ' Fresh realByteTokenizer/render_chat outputs6inputs,2active targets[73,2] at4/5;ABoutputs3active targets[73,74,2]. The current saved notebook agrees and newbrowser serves the personallyviewedffc11…SVG.'
+c10['verification']['details'] += ' This round re-read complete necessary20.6–20.8, actualrenderer/currentencoding source and originalTransformers4.57.6 loss. Toy IDs73/74/2 are ByteTokenizer values; earlier disclosed processor-double IDs65/66/59 remain a different bounded encoding probe. No realQwen model/tokenizer rerun.'
+for c in report['claims']:
+    c['round3_recheck_scope'] = 'Unchanged guide byte-equal to prior genuine entire327-line fullread, code/data/original records byte-checked; existing whole-guide audit reused. This correction newly reads complete necessary20.6–20.8 and checks the registered answer-maskSVG/c10 reliance; no fresh327-line read claimed.'
+report['figure_sha256'][figure] = sha(ROOT / figure)
+report['current_registered_dependency_sha256'] = json.loads((OUT / 'recheck-receipt.json').read_text())['current_dependency_sha256']
+report['assigned_document_scope']['read_scope'] = 'Original genuine complete327-line guide reading retained; current unchanged guide personally byte-compared to fullraw snapshot. This round newly read complete necessary20.6–20.8 and inspected corrected registeredSVG; no new327-line reading claimed.'
+report['assigned_document_scope']['new_read_this_round'] = ['course/chapters/20.md#20.6 complete', 'course/chapters/20.md#20.7 complete', 'course/chapters/20.md#20.8 complete']
+report['verdict'] = 'pass'
+report['checks']['factual_accuracy']['details'] = 'Prior genuine19-claim whole-guide audit retained after currentguide/code/data/actualrecord byte comparison. New current20.6–20.8 and c10 reliance substantively checked against originalcausalloss/source; changedSVG correctly represents next-token targets. No remaining factual contradiction.'
+report['checks']['numeric_verification']['details'] = 'Prior fullguide integer/formula/GPUrecord conversions retained after unchangedinput comparison. Fresh tinyCPU20.7 produces6inputs,2targets at4/5,[73,2];AB3targets. Matches actual current savednotebook. No new GPUquality/timing inference.'
+report['checks']['figure_consistency']['details'] = 'TRAINING has no directSVG but registers four necessary prerequisitefigures. Three unchanged SVGs/renders retain genuine prior personalviews afterbyte comparison. Changed answer-maskffc11… actually newly rendered Inkscape and personallyviewed, plus actual8790 browserimage. TargetY/assistant→A/A→EOS, grey directloss exclusions and lengthcaveat match actualcode/originalauthority.'
+report['checks']['source_verification']['details'] = 'Own original official/paper/code evidence reused after actualbyte comparison. Personally reread actualtoyrenderer, productionencoding and originalTransformers4.57.6 loss29–68. Complete currentnecessary20.6–20.8 saved exactly; current20.7/servedSVG match actualpreviewliteral9e963cb…. Changed reviewcontract role/routing metadata was completely read and actualold/newdiff inspected; explicitcurrentdispatch8790 controls.'
+report['checks']['limitations']['details'] = 'Newprobe is a six/seven-positionCPUtoy and existingnotebookaudit; genuine originalGPU/fullguidequality evidence remains recordaudit only. Fullguide source unchanged and nofresh327-line/whole1881release/modelrun/blindgrade claimed. Direction-neutral targetlabel does not add a secondshift or imply six-tokenQwen input. Authoringpreview readingtime remains pending and factualPASS is not publicationapproval.'
+report['provenance_artifact_id'] = 'a_round3_receipt'
+report['checked_on'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+report['execution_limits'] += ['Round3 correction: currentguide fullraw unchanged; no new327-line whole-guide read or whole1881-release rerun. Newly read complete necessary20.6–20.8, actualnewSVG and8790 authoringpreview only.', 'Current contract changed only review coordination/search/provenance routes; oldce854…/newfac646… diff personally inspected, and actualcurrentdispatch8790 supersedes reference8786.', 'First new strictbaselineprobe rejected changedcontractmetadata; firstbrowser stopped onmissing probe snapshot. Both originalfailedscripts/stdout/stderr retained; separatev2 actualCPU/browser executions passed.']
+report['revision_history'].append({'round': 'round3_registered_answer_mask_correction', 'prior_report_path': PREFIX + '/' + ROUND + '/report.prior.original.json', 'prior_report_sha256': sha(prior_path), 'current_document_sha256': report['current_document_sha256'], 'new_svg_sha256': sha(ROOT / figure), 'actual_new_read_scope': 'Complete currentnecessary20.6–20.8; actualnewSVG rendering/personalview and8790browser; originalwholeguideaudit reused after exactbyte comparison.', 'verdict': 'pass', 'evidence_artifact_ids': ['a_round3_alignment', 'a_round3_mask_render', 'a_round3_browser', 'a_round3_receipt'], 'remaining_issue_ids': [], 'reason': 'Current registered answer-mask wording accurately describes already aligned targets. c10/source/render/CPU/notebook/browser checked substantively; current dependencies and fivechecks updated without fabricating a newwhole-read.'})
+save(OUT / 'report.initial.original.json', report)
+(EVIDENCE / 'report.json').write_bytes((OUT / 'report.initial.original.json').read_bytes())
+print(json.dumps({'report_path': PREFIX + '/report.json', 'report_sha256': sha(EVIDENCE / 'report.json'), 'verdict': report['verdict'], 'current_document_sha256': report['current_document_sha256'], 'new_svg_sha256': sha(ROOT / figure), 'claims': len(report['claims']), 'sources': len(report['sources']), 'artifacts': len(report['artifacts']), 'remaining_issue_ids': []}, ensure_ascii=False, indent=2))

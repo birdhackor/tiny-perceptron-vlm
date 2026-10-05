@@ -1,0 +1,204 @@
+"""Collect current bytes only after actual corrective owners have returned FINAL."""
+import argparse
+import hashlib
+import json
+import re
+import subprocess
+from datetime import UTC, datetime
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[3]
+BASE = ROOT / "outputs/natural-v4/review-plan"
+
+
+def digest(raw):
+    return hashlib.sha256(raw).hexdigest()
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--previous-closure", required=True)
+    parser.add_argument("--output", required=True)
+    parser.add_argument("--source-version", required=True)
+    parser.add_argument("--observed-all-required-owner-finals", action="store_true", required=True)
+    args = parser.parse_args()
+    output = ROOT / args.output
+    assert not output.exists(), "Preserve the existing genuine closure."
+    previous = ROOT / args.previous_closure
+    closure = json.loads(previous.read_bytes())
+    numbered = []
+    changed_numbered_observed_finals = []
+    for old in closure["numbered_current58"]:
+        path = ROOT / old["report_path"]
+        raw_report = path.read_bytes()
+        report = json.loads(raw_report)
+        assert report["reviewer_task"] == old["actual_owner"]
+        assert report["reviewer_context"] == "fresh" and report["verdict"] == "pass"
+        if digest(raw_report) != old["report_sha256"]:
+            actual_receipts = {
+                "20.7": "answer-mask-corrective-review-001/reader-completions/20.7/coordinator-observed-owner-FINAL.json",
+                "20.8": "answer-mask-corrective-review-001/reader-completions/20.8/coordinator-observed-owner-FINAL.json",
+                "T.8": "efficiency-anchor-reader-current-completions/T.8/coordinator-observed-owner-FINAL.json",
+                "16.1": "efficiency-anchor-reader-current-completions/16.1/coordinator-observed-owner-FINAL.json",
+                "19.10": "045-corrective-reader-dispatch/19.10-genuine-final/coordinator-observed-owner-FINAL.json",
+                "11.14": "c9cd483-corrective-reader-dispatch/11.14-genuine-final/coordinator-observed-owner-FINAL.json",
+            }
+            assert old["lesson_id"] in actual_receipts, "A further change needs its own observed FINAL provenance."
+            observed_path = BASE / actual_receipts[old["lesson_id"]]
+            observed = json.loads(observed_path.read_bytes())
+            assert observed["actual_owner_FINAL_observed"]
+            assert observed["actual_owner"] == old["actual_owner"]
+            assert observed["actual_owner_verdict"] == "pass"
+            assert observed["report_sha256"] == digest(raw_report)
+            changed_numbered_observed_finals.append({"lesson_id": old["lesson_id"],
+                "actual_owner": old["actual_owner"], "actual_report_sha256": digest(raw_report),
+                "observed_actual_FINAL_receipt": observed_path.relative_to(ROOT).as_posix()})
+        source = ROOT / report["source"].split("#")[0]
+        raw = source.read_bytes()
+        heads = list(re.finditer(rb"(?m)^## ([A-Z\d]+\.\d+) [^\r\n]+", raw))
+        i = next(i for i, h in enumerate(heads) if h[1].decode() == old["lesson_id"])
+        body = raw[heads[i].start():heads[i + 1].start() if i + 1 < len(heads) else len(raw)]
+        assert digest(body) == report["source_sha256"], old["lesson_id"]
+        intro = None
+        if i == 0:
+            intro = digest(raw[:heads[0].start()])
+            assert intro == report["intro_sha256"]
+        for figure, expected in report["figure_sha256"].items():
+            assert digest((ROOT / figure).read_bytes()) == expected, figure
+        numbered.append({"lesson_id": old["lesson_id"], "actual_owner": old["actual_owner"],
+                         "report_path": old["report_path"], "report_sha256": digest(raw_report),
+                         "current_source_sha256": report["source_sha256"], "intro_sha256": intro,
+                         "current_figure_sha256": report["figure_sha256"]})
+    assert len(numbered) == 58 and len({r["actual_owner"] for r in numbered}) == 58
+    supplemental = []
+    supplemental_corrections = []
+    supplementary_journal = json.loads((BASE / "supplemental-final-publication/dispatch-journal.json").read_bytes())
+    for old in closure["supplemental_current8"]:
+        row = dict(old)
+        dispatch = next((d for d in supplementary_journal["dispatches"] if d["group_id"] == row["group_id"]), None)
+        if dispatch is None:
+            reference_journal = json.loads((BASE / "reference-four-reader-dispatch-journal.json").read_bytes())
+            reference_dispatch = next(d for d in reference_journal["dispatches"] if d["group_id"] == row["group_id"])
+            assert reference_dispatch["actual_owner"] == row["actual_owner"]
+            assert reference_dispatch["completion_status"] == "actual_owner_current_complete_read_and_browser_pass"
+            assert reference_dispatch["actual_owner_report_sha256"] == row["report_sha256"]
+            dispatch = {"current_observed_actual_owner_report_path": row["report_path"],
+                        "current_observed_actual_owner_report_sha256": row["report_sha256"]}
+        latest_path = dispatch.get("current_observed_actual_owner_report_path", row["report_path"])
+        latest_sha = dispatch.get("current_observed_actual_owner_report_sha256", row["report_sha256"])
+        if latest_sha != row["report_sha256"]:
+            observed = next(r for r in reversed(supplementary_journal["recheck_completions"])
+                            if r["group_id"] == row["group_id"] and r["report_sha256"] == latest_sha)
+            assert observed["actual_observed_owner_final"] and observed["owner_verdict"] == "pass"
+            assert observed["actual_owner"] == row["actual_owner"]
+            assert dispatch["completion_status"] == "actual_same_owner_current_source_and_executed_browser_pass"
+            row.update({"report_path": latest_path, "report_sha256": latest_sha,
+                        "assigned_complete_document_sha256_from_actual_owner": observed["assigned_complete_document_sha256_from_actual_owner"],
+                        "current_figure_sha256_from_actual_owner": observed["current_figure_sha256_from_actual_owner"],
+                        "owner_remaining_issues_unchanged": observed["owner_remaining_issues_unchanged"],
+                        "latest_actual_owner_browser_scope": observed["actual_browser_scope"]})
+            supplemental_corrections.append({"group_id": row["group_id"], "actual_owner": row["actual_owner"],
+                                             "actual_review_round": observed["review_round"],
+                                             "report_sha256": latest_sha, "actual_browser_scope": observed["actual_browser_scope"]})
+        raw = (ROOT / row["report_path"]).read_bytes()
+        assert digest(raw) == row["report_sha256"], "No unobserved changed supplemental owner report."
+        report = json.loads(raw)
+        assert report["verdict"] == "pass"
+        for doc, expected in row["assigned_complete_document_sha256_from_actual_owner"].items():
+            assert digest((ROOT / doc).read_bytes()) == expected, doc
+        for fig, expected in row["current_figure_sha256_from_actual_owner"].items():
+            assert digest((ROOT / fig).read_bytes()) == expected, fig
+        supplemental.append(row)
+    reference_path = BASE / "reference-four-reader-dispatch-journal.json"
+    if reference_path.exists():
+        references = json.loads(reference_path.read_bytes())
+        for dispatch in references["dispatches"]:
+            if dispatch["group_id"] in {r["group_id"] for r in supplemental}:
+                continue
+            assert dispatch["completion_status"] == "actual_owner_current_complete_read_and_browser_pass"
+            observed = next(r for r in reversed(references["completions"] + references.get("recheck_completions", [])) if r["group_id"] == dispatch["group_id"])
+            assert observed["actual_observed_owner_final"] and observed["owner_verdict"] == "pass"
+            assert observed["actual_owner"] == dispatch["actual_owner"]
+            raw = (ROOT / observed["report_path"]).read_bytes()
+            assert digest(raw) == observed["report_sha256"] == dispatch["actual_owner_report_sha256"]
+            for doc, expected in observed["assigned_complete_document_sha256_from_actual_owner"].items():
+                assert digest((ROOT / doc).read_bytes()) == expected
+            for fig, expected in observed["current_figure_sha256_from_actual_owner"].items():
+                assert digest((ROOT / fig).read_bytes()) == expected
+            supplemental.append({"group_id": dispatch["group_id"], "actual_owner": observed["actual_owner"],
+                                 "report_path": observed["report_path"], "report_sha256": observed["report_sha256"],
+                                 "assigned_complete_document_sha256_from_actual_owner": observed["assigned_complete_document_sha256_from_actual_owner"],
+                                 "current_figure_sha256_from_actual_owner": observed["current_figure_sha256_from_actual_owner"],
+                                 "owner_remaining_issues_unchanged": observed["owner_remaining_issues_unchanged"],
+                                 "latest_actual_owner_browser_scope": observed["actual_browser_scope"],
+                                 "actual_first_fresh_reader_completion": True})
+    authorized_group_count = len(json.loads((BASE / "factual-supplemental-dispatch-journal.json").read_bytes())["scope_groups"])
+    assert len(supplemental) == len({r["group_id"] for r in supplemental}) == authorized_group_count
+    assert len({r["actual_owner"] for r in numbered + supplemental}) == 58 + authorized_group_count
+    file_count = sum(len(r["assigned_complete_document_sha256_from_actual_owner"]) for r in supplemental)
+    factual_plan_before_collection = json.loads((BASE / "factual-current-dispatch-plan.json").read_bytes())
+    authorized_files = factual_plan_before_collection.get("current_authorized_supplemental_complete_file_count", 8)
+    assert file_count == authorized_files
+    command = [str(ROOT / ".venv/bin/python"), "scripts/check_course_reviews.py"]
+    result = subprocess.run(command, cwd=ROOT, capture_output=True)
+    stdout = output.with_name(output.stem + ".checker.stdout.txt")
+    stderr = output.with_name(output.stem + ".checker.stderr.txt")
+    stdout.write_bytes(result.stdout)
+    stderr.write_bytes(result.stderr)
+    assert result.returncode == 0, result.stdout.decode() + result.stderr.decode()
+    closure.update({"captured_at": datetime.now(UTC).isoformat(), "source_version": args.source_version,
+                    "previous_genuine_closure_path": args.previous_closure,
+                    "previous_genuine_closure_sha256": digest(previous.read_bytes()),
+                    "numbered_current58": numbered, "supplemental_current8": supplemental,
+                    "actual_complete_supplemental_wholefiles": file_count,
+                    "actual_supplemental_genuine_fresh_owner_groups": len(supplemental),
+                    "corrective_chain_scope": "Two original reader20.7/20.8 genuine rereads and current SVG personal views; unchanged original owners retain true baseline evidence. Prior immutable closure remains unmodified.",
+                    "supplemental_list_legacy_key_notice": "supplemental_current8 is the preserved original field name; actualcomplete filecount may expand only under explicit recordedauthorization and realownerfullread.",
+                    "actual_checker_command": command, "actual_checker_exit_code": result.returncode,
+                    "actual_checker_stdout": stdout.relative_to(ROOT).as_posix(),
+                    "actual_checker_stderr": stderr.relative_to(ROOT).as_posix(),
+                    "latest_genuine_corrective_owner_finals": changed_numbered_observed_finals,
+                    "latest_genuine_corrective_supplemental_owner_finals": supplemental_corrections,
+                    "browser_scope": "Unchanged full documents retain their genuinely observed original source/browser evidence; changed full supplements use observed genuine same-owner current complete-read/browser receipt in each row. No new whole-book browser action or reread is invented by this collector.",
+                    "closure_scope": "Actual owner FINALs observed before collection; current raw main/intro/fig and unchanged supplemental versions plus native checker validated. This collector is provenance, not a substitute for actual reading or a factual verdict."})
+    output.write_text(json.dumps(closure, ensure_ascii=False, indent=2) + "\n")
+    status_path = BASE / "authorized-readability-status.json"
+    status_raw = status_path.read_bytes()
+    (BASE / ("authorized-readability-status-before-current-freezing-closure." + digest(status_raw) + ".json")).write_bytes(status_raw)
+    status = json.loads(status_raw)
+    status.update({"captured_at": datetime.now(UTC).isoformat(), "latest_actual_source_version": args.source_version,
+                   "current_actual_corrective_READABILITY_closure_receipt": args.output,
+                   "readability_phase_complete": True, "completed_current_section_count": 58,
+                   "localized_supplemental_corrective_reader_pending": False,
+                   "current_corrective_T8_and_whole_training_reader_pending": False,
+                   "current_045_original_19_10_and_entry_readers_pending": False,
+                   "English_additional_fullreader_notyetdispatched_pending_rootfreeze": False,
+                   "additional_four_reference_fullreader_pending_actual_fresh_owner_FINAL": False,
+                   "additional_four_reference_fullreader_pending_author_freeze": False,
+                   "same_owner_rechecks_in_progress_count": 0, "owner_revision_or_version_recheck_required_count": 0})
+    status_path.write_text(json.dumps(status, ensure_ascii=False, indent=2) + "\n")
+    plan_path = BASE / "factual-current-dispatch-plan.json"
+    plan = json.loads(plan_path.read_bytes())
+    plan["current_actual_whole_READABILITY_closure_receipt"] = args.output
+    chain = plan.get("corrective_readability_chain", {})
+    chain.update({"new_factual_dispatch_temporarily_held_for_real_corrective_readability": False,
+                  "affected_numbered_lessons_must_wait_for_own_reader_closure": [],
+                  "whole_entry_English_first_full_reader_pending": False,
+                  "whole_entry_current_fourfile_reader_pending": False,
+                  "whole_course_training_corrective_full_reader_pending": False,
+                  "additional_site_reference_four_reader_pending": False,
+                  "actual_latest_corrective_whole_reader_closure": args.output})
+    if "localized_supplemental_reader_corrections" in plan:
+        plan["localized_supplemental_reader_corrections"]["actual_current_closure"] = args.output
+        plan["localized_supplemental_reader_corrections"]["current_actual_reader_closed"] = True
+    plan_path.write_text(json.dumps(plan, ensure_ascii=False, indent=2) + "\n")
+    supplementary_journal["current_corrective_wholefile_reader_pending"] = False
+    supplementary_journal["current_corrective_readability_closure_receipt"] = args.output
+    supplementary_journal["actual_current_complete_document_count"] = file_count
+    (BASE / "supplemental-final-publication/dispatch-journal.json").write_text(json.dumps(supplementary_journal, ensure_ascii=False, indent=2) + "\n")
+    print(json.dumps({"current_fresh_numbered": 58, "genuine_unchanged_baseline": 234, "supplemental_docs": file_count,
+                      "actual_reader_checker_exit_code": result.returncode, "closure": args.output}))
+
+
+if __name__ == "__main__":
+    main()

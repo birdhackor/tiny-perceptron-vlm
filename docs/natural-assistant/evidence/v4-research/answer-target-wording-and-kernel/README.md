@@ -1,0 +1,3 @@
+# Localized answer-target clarification
+
+The diagram/body now name the next-item target without an ambiguous physical-shift direction. Code cells and target alignment are unchanged. The original strict export honestly rejected the previous notebook markdown; a fresh actual 20.7 kernel passed before current export. This packet preserves original before/after bytes, actual stdout/stderr and the executed copy. The 303-estimate build-info/metadata are an explicitly incomplete author preview used by independent reviewers, not final publication evidence. Final complete metadata, site and browser checks are preserved separately.

@@ -1,0 +1,51 @@
+"""Collect genuine original-owner singlepage time correction, retaining303 actual original records."""
+import argparse,hashlib,json,subprocess
+from datetime import datetime,UTC
+from pathlib import Path
+ROOT=Path(__file__).resolve().parents[3]
+BASE=ROOT/"outputs/natural-v4/review-plan"
+PACKET=BASE/"answer-mask-corrective-review-001"
+def sha(raw):return hashlib.sha256(raw).hexdigest()
+def load(path):return json.loads((ROOT/path).read_bytes())
+def main():
+ p=argparse.ArgumentParser();p.add_argument("--owner-metadata",required=True);p.add_argument("--owner-report",required=True);p.add_argument("--inventory",required=True);p.add_argument("--continuity-closure",required=True);p.add_argument("--output",required=True);p.add_argument("--observed-owner-final",action="store_true",required=True);a=p.parse_args()
+ journal=load(PACKET.relative_to(ROOT)/"dispatch-journal.json")
+ dispatch=next(d for d in journal["dispatches"] if d["phase"]=="reading-time" and d["scope"]=="20.7")
+ assert dispatch["actual_dispatch_observed"] and dispatch["completion_status"]=="awaiting_actual_same_owner_FINAL"
+ cont=load(a.continuity_closure);assert cont["whole_continuity_phase_complete"]
+ owner=dispatch["actual_owner"]
+ report_raw=(ROOT/a.owner_report).read_bytes();report=json.loads(report_raw)
+ assert report["reviewer_task"]==owner and report["verdict"]=="pass"
+ assert report["personally_read_page_ids"]==["20.7"]
+ assert isinstance(report.get("per_page_reading_scope"),(dict,list)) and report["per_page_reading_scope"]
+ for artifact in report["artifacts"]:assert sha((ROOT/artifact["path"]).read_bytes())==artifact["sha256"]
+ meta_raw=(ROOT/a.owner_metadata).read_bytes();meta=json.loads(meta_raw)
+ assert meta["schema_version"]==1 and meta["estimate_kind"]=="ai_estimate" and len(meta["pages"])==1
+ entry=meta["pages"][0];assert entry["page_id"]=="20.7" and entry["reviewer_task"]==owner
+ assert isinstance(entry["minutes_min"],int) and isinstance(entry["minutes_max"],int) and 0<entry["minutes_min"]<=entry["minutes_max"]
+ assert isinstance(entry["reason"],str) and entry["reason"].strip()
+ inv=load(a.inventory);old_inv=load("outputs/natural-v4/review-plan/reading-time-current-freeze-160/inventory.json")
+ actual={r["page_id"]:r for r in inv["pages"]};prior={r["page_id"]:r for r in old_inv["pages"]}
+ assert set(actual)==set(prior) and len(actual)==304
+ delta=[]
+ for page in actual:
+  if any(actual[page][k]!=prior[page][k] for k in ["source_sha256","figures_sha256"]):delta.append(page)
+ assert delta==["20.7"],delta
+ assert entry["source_sha256"]==actual["20.7"]["source_sha256"] and entry["figures_sha256"]==actual["20.7"]["figures_sha256"]
+ assert all(report["personally_viewed_figure_sha256"].get(fig)==value for fig,value in entry["figures_sha256"].items())
+ original=load("outputs/natural-v4/review-plan/reading-times-current-304-candidate.json")
+ candidate={**original,"pages":[entry if r["page_id"]=="20.7" else r for r in original["pages"]]}
+ assert len(candidate["pages"])==304
+ assert all(new==old for new,old in zip(candidate["pages"],original["pages"]) if old["page_id"]!="20.7")
+ output=ROOT/a.output;assert not output.exists();output.write_text(json.dumps(candidate,ensure_ascii=False,indent=2)+"\n")
+ command=[str(ROOT/".venv/bin/python"),"scripts/reading_time.py","validate","--metadata",a.output,"--executed"]
+ result=subprocess.run(command,cwd=ROOT,capture_output=True)
+ output.with_name(output.stem+".validation.stdout.txt").write_bytes(result.stdout);output.with_name(output.stem+".validation.stderr.txt").write_bytes(result.stderr)
+ record={"kind":"genuine-original-owner-onepage-corrective-time-closure","captured_at":datetime.now(UTC).isoformat(),"actual_owner":owner,"actual_owner_FINAL_observed":True,"owner_report":a.owner_report,"owner_report_sha256":sha(report_raw),"owner_metadata":a.owner_metadata,"owner_metadata_sha256":sha(meta_raw),"actual_current_inventory":a.inventory,"actual_current_inventory_sha256":sha((ROOT/a.inventory).read_bytes()),"genuine_prior304_candidate":"outputs/natural-v4/review-plan/reading-times-current-304-candidate.json","genuine_prior304_candidate_sha256":sha((BASE/"reading-times-current-304-candidate.json").read_bytes()),"actual_source_figure_delta_pages":delta,"actual_manually_reread_and_reestimated_pages":["20.7"],"genuine_unchanged_prior_records_retained":303,"candidate":a.output,"candidate_sha256":sha(output.read_bytes()),"actual_validator_command":command,"actual_validator_exit_code":result.returncode,"continuity_closure":a.continuity_closure,"continuity_closure_sha256":sha((ROOT/a.continuity_closure).read_bytes()),"whole304_current_metadata_complete":result.returncode==0,"scope_limit":"Original6fresh owners genuinely read304, now same actualg06 owner personally onepage reread/code actualCPUoutputs/currentSVGview and newmanual judgment. No fabricated304secondread, no formula/timehash inheritance forchangedpage. Original immutable closures/reports/candidate remain unmodified."}
+ receipt=PACKET/"time-corrective-current-closure.json";assert not receipt.exists();receipt.write_text(json.dumps(record,ensure_ascii=False,indent=2)+"\n")
+ assert result.returncode==0,result.stdout.decode()+result.stderr.decode()
+ dispatch["completion_status"]="actual_same_owner_onepage_manual_current_FINAL_and304_validator_pass"
+ journal["completions"].append({"phase":"reading-time","scope":"20.7",**record});journal["current_corrective_phase_complete"]=True;journal["actual_current_candidate"]=a.output
+ (PACKET/"dispatch-journal.json").write_text(json.dumps(journal,ensure_ascii=False,indent=2)+"\n")
+ print(json.dumps(record,ensure_ascii=False))
+if __name__=="__main__":main()
