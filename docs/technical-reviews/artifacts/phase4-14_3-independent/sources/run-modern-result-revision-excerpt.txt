@@ -1,0 +1,38 @@
+291: def run_modern(ctx):
+292:     started = time.perf_counter()
+293:     data = _text_dataset(ctx)
+294:     initial = new_lm(ctx, heads=4)
+295:     variants = {
+296:         "baseline": {},
+297:         "rope": {"rotary": True},
+298:         "rmsnorm": {"norm": "rms"},
+299:         "relu2": {"activation": "relu2"},
+300:         "swiglu": {"activation": "swiglu"},
+301:         "tied": {"tied": True},
+302:     }
+303:     results = {}
+304:     steps = _steps(ctx, 240)
+305:     for name, changes in variants.items():
+306:         model, shared = _clone_config(initial, ctx, **changes)
+307:         training = _train(model, data["train"], ctx, name=name, steps=steps, deadline=started + 520)
+308:         results[name] = {
+309:             "model": _description(model),
+310:             "changes": changes,
+311:             "copied_initial_tables": shared,
+312:             "training": training,
+313:             "heldout": _heldout(model, data),
+314:         }
+315:     # 下游以 baseline 為參照；這不是挑驗證集最低者。
+316:     (ctx.output / "model.pt").write_bytes((ctx.output / "baseline.pt").read_bytes())
+317:     return {
+318:         "seed": ctx.seed,
+319:         "step_scale": getattr(ctx, "step_scale", 1.0),
+320:         "runtime": _runtime(ctx),
+321:         "dataset": _data_report(data),
+322:         "variants": results,
+323:         "seconds": time.perf_counter() - started,
+324:         "comparison": "每項只改一個設計；同資料、batch抽樣、更新數與共有表初值。RoPE移除位置表、"
+325:         "SwiGLU新增gate、tied共享表，所以總參數不同；固定的是更新/token預算。",
+326:         "limitations": "單一seed、小型固定語料；不能據此宣稱架構普遍優劣或長度外推能力。",
+327:         "all_requested_updates_completed": all(result["training"]["steps"] == steps for result in results.values()),
+328:     }

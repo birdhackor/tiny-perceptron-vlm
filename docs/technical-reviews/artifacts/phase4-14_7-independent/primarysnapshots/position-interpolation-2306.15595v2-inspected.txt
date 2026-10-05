@@ -1,0 +1,205 @@
+
+--- pdftotext -layout lines 1-38 ---
+                                         E XTENDING C ONTEXT W INDOW OF L ARGE L AN -
+                                         GUAGE M ODELS VIA P OSITION I NTERPOLATION
+
+                                          Shouyuan Chen       Sherman Wong Liangjian Chen Yuandong Tian
+                                          Meta Platforms Inc.
+                                          {chenshouyuan,shermanwong,clj,yuandong}@meta.com
+
+
+
+                                                                                     A BSTRACT
+arXiv:2306.15595v2 [cs.CL] 28 Jun 2023
+
+
+
+
+                                                  We present Position Interpolation (PI) that extends the context window sizes of
+                                                  RoPE-based (Su et al., 2021) pretrained LLMs such as LLaMA (Touvron et al.,
+                                                  2023) models to up to 32768 with minimal fine-tuning (within 1000 steps), while
+                                                  demonstrating strong empirical results on various tasks that require long context,
+                                                  including passkey retrieval, language modeling, and long document summariza-
+                                                  tion from LLaMA 7B to 65B. Meanwhile, the extended model by Position Inter-
+                                                  polation preserve quality relatively well on tasks within its original context win-
+                                                  dow. To achieve this goal, Position Interpolation linearly down-scales the input
+                                                  position indices to match the original context window size, rather than extrapo-
+                                                  lating beyond the trained context length which may lead to catastrophically high
+                                                  attention scores that completely ruin the self-attention mechanism. Our theoretical
+                                                  study shows that the upper bound of interpolation is at least ∼ 600× smaller than
+                                                  that of extrapolation, further demonstrating its stability. Models extended via Po-
+                                                  sition Interpolation retain its original architecture and can reuse most pre-existing
+                                                  optimization and infrastructure.
+
+
+                                         1   I NTRODUCTION
+
+                                         Large language models (LLMs) typically come with a pre-defined context window size. For exam-
+                                         ple, inputs to LLaMA models (Touvron et al., 2023) must be fewer than 2048 tokens. This pre-set
+                                         context window limit is frequently exceeded in applications such as conducting long conversations,
+                                         summarizing long documents, or executing long-term planning. For these applications, LLMs with
+
+--- pdftotext -layout lines 128-260 ---
+HOT kaiokendev (2023)) that also interpolates positional encoding in RoPE to extend the context
+window from 2K to 8K. Recently, open source community picks it up in Reddit post 1 and Github
+Issues 2 , which shows that fine-tuning with LoRA (Hu et al., 2021) also seems to work well. Our
+paper shows a full fine-tuning with up to 65B model work well with Position Interpolation, and we
+also give theoretical explanations why interpolation achieves much more stable results than extrap-
+olation, by showing that the upper bound of interplated attention score is much lower than that of
+extrapolated ones.
+
+2     M ETHOD
+2.1   BACKGROUND : ROTARY P OSITION E MBEDDING (RO PE)
+
+Transformer models require explicit positional information to be injected, typically in the form of
+positional encodings, to represent the order of inputs. We consider Rotary Position Embedding
+(RoPE) (Su et al., 2021), which is the position encoding used in the LLaMA model (Touvron et al.,
+2023). Given a position index m ∈ [0, c) and an embedding vector x := [x0 , x1 , . . . , xd−1 ]⊤ , where
+d is the dimension of the attention head, RoPE defines a vector-valued complex function f (x, m) as
+follows
+          f (x, m) = [(x0 + ix1 )eimθ0 , (x2 + ix3 )eimθ1 , . . . , (xd−2 + ixd−1 )eimθd/2−1 ]⊤ (1)
+            √
+where i := −1 is the imaginary unit and θj = 10000−2j/d . Using RoPE, the self-attention score
+a(m, n)    =    Re⟨f (q, m), f (k, n)⟩
+                                                                 
+                     d/2−1
+                      X
+           =    Re       (q2j + iq2j+1 )(k2j − ik2j+1 )ei(m−n)θj 
+                        j=0
+                d/2−1
+                 X
+           =            (q2j k2j + q2j+1 k2j+1 ) cos((m − n)θj ) + (q2j k2j+1 − q2j+1 k2j ) sin((m − n)θj )
+                 j=0
+           =: a(m − n)                                                                                     (2)
+is only dependent on relative position m − n through trigonometric functions. Here q and k are the
+query and key vector for a specific attention head. At each layer, RoPE is applied on both query and
+key embeddings for computing attention scores.
+
+2.2   D IRECT E XTRAPOLATION
+
+While the attention score in RoPE only depends on the relative positions, which is what we want,
+its extrapolation performance is not great . In particular, when directly extending to larger context
+windows unseen in the training, the perplexity may shoot up to very high numbers (i.e., > 103 ),
+comparable to untrained models.
+Ideally, we want to see the model trained on a context window of size L = 2048 to still work
+reasonably well on longer context window, but may not have the capability to leverage information
+that appears beyond L. For example, to answer a question located at 3000, the model trained on
+maximal window size of L = 2048 cannot leverage evidences provided at location 0, but still
+can leverage the evidences provided at location 2900. In contrast, in reality we see catastrophic
+behaviors, i.e., question at location 3000 cannot be answered correctly, even if the evidences are
+located at location 2900.
+What is the reason behind? How could this happen if the attention score am−n decays as the relative
+distance |m − n| increases, according to Section 3.4.3 of (Su et al., 2021), and content from very
+  1
+    https://www.reddit.com/r/LocalLLaMA/comments/14fgjqj/a_simple_way_to_
+extending_context_to_8k/
+  2
+    https://github.com/ggerganov/llama.cpp/discussions/1965
+
+
+                                                   3
+                                                                                  Effect of Extrapolation                        Effect of Interpolation
+                       3
+                                                                      8000                                            0.2
+                       2
+
+                       1                                              6000                                            0.1
+attention score a(s)
+
+
+
+
+                       0
+                                                                      4000                                            0.0
+                       1
+                                                                      2000                                            0.1
+                       2
+
+                       3                                                0                                             0.2
+                           0      500       1000        1500   2000          0   1000       2000        3000   4000         30    40        50        60    70
+                                    Positional difference s                         Positional difference s                       Positional difference s
+
+       Figure 2: Extrapolation versus interpolation. Left: a fitted attention score function (in red) in the form of
+       Eqn. 3 with d = dmodel /nhead = 4096/32 = 128 (setting of LLaMA 7B). Dots are random input points to be
+       fitted and red curve is the fitted score function via least square, which is approximately within [−1, 1]. Middle:
+       While the fitted function seems to be well bounded in [0, L], where L = 2048, out of this region it may goes
+       beyond 8000, causing catastrophic issues in attention computation. Note that here we do not cherry pick at all:
+       almost every learned curve from a set of randomly generated input points within [0, L] has the extrapolation
+       issue. Right: On the other hand, interpolation is much more stable. Curves in between vertical dotted lines
+       (i.e., integer positional difference) are smooth and well-behaved. Please check Appendix C.1 for the source
+       code used to generate the figure.
+
+
+       far distances should not matter that much? It turns out that the upper bound derived in Section 3.4.3
+       of (Su et al., 2021) may be too loose: while it indeed decays with respect to |m − n|, the bound
+       can still be quite large (i.e., the bound can be critically depends on the magnitude of vj ) and thus
+       vacuous. In fact, if we treat all trigonometric functions as basis functions (i.e, ϕj (s) := eisθj ), and
+       think about Eqn. 2 as basis expansion as the following:
+                                                                         
+                                                          d/2−1
+                                                           X
+                                              a(s) = Re         hj eisθj                                    (3)
+                                                                                           j=0
+
+       where s is the positional span between a query and a key and hj := (q2j + iq2j+1 )(k2j − ik2j+1 )
+       are complex coefficients depending on q and k (here the definition of hj is exactly the same as the
+       definition of hj in Sec 3.4.3 in RoPE (Su et al., 2021)). Now the the issue becomes clear: as shown
+       in Fig. 2, as can be small in magnitude in the range of [0, 2048], but gives huge values out of the
+       region. The underlying reason is that the trigonometric family {ϕj } (with sufficiently large d) is
+       a universal approximator and can fit any arbitrary functions. Therefore, for as , there always exist
+       coefficients {hj } (i.e. key and query) that corresponds to small function values in [0, 2048] but
+       much larger in regions beyond.
+
+        2.3                    P ROPOSED APPROACH : P OSITION I NTERPOLATION (PI)
+
+       In Fig. 2, thanks to the smoothness of bases functions ϕj interpolation is much more stable and will
+       not lead to wild values. Therefore, instead of extrapolate the attention score in Eqn. 3 to s > L,
+       how about we define an attention score ã(s) = a(Ls/L′ ) where L′ is the longer context window?
+       Formally, we replace RoPE f by f ′ defined as follows
+                                                                   
+                                                               mL
+                                             f ′ (x, m) = f x, ′ .                                      (4)
+                                                                L
+       We call this transformation on the position encoding Position Interpolation. In this step, we reduce
+       position indices from [0, L′ ) to [0, L) to match the original range of indices before computing RoPE.
+       Consequently, as inputs to RoPE, the maximum relative distance between any two tokens has been
+       reduced from L′ to L. Since we align the ranges of position indices and relative distances before
+       and after extension, we mitigate the effect on attention score computation due to context window
+       extensions, which can allow the model easier to adapt. To further demonstrate this is the case, in the
+       following theorem, we show that the interpolated attention score is well-behaved:
+
+
+                                                                                          4
+                                                                             hP                    i
+
+--- pdftotext -layout lines 276-305 ---
+have (s − s1 )(s2 − s) ≤ 1/4. Note that c = 10000, the bound becomes:
+                                                      d                d maxj |hj |
+                           |a(s) − alinear (s)| ≤          max |hj | ≈                                       (7)
+                                                    32 ln c j            294.73
+In comparison, Sec. 3.4.3 in RoPE (Su et al., 2021) yields an extrapolation bound (i.e., it works for
+all positional distance s):
+                                      d/2−1
+                                         X                             d/2−1
+                                                                          X
+         |a(s)| ≤    max |hj − hj+1 |         |Ak+1 (s)| ≤ 2 max |hj |         |Ak+1 (s)|,                   (8)
+                       j                                               j
+                                             k=0                                     k=0
+                    Pk−1                                                   Pd/2−1
+where Ak (s) := j=0 eisθj . While there is no close form for B(s) := k=0 |Ak+1 (s)|, numer-
+ically it is at least larger than d, and for many positional difference s, B(s) is much larger than d
+(check Appendix B for the plot). Therefore, the interpolation bound is at least 2 · 294.73 ∼ 600×
+smaller than the extrapolation bound, and thus the interpolated attention score is much more stable
+than extrapolated one.
+Notably, our method of rescaling of position indices does not introduce extra weight, or modify
+the model architecture in any way. This makes it attractive in practical applications, since most
+infrastructure and optimization for the original model can be reused after the extension.
+Fine-tuning. We can further fine-tune the interpolated model using the next token prediction task
+with interpolated position encodings on the extended context window size using a pre-training cor-
+pus such as the Pile (Gao et al., 2020). In the next section, we show that our fine-tuning process
+only needs tens to hundreds thousands of examples. We also find that the result of the fine-tuning
+is not sensitive to the choice of examples. The reason may be that the model is only adapting to the
+new context window during the fine-tuning phase, starting from a good initialization, as opposed to
+acquiring new knowledge.
+Other ways to reduce interpolation/extrapolation bound. From the expression of the interpola-
+tion (Eqn. 5) and extrapolation bound (Eqn. 8), a common term is maxj |hj |, which is the maximal

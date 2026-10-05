@@ -1,0 +1,117 @@
+3     M ETHODOLOGY
+
+Whereas PI stretches all RoPE dimensions equally, we find that the theoretical interpolation bound
+described by PI (Chen et al., 2023) is insufficient at predicting the complex dynamics between RoPE
+and the LLM’s internal embeddings. In the following subsections, we describe the main issues
+with PI we have individually identified and solved, so as to give the readers the context, origin and
+justifications of each method which we use in concert to obtain the full YaRN method.
+
+3.1   L OSS OF H IGH F REQUENCY INFORMATION - "NTK- AWARE " INTERPOLATION
+
+If we look at rotary position embeddings (RoPE) only from an information encoding perspective,
+it was shown in (Tancik et al., 2020), using Neural Tangent Kernel (NTK) theory, that deep neural
+networks have trouble learning high frequency information if the input dimension is low and the
+corresponding embeddings lack high frequency components. Here we can see the similarities: a
+token’s positional information is one-dimensional, and RoPE expands it to an n-dimensional complex
+vector embedding. RoPE closely resembles Fourier Features (Tancik et al., 2020) in many aspects, as
+it is possible to define RoPE as a special 1D case of a Fourier Feature.
+In the case of Positional Interpolation (PI), as we strech all dimensions equally by a factor s, it
+removes the high frequency components of RoPE. This degradation is worsened as the scaling factor
+s grows, and at some point, the network will not be able to recover. Previous fine-tunes (kaiokendev,
+2023) (Chen et al., 2023) (Together.ai, 2023) (Quesnelle et al., 2023) using PI were only able to
+achieve a scaling factor of roughly s = 8 before the LLM’s outputs starts to degrade, even after
+fine-tuning.
+In order to alleviate this issue, the "NTK-aware" interpolation was developed in (bloc97, 2023a).
+Instead of scaling every dimension of RoPE equally by a factor s, we spread out the interpolation
+pressure across multiple dimensions by scaling high frequencies less and low frequencies more. One
+can obtain such a transformation in many ways, but the simplest would be to perform a base change
+on the value of θ. The details are described in the Appendix A.2 and the method has seen some
+open-source adoptions* .
+One main issue of this "NTK-aware" scaling is that it is very difficult to determine what optimal base
+should be used for an intended context extension by s times. The best base to use for "NTK-aware"
+interpolation usually has to be found empirically, which significantly increases the difficulty and
+cost of obtaining a successful fine-tuned model. Despite its limitations, the observations from the
+NTK theory is valid and the following idea is still maintained and executed in a different way in the
+"NTK-by-parts" interpolation introduced in the next section.
+
+3.2   L OSS OF R ELATIVE L OCAL D ISTANCES - "NTK- BY- PARTS " INTERPOLATION
+
+To understand why "NTK-aware" interpolation works better than PI and to eliminate its disadvantages,
+we have to take a closer look at RoPE. In this section, we think heavily in terms of the wavelengths
+λd defined in Eq. 8 in the formula of RoPE. For simplicity, we omit the subscript d in λd and the
+reader is encouraged to think about λ as the wavelength of an arbitrary periodic function.
+In theory, as RoPE is a relative position embedding, it should be quite surprising that it fails to
+generalize to unseen longer context sizes. However, we can show that in practice, RoPE does not
+only encode relative position. One observation we can make is that given a context size L, there are
+some dimensions d where the wavelength is longer than the maximum context length seen during
+pretraining (λ > L), this suggests that some dimensions’ rotary embeddings might not be distributed
+evenly in the rotational domain (i.e. does not perform a full rotation for the entire training context
+size). In such cases, we presume having unique position pairs† implies that the absolute positional
+
+   *We note that shortly before the release of this article, Code Llama (Rozière et al., 2023) was released
+
+and uses "NTK-aware" scaling by manually scaling the base b to 1M, in which they call this method as RoPE
+"adjusted base frequency" (ABF).
+   †
+     Since the dimension never rotates fully at least once during pre-training, if we pick the first token as the
+anchor, every other token during pre-training has an unique distance to it, which the neural network can use to
+determine its absolute position.
+
+
+                                                       4
+information remains intact in those dimensions. On the contrary, when the wavelength is short, only
+relative positional information is accessible to the network.
+Given these observations, we can see that it is important to not touch the dimensions that only encode
+relative positional information, as they are crucial for the network to distinguish the relative order
+of nearby tokens. Meanwhile, dimensions that only encode absolute positional information should
+always be interpolated, as larger distances will be out of distribution. Instead of arbitrarily changing
+the base in "NTK-aware" interpolation (which basically does something similar to what is described
+here), we can formulate an explicit and targeted interpolation method that takes in account all of the
+above.
+In other words,
+
+       • if the wavelength λ is much smaller than the context size L, we do not interpolate;
+       • if the wavelength λ is equal to or bigger than the context size L, we want to only interpolate
+         and avoid any extrapolation (unlike the previous "NTK-aware" method);
+       • dimensions in-between can have a bit of both, similar to the "NTK-aware" interpolation.
+
+As a result, it is more convenient to introduce the ratio r = Lλ between the original context size L and
+the wavelength λ. This ratio represents the number of rotations a certain RoPE dimension makes
+given a fixed pretrained context length L. In the d-th hidden state, the ratio r depends on d in the
+following way:
+                                                  L         L
+                                          r(d) =      =       2d .                                  (10)
+                                                  λd     2πb |D|
+In order to define the boundary of the different interpolation strategies as above, we introduce
+two extra parameters α, β. All hidden dimensions d where r(d) < α are those where we linearly
+interpolate by a scale s (exactly like PI, avoiding any extrapolation), and the d where r(d) > β are
+those where we do not interpolate at all. Define the ramp function γ to be
+                                            
+                                            
+                                             0,        if r < α
+                                            
+                                    γ(r) = 1,           if r > β                                (11)
+                                               r−α
+                                                     , otherwise.
+                                            
+                                            
+                                               β−α
+                                            
+
+With the help of the ramp function, the "NTK-by-parts" method can be described as follows.
+
+Definition 1 The "NTK-by-parts" interpolation is a modification of RoPE using Eq. 7 with the
+following functions‡ .
+                              g(m) = m                                                             (12)
+                                                 θ d         
+                              h(θd ) = 1 − γ r(d)       + γ r(d) θd .                              (13)
+                                                    s
+
+The values of α and β should be tuned on a case-by-case basis. For example, we have found
+experimentally that for the Llama family of models, good values for α and β are α = 1 and β = 32.
+Using the techniques described in this section, a variant of the resulting method was released under
+the name "NTK-by-parts" interpolation (bloc97, 2023b). This improved method performs better
+than the previous PI (Chen et al., 2023) and "NTK-aware" 3.1 interpolation methods, both with
+non-fine-tuned models and with fine-tuned models, as shown in (bloc97, 2023b) and Section 4.2.
+
+3.3   YA RN

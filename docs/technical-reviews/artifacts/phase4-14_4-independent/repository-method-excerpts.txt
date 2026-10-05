@@ -1,0 +1,516 @@
+
+===== Experiment original revision 4ef6555710e9915179a4a69738cdfabe80c299cf: relevant original methods; whole_source_sha256=1ad0b0789318236d5e1a8fc1117cb65758bbd6e3ad62dc2d646a111ae1ea37a3 =====
+
+[original lines 51-82]
+def _copy_matching(source, target):
+    """相同形狀的表共用初值；新增／變形的表保留固定 seed 的初始化。"""
+    original, current = source.state_dict(), target.state_dict()
+    names = []
+    for name, value in current.items():
+        if name in original and value.shape == original[name].shape:
+            # tied 的 output 是 embedding 同一物件，不能讓第二次 copy 覆寫 embedding。
+            if name == "output.weight" and target.config.tied:
+                continue
+            value.copy_(original[name])
+            names.append(name)
+    target.load_state_dict(current)
+    return names
+
+
+def _clone_config(source, ctx, **changes):
+    seed(ctx.seed)
+    target = TinyLM(replace(source.config, **changes)).to(ctx.device)
+    return target, _copy_matching(source, target)
+
+
+def _text_dataset(ctx):
+    directory = extract_asset(ctx, "tinystories")
+    files = list(directory.rglob("tinystories-train-512.jsonl"))
+    if len(files) != 1:
+        raise ValueError(f"預期唯一 TinyStories 資料檔，找到 {len(files)} 個")
+    records = load_jsonl(files[0])
+    for record in records:
+        record["family"] = record.get("text_sha256", records_sha256([{"text": record["text"]}]))
+    data = split_records(records, ctx.seed)
+    write_json(ctx.output / "dataset.json", data)
+    return data
+
+[original lines 99-108]
+        "device": str(ctx.device),
+        "torch": str(torch.__version__),
+        "float32_matmul_precision": torch.get_float32_matmul_precision(),
+        "cuda_matmul_allow_tf32": torch.backends.cuda.matmul.allow_tf32 if str(ctx.device).startswith("cuda") else None,
+    }
+
+
+def _steps(ctx, count):
+    """正式排程保持原步數；caller明示的縮步只用於通路檢查。"""
+    return max(1, round(count * getattr(ctx, "step_scale", 1.0)))
+
+[original lines 139-149]
+def _nll(model, examples, ctx, dtype=None, forward=None):
+    model.eval()
+    summed, tokens = 0.0, 0
+    for start in range(0, len(examples), 16):
+        x, y, valid = (t.to(ctx.device) for t in pad_batch(examples[start : start + 16]))
+        with _amp(ctx.device, dtype):
+            result = _forward(model, x, valid, forward)
+            total, count = loss_sum(result["logits"].float(), y)
+        summed += float(total)
+        tokens += int(count)
+    return {"nll": summed / tokens, "nll_sum": summed, "effective_tokens": tokens, "examples": len(examples)}
+
+[original lines 152-284]
+def _train(
+    model,
+    records,
+    ctx,
+    *,
+    name,
+    steps,
+    mode="text",
+    auxiliary=0.0,
+    batch_size=16,
+    lr=0.003,
+    forward=None,
+    dtype=None,
+    micro_sizes=None,
+    deadline=None,
+):
+    """固定 seed 的 batch；累積時共用有效 token 分母，最後才 clip 與 step。"""
+    examples = text_examples(records, mode, model.config.max_length)
+    initial = _nll(model, examples, ctx, dtype)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
+    sampler = random.Random(ctx.seed)
+    use_scaler = dtype == torch.float16 and torch.device(ctx.device).type == "cuda"
+    scaler = torch.amp.GradScaler("cuda", enabled=use_scaler)
+    history, latencies, effective_tokens, updates, skipped, complete = [], [], 0, 0, 0, 0
+    if str(ctx.device).startswith("cuda"):
+        torch.cuda.reset_peak_memory_stats(ctx.device)
+        memory_before = torch.cuda.memory_allocated(ctx.device)
+    else:
+        memory_before = None
+    _sync(ctx.device)
+    started = time.perf_counter()
+    model.train()
+    for step in range(steps):
+        if deadline is not None and time.perf_counter() >= deadline:
+            break
+        batch = sampler.choices(examples, k=batch_size)
+        total_tokens = sum(int((y != IGNORE).sum()) for _, y in batch)
+        sizes = micro_sizes or [batch_size]
+        if sum(sizes) != batch_size:
+            raise ValueError("micro_sizes 總和必須等於 batch_size")
+        optimizer.zero_grad(set_to_none=True)
+        _sync(ctx.device)
+        step_started = time.perf_counter()
+        value, offset = 0.0, 0
+        for size in sizes:
+            x, y, valid = (t.to(ctx.device) for t in pad_batch(batch[offset : offset + size]))
+            offset += size
+            with _amp(ctx.device, dtype):
+                result = _forward(model, x, valid, forward)
+                total, _ = loss_sum(result["logits"].float(), y)
+                loss = total / total_tokens + auxiliary * result["auxiliary"] * size / batch_size
+            if not torch.isfinite(loss):
+                raise FloatingPointError(f"{name} 第 {step + 1} 步 loss 非有限值")
+            scaler.scale(loss).backward()
+            value += float(loss.detach())
+        scaler.unscale_(optimizer)
+        gradients_finite = all(p.grad is None or bool(torch.isfinite(p.grad).all()) for p in model.parameters())
+        if not gradients_finite and not use_scaler:
+            raise FloatingPointError(f"{name} 第 {step + 1} 步 gradient 非有限值")
+        if gradients_finite:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0, error_if_nonfinite=True)
+        old_scale = scaler.get_scale()
+        scaler.step(optimizer)
+        scaler.update()
+        if gradients_finite:
+            updates += 1
+        else:
+            skipped += 1
+        _sync(ctx.device)
+        latencies.append(time.perf_counter() - step_started)
+        effective_tokens += total_tokens
+        complete = step + 1
+        if step == 0 or (step + 1) % max(1, steps // 8) == 0:
+            history.append(
+                {
+                    "step": step + 1,
+                    "loss": value,
+                    "gradients_finite": gradients_finite,
+                    "scaler_before": old_scale,
+                    "scaler_after": scaler.get_scale(),
+                }
+            )
+    _sync(ctx.device)
+    seconds = time.perf_counter() - started
+    memory_peak = torch.cuda.max_memory_allocated(ctx.device) if memory_before is not None else None
+    metadata = {
+        "seed": ctx.seed,
+        "mode": mode,
+        "lr": lr,
+        "auxiliary": auxiliary,
+        "records_sha256": records_sha256(records),
+        "effective_tokens": effective_tokens,
+        "amp_dtype": str(dtype),
+        "successful_optimizer_updates": updates,
+        "requested_steps": steps,
+        "completed_attempts": complete,
+        "skipped_updates": skipped,
+        "step_scale": getattr(ctx, "step_scale", 1.0),
+    }
+    save_checkpoint(
+        ctx.output / f"{name}.pt", model, optimizer, complete, metadata, {"grad_scaler": scaler.state_dict()}
+    )
+    return {
+        "initial": initial,
+        "final": _nll(model, examples, ctx, dtype),
+        "history": history,
+        "requested_steps": steps,
+        "status": "budget_exhausted" if complete < steps else "completed",
+        "all_requested_attempts_completed": complete == steps,
+        "step_scale": getattr(ctx, "step_scale", 1.0),
+        "schedule": "constant",
+        "learning_rate": lr,
+        "batch_size": batch_size,
+        "micro_batch_sizes": micro_sizes or [batch_size],
+        "gradient_clip_norm": 1.0,
+        "auxiliary_weight": auxiliary,
+        "steps": complete,
+        "optimizer_updates": updates,
+        "skipped_updates": skipped,
+        "budget_exhausted": complete < steps,
+        "seconds": seconds,
+        "effective_tokens": effective_tokens,
+        "checkpoint": f"{name}.pt",
+        "warm_step_median_seconds": statistics.median(latencies[3:] or latencies) if latencies else None,
+        "memory_allocated_before_bytes": memory_before,
+        "peak_memory_allocated_bytes": memory_peak,
+        "peak_additional_allocated_bytes": memory_peak - memory_before if memory_peak is not None else None,
+        "memory_note": "CUDA allocator allocated bytes；包含參數、optimizer及中間量"
+        if memory_peak is not None
+        else "此裝置沒有 CUDA allocator peak API，未聲稱峰值記憶體收益",
+        "scaler_enabled": use_scaler,
+        "all_parameters_finite": all(bool(torch.isfinite(p).all()) for p in model.parameters()),
+    }
+
+[original lines 287-318]
+def _heldout(model, data, mode="text"):
+    return {name: evaluate_lm(model, data[name], mode=mode) for name in ("validation", "test")}
+
+
+def run_modern(ctx):
+    started = time.perf_counter()
+    data = _text_dataset(ctx)
+    initial = new_lm(ctx, heads=4)
+    variants = {
+        "baseline": {},
+        "rope": {"rotary": True},
+        "rmsnorm": {"norm": "rms"},
+        "relu2": {"activation": "relu2"},
+        "swiglu": {"activation": "swiglu"},
+        "tied": {"tied": True},
+    }
+    results = {}
+    steps = _steps(ctx, 240)
+    for name, changes in variants.items():
+        model, shared = _clone_config(initial, ctx, **changes)
+        training = _train(model, data["train"], ctx, name=name, steps=steps, deadline=started + 520)
+        results[name] = {
+            "model": _description(model),
+            "changes": changes,
+            "copied_initial_tables": shared,
+            "training": training,
+            "heldout": _heldout(model, data),
+        }
+    # 下游以 baseline 為參照；這不是挑驗證集最低者。
+    (ctx.output / "model.pt").write_bytes((ctx.output / "baseline.pt").read_bytes())
+    return {
+        "seed": ctx.seed,
+
+===== DenseFFN unchanged against original result code_sha256; whole_source_sha256=02f6332a7676f98342ed3f168f5c178e466f7acb649bdd48554b87dc66caf24a =====
+
+[original lines 35-53]
+class DenseFFN(nn.Module):
+    def __init__(self, width, hidden=None, activation="gelu"):
+        super().__init__()
+        hidden = hidden or width * 4
+        self.up, self.down = nn.Linear(width, hidden), nn.Linear(hidden, width)
+        self.activation = activation
+        if activation not in ("gelu", "relu2", "swiglu"):
+            raise ValueError("activation 必須是 gelu/relu2/swiglu")
+        self.gate = nn.Linear(width, hidden) if activation == "swiglu" else None
+
+    def forward(self, x):
+        h = self.up(x)
+        if self.activation == "gelu":
+            h = F.gelu(h)
+        elif self.activation == "relu2":
+            h = F.relu(h).square()
+        else:
+            h = F.silu(self.gate(x)) * h
+        return self.down(h)
+
+===== ModelConfig, TinyLM structure and summed-loss denominator; whole_source_sha256=176e3a2c305f3ec509934abe41a1e8e48c5a76de8e9b0cea5c41eefd5a9adf69 =====
+
+[original lines 15-89]
+class ModelConfig:
+    vocab_size: int = 264
+    width: int = 32
+    layers: int = 1
+    heads: int = 1
+    max_length: int = 128
+    norm: str = "layer"
+    activation: str = "gelu"
+    rotary: bool = False
+    tied: bool = False
+    kv_heads: int | None = None
+    backend: str = "manual"
+    experts: int = 0
+    top_k: int = 2
+
+
+class Block(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        norm = nn.LayerNorm if config.norm == "layer" else RMSNorm
+        self.norm1, self.norm2 = norm(config.width), norm(config.width)
+        self.attention = CausalAttention(config.width, config.heads, config.kv_heads, config.backend, config.rotary)
+        self.ffn = (
+            MoEFFN(config.width, config.experts, config.top_k)
+            if config.experts
+            else DenseFFN(config.width, activation=config.activation)
+        )
+
+    def forward(self, x, valid=None, positions=None, segments=None, cache=None):
+        attended, new_cache = self.attention(self.norm1(x), valid, positions, segments, cache)
+        x = x + attended
+        h = self.ffn(self.norm2(x))
+        auxiliary = x.new_zeros(())
+        if isinstance(h, tuple):
+            h, auxiliary, _ = h
+        return x + h, new_cache, auxiliary
+
+
+class TinyLM(nn.Module):
+    def __init__(self, config=None):
+        super().__init__()
+        self.config = config or ModelConfig()
+        c = self.config
+        if c.norm not in ("layer", "rms") or c.layers < 1 or c.max_length < 1:
+            raise ValueError("無效的 norm/layers/max_length 設定")
+        self.embedding = nn.Embedding(c.vocab_size, c.width)
+        self.position = None if c.rotary else nn.Embedding(c.max_length, c.width)
+        self.blocks = nn.ModuleList([Block(c) for _ in range(c.layers)])
+        self.final_norm = nn.LayerNorm(c.width) if c.norm == "layer" else RMSNorm(c.width)
+        self.output = nn.Linear(c.width, c.vocab_size, bias=False)
+        if c.tied:
+            self.output.weight = self.embedding.weight
+
+    def forward(self, ids=None, *, embeddings=None, valid=None, positions=None, segments=None, cache=None):
+        if (ids is None) == (embeddings is None):
+            raise ValueError("必須恰好提供 ids 或 embeddings 其中之一")
+        x = self.embedding(ids) if embeddings is None else embeddings
+        b, t, _ = x.shape
+        offset = 0 if cache is None else cache[0][0].shape[2]
+        if offset + t > self.config.max_length:
+            raise ValueError("序列超過 max_length；增加配置或明確截斷，不能默默重用位置")
+        if positions is None:
+            positions = torch.arange(offset, offset + t, device=x.device)
+        if self.position is not None:
+            x = x + self.position(positions)
+        caches, auxiliary = [], x.new_zeros(())
+        for i, block in enumerate(self.blocks):
+            x, state, aux = block(x, valid, positions, segments, None if cache is None else cache[i])
+            caches.append(state)
+            auxiliary = auxiliary + aux
+        logits = self.output(self.final_norm(x))
+        return {"logits": logits, "cache": caches, "auxiliary": auxiliary}
+
+    def description(self):
+        return {"config": asdict(self.config), "parameters": sum(p.numel() for p in self.parameters())}
+
+[original lines 92-105]
+def loss_sum(logits, labels):
+    """先求和再數有效 token，才能正確合併長短不同的 micro-batch。"""
+    count = (labels != IGNORE).sum()
+    if count.item() == 0:
+        raise ValueError("所有 labels 都被忽略：没有可學習的答案")
+    loss = F.cross_entropy(
+        logits.reshape(-1, logits.shape[-1]), labels.reshape(-1), ignore_index=IGNORE, reduction="sum"
+    )
+    return loss, count
+
+
+def masked_loss(logits, labels):
+    total, count = loss_sum(logits, labels)
+    return total / count
+
+===== new_lm, data split/chunk rules and heldout NLL/generation methods; whole_source_sha256=df08fb4d378170e930bb5deb50b97749c33e5d97d0fbd3ce77ba916b12b07206 =====
+
+[original lines 45-97]
+def new_lm(ctx, width=64, layers=2, max_length=128, **kwargs):
+    seed(ctx.seed)
+    return TinyLM(ModelConfig(width=width, layers=layers, max_length=max_length, **kwargs)).to(ctx.device)
+
+
+def split_records(records, seed=42, family="family"):
+    """Keep all descendants of a family in one split; never split individual answers."""
+    groups = {}
+    seen = set()
+    for record in records:
+        encoded = json.dumps(record, ensure_ascii=False, sort_keys=True)
+        if encoded in seen:
+            continue
+        seen.add(encoded)
+        key = str(record.get(family, hashlib.sha256(encoded.encode()).hexdigest()))
+        groups.setdefault(key, []).append(record)
+    keys = sorted(groups)
+    if len(keys) < 3:
+        raise ValueError("At least three distinct families are required for train/validation/test")
+    random.Random(seed).shuffle(keys)
+    a = min(max(1, int(len(keys) * 0.8)), len(keys) - 2)
+    b = min(max(a + 1, int(len(keys) * 0.9)), len(keys) - 1)
+    return {
+        name: [record for key in selected for record in groups[key]]
+        for name, selected in (("train", keys[:a]), ("validation", keys[a:b]), ("test", keys[b:]))
+    }
+
+
+def records_sha256(records):
+    return hashlib.sha256(json.dumps(records, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+
+
+def text_examples(records, mode="text", max_length=128, tokenizer=None):
+    tok = tokenizer or ByteTokenizer()
+    examples = []
+    for record in records:
+        if mode == "sft":
+            messages = record["messages"] if isinstance(record, dict) else record
+            x, y = render_chat(messages, tok)
+            if len(x) > max_length:
+                raise ValueError(f"SFT record has {len(x)} tokens, exceeding {max_length}; crop explicitly upstream")
+            examples.append((x, y))
+        elif mode == "text":
+            text = record["text"] if isinstance(record, dict) else record
+            ids = [tok.bos_id] + tok.encode(text) + [tok.eos_id]
+            # Every next-token label appears once; chunk boundaries share only the preceding input token.
+            for start in range(0, len(ids) - 1, max_length):
+                examples.append(shifted(ids[start : start + max_length + 1]))
+        else:
+            raise ValueError("mode must be text or sft")
+    if not examples:
+        raise ValueError("No examples to train or evaluate")
+    return examples
+
+[original lines 106-119]
+def _nll(model, examples, batch_size=16):
+    was_training = model.training
+    model.eval()
+    device = next(model.parameters()).device
+    total, count = 0.0, 0
+    try:
+        for start in range(0, len(examples), batch_size):
+            x, y, valid = (t.to(device) for t in pad_batch(examples[start : start + batch_size]))
+            summed, n = loss_sum(model(x, valid=valid)["logits"], y)
+            total += float(summed)
+            count += int(n)
+    finally:
+        model.train(was_training)
+    return {"nll": total / count, "nll_sum": total, "effective_tokens": count, "examples": len(examples)}
+
+[original lines 243-304]
+def evaluate_lm(model, records, mode="text", tokens=32, tokenizer=None):
+    tok = tokenizer or ByteTokenizer()
+    result = _nll(model, text_examples(records, mode, model.config.max_length, tok))
+    device = next(model.parameters()).device
+    samples, matches, ended = [], 0, 0
+    if mode == "sft":
+        for record in records:
+            messages = record["messages"]
+            if messages[-1]["role"] != "assistant":
+                raise ValueError("SFT evaluation must end with an assistant answer")
+            prompt = [tok.bos_id]
+            roles = {"user": tok.user_id, "assistant": tok.assistant_id, "system": tok.system_id}
+            for message in messages[:-1]:
+                prompt += [roles[message["role"]]] + tok.encode(message["content"]) + [tok.eos_id]
+            prompt += [tok.assistant_id]
+            ids = torch.tensor([prompt], device=device)
+            generated = generate(model, ids, tokens, eos_id=tok.eos_id)[0, len(prompt) :].tolist()
+            raw = generated[: generated.index(tok.eos_id)] if tok.eos_id in generated else generated
+            predicted, expected = tok.decode(raw), messages[-1]["content"]
+            # Raw token identity catches invalid special tokens hidden by the decoder.
+            exact = raw == tok.encode(expected)
+            matches += int(exact)
+            ended += int(tok.eos_id in generated)
+            samples.append(
+                {
+                    "messages": messages[:-1],
+                    "expected": expected,
+                    "generated": predicted,
+                    "generated_ids": generated,
+                    "exact": exact,
+                    "eos": tok.eos_id in generated,
+                }
+            )
+        result.update(
+            {
+                "exact_match": matches / len(records),
+                "matches": matches,
+                "records": len(records),
+                "eos_rate": ended / len(records),
+                "samples": samples,
+            }
+        )
+    else:
+        for record in records[:8]:
+            text = record["text"] if isinstance(record, dict) else record
+            limit = min(24, max(1, model.config.max_length - tokens - 1))
+            prefix_text = ""
+            for character in text:
+                candidate = prefix_text + character
+                if len(tok.encode(candidate)) > limit:
+                    break
+                prefix_text = candidate
+            # A human-readable prompt must end at a character boundary, even for byte/BPE tokens.
+            prefix = tok.encode(prefix_text)
+            ids = torch.tensor([[tok.bos_id] + prefix], device=device)
+            generated = generate(model, ids, tokens, eos_id=tok.eos_id)[0, ids.shape[1] :].tolist()
+            samples.append(
+                {"prompt": tok.decode(prefix), "generated": tok.decode(generated), "generated_ids": generated}
+            )
+        result["samples"] = samples
+        result["records"] = len(records)
+    return result
+
+===== ByteTokenizer and shifted next-token labels; whole_source_sha256=6b40ba4bccc4a1ce169a90df8ce71f40e7c9e33e3d7633a36fdd8348d9536321 =====
+
+[original lines 10-28]
+IGNORE = -100
+SPECIALS = ("<pad>", "<bos>", "<eos>", "<user>", "<assistant>", "<image>", "<audio>", "<system>")
+
+
+class ByteTokenizer:
+    """不學切詞的可還原起點；每個 UTF-8 byte 對應一個 ID。"""
+
+    vocab_size = 264
+    pad_id, bos_id, eos_id, user_id, assistant_id, image_id, audio_id, system_id = range(8)
+
+    def encode(self, text):
+        return [b + len(SPECIALS) for b in text.encode("utf-8")]
+
+    def decode(self, ids):
+        raw = bytes(i - len(SPECIALS) for i in ids if i >= len(SPECIALS))
+        return raw.decode("utf-8", errors="replace")
+
+    def state(self):
+        return {"type": "byte", "specials": list(SPECIALS)}
+
+[original lines 46-51]
+def shifted(ids):
+    """只 shift 一次：輸入第 t 格猜原序列的第 t+1 格。"""
+    if len(ids) < 2:
+        raise ValueError("至少需要兩個 token 才有下一字目標")
+    ids = torch.tensor(ids, dtype=torch.long)
+    return ids[:-1], ids[1:]

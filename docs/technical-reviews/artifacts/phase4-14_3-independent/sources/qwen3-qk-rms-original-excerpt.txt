@@ -1,0 +1,84 @@
+51:     def __init__(self, hidden_size, eps: float = 1e-6) -> None:
+52:         """
+53:         Qwen3RMSNorm is equivalent to T5LayerNorm
+54:         """
+55:         super().__init__()
+56:         self.weight = nn.Parameter(torch.ones(hidden_size))
+57:         self.variance_epsilon = eps
+
+59:     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+60:         input_dtype = hidden_states.dtype
+61:         hidden_states = hidden_states.to(torch.float32)
+62:         variance = hidden_states.pow(2).mean(-1, keepdim=True)
+63:         hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
+64:         return self.weight * hidden_states.to(input_dtype)
+
+161:     def __init__(self, config: Qwen3Config, layer_idx: int):
+162:         super().__init__()
+163:         self.config = config
+164:         self.layer_idx = layer_idx
+165:         self.head_dim = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
+166:         self.num_key_value_groups = config.num_attention_heads // config.num_key_value_heads
+167:         self.scaling = self.head_dim**-0.5
+168:         self.attention_dropout = config.attention_dropout
+169:         self.is_causal = True
+170: 
+171:         self.q_proj = nn.Linear(
+172:             config.hidden_size, config.num_attention_heads * self.head_dim, bias=config.attention_bias
+173:         )
+174:         self.k_proj = nn.Linear(
+175:             config.hidden_size, config.num_key_value_heads * self.head_dim, bias=config.attention_bias
+176:         )
+177:         self.v_proj = nn.Linear(
+178:             config.hidden_size, config.num_key_value_heads * self.head_dim, bias=config.attention_bias
+179:         )
+180:         self.o_proj = nn.Linear(
+181:             config.num_attention_heads * self.head_dim, config.hidden_size, bias=config.attention_bias
+182:         )
+183:         self.q_norm = Qwen3RMSNorm(self.head_dim, eps=config.rms_norm_eps)  # unlike olmo, only on the head dim!
+184:         self.k_norm = Qwen3RMSNorm(self.head_dim, eps=config.rms_norm_eps)  # thus post q_norm does not need reshape
+185:         self.sliding_window = config.sliding_window if config.layer_types[layer_idx] == "sliding_attention" else None
+
+188:     def forward(
+189:         self,
+190:         hidden_states: torch.Tensor,
+191:         position_embeddings: tuple[torch.Tensor, torch.Tensor],
+192:         attention_mask: Optional[torch.Tensor],
+193:         past_key_values: Optional[Cache] = None,
+194:         cache_position: Optional[torch.LongTensor] = None,
+195:         **kwargs: Unpack[FlashAttentionKwargs],
+196:     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+197:         input_shape = hidden_states.shape[:-1]
+198:         hidden_shape = (*input_shape, -1, self.head_dim)
+199: 
+200:         query_states = self.q_norm(self.q_proj(hidden_states).view(hidden_shape)).transpose(1, 2)
+201:         key_states = self.k_norm(self.k_proj(hidden_states).view(hidden_shape)).transpose(1, 2)
+202:         value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+203: 
+204:         cos, sin = position_embeddings
+205:         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+206: 
+207:         if past_key_values is not None:
+208:             # sin and cos are specific to RoPE models; cache_position needed for the static cache
+209:             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+210:             key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx, cache_kwargs)
+211: 
+212:         attention_interface: Callable = eager_attention_forward
+213:         if self.config._attn_implementation != "eager":
+214:             attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
+215: 
+216:         attn_output, attn_weights = attention_interface(
+217:             self,
+218:             query_states,
+219:             key_states,
+220:             value_states,
+221:             attention_mask,
+222:             dropout=0.0 if not self.training else self.attention_dropout,
+223:             scaling=self.scaling,
+224:             sliding_window=self.sliding_window,  # diff with Llama
+225:             **kwargs,
+226:         )
+227: 
+228:         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
+229:         attn_output = self.o_proj(attn_output)
+230:         return attn_output, attn_weights

@@ -1,0 +1,12 @@
+import torch
+import torch.nn.functional as F
+
+q = torch.tensor([[1.0, 1.0]])
+k = torch.tensor([[1.0, 0.0], [0.0, 100.0]])
+raw = q @ k.T
+unit = F.normalize(q, dim=-1) @ F.normalize(k, dim=-1).T
+print("原分數", raw.tolist())
+print("原權重", raw.softmax(-1).tolist())
+print("正規化分數", unit.round(decimals=4).tolist())
+print("正規化權重", unit.softmax(-1).tolist())
+print("有方向差的權重", torch.tensor([1.0, 0.0]).mul(4).softmax(-1).tolist())

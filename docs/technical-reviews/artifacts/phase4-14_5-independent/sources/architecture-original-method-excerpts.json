@@ -1,0 +1,78 @@
+{
+  "original_version": "4ef6555710e9915179a4a69738cdfabe80c299cf",
+  "full_original_sha256": "1ad0b0789318236d5e1a8fc1117cb65758bbd6e3ad62dc2d646a111ae1ea37a3",
+  "excluded_unread_ranges": [
+    [
+      324,
+      326
+    ]
+  ],
+  "excerpts": [
+    {
+      "method": "_description",
+      "start": 47,
+      "end": 48,
+      "excerpt": "47: def _description(model):\n48:     return {**model.description(), \"parameter_bytes\": sum(p.numel() * p.element_size() for p in model.parameters())}"
+    },
+    {
+      "method": "_copy_matching",
+      "start": 51,
+      "end": 63,
+      "excerpt": "51: def _copy_matching(source, target):\n52:     \"\"\"相同形狀的表共用初值；新增／變形的表保留固定 seed 的初始化。\"\"\"\n53:     original, current = source.state_dict(), target.state_dict()\n54:     names = []\n55:     for name, value in current.items():\n56:         if name in original and value.shape == original[name].shape:\n57:             # tied 的 output 是 embedding 同一物件，不能讓第二次 copy 覆寫 embedding。\n58:             if name == \"output.weight\" and target.config.tied:\n59:                 continue\n60:             value.copy_(original[name])\n61:             names.append(name)\n62:     target.load_state_dict(current)\n63:     return names"
+    },
+    {
+      "method": "_clone_config",
+      "start": 66,
+      "end": 69,
+      "excerpt": "66: def _clone_config(source, ctx, **changes):\n67:     seed(ctx.seed)\n68:     target = TinyLM(replace(source.config, **changes)).to(ctx.device)\n69:     return target, _copy_matching(source, target)"
+    },
+    {
+      "method": "_text_dataset",
+      "start": 72,
+      "end": 82,
+      "excerpt": "72: def _text_dataset(ctx):\n73:     directory = extract_asset(ctx, \"tinystories\")\n74:     files = list(directory.rglob(\"tinystories-train-512.jsonl\"))\n75:     if len(files) != 1:\n76:         raise ValueError(f\"預期唯一 TinyStories 資料檔，找到 {len(files)} 個\")\n77:     records = load_jsonl(files[0])\n78:     for record in records:\n79:         record[\"family\"] = record.get(\"text_sha256\", records_sha256([{\"text\": record[\"text\"]}]))\n80:     data = split_records(records, ctx.seed)\n81:     write_json(ctx.output / \"dataset.json\", data)\n82:     return data"
+    },
+    {
+      "method": "_data_report",
+      "start": 93,
+      "end": 94,
+      "excerpt": "93: def _data_report(data):\n94:     return {name: {\"records\": len(rows), \"sha256\": records_sha256(rows)} for name, rows in data.items()}"
+    },
+    {
+      "method": "_steps",
+      "start": 106,
+      "end": 108,
+      "excerpt": "106: def _steps(ctx, count):\n107:     \"\"\"正式排程保持原步數；caller明示的縮步只用於通路檢查。\"\"\"\n108:     return max(1, round(count * getattr(ctx, \"step_scale\", 1.0)))"
+    },
+    {
+      "method": "_nll",
+      "start": 139,
+      "end": 149,
+      "excerpt": "139: def _nll(model, examples, ctx, dtype=None, forward=None):\n140:     model.eval()\n141:     summed, tokens = 0.0, 0\n142:     for start in range(0, len(examples), 16):\n143:         x, y, valid = (t.to(ctx.device) for t in pad_batch(examples[start : start + 16]))\n144:         with _amp(ctx.device, dtype):\n145:             result = _forward(model, x, valid, forward)\n146:             total, count = loss_sum(result[\"logits\"].float(), y)\n147:         summed += float(total)\n148:         tokens += int(count)\n149:     return {\"nll\": summed / tokens, \"nll_sum\": summed, \"effective_tokens\": tokens, \"examples\": len(examples)}"
+    },
+    {
+      "method": "_train",
+      "start": 152,
+      "end": 235,
+      "excerpt": "152: def _train(\n153:     model,\n154:     records,\n155:     ctx,\n156:     *,\n157:     name,\n158:     steps,\n159:     mode=\"text\",\n160:     auxiliary=0.0,\n161:     batch_size=16,\n162:     lr=0.003,\n163:     forward=None,\n164:     dtype=None,\n165:     micro_sizes=None,\n166:     deadline=None,\n167: ):\n168:     \"\"\"固定 seed 的 batch；累積時共用有效 token 分母，最後才 clip 與 step。\"\"\"\n169:     examples = text_examples(records, mode, model.config.max_length)\n170:     initial = _nll(model, examples, ctx, dtype)\n171:     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)\n172:     sampler = random.Random(ctx.seed)\n173:     use_scaler = dtype == torch.float16 and torch.device(ctx.device).type == \"cuda\"\n174:     scaler = torch.amp.GradScaler(\"cuda\", enabled=use_scaler)\n175:     history, latencies, effective_tokens, updates, skipped, complete = [], [], 0, 0, 0, 0\n176:     if str(ctx.device).startswith(\"cuda\"):\n177:         torch.cuda.reset_peak_memory_stats(ctx.device)\n178:         memory_before = torch.cuda.memory_allocated(ctx.device)\n179:     else:\n180:         memory_before = None\n181:     _sync(ctx.device)\n182:     started = time.perf_counter()\n183:     model.train()\n184:     for step in range(steps):\n185:         if deadline is not None and time.perf_counter() >= deadline:\n186:             break\n187:         batch = sampler.choices(examples, k=batch_size)\n188:         total_tokens = sum(int((y != IGNORE).sum()) for _, y in batch)\n189:         sizes = micro_sizes or [batch_size]\n190:         if sum(sizes) != batch_size:\n191:             raise ValueError(\"micro_sizes 總和必須等於 batch_size\")\n192:         optimizer.zero_grad(set_to_none=True)\n193:         _sync(ctx.device)\n194:         step_started = time.perf_counter()\n195:         value, offset = 0.0, 0\n196:         for size in sizes:\n197:             x, y, valid = (t.to(ctx.device) for t in pad_batch(batch[offset : offset + size]))\n198:             offset += size\n199:             with _amp(ctx.device, dtype):\n200:                 result = _forward(model, x, valid, forward)\n201:                 total, _ = loss_sum(result[\"logits\"].float(), y)\n202:                 loss = total / total_tokens + auxiliary * result[\"auxiliary\"] * size / batch_size\n203:             if not torch.isfinite(loss):\n204:                 raise FloatingPointError(f\"{name} 第 {step + 1} 步 loss 非有限值\")\n205:             scaler.scale(loss).backward()\n206:             value += float(loss.detach())\n207:         scaler.unscale_(optimizer)\n208:         gradients_finite = all(p.grad is None or bool(torch.isfinite(p.grad).all()) for p in model.parameters())\n209:         if not gradients_finite and not use_scaler:\n210:             raise FloatingPointError(f\"{name} 第 {step + 1} 步 gradient 非有限值\")\n211:         if gradients_finite:\n212:             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0, error_if_nonfinite=True)\n213:         old_scale = scaler.get_scale()\n214:         scaler.step(optimizer)\n215:         scaler.update()\n216:         if gradients_finite:\n217:             updates += 1\n218:         else:\n219:             skipped += 1\n220:         _sync(ctx.device)\n221:         latencies.append(time.perf_counter() - step_started)\n222:         effective_tokens += total_tokens\n223:         complete = step + 1\n224:         if step == 0 or (step + 1) % max(1, steps // 8) == 0:\n225:             history.append(\n226:                 {\n227:                     \"step\": step + 1,\n228:                     \"loss\": value,\n229:                     \"gradients_finite\": gradients_finite,\n230:                     \"scaler_before\": old_scale,\n231:                     \"scaler_after\": scaler.get_scale(),\n232:                 }\n233:             )\n234:     _sync(ctx.device)\n235:     seconds = time.perf_counter() - started"
+    },
+    {
+      "method": "_train",
+      "start": 254,
+      "end": 278,
+      "excerpt": "254:     return {\n255:         \"initial\": initial,\n256:         \"final\": _nll(model, examples, ctx, dtype),\n257:         \"history\": history,\n258:         \"requested_steps\": steps,\n259:         \"status\": \"budget_exhausted\" if complete < steps else \"completed\",\n260:         \"all_requested_attempts_completed\": complete == steps,\n261:         \"step_scale\": getattr(ctx, \"step_scale\", 1.0),\n262:         \"schedule\": \"constant\",\n263:         \"learning_rate\": lr,\n264:         \"batch_size\": batch_size,\n265:         \"micro_batch_sizes\": micro_sizes or [batch_size],\n266:         \"gradient_clip_norm\": 1.0,\n267:         \"auxiliary_weight\": auxiliary,\n268:         \"steps\": complete,\n269:         \"optimizer_updates\": updates,\n270:         \"skipped_updates\": skipped,\n271:         \"budget_exhausted\": complete < steps,\n272:         \"seconds\": seconds,\n273:         \"effective_tokens\": effective_tokens,\n274:         \"checkpoint\": f\"{name}.pt\",\n275:         \"warm_step_median_seconds\": statistics.median(latencies[3:] or latencies) if latencies else None,\n276:         \"memory_allocated_before_bytes\": memory_before,\n277:         \"peak_memory_allocated_bytes\": memory_peak,\n278:         \"peak_additional_allocated_bytes\": memory_peak - memory_before if memory_peak is not None else None,"
+    },
+    {
+      "method": "run_modern",
+      "start": 291,
+      "end": 323,
+      "excerpt": "291: def run_modern(ctx):\n292:     started = time.perf_counter()\n293:     data = _text_dataset(ctx)\n294:     initial = new_lm(ctx, heads=4)\n295:     variants = {\n296:         \"baseline\": {},\n297:         \"rope\": {\"rotary\": True},\n298:         \"rmsnorm\": {\"norm\": \"rms\"},\n299:         \"relu2\": {\"activation\": \"relu2\"},\n300:         \"swiglu\": {\"activation\": \"swiglu\"},\n301:         \"tied\": {\"tied\": True},\n302:     }\n303:     results = {}\n304:     steps = _steps(ctx, 240)\n305:     for name, changes in variants.items():\n306:         model, shared = _clone_config(initial, ctx, **changes)\n307:         training = _train(model, data[\"train\"], ctx, name=name, steps=steps, deadline=started + 520)\n308:         results[name] = {\n309:             \"model\": _description(model),\n310:             \"changes\": changes,\n311:             \"copied_initial_tables\": shared,\n312:             \"training\": training,\n313:             \"heldout\": _heldout(model, data),\n314:         }\n315:     # 下游以 baseline 為參照；這不是挑驗證集最低者。\n316:     (ctx.output / \"model.pt\").write_bytes((ctx.output / \"baseline.pt\").read_bytes())\n317:     return {\n318:         \"seed\": ctx.seed,\n319:         \"step_scale\": getattr(ctx, \"step_scale\", 1.0),\n320:         \"runtime\": _runtime(ctx),\n321:         \"dataset\": _data_report(data),\n322:         \"variants\": results,\n323:         \"seconds\": time.perf_counter() - started,"
+    },
+    {
+      "method": "run_modern",
+      "start": 327,
+      "end": 328,
+      "excerpt": "327:         \"all_requested_updates_completed\": all(result[\"training\"][\"steps\"] == steps for result in results.values()),\n328:     }"
+    }
+  ]
+}
