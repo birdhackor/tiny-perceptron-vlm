@@ -1,0 +1,3 @@
+git clone https://github.com/birdhackor/tiny-perceptron-vlm.git
+cd tiny-perceptron-vlm
+uv sync --frozen --extra cpu --group notebook
