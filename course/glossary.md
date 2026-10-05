@@ -67,7 +67,7 @@
 
 | 名詞 | 想解決的問題 | 完整講解 |
 | --- | --- | --- |
-| Dense、MoE | 本課比較每個位置共用一組FFN，與由路由選少數專家FFN處理 | [15.1](chapters/15.md#15.1)、[15.4](chapters/15.md#15.4) |
+| Dense、MoE | 如何在總參數容量與每個token的計算量之間取捨；本課比較共用FFN與路由選少數專家FFN | [15.1](chapters/15.md#15.1)、[15.4](chapters/15.md#15.4) |
 | KV cache | 保存每層舊位置的K、V，生成下一字時重用它們 | [16.3](chapters/16.md#16.3) |
 | Flash Attention | 分塊計算，減少大型中間表的儲存與搬移 | [16.9](chapters/16.md#16.9) |
 | context window，上下文窗口 | 模型與介面規定的可用輸入範圍；能放入多少，與實際用好多少要分開看 | [7.19](chapters/07.md#7.19)、[14.7](chapters/14.md#14.7) |

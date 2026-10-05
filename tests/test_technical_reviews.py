@@ -16,6 +16,23 @@ def digest(value):
     return hashlib.sha256(value).hexdigest()
 
 
+@pytest.mark.parametrize("language", ["text", "plaintext", "json", "jsonl"])
+def test_reader_data_fence_is_not_a_program(language):
+    body = f"## 8.14 答案表示\n\n```{language}\nA\n```\n"
+    assert not readers.has_program_fence(body)
+
+
+@pytest.mark.parametrize("language", ["python", "bash", "", "unknown"])
+def test_reader_program_or_unknown_fence_requires_program_check(language):
+    body = f"## 8.14 程式\n\n```{language}\nprint(1)\n```\n"
+    assert readers.has_program_fence(body)
+
+
+def test_reader_mixed_data_and_program_still_requires_program_check():
+    body = '```json\n{"answer":"A"}\n```\n\n```python\nprint(1)\n```\n'
+    assert readers.has_program_fence(body)
+
+
 def write_report(root, report):
     path = root / "docs/technical-reviews" / f"{report['lesson_id']}.json"
     path.parent.mkdir(parents=True, exist_ok=True)

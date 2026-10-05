@@ -8,6 +8,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 FRONT_MATTER = ("first-steps.md", "README.md", "training.md", "glossary.md")
 HEADINGS = re.compile(r"^## ([A-Z\d]+\.\d+) (.+)$", re.M)
+DATA_FENCES = {"text", "plaintext", "json", "jsonl"}
+
+
+def has_program_fence(body):
+    """Data and displayed answers are not executable programs; unknown fences stay conservative."""
+    fences = re.findall(r"(?ms)^```([^\r\n]*)\r?\n.*?^```[ \t]*$", body)
+    return any(info.strip().lower() not in DATA_FENCES for info in fences)
 
 
 def checked(value, *, allow_not_applicable=False):
@@ -84,7 +91,7 @@ def main():
             else:
                 items = []
             if len(items) < 5 or not all(
-                checked(value, allow_not_applicable=name == "program_explanation" and "```" not in body)
+                checked(value, allow_not_applicable=name == "program_explanation" and not has_program_fence(body))
                 for name, value in items
             ):
                 failures.append(f"{lesson_id}: 缺少背景、術語、例子、程式或練習的檢查")
