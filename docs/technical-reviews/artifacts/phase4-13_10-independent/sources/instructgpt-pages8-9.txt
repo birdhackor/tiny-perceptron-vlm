@@ -1,0 +1,134 @@
+doing so requires making some difficult design decisions that we leave to future work; see Section 5.4
+for more discussion). However, in our final evaluations we asked labelers prioritize truthfulness and
+harmlessness (since this is what we really care about).
+As in Stiennon et al. (2020), we collaborate closely with labelers over the course of the project. We
+have an onboarding process to train labelers on the project, write detailed instructions for each task
+(see Appendix B.2), and answer labeler questions in a shared chat room.
+As an initial study to see how well our model generalizes to the preferences of other labelers, we hire
+a separate set of labelers who do not produce any of the training data. These labelers are sourced
+from the same vendors, but do not undergo a screening test.
+Despite the complexity of the task, we find that inter-annotator agreement rates are quite high:
+training labelers agree with each-other 72.6 ± 1.5% of the time, while for held-out labelers this
+number is 77.3 ± 1.3%. For comparison, in the summarization work of Stiennon et al. (2020)
+researcher-researcher agreement was 73 ± 4%.
+
+3.5       Models
+
+We start with the GPT-3 pretrained language models from Brown et al. (2020). These models are
+trained on a broad distribution of Internet data and are adaptable to a wide range of downstream tasks,
+but have poorly characterized behavior. Starting from these models, we then train models with three
+different techniques:
+
+Supervised fine-tuning (SFT). We fine-tune GPT-3 on our labeler demonstrations using supervised
+learning. We trained for 16 epochs, using a cosine learning rate decay, and residual dropout of 0.2.
+We do our final SFT model selection based on the RM score on the validation set. Similarly to Wu
+et al. (2021), we find that our SFT models overfit on validation loss after 1 epoch; however, we find
+that training for more epochs helps both the RM score and human preference ratings, despite this
+overfitting.
+
+Reward modeling (RM). Starting from the SFT model with the final unembedding layer removed,
+we trained a model to take in a prompt and response, and output a scalar reward. In this paper we
+only use 6B RMs, as this saves a lot of compute, and we found that 175B RM training could be
+unstable and thus was less suitable to be used as the value function during RL (see Appendix C for
+more details).
+In Stiennon et al. (2020), the RM is trained on a dataset of comparisons between two model outputs
+on the same input. They use a cross-entropy loss, with the comparisons as labels—the difference in
+rewards represents the log odds that one response will be preferred to the other by a human labeler.
+In order to speed up comparison collection,we present labelers with anywhere between K = 4 and
+K = 9 responses to rank. This produces K  2 comparisons for each prompt shown to a labeler. Since
+comparisons are very correlated within each labeling task, we found that if we simply shuffle the
+                                                                                                    5
+comparisons into one dataset,
+                            a single pass over the dataset caused the reward model to overfit.
+                         K
+Instead, we train on all 2 comparisons from each prompt as a single batch element. This is much
+more computationally efficient  because it only requires a single forward pass of the RM for each
+completion (rather than K
+                           
+                         2   forward passes for K completions) and, because it no longer overfits, it
+achieves much improved validation accuracy and log loss.
+Specifically, the loss function for the reward model is:
+
+                                 1
+                    loss (θ) = − K  E(x,yw ,yl )∼D [log (σ (rθ (x, yw ) − rθ (x, yl )))]                    (1)
+                                    2
+
+where rθ (x, y) is the scalar output of the reward model for prompt x and completion y with parameters
+θ, yw is the preferred completion out of the pair of yw and yl , and D is the dataset of human
+comparisons.
+     That is, if each of the possible K
+      5
+                                        
+                                      2
+                                          comparisons is treated as a separate data point, then each completion
+will potentially be used for K − 1 separate gradient updates. The model tends to overfit after a single epoch, so
+repeating data within an epoch also causes it to overfit.
+
+
+                                                       8
+                      Table 3: Labeler-collected metadata on the API distribution.
+           Metadata                                                                           Scale
+           Overall quality                                                         Likert scale; 1-7
+           Fails to follow the correct instruction / task                                    Binary
+           Inappropriate for customer assistant                                              Binary
+           Hallucination                                                                     Binary
+           Satisifies constraint provided in the instruction                                 Binary
+           Contains sexual content                                                           Binary
+           Contains violent content                                                          Binary
+           Encourages or fails to discourage violence/abuse/terrorism/self-harm              Binary
+           Denigrates a protected class                                                      Binary
+           Gives harmful advice                                                              Binary
+           Expresses opinion                                                                 Binary
+           Expresses moral judgment                                                          Binary
+
+
+Finally, since the RM loss is invariant to shifts in reward, we normalize the reward model using a bias
+so that the labeler demonstrations achieve a mean score of 0 before doing RL.
+
+Reinforcement learning (RL). Once again following Stiennon et al. (2020), we fine-tuned the
+SFT model on our environment using PPO (Schulman et al., 2017). The environment is a bandit
+environment which presents a random customer prompt and expects a response to the prompt. Given
+the prompt and response, it produces a reward determined by the reward model and ends the episode.
+In addition, we add a per-token KL penalty from the SFT model at each token to mitigate over-
+optimization of the reward model. The value function is initialized from the RM. We call these
+models “PPO.”
+We also experiment with mixing the pretraining gradients into the PPO gradients, in order to fix the
+performance regressions on public NLP datasets. We call these models “PPO-ptx.” We maximize the
+following combined objective function in RL training:
+
+
+            objective (φ) =E(x,y)∼DπRL rθ (x, y) − β log πφRL (y | x)/π SFT (y | x) +
+                                                                                  
+                                      φ
+                                                                                                           (2)
+                           γEx∼Dpretrain log(πφRL (x))
+                                                     
+
+
+where πφRL is the learned RL policy, π SFT is the supervised trained model, and Dpretrain is the
+pretraining distribution. The KL reward coefficient, β, and the pretraining loss coefficient, γ, control
+the strength of the KL penalty and pretraining gradients respectively. For "PPO" models, γ is set to 0.
+Unless otherwise specified, in this paper InstructGPT refers to the PPO-ptx models.
+
+Baselines. We compare the performance of our PPO models to our SFT models and GPT-3. We also
+compare to GPT-3 when it is provided a few-shot prefix to ‘prompt’ it into an instruction-following
+mode (GPT-3-prompted). This prefix is prepended to the user-specified instruction.6
+We additionally compare InstructGPT to fine-tuning 175B GPT-3 on the FLAN (Wei et al., 2021) and
+T0 (Sanh et al., 2021) datasets, which both consist of a variety of NLP tasks, combined with natural
+language instructions for each task (the datasets differ in the NLP datasets included, and the style of
+instructions used). We fine-tune them on approximately 1 million examples respectively and choose
+the checkpoint which obtains the highest reward model score on the validation set. See Appendix C
+for more training details.
+
+3.6   Evaluation
+
+To evaluate how “aligned” our models are, we first need to clarify what alignment means in this
+context. The definition of alignment has historically been a vague and confusing topic, with various
+   6
+     To obtain this prefix, authors RL and DA held a prefix-finding competition: each spent an hour interacting
+with GPT-3 to come up with their two best prefixes. The winning prefix was the one that led GPT-3 to attain the
+highest RM score on the prompt validation set. DA won.
+
+
+                                                      9
+

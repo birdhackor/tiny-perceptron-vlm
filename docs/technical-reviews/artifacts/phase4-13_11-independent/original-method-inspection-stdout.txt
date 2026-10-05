@@ -1,0 +1,148 @@
+tiny_perceptron/posttraining.py bandit_advantage 24 28
+24: def bandit_advantage(rewards, old_values):
+25:     """單一步驟任務 A = R - V_old；本輪更新時兩份採樣資料保持固定。"""
+26:     if rewards.shape != old_values.shape or not rewards.numel():
+27:         raise ValueError("回饋與舊 value 必須同形狀且不可為空")
+28:     return (rewards - old_values).detach()
+tiny_perceptron/posttraining.py ppo_clipped_objective 31 50
+31: def ppo_clipped_objective(new_log_prob, old_log_prob, advantage, clip_range=0.2):
+32:     """PPO 論文式 (7)；回傳最小化的負 surrogate 與可檢查的各項。"""
+33:     if new_log_prob.shape != old_log_prob.shape or new_log_prob.shape != advantage.shape:
+34:         raise ValueError("新舊 log 機率與 advantage 必須同形狀")
+35:     if not new_log_prob.numel() or not 0 < clip_range < 1:
+36:         raise ValueError("至少需要一筆採樣，且 clip_range 必須在 0 與 1 之間")
+37:     ratio = (new_log_prob - old_log_prob.detach()).exp()
+38:     fixed_advantage = advantage.detach()
+39:     unclipped = ratio * fixed_advantage
+40:     clipped = ratio.clamp(1 - clip_range, 1 + clip_range) * fixed_advantage
+41:     surrogate = torch.minimum(unclipped, clipped)
+42:     return {
+43:         "ratio": ratio,
+44:         "unclipped": unclipped,
+45:         "clipped": clipped,
+46:         "surrogate": surrogate,
+47:         "policy_loss": -surrogate.mean(),
+48:         # 超出區間不一定是有害方向，也不代表每項都已失去梯度。
+49:         "clip_fraction": ((ratio - 1).abs() > clip_range).float().mean(),
+50:     }
+tiny_perceptron/posttraining.py FiniteResponsePolicy 53 61
+53: class FiniteResponsePolicy(nn.Module):
+54:     """輸入四個人工結構特徵；輸出四個事先寫好的回答的 logits。"""
+55: 
+56:     def __init__(self, features=4, width=16, actions=4):
+57:         super().__init__()
+58:         self.network = nn.Sequential(nn.Linear(features, width), nn.Tanh(), nn.Linear(width, actions))
+59: 
+60:     def forward(self, features):
+61:         return self.network(features)
+tiny_perceptron/posttraining.py FiniteRewardModel 64 75
+64: class FiniteRewardModel(nn.Module):
+65:     """對 context 與候選編號評分；不把候選中文當自然語言輸入。"""
+66: 
+67:     def __init__(self, features=4, width=24, actions=4):
+68:         super().__init__()
+69:         self.register_buffer("candidate_identity", torch.eye(actions))
+70:         self.network = nn.Sequential(nn.Linear(features + actions, width), nn.Tanh(), nn.Linear(width, 1))
+71: 
+72:     def forward(self, features):
+73:         contexts = features[:, None, :].expand(-1, len(self.candidate_identity), -1)
+74:         identities = self.candidate_identity[None, :, :].expand(len(features), -1, -1)
+75:         return self.network(torch.cat((contexts, identities), -1)).squeeze(-1)
+tiny_perceptron/posttraining.py FiniteValueModel 78 86
+78: class FiniteValueModel(nn.Module):
+79:     """從 context 預測目前策略會拿到的 RM 回饋；不是另一個偏好評審。"""
+80: 
+81:     def __init__(self, features=4, width=16):
+82:         super().__init__()
+83:         self.network = nn.Sequential(nn.Linear(features, width), nn.Tanh(), nn.Linear(width, 1))
+84: 
+85:     def forward(self, features):
+86:         return self.network(features).squeeze(-1)
+scripts/course_experiments/posttraining.py _update 151 157
+151: def _update(optimizer, parameters, loss):
+152:     if not torch.isfinite(loss):
+153:         raise FloatingPointError("nonfinite training loss")
+154:     optimizer.zero_grad(set_to_none=True)
+155:     loss.backward()
+156:     torch.nn.utils.clip_grad_norm_(parameters, 1.0, error_if_nonfinite=True)
+157:     optimizer.step()
+scripts/course_experiments/posttraining.py _normalized_scores 160 162
+160: def _normalized_scores(raw_scores, scale):
+161:     # 減去每題所有候選的平均分，不改同題排序；除数只由 train 計算且全程固定。
+162:     return (raw_scores - raw_scores.mean(-1, keepdim=True)) / scale
+scripts/course_experiments/posttraining.py exact calculation branch 315 389
+315:     with torch.no_grad():
+316:         raw_scores = reward_model(x)
+317:         scale = float((raw_scores - raw_scores.mean(-1, keepdim=True)).std(unbiased=False).clamp_min(1e-6))
+318:     checkpoints.append(
+319:         _checkpoint(
+320:             ctx.output / "reward.pt",
+321:             reward_model,
+322:             {"stage": "reward", "scale_from_training_candidates": scale, "config": CONFIG},
+323:         )
+324:     )
+325: 
+326:     ppo = copy.deepcopy(reference).requires_grad_(True)
+327:     dpo = copy.deepcopy(reference).requires_grad_(True)
+328:     ppo_initial_hash, dpo_initial_hash = _state_sha256(ppo), _state_sha256(dpo)
+329:     value = FiniteValueModel().to(ctx.device)
+330:     optimizer = torch.optim.Adam(ppo.parameters(), lr=CONFIG["ppo_learning_rate"])
+331:     value_optimizer = torch.optim.Adam(value.parameters(), lr=CONFIG["value_learning_rate"])
+332:     action_generator = torch.Generator(device=ctx.device).manual_seed(ctx.seed + 2)
+333:     ppo_history, first_rollout = [], []
+334:     stage_started = time.perf_counter()
+335:     for rollout in range(CONFIG["ppo_rollout_batches"]):
+336:         indices = torch.tensor(sampler.choices(range(len(train)), k=CONFIG["ppo_rollout_size"]), device=ctx.device)
+337:         features = x[indices]
+338:         with torch.no_grad():
+339:             old_log_probs = ppo(features).log_softmax(-1)
+340:             actions = torch.multinomial(old_log_probs.exp(), 1, generator=action_generator).squeeze(1)
+341:             old_selected = old_log_probs.gather(1, actions[:, None]).squeeze(1).clone()
+342:             old_values = value(features).clone()
+343:             rewards = _normalized_scores(reward_model(features), scale).gather(1, actions[:, None]).squeeze(1)
+344:             advantages = bandit_advantage(rewards, old_values)
+345:             reference_logits = reference(features)
+346:         fixed_old_hash = hashlib.sha256(old_selected.numpy().tobytes()).hexdigest()
+347:         for epoch in range(CONFIG["ppo_epochs_per_rollout"]):
+348:             logits = ppo(features)
+349:             selected = logits.log_softmax(-1).gather(1, actions[:, None]).squeeze(1)
+350:             terms = ppo_clipped_objective(selected, old_selected, advantages, CONFIG["ppo_clip_range"])
+351:             kl = exact_kl(logits, reference_logits).mean()
+352:             policy_loss = terms["policy_loss"] + CONFIG["reference_kl_coefficient"] * kl
+353:             _update(optimizer, ppo.parameters(), policy_loss)
+354:             value_loss = F.mse_loss(value(features), rewards)
+355:             _update(value_optimizer, value.parameters(), value_loss)
+356:             if rollout == 0:
+357:                 with torch.no_grad():
+358:                     updated = ppo(features).log_softmax(-1).gather(1, actions[:, None]).squeeze(1)
+359:                 first_rollout.append(
+360:                     {
+361:                         "epoch": epoch + 1,
+362:                         "train_context_indices": indices.tolist(),
+363:                         "sampled_actions": actions.tolist(),
+364:                         "old_selected_log_probabilities": old_selected.tolist(),
+365:                         "old_values": old_values.tolist(),
+366:                         "normalized_rm_rewards": rewards.tolist(),
+367:                         "fixed_advantages": advantages.tolist(),
+368:                         "log_probabilities_before_update": selected.detach().tolist(),
+369:                         "ratios_before_update": terms["ratio"].detach().tolist(),
+370:                         "log_probabilities_after_update": updated.tolist(),
+371:                         "old_log_probability_sha256": fixed_old_hash,
+372:                         "reference_state_sha256": sft_hash,
+373:                     }
+374:                 )
+375:             if hashlib.sha256(old_selected.numpy().tobytes()).hexdigest() != fixed_old_hash:
+376:                 raise AssertionError("PPO rollout log probability changed during reuse")
+377:         if rollout == 0 or (rollout + 1) % 20 == 0:
+378:             ppo_history.append(
+379:                 {
+380:                     "rollout_batch": rollout + 1,
+381:                     "policy_updates": (rollout + 1) * CONFIG["ppo_epochs_per_rollout"],
+382:                     "sampled_reward_mean": float(rewards.mean()),
+383:                     "sampled_advantage_mean": float(advantages.mean()),
+384:                     "last_epoch_policy_surrogate_loss_before_update": float(terms["policy_loss"].detach()),
+385:                     "last_epoch_exact_reference_kl_before_update": float(kl.detach()),
+386:                     "last_epoch_ratio_outside_clip_interval_fraction": float(terms["clip_fraction"].detach()),
+387:                     "last_epoch_value_mse_before_update": float(value_loss.detach()),
+388:                 }
+389:             )

@@ -1,0 +1,43 @@
+<!doctype html><html lang="zh-Hant"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>13.7 frozen input render</title><style>
+html{font-size:20px}body{margin:0;background:#fff;color:#222;font-family:"Noto Sans CJK TC","Noto Sans CJK SC",sans-serif}
+main{max-width:860px;margin:32px auto;padding:0 24px}pre{background:#f5f5f5;padding:16px;overflow-x:auto;font-size:14px;line-height:1.6}code{font-family:monospace;font-size:.85em}details{margin:24px 0;border:1px solid #ccc;padding:12px}summary{cursor:pointer}h2{font-size:26px}
+@media(max-width:500px){main{margin:16px auto;padding:0 18px}h2{font-size:23px}}
+/* 導覽、搜尋、程式碼與版面由 Zensical 提供；這裡只補教材的閱讀與圖解。 */
+.md-typeset { font-size: .85rem; line-height: 1.85; }
+.md-typeset h1, .md-typeset h2, .md-typeset h3 { line-height: 1.5; }
+.md-typeset .actions { display: flex; flex-wrap: wrap; gap: .65rem; margin: 1.4rem 0; }
+/* SVG 只有 viewBox 時的預設寬度是 300px；圖解容器需明確填滿正文欄。 */
+.md-typeset .illustration { display: block; width: 100%; max-width: 100%; margin: 1.5rem 0; }
+.md-typeset .diagram { display: block; width: 100%; height: auto; }
+.diagram-link { display: block; cursor: zoom-in; }
+.diagram-viewport { overflow-x: auto; }
+.diagram-viewport.is-enlarged .diagram-link { min-width: 800px; }
+.md-typeset .illustration figcaption { max-width: none; margin-top: .3rem; text-align: right; font-size: .7rem; }
+.diagram-zoom { padding: 0 .4rem; color: var(--md-typeset-a-color); font: inherit; cursor: pointer; text-decoration: underline; }
+.md-typeset .output { margin: -.5rem 0 1.4rem; padding: .6rem .85rem; border-left: .15rem solid #4c9b68; background: var(--md-code-bg-color); }
+.md-typeset .output pre { padding: 0; overflow-x: auto; background: transparent; white-space: pre; }
+.md-typeset .output-label { margin: 0; color: var(--md-default-fg-color--light); font-size: .65rem; }
+.md-typeset .output img { max-width: 100%; height: auto; }
+.md-typeset mjx-container[display="true"] { max-width: 100%; overflow-x: auto; overflow-y: hidden; }
+@media (prefers-reduced-motion: reduce) {
+  .md-typeset *, .md-typeset *::before, .md-typeset *::after { animation: none !important; transition: none !important; }
+}
+</style><body><main class="md-typeset"><h2>13.7 偏好資料會不會把長度當成捷徑？</h2>
+<p>同題「2+2=?」，短版「4」和長版「4。」重複八次，只有同一個事實。如果大多數較佳回答恰好都是長版，模型可能學到增加文字量，而非增加有用解釋。本節先數兩邊有哪些位置，將這個隱藏差異記下來。</p>
+<pre><code class="language-python">from tiny_perceptron.data import ByteTokenizer
+
+tok = ByteTokenizer()
+answers = [&quot;4&quot;, &quot;4。&quot; * 8]
+for answer in answers:
+    body = tok.encode(answer)
+    print(&quot;回答&quot;, answer, &quot;正文位元組tokens&quot;, len(body), &quot;含結束學習位置&quot;, len(body) + 1)
+</code></pre>
+<p>預設ByteTokenizer按UTF-8位元組分片：數字4佔1，中文句號佔3。短正文1個token、長正文32個；加EOS後，有效目標是2與33。這只數資料，沒有測模型偏好。</p>
+<p>長度與品質一起變，讓原因難分，這叫<strong>混淆因素</strong>。可以增加長短接近但品質不同的比較，也讓「短而完整」勝過「長而重複」。需要解釋的任務則保留有用長答，不把短一律標好。</p>
+<p>13.3採整段log加總；改平均會改數學目標，不能當成無影響的修正。每篇自己的長度同時進入策略與參考計算，參考差分也不保證消除資料的長度偏差。</p>
+<p>練習把重複次數改2，預測正文8、含EOS9。接著用「兩組各2塊積木合起來，共有4塊」作長版：在只回數字的要求下它不合格，在要求分組說明時則有需要的資訊。偏好理由應跟著請求，不能只引用長度。</p>
+<details>
+<summary>補充：來源、完整設定與既有實測紀錄</summary>
+<p>正式實驗另做一支只比較附加句的控制：同一題<code>2+2=?</code>，指定較佳為<code>4</code>、較差為<code>4; answer complete</code>，兩邊數值都正確。第一篇含EOS有兩個目標，第二篇有19個；本支線的偏好理由是不要附加句，並不是第二篇算錯。起點在七道最後檢查上，本來就給短候選較高機率。更新200次後，七道相對差距都改善，短候選仍都排前，不是從零題變成七題；但是七道自由生成仍零題答對，上面這題實際生成<code>3</code>。這讓我們把格式偏好與算術能力分開觀察，不能把7／7排序當成加法通過。</p>
+<p>相對差距增加，甚至不要求較佳候選自己的機率上升。在驗證題<code>0+3=?</code>上，正確短答<code>3</code>的log機率從約−13.30943降為−13.37556，卻仍有約115.77823的相對差距改善，因為附加句版本下降更多。這個數字是兩篇完整機率與參考差距的變化，不是模型算對的信心。長短、答案內容與生成結果需要一起回查；這支線沒有消除所有長度偏差，也沒有改成平均分數。</p>
+</details></main></body></html>

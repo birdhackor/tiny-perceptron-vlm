@@ -1,0 +1,77 @@
+<!doctype html><html lang="zh-Hant"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><style>html { font-family: "Noto Sans CJK TC", sans-serif; font-size:20px; }
+body { margin:0; background:#fff; color:#222; } main { max-width:760px; margin:auto; padding:20px; }
+pre { overflow-x:auto; background:#f3f4f6; padding:16px; font-size:13px; line-height:1.6; }
+code { font-family:monospace; } table { border-collapse:collapse; width:100%; }
+td,th { border:1px solid #ddd; padding:7px; } details { border:1px solid #ddd; padding:12px; }
+@media(max-width:600px) { html { font-size:18px; } main { padding:16px; } }
+/* 導覽、搜尋、程式碼與版面由 Zensical 提供；這裡只補教材的閱讀與圖解。 */
+.md-typeset { font-size: .85rem; line-height: 1.85; }
+.md-typeset h1, .md-typeset h2, .md-typeset h3 { line-height: 1.5; }
+.md-typeset .actions { display: flex; flex-wrap: wrap; gap: .65rem; margin: 1.4rem 0; }
+/* SVG 只有 viewBox 時的預設寬度是 300px；圖解容器需明確填滿正文欄。 */
+.md-typeset .illustration { display: block; width: 100%; max-width: 100%; margin: 1.5rem 0; }
+.md-typeset .diagram { display: block; width: 100%; height: auto; }
+.diagram-link { display: block; cursor: zoom-in; }
+.diagram-viewport { overflow-x: auto; }
+.diagram-viewport.is-enlarged .diagram-link { min-width: 800px; }
+.md-typeset .illustration figcaption { max-width: none; margin-top: .3rem; text-align: right; font-size: .7rem; }
+.diagram-zoom { padding: 0 .4rem; color: var(--md-typeset-a-color); font: inherit; cursor: pointer; text-decoration: underline; }
+.md-typeset .output { margin: -.5rem 0 1.4rem; padding: .6rem .85rem; border-left: .15rem solid #4c9b68; background: var(--md-code-bg-color); }
+.md-typeset .output pre { padding: 0; overflow-x: auto; background: transparent; white-space: pre; }
+.md-typeset .output-label { margin: 0; color: var(--md-default-fg-color--light); font-size: .65rem; }
+.md-typeset .output img { max-width: 100%; height: auto; }
+.md-typeset mjx-container[display="true"] { max-width: 100%; overflow-x: auto; overflow-y: hidden; }
+@media (prefers-reduced-motion: reduce) {
+  .md-typeset *, .md-typeset *::before, .md-typeset *::after { animation: none !important; transition: none !important; }
+}
+</style><main class="md-typeset"><h2>13.10 偏好比較能教另一個評分模型嗎？</h2>
+<p>對「只回數字：1+2=?」，我們標「3」比「1 加 2 是 3。」合適。現在接收這個比較的，不是未來回答的模型，而是另一個專門給分的模型。它叫<strong>獎勵模型（reward model）</strong>，讀問題與回答，輸出估計這份回答有多合適的分數。</p>
+<p>先用手設分數看學習目標。較佳分數減較差分數為d，將<code>sigmoid(d)=1/(1+exp(−d))</code>當成較佳勝出的估計機率，再取負log作代價。差0表示0.5；差2約0.8808。這是偏好選擇的估計，不是內容正確率。</p>
+<pre><code class="language-python">import torch
+from tiny_perceptron.posttraining import preference_loss
+
+for preferred_score in [0.0, 2.0]:
+    chosen = torch.tensor([preferred_score])
+    rejected = torch.tensor([0.0])
+    gap = chosen - rejected
+    win_probability = torch.sigmoid(gap)
+    loss = preference_loss(chosen, rejected)
+    print(&quot;差距&quot;, gap.item(), &quot;勝出機率&quot;, round(win_probability.item(), 4), &quot;代價&quot;, round(loss.item(), 4))
+</code></pre>
+<p>輸出兩行機率與代價約為<code>0.5、0.6931</code>和<code>0.8808、0.1269</code>。把較佳相對分數拉高，代價就降低；兩個分數一起加10，差距與代價不變。因此原始分數3不代表三成正確，也不是比1多懂三倍。</p>
+<p>接下來PPO用一個有限選卡任務，把評分和回答選擇分開。以1+2題為例，候選先由Python寫好：</p>
+<table>
+<thead>
+<tr>
+<th style="text-align: right;">卡號</th>
+<th>加法候選文字</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: right;">0</td>
+<td>3</td>
+</tr>
+<tr>
+<td style="text-align: right;">1</td>
+<td>1 加 2 是 3。</td>
+</tr>
+<tr>
+<td style="text-align: right;">2</td>
+<td>4</td>
+</tr>
+<tr>
+<td style="text-align: right;">3</td>
+<td>請再提供更多資訊。</td>
+</tr>
+</tbody>
+</table>
+<p>只回數字時選0，一句話說明時選1。另有「單價1元、運費2元，總價多少？」的題，因缺購買數量，應選求補數量的3號卡，不能擅自把單價加運費當總價。</p>
+<p>小網路讀的是已整理好的題目條件與卡號特徵，不讀中文；候選裡的加法也先算好了。偏好標籤由作者規則產生，沒有招募真人，所以它只教流程，不是完整人類回饋RLHF實證。</p>
+<p>練習把rejected分數改1，兩個差距變−1與1，機率約0.2689與0.7311。再把雙方都加10，核對結果不變。</p>
+<details>
+<summary>補充：來源、完整設定與既有實測紀錄</summary>
+
+實際訓練時先用訓練家族的偏好對更新評分網路，再凍結它，供[13.15](#13.15)的選擇模型使用。數字對調仍屬同一家族，不會把`1+2`與`2+1`分到訓練和最後測試兩邊。評分員是否把未見家族也排對，與它的訓練代價，會分別保存；預寫卡裡有正確答案，不等於模型會自己寫出答案。
+
+</details></main></html>
