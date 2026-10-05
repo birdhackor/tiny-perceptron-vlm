@@ -245,7 +245,7 @@ python scripts/evaluate.py checkpoints/safety.pt --data data/generated/safety/va
 .venv/bin/python -m scripts.course_experiments.run --experiment lora --device cuda
 ```
 
-固定 `style/` 另保存 `content.pt` 等起點，和上面的 `checkpoints/style.pt` 不同。`lora/` 的 adapter 要載入原始浮點基模並核對指紋；已合併修正的 `merged-*.pt` 不再加同一 adapter。使用示例與原始欄位見[實驗說明](../docs/course-experiments/README.md)。
+固定 `style/` 另保存 `content.pt` 等起點，和上面的 `checkpoints/style.pt` 不同。`lora/` 的 adapter 要載入原始浮點基模並核對指紋；已合併修正的 `merged-*.pt` 不再加同一 adapter。固定實驗入口與基底核對提醒見[實驗說明](../docs/course-experiments/README.md)。
 
 PKU-SafeRLHF 起步包標示 CC-BY-NC-4.0；它與本課原創盒子題的授權不同。選取、截短支線和衍生權重沒有放進公開學生包，公開安全報告保留聚合數字。使用或分享前，先核對[資料授權](../assets/training/README.md)。
 
@@ -260,7 +260,7 @@ PKU-SafeRLHF 起步包標示 CC-BY-NC-4.0；它與本課原創盒子題的授權
 .venv/bin/python scripts/pretrain_encoders.py --modality audio --train --steps 300 --output checkpoints/audio-encoder.pt
 ```
 
-視覺留出兩張新位置圖，方形類別 0、圓形 1；音訊留出 180Hz 低音類別 0、1000Hz 高音 1。查看最後JSON：本次命令有`--train`，`mode`應為`train`；若是`dry-run-no-weight-update`，表示只檢查通路，尚未完成這次訓練。`holdout_examples`應為2，`holdout_accuracy`要等於1才接續；0.5只是答對一題，保存檔存在不能代替檢查。
+視覺留出兩張向右偏移的藍色圖，方形、圓形各一張；同位置的紅、綠圖仍用於訓練，留出的是未見過的顏色與位置組合。方形類別 0、圓形 1；音訊留出 180Hz 低音類別 0、1000Hz 高音 1。查看最後JSON：本次命令有`--train`，`mode`應為`train`；若是`dry-run-no-weight-update`，表示只檢查通路，尚未完成這次訓練。`holdout_examples`應為2，`holdout_accuracy`要等於1才接續；0.5只是答對一題，保存檔存在不能代替檢查。
 
 取得 T.4 的 `attributes.pt` 與兩個編碼器後，選圖片、聲音或聯合路線：
 
@@ -405,7 +405,7 @@ FlashAttention是分塊安排注意力計算、減少中間表儲存與搬移的
 .venv/bin/python -m scripts.course_experiments.run --experiment flash_probe --device cuda
 ```
 
-它只測固定Q/K/V的注意力前向與反傳；Q用來查詢、K供比較、V是混合的內容數字，見[3.4](chapters/03.md#3.4)，不訓練整個模型。報告的`results.verification_passed`若為`true`，表示這次探針的核對條件通過；未通過或未執行時，先看原因，不據此聲稱使用成功。仍要核對實際後端、數值容差及記憶體範圍，不能由SDPA這個API名稱推定已用Flash；完整條件在[原報告](../docs/course-experiments/results/flash_probe.json)。
+它只測固定Q/K/V的注意力前向與反傳；Q用來查詢、K供比較、V是混合的內容數字，見[3.4](chapters/03.md#3.4)，不訓練整個模型。報告的`results.verification_passed=true`只表示`supported_routes`至少有一條已核驗Flash後端的路線，而且這個集合內的路線都已完成；其他路線仍可能失敗。先查看各路線的`status`、後端核驗與數值容差，再以`results.schedule_completed`和`results.status`判讀整次探針是否完成，以及是否有不支援的路線。未執行或未完成時，先看原因，不據此聲稱使用成功。還要核對記憶體範圍，不能由SDPA這個API名稱推定已用Flash；完整條件在[原報告](../docs/course-experiments/results/flash_probe.json)。
 
 </details>
 
@@ -455,7 +455,7 @@ for path in paths:
 .venv/bin/python scripts/evaluate.py checkpoints/attributes-int8.pt --data data/generated/attributes-sft/validation.jsonl --mode sft --tokens 24 --limit all --device cpu --output outputs/attributes-int8-validation.json
 ```
 
-在三份JSON中用相同`row`找回同一筆提問與目標，再並排`samples`裡的生成、原始ID與停止原因，欄位見[T.4](training.md#T.4)。逐題判內容匹配及正常結束，記「新增答對、新增答錯與不變」，相同總答對數可能是不同題目答對。先用validation選位數；設定選完才把相同三條命令的資料路徑改為`test.jsonl`、另取輸出檔名，最後題不拿來重新選設定。
+在三份JSON中用相同`row`找回同一筆提問與目標，再並排`samples`裡的生成、原始ID與停止原因，欄位見[T.4](training.md#T.4)。逐題判內容匹配及正常結束，記「新增答對、新增答錯與不變」，相同總答對數可能是不同題目答對。先用validation選位數；設定選完才把相同三條命令的資料路徑改為`test.jsonl`，加上`--split-label test`並另取輸出檔名，最後題不拿來重新選設定。
 
 練習把三版模型張量大小與逐題變化放在同一張表，分別說明「保存變小了嗎」與「相同題目是否維持回答」。尚未量到的執行記憶體與速度就留未量測。
 
