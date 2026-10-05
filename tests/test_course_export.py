@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts import export_course
+from scripts import build_course, export_course
 from scripts.build_course import notebook_reading_links
 from scripts.export_course import COURSE_URL, checked_notebook, output_html, reading_markdown
 
@@ -43,6 +43,33 @@ def test_links_and_bookmarks_survive_without_editing_programs():
     assert "## W.2 Python {#W.2}" in result
     assert "[前置](first-steps.md#W.2)" in result
     assert f"# 註解\nurl = '{COURSE_URL}1.1.html'" in result
+
+
+@pytest.mark.parametrize(
+    ("target", "expected"),
+    [("#71-對話怎麼表示", "7.1"), ("05.md#52-一次看多少例子", "5.2")],
+)
+def test_full_heading_links_reach_the_split_lesson_in_site_and_notebook(tmp_path, monkeypatch, target, expected):
+    chapters = tmp_path / "course/chapters"
+    chapters.mkdir(parents=True)
+    source = chapters / "07.md"
+    source.write_text("## 7.1 對話怎麼表示？\n", encoding="utf-8")
+    (chapters / "05.md").write_text("## 5.2 一次看多少例子？\n", encoding="utf-8")
+    monkeypatch.setattr(build_course, "ROOT", tmp_path)
+    prose = f"[回讀]({target})"
+    lessons = {source: {"7.1": "7.1.md"}, chapters / "05.md": {"5.2": "5.2.md"}}
+    assert notebook_reading_links(prose, source) == f"[回讀]({COURSE_URL}{expected}.html)"
+    assert reading_markdown(prose, source, {}, lessons, "main") == f"[回讀]({expected}.md)\n"
+
+
+def test_unknown_same_page_fragment_is_preserved(tmp_path, monkeypatch):
+    source = tmp_path / "course/chapters/07.md"
+    source.parent.mkdir(parents=True)
+    source.write_text("## 7.1 對話怎麼表示？\n", encoding="utf-8")
+    monkeypatch.setattr(build_course, "ROOT", tmp_path)
+    prose = "[細節](#other-detail)"
+    assert notebook_reading_links(prose, source) == prose
+    assert reading_markdown(prose, source, {}, {source: {"7.1": "7.1.md"}}, "main") == prose + "\n"
 
 
 def test_execution_text_is_escaped():

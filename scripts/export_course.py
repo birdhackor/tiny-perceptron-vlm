@@ -13,6 +13,7 @@ from importlib.metadata import version
 from pathlib import Path
 
 if __package__:
+    from scripts.build_course import lesson_anchor_aliases
     from scripts.reading_time import (
         METADATA,
         ROUTES,
@@ -23,6 +24,7 @@ if __package__:
         render_page,
     )
 else:
+    from build_course import lesson_anchor_aliases
     from reading_time import (
         METADATA,
         ROUTES,
@@ -123,6 +125,8 @@ def reading_markdown(content, source_path, targets, lesson_targets, revision):
             return match[0]
         path_text, _, fragment = target.partition("#")
         path = (source_path.parent / path_text).resolve() if path_text else source_path.resolve()
+        if fragment not in lesson_targets.get(path, {}) and path in lesson_targets:
+            fragment = lesson_anchor_aliases(path).get(fragment, fragment)
         if fragment in lesson_targets.get(path, {}):
             link = lesson_targets[path][fragment]
             fragment = ""

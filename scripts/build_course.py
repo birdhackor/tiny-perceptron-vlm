@@ -70,6 +70,19 @@ def cell(kind, source):
     return result
 
 
+def lesson_anchor_aliases(source):
+    """Map a full numbered-heading slug to its preserved lesson ID."""
+    if not source.is_file():
+        return {}
+    aliases = {}
+    for lesson, title in re.findall(r"^## ([\dABC]+\.\d+) (.+)$", source.read_text(encoding="utf-8"), re.M):
+        heading = f"{lesson} {title}"
+        plain = re.sub(r"[`*_]", "", re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", heading))
+        slug = re.sub(r"[^\w\s-]", "", plain.lower()).replace(" ", "-")
+        aliases[slug] = lesson
+    return aliases
+
+
 def notebook_reading_links(content, source):
     # Notebook 位於 notebooks/，原稿位於 course/；前置統一接到可閱讀的網站頁面。
     def convert(match):
@@ -77,9 +90,12 @@ def notebook_reading_links(content, source):
         if "://" in target:
             return match[0]
         path_text, _, fragment = target.partition("#")
+        path = (source.parent / path_text).resolve() if path_text else source.resolve()
+        if path.parent == ROOT / "course/chapters":
+            if fragment and not re.fullmatch(r"[\dABC]+\.\d+", fragment):
+                fragment = lesson_anchor_aliases(path).get(fragment, fragment)
         if not path_text and not re.fullmatch(r"[\dABC]+\.\d+", fragment):
             return match[0]
-        path = (source.parent / path_text).resolve() if path_text else source.resolve()
         if path.parent == ROOT / "course/chapters":
             page = fragment + ".html" if re.fullmatch(r"[\dABC]+\.\d+", fragment) else f"chapter-{path.stem}.html"
             if re.fullmatch(r"[\dABC]+\.\d+", fragment):
