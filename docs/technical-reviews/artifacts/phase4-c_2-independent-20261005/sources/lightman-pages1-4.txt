@@ -1,0 +1,181 @@
+                                                                  Let’s Verify Step by Step
+
+                                               Hunter Lightman∗       Vineet Kosaraju∗      Yura Burda∗      Harri Edwards
+arXiv:2305.20050v1 [cs.LG] 31 May 2023
+
+
+
+
+                                             Bowen Baker      Teddy Lee       Jan Leike     John Schulman       Ilya Sutskever
+
+                                                                                Karl Cobbe∗
+
+
+                                                                                 OpenAI
+
+
+
+                                                                                Abstract
+                                                    In recent years, large language models have greatly improved in their
+                                                ability to perform complex multi-step reasoning. However, even state-
+                                                of-the-art models still regularly produce logical mistakes. To train more
+                                                reliable models, we can turn either to outcome supervision, which provides
+                                                feedback for a final result, or process supervision, which provides feedback
+                                                for each intermediate reasoning step. Given the importance of training
+                                                reliable models, and given the high cost of human feedback, it is impor-
+                                                tant to carefully compare the both methods. Recent work has already
+                                                begun this comparison, but many questions still remain. We conduct our
+                                                own investigation, finding that process supervision significantly outper-
+                                                forms outcome supervision for training models to solve problems from the
+                                                challenging MATH dataset. Our process-supervised model solves 78% of
+                                                problems from a representative subset of the MATH test set. Additionally,
+                                                we show that active learning significantly improves the efficacy of process
+                                                supervision. To support related research, we also release PRM800K, the
+                                                complete dataset of 800,000 step-level human feedback labels used to train
+                                                our best reward model.
+
+
+                                         1      Introduction
+                                         Large language models are capable of solving tasks that require complex multi-
+                                         step reasoning by generating solutions in a step-by-step chain-of-thought format
+                                         (Nye et al., 2021; Wei et al., 2022; Kojima et al., 2022). However, even state-
+                                         of-the-art models are prone to producing falsehoods — they exhibit a tendency
+                                         to invent facts in moments of uncertainty (Bubeck et al., 2023). These hallu-
+                                         cinations (Maynez et al., 2020) are particularly problematic in domains that
+                                         require multi-step reasoning, since a single logical error is enough to derail a
+                                         much larger solution. Detecting and mitigating hallucinations is essential to
+                                         improve reasoning capabilities.
+                                             ∗ Primary authors. Correspondence to: Karl Cobbe <karl@openai.com>
+
+
+
+
+                                                                                     1
+    One effective method involves training reward models to discriminate be-
+tween desirable and undesirable outputs. The reward model can then be used
+in a reinforcement learning pipeline (Ziegler et al., 2019; Stiennon et al., 2020;
+Nakano et al., 2021; Ouyang et al., 2022) or to perform search via rejection sam-
+pling (Nichols et al., 2020; Shen et al., 2021; Cobbe et al., 2021). While these
+techniques are useful, the resulting system is only as reliable as the reward
+model itself. It is therefore important that we study how to most effectively
+train reliable reward models.
+    In closely related work, Uesato et al. (2022) describe two distinct meth-
+ods for training reward models: outcome supervision and process supervision.
+Outcome-supervised reward models (ORMs) are trained using only the final
+result of the model’s chain-of-thought, while process-supervised reward models
+(PRMs) receive feedback for each step in the chain-of-thought. There are com-
+pelling reasons to favor process supervision. It provides more precise feedback,
+since it specifies the exact location of any errors that occur. It also has sev-
+eral advantages relevant to AI alignment: it is easier for humans to interpret,
+and it more directly rewards models for following a human-endorsed chain-of-
+thought. Within the domain of logical reasoning, models trained with outcome
+supervision regularly use incorrect reasoning to reach the correct final answer
+(Zelikman et al., 2022; Creswell et al., 2022). Process supervision has been
+shown to mitigate this misaligned behavior (Uesato et al., 2022).
+    Despite these advantages, Uesato et al. (2022) found that outcome supervi-
+sion and process supervision led to similar final performance in the domain of
+grade school math. We conduct our own detailed comparison of outcome and
+process supervision, with three main differences: we use a more capable base
+model, we use significantly more human feedback, and we train and test on the
+more challenging MATH dataset (Hendrycks et al., 2021).
+    Our main contributions are as follows:
+
+  1. We show that process supervision can train much more reliable reward
+     models than outcome supervision. We use our state-of-the-art PRM to
+     solve 78.2% of problems from a representative subset of the MATH test
+     set.
+  2. We show that a large reward model can reliably approximate human su-
+     pervision for smaller reward models, and that it can be used to efficiently
+     conduct large-scale data collection ablations.
+
+  3. We show that active learning leads to a 2.6× improvement in the data
+     efficiency of process supervision.
+  4. We release our full process supervision dataset, PRM800K, to promote
+     related research.
+
+
+
+
+                                        2
+2     Methods
+We perform a comparison of outcome and process supervision, following a sim-
+ilar methodology to Uesato et al. (2022). Outcome supervision can be provided
+without humans, since all problems in the MATH dataset have automatically
+checkable answers. In contrast, there is no simple way to automate process su-
+pervision. We therefore rely on human data-labelers to provide process super-
+vision, specifically by labelling the correctness of each step in model-generated
+solutions.
+    We conduct experiments in two separate regimes: large-scale and small-
+scale. Each has its own advantages, and they offer complimentary perspectives.
+At large-scale, we finetune all models from GPT-4 (OpenAI, 2023). We focus
+on advancing the state-of-the-art by training the most reliable ORM and PRM
+possible. Unfortunately the training sets for these reward models are not directly
+comparable, for reasons we will discuss in Section 3. These models are therefore
+not ideal for making an apples-to-apples comparison of outcome and process
+supervision. To address this flaw, we also train models at small-scale, where
+we can conduct a more direct comparison. In order to remove our dependence
+on costly human feedback, we use a large-scale model to supervise small-scale
+model training. This setup enables us to conduct several important ablations
+that would otherwise be infeasible.
+
+2.1    Scope
+At each model scale, we use a single fixed model to generate all solutions. We
+call this model the generator. We do not attempt to improve the generator with
+reinforcement learning (RL). When we discuss outcome and process supervision,
+we are specifically referring to the supervision given to the reward model. We do
+not discuss any supervision the generator would receive from the reward model
+if trained with RL. Although finetuning the generator with RL is a natural next
+step, it is intentionally not the focus of this work.
+     We instead focus exclusively on how to train the most reliable reward model
+possible. We evaluate a reward model by its ability to perform best-of-N search
+over uniformly sampled solutions from the generator. For each test problem we
+select the solution ranked highest by the reward model, automatically grade it
+based on its final answer, and report the fraction that are correct. A reward
+model that is more reliable will select the correct solution more often.
+
+2.2    Base Models
+All large-scale models are finetuned from the base GPT-4 model (OpenAI, 2023).
+This model has been pretrained solely to predict the next token; it has not been
+pretrained with any Reinforcement Learning from Human Feedback (RLHF)
+(Christiano et al., 2017). The small-scale base models are similar in design to
+GPT-4, but they were pretrained with roughly 200 times less compute. As an
+additional pretraining step, we finetune all models on a dataset of roughly 1.5B
+
+
+                                        3
+Figure 1: A screenshot of the interface used to collect feedback for each step in
+a solution.
+
+
+math-relevant tokens, which we call MathMix. Similar to Lewkowycz et al.
+(2022), we find that this improves the model’s mathematical reasoning capabil-
+ities. Details on how this dataset was constructed can be found in Appendix A.
+
+2.3    Generator
+To make parsing individual steps easier, we train the generator to produce
+solutions in a newline delimited step-by-step format. Specifically, we few-shot
+generate solutions to MATH training problems, filter to those that reach the
+correct final answer, and finetune the base model on this dataset for a single
+epoch. This step is not intended to teach the generator new skills; it is intended
+only to teach the generator to produce solutions in the desired format.
+
+2.4    Data Collection
+To collect process supervision data, we present human data-labelers with step-
+by-step solutions to MATH problems sampled by the large-scale generator.
+Their task is to assign each step in the solution a label of positive, negative,
+or neutral, as shown in Figure 1. A positive label indicates that the step is cor-
+rect and reasonable. A negative label indicates that the step is either incorrect
+or unreasonable. A neutral label indicates ambiguity. In practice, a step may
+be labelled neutral if it is subtly misleading, or if it is a poor suggestion that
+is technically still valid. We permit neutral labels since this allows us to defer
+the decision about how to handle ambiguity: at test time, we can treat neutral
+labels as either positive or negative. A more detailed description of the labelling
+instructions is provided in Appendix D.
+    We label solutions exclusively from the large-scale generator in order to
+maximize the value of our limited human-data resource. We refer to the en-
+tire dataset of step-level labels collected as PRM800K. The PRM800K training
+set contains 800K step-level labels across 75K solutions to 12K problems. To
+
+
+                                        4
+

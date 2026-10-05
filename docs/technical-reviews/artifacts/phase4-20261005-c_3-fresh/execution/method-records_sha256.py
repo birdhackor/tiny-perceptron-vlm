@@ -1,0 +1,2 @@
+def records_sha256(records):
+    return hashlib.sha256(json.dumps(records, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
