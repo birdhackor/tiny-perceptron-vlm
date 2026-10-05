@@ -1,0 +1,402 @@
+### scripts/course_experiments/modalities.py:37-38; full source SHA256 275ef1a5a7d5f25a7a1c30dfa5a22bc52c5349f83f62488335a06a5739c2bfeb
+37: def _hash(value):
+38:     return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+
+### scripts/course_experiments/modalities.py:42-50; full source SHA256 275ef1a5a7d5f25a7a1c30dfa5a22bc52c5349f83f62488335a06a5739c2bfeb
+42:     identities = {key: {row["family"] for row in rows} for key, rows in splits.items()}
+43:     for first, second in (("train", "validation"), ("train", "test"), ("validation", "test")):
+44:         if identities[first] & identities[second]:
+45:             raise ValueError(f"{name}: {first}/{second} 題目家族洩漏")
+46:     result = {
+47:         "seed": ctx.seed,
+48:         "split_policy": policy,
+49:         "splits": {key: {"count": len(rows), "sha256": _hash(rows), "records": rows} for key, rows in splits.items()},
+50:     }
+
+### scripts/course_experiments/modalities.py:173-190; full source SHA256 275ef1a5a7d5f25a7a1c30dfa5a22bc52c5349f83f62488335a06a5739c2bfeb
+173:     for split, offsets in (("train", (-2, -1, 0)), ("validation", (1,)), ("test", (2,))):
+174:         rows = []
+175:         for color in ("red", "green", "blue"):
+176:             for shape in ("circle", "square"):
+177:                 for offset in offsets:
+178:                     for question in questions:
+179:                         answer = {"describe": f"{color} {shape}", "shape?": shape, "color?": color}[question]
+180:                         rows.append(
+181:                             {
+182:                                 "modality": "vision",
+183:                                 "color": color,
+184:                                 "shape": shape,
+185:                                 "offset": offset,
+186:                                 "question": question,
+187:                                 "answer": answer,
+188:                                 "family": f"{color}:{shape}:{offset}",
+189:                             }
+190:                         )
+
+### scripts/course_experiments/modalities.py:246-257; full source SHA256 275ef1a5a7d5f25a7a1c30dfa5a22bc52c5349f83f62488335a06a5739c2bfeb
+246: def _sequence(row, ctx, answer=True):
+247:     tok = ByteTokenizer()
+248:     markers = ([] if row["modality"] == "audio" else [tok.image_id]) + (
+249:         [] if row["modality"] == "vision" else [tok.audio_id]
+250:     )
+251:     prefix = [tok.bos_id, tok.user_id] + markers + tok.encode(row["question"]) + [tok.eos_id, tok.assistant_id]
+252:     tail = tok.encode(row["answer"]) + [tok.eos_id] if answer else []
+253:     return (
+254:         torch.tensor(prefix + tail, device=ctx.device),
+255:         torch.tensor([-100] * len(prefix) + tail, device=ctx.device),
+256:         len(tail),
+257:     )
+
+### scripts/course_experiments/modalities.py:260-280; full source SHA256 275ef1a5a7d5f25a7a1c30dfa5a22bc52c5349f83f62488335a06a5739c2bfeb
+260: def _loss_fn(model, records, ctx, batch=4, replay=None, replay_ratio=0):
+261:     def calculate(step):
+262:         rng = random.Random(ctx.seed + step)
+263:         totals, counts = [], []
+264:         for _ in range(batch):
+265:             if replay and rng.random() < replay_ratio:
+266:                 from tiny_perceptron.data import render_chat
+267: 
+268:                 x, y = render_chat(rng.choice(replay)["messages"])
+269:                 y = y.to(ctx.device)[None]
+270:                 output = model.language(x.to(ctx.device)[None])
+271:                 count = int((y != -100).sum())
+272:             else:
+273:                 row = rng.choice(records)
+274:                 ids, labels, count = _sequence(row, ctx)
+275:                 image, waveform = _media(row, ctx)
+276:                 output = model(ids, labels, image=image, waveform=waveform)
+277:                 y = output["labels"]
+278:             totals.append(masked_loss(output["logits"], y) * count)
+279:             counts.append(count)
+280:         return torch.stack(totals).sum() / sum(counts), sum(counts)
+
+### scripts/course_experiments/modalities.py:290-318; full source SHA256 275ef1a5a7d5f25a7a1c30dfa5a22bc52c5349f83f62488335a06a5739c2bfeb
+290:     samples, total_nll, effective = [], 0.0, 0
+291:     for index, row in enumerate(records):
+292:         image, waveform = _media(row, ctx)
+293:         donor = None
+294:         if ablation in ("blank", "blank_image") and image is not None:
+295:             image = torch.zeros_like(image)
+296:         if ablation in ("blank", "blank_audio") and waveform is not None:
+297:             waveform = torch.zeros_like(waveform)
+298:         if ablation == "shuffle":
+299:             donor = (index + max(1, len(records) // 2)) % len(records)
+300:             image, waveform = _media(records[donor], ctx)
+301:         ids, labels, count = _sequence(row, ctx)
+302:         output = model(ids, labels, image=image, waveform=waveform)
+303:         total_nll += float(masked_loss(output["logits"], output["labels"])) * count
+304:         effective += count
+305:         prefix = _sequence(row, ctx, False)[0]
+306:         generation_error = None
+307:         try:
+308:             generated = generate_modal(model, prefix, image, waveform, tokens)
+309:             generated_ids = generated[len(prefix) :].tolist()
+310:         except ValueError as error:
+311:             if "placeholder 缺少配對" not in str(error):
+312:                 raise
+313:             # 未學模型產生錯誤模態標記也是失敗，不可略過這道題。
+314:             generation_error = str(error)
+315:             generated_ids = []
+316:         raw = generated_ids[: generated_ids.index(tok.eos_id)] if tok.eos_id in generated_ids else generated_ids
+317:         answer = tok.decode(raw)
+318:         samples.append(
+
+### scripts/course_experiments/modalities.py:320-340; full source SHA256 275ef1a5a7d5f25a7a1c30dfa5a22bc52c5349f83f62488335a06a5739c2bfeb
+320:                 "row": index,
+321:                 "family": row["family"],
+322:                 "question": row["question"],
+323:                 "target": row["answer"],
+324:                 "generated": answer,
+325:                 "generated_ids": generated_ids,
+326:                 "exact_match": raw == tok.encode(row["answer"]),
+327:                 "eos": tok.eos_id in generated_ids,
+328:                 "generation_error": generation_error,
+329:                 "invalid_special_tokens": sum(token < 8 for token in raw),
+330:                 "donor_row": donor,
+331:             }
+332:         )
+333:     if not samples or not effective:
+334:         raise ValueError("評估集沒有有效題目")
+335:     result = {
+336:         "examples": len(samples),
+337:         "correct": sum(row["exact_match"] for row in samples),
+338:         "exact_match": sum(row["exact_match"] for row in samples) / len(samples),
+339:         "mean_token_nll": total_nll / effective,
+340:         "effective_tokens": effective,
+
+### scripts/course_experiments/modalities.py:356-363; full source SHA256 275ef1a5a7d5f25a7a1c30dfa5a22bc52c5349f83f62488335a06a5739c2bfeb
+356:     groups = {}
+357:     for row, sample in zip(records, samples, strict=True):
+358:         key = row.get("question", "all")
+359:         group = groups.setdefault(key, {"correct": 0, "count": 0})
+360:         group["count"] += 1
+361:         group["correct"] += int(sample["exact_match"])
+362:     result["groups"] = groups
+363:     result["macro_accuracy"] = sum(g["correct"] / g["count"] for g in groups.values()) / len(groups)
+
+### scripts/course_experiments/modalities.py:773-793; full source SHA256 275ef1a5a7d5f25a7a1c30dfa5a22bc52c5349f83f62488335a06a5739c2bfeb
+773:     splits = _vision_records(("shape?", "color?"))
+774:     manifest = _manifest(ctx, "vision-ablation", splits, "held-out offset families, paired test interventions")
+775:     source, _ = load_checkpoint(ctx.dependency("vqa"), ctx.device)
+776:     seed_everything(ctx.seed)
+777:     model = copy.deepcopy(source)
+778:     _freeze(model, "all")
+779:     before = _evaluate(model, splits["test"], ctx)
+780:     training = _fit(model, _loss_fn(model, splits["train"], ctx), ctx, _steps(ctx, 100, 8), task="vision")
+781:     results = {ablation: _evaluate(model, splits["test"], ctx, ablation) for ablation in ("none", "blank", "shuffle")}
+782:     # 真替圖須改 target；這與打亂配對後保持原 target 的消融不同。
+783:     swapped = [
+784:         dict(
+785:             row,
+786:             shape="square" if row["shape"] == "circle" else "circle",
+787:             answer=("square" if row["shape"] == "circle" else "circle")
+788:             if row["question"] == "shape?"
+789:             else row["answer"],
+790:         )
+791:         for row in splits["test"]
+792:     ]
+793:     results["shape_swap_relabelled"] = _evaluate(model, swapped, ctx)
+
+### scripts/course_experiments/modalities.py:75-96; full source SHA256 275ef1a5a7d5f25a7a1c30dfa5a22bc52c5349f83f62488335a06a5739c2bfeb
+75:     parameters = [p for p in model.parameters() if p.requires_grad]
+76:     if not parameters:
+77:         raise ValueError("没有可訓練參數")
+78:     optimizer = torch.optim.AdamW(parameters, lr=lr)
+79:     originals = [p.detach().clone() for p in parameters]
+80:     model.eval()
+81:     with torch.no_grad():
+82:         initial_loss = float(loss_fn(-1)[0])
+83:     model.train()
+84:     history, effective = [], 0
+85:     _sync(ctx)
+86:     started = time.perf_counter()
+87:     for step in range(steps):
+88:         optimizer.zero_grad(set_to_none=True)
+89:         loss, count = loss_fn(step)
+90:         if not bool(torch.isfinite(loss)):
+91:             raise ValueError("訓練 loss 非有限值")
+92:         loss.backward()
+93:         norm = float(torch.nn.utils.clip_grad_norm_(parameters, 1.0))
+94:         if not math.isfinite(norm):
+95:             raise ValueError("訓練梯度非有限值")
+96:         optimizer.step()
+
+### scripts/course_experiments/modalities.py:117-131; full source SHA256 275ef1a5a7d5f25a7a1c30dfa5a22bc52c5349f83f62488335a06a5739c2bfeb
+117:     result = {
+118:         **_summary(model),
+119:         "initial_loss": initial_loss,
+120:         "final_loss": final_loss,
+121:         "loss_probe": "same deterministic batch before and after training",
+122:         "history": history,
+123:         "steps": len(history),
+124:         "seconds": seconds,
+125:         "elapsed": seconds,
+126:         "timing_scope": "optimizer loop including logging, periodic local checkpoints and CUDA synchronization; excludes probes, evaluation and final file write",
+127:         "effective_tokens": effective if isinstance(model, MultiModalLM) else None,
+128:         "effective_targets": effective,
+129:         "weights_changed": changed,
+130:         "nonzero_gradient_seen": any(row["grad_norm"] > 0 for row in history),
+131:         "cpu_smoke": str(ctx.device).startswith("cpu"),
+
+### scripts/course_experiments/modalities.py:367-384; full source SHA256 275ef1a5a7d5f25a7a1c30dfa5a22bc52c5349f83f62488335a06a5739c2bfeb
+367: def _modal(ctx, modality="vision", pretrained=True):
+368:     language, _ = load_checkpoint(ctx.dependency("sft"), ctx.device)
+369:     model = MultiModalLM(language).to(ctx.device)
+370:     if pretrained:
+371:         for name in ("vision", "audio"):
+372:             saved = torch.load(ctx.dependency("encoders", f"{name}.pt"), map_location="cpu", weights_only=True)
+373:             getattr(model, name).load_state_dict(saved["encoder"], strict=True)
+374:     return model
+375: 
+376: 
+377: def _freeze(model, scope, modality="vision"):
+378:     model.requires_grad_(scope == "all")
+379:     if modality in ("vision", "joint"):
+380:         model.image_projector.requires_grad_(True)
+381:     if modality in ("audio", "joint"):
+382:         model.audio_projector.requires_grad_(True)
+383:     if scope == "partial":
+384:         model.language.blocks[-1].requires_grad_(True)
+
+### tiny_perceptron/data.py:8-25; full source SHA256 6b40ba4bccc4a1ce169a90df8ce71f40e7c9e33e3d7633a36fdd8348d9536321
+8: import torch
+9: 
+10: IGNORE = -100
+11: SPECIALS = ("<pad>", "<bos>", "<eos>", "<user>", "<assistant>", "<image>", "<audio>", "<system>")
+12: 
+13: 
+14: class ByteTokenizer:
+15:     """不學切詞的可還原起點；每個 UTF-8 byte 對應一個 ID。"""
+16: 
+17:     vocab_size = 264
+18:     pad_id, bos_id, eos_id, user_id, assistant_id, image_id, audio_id, system_id = range(8)
+19: 
+20:     def encode(self, text):
+21:         return [b + len(SPECIALS) for b in text.encode("utf-8")]
+22: 
+23:     def decode(self, ids):
+24:         raw = bytes(i - len(SPECIALS) for i in ids if i >= len(SPECIALS))
+25:         return raw.decode("utf-8", errors="replace")
+
+### sklearn-model-evaluation-1.7.2.rst:555-590; full source SHA256 32a242dae4c0a3d0b4306081c74cff1ba03849281752cf199194859a04a20a84
+555: From binary to multiclass and multilabel
+556: ----------------------------------------
+557: 
+558: Some metrics are essentially defined for binary classification tasks (e.g.
+559: :func:`f1_score`, :func:`roc_auc_score`). In these cases, by default
+560: only the positive label is evaluated, assuming by default that the positive
+561: class is labelled ``1`` (though this may be configurable through the
+562: ``pos_label`` parameter).
+563: 
+564: In extending a binary metric to multiclass or multilabel problems, the data
+565: is treated as a collection of binary problems, one for each class.
+566: There are then a number of ways to average binary metric calculations across
+567: the set of classes, each of which may be useful in some scenario.
+568: Where available, you should select among these using the ``average`` parameter.
+569: 
+570: * ``"macro"`` simply calculates the mean of the binary metrics,
+571:   giving equal weight to each class.  In problems where infrequent classes
+572:   are nonetheless important, macro-averaging may be a means of highlighting
+573:   their performance. On the other hand, the assumption that all classes are
+574:   equally important is often untrue, such that macro-averaging will
+575:   over-emphasize the typically low performance on an infrequent class.
+576: * ``"weighted"`` accounts for class imbalance by computing the average of
+577:   binary metrics in which each class's score is weighted by its presence in the
+578:   true data sample.
+579: * ``"micro"`` gives each sample-class pair an equal contribution to the overall
+580:   metric (except as a result of sample-weight). Rather than summing the
+581:   metric per class, this sums the dividends and divisors that make up the
+582:   per-class metrics to calculate an overall quotient.
+583:   Micro-averaging may be preferred in multilabel settings, including
+584:   multiclass classification where a majority class is to be ignored.
+585: * ``"samples"`` applies only to multilabel problems. It does not calculate a
+586:   per-class measure, instead calculating the metric over the true and predicted
+587:   classes for each sample in the evaluation data, and returning their
+588:   (``sample_weight``-weighted) average.
+589: * Selecting ``average=None`` will return an array with the score for each
+590:   class.
+
+### sklearn-model-evaluation-1.7.2.rst:597-620; full source SHA256 32a242dae4c0a3d0b4306081c74cff1ba03849281752cf199194859a04a20a84
+597: .. _accuracy_score:
+598: 
+599: Accuracy score
+600: --------------
+601: 
+602: The :func:`accuracy_score` function computes the
+603: `accuracy <https://en.wikipedia.org/wiki/Accuracy_and_precision>`_, either the fraction
+604: (default) or the count (normalize=False) of correct predictions.
+605: 
+606: 
+607: In multilabel classification, the function returns the subset accuracy. If
+608: the entire set of predicted labels for a sample strictly match with the true
+609: set of labels, then the subset accuracy is 1.0; otherwise it is 0.0.
+610: 
+611: If :math:`\hat{y}_i` is the predicted value of
+612: the :math:`i`-th sample and :math:`y_i` is the corresponding true value,
+613: then the fraction of correct predictions over :math:`n_\text{samples}` is
+614: defined as
+615: 
+616: .. math::
+617: 
+618:   \texttt{accuracy}(y, \hat{y}) = \frac{1}{n_\text{samples}} \sum_{i=0}^{n_\text{samples}-1} 1(\hat{y}_i = y_i)
+619: 
+620: where :math:`1(x)` is the `indicator function
+
+### sklearn-model-evaluation-1.7.2.rst:684-696; full source SHA256 32a242dae4c0a3d0b4306081c74cff1ba03849281752cf199194859a04a20a84
+684: -----------------------
+685: 
+686: The :func:`balanced_accuracy_score` function computes the `balanced accuracy
+687: <https://en.wikipedia.org/wiki/Accuracy_and_precision>`_, which avoids inflated
+688: performance estimates on imbalanced datasets. It is the macro-average of recall
+689: scores per class or, equivalently, raw accuracy where each sample is weighted
+690: according to the inverse prevalence of its true class.
+691: Thus for balanced datasets, the score is equal to accuracy.
+692: 
+693: In the binary case, balanced accuracy is equal to the arithmetic mean of
+694: `sensitivity <https://en.wikipedia.org/wiki/Sensitivity_and_specificity>`_
+695: (true positive rate) and `specificity
+696: <https://en.wikipedia.org/wiki/Sensitivity_and_specificity>`_ (true negative
+
+### scipy-binomial-test-1.16.2.py:49-82; full source SHA256 696ea9faf464bf7a5207cff49d37d3de4340855f08a78e00dfd1043f297d5a57
+49:     def proportion_ci(self, confidence_level=0.95, method='exact'):
+50:         """
+51:         Compute the confidence interval for ``statistic``.
+52: 
+53:         Parameters
+54:         ----------
+55:         confidence_level : float, optional
+56:             Confidence level for the computed confidence interval
+57:             of the estimated proportion. Default is 0.95.
+58:         method : {'exact', 'wilson', 'wilsoncc'}, optional
+59:             Selects the method used to compute the confidence interval
+60:             for the estimate of the proportion:
+61: 
+62:             'exact' :
+63:                 Use the Clopper-Pearson exact method [1]_.
+64:             'wilson' :
+65:                 Wilson's method, without continuity correction ([2]_, [3]_).
+66:             'wilsoncc' :
+67:                 Wilson's method, with continuity correction ([2]_, [3]_).
+68: 
+69:             Default is ``'exact'``.
+70: 
+71:         Returns
+72:         -------
+73:         ci : ``ConfidenceInterval`` object
+74:             The object has attributes ``low`` and ``high`` that hold the
+75:             lower and upper bounds of the confidence interval.
+76: 
+77:         References
+78:         ----------
+79:         .. [1] C. J. Clopper and E. S. Pearson, The use of confidence or
+80:                fiducial limits illustrated in the case of the binomial,
+81:                Biometrika, Vol. 26, No. 4, pp 404-413 (Dec. 1934).
+82:         .. [2] E. B. Wilson, Probable inference, the law of succession, and
+
+### scipy-binomial-test-1.16.2.py:101-112; full source SHA256 696ea9faf464bf7a5207cff49d37d3de4340855f08a78e00dfd1043f297d5a57
+101:         if not (0 <= confidence_level <= 1):
+102:             raise ValueError(f'confidence_level ({confidence_level}) must be in '
+103:                              'the interval [0, 1].')
+104:         if method == 'exact':
+105:             low, high = _binom_exact_conf_int(self.k, self.n,
+106:                                               confidence_level,
+107:                                               self.alternative)
+108:         else:
+109:             # method is 'wilson' or 'wilsoncc'
+110:             low, high = _binom_wilson_conf_int(self.k, self.n,
+111:                                                confidence_level,
+112:                                                self.alternative,
+
+### scipy-binomial-test-1.16.2.py:129-160; full source SHA256 696ea9faf464bf7a5207cff49d37d3de4340855f08a78e00dfd1043f297d5a57
+129: def _binom_exact_conf_int(k, n, confidence_level, alternative):
+130:     """
+131:     Compute the estimate and confidence interval for the binomial test.
+132: 
+133:     Returns proportion, prop_low, prop_high
+134:     """
+135:     if alternative == 'two-sided':
+136:         alpha = (1 - confidence_level) / 2
+137:         if k == 0:
+138:             plow = 0.0
+139:         else:
+140:             plow = _findp(lambda p: binom.sf(k-1, n, p) - alpha)
+141:         if k == n:
+142:             phigh = 1.0
+143:         else:
+144:             phigh = _findp(lambda p: binom.cdf(k, n, p) - alpha)
+145:     elif alternative == 'less':
+146:         alpha = 1 - confidence_level
+147:         plow = 0.0
+148:         if k == n:
+149:             phigh = 1.0
+150:         else:
+151:             phigh = _findp(lambda p: binom.cdf(k, n, p) - alpha)
+152:     elif alternative == 'greater':
+153:         alpha = 1 - confidence_level
+154:         if k == 0:
+155:             plow = 0.0
+156:         else:
+157:             plow = _findp(lambda p: binom.sf(k-1, n, p) - alpha)
+158:         phigh = 1.0
+159:     return plow, phigh
+160: 

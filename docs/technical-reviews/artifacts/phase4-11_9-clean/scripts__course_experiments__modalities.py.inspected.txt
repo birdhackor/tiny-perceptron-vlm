@@ -1,0 +1,207 @@
+ORIGINAL scripts/course_experiments/modalities.py L37-L53
+def _hash(value):
+    return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+
+
+def _manifest(ctx, name, splits, policy):
+    identities = {key: {row["family"] for row in rows} for key, rows in splits.items()}
+    for first, second in (("train", "validation"), ("train", "test"), ("validation", "test")):
+        if identities[first] & identities[second]:
+            raise ValueError(f"{name}: {first}/{second} 題目家族洩漏")
+    result = {
+        "seed": ctx.seed,
+        "split_policy": policy,
+        "splits": {key: {"count": len(rows), "sha256": _hash(rows), "records": rows} for key, rows in splits.items()},
+    }
+    write_json(ctx.output / f"{name}-data.json", result)
+    write_json(ctx.output / "dataset.json", splits)
+    return result
+
+ORIGINAL scripts/course_experiments/modalities.py L171-L192
+def _vision_records(questions=("describe",)):
+    splits = {}
+    for split, offsets in (("train", (-2, -1, 0)), ("validation", (1,)), ("test", (2,))):
+        rows = []
+        for color in ("red", "green", "blue"):
+            for shape in ("circle", "square"):
+                for offset in offsets:
+                    for question in questions:
+                        answer = {"describe": f"{color} {shape}", "shape?": shape, "color?": color}[question]
+                        rows.append(
+                            {
+                                "modality": "vision",
+                                "color": color,
+                                "shape": shape,
+                                "offset": offset,
+                                "question": question,
+                                "answer": answer,
+                                "family": f"{color}:{shape}:{offset}",
+                            }
+                        )
+        splits[split] = rows
+    return splits
+
+ORIGINAL scripts/course_experiments/modalities.py L219-L243
+def _media(row, ctx):
+    image = waveform = None
+    if row["modality"] in ("vision", "joint"):
+        if "image" in row:
+            with Image.open(row["image"]) as source:
+                pixels = np.array(source.convert("RGB").resize((16, 16)), copy=True)
+            image = torch.from_numpy(pixels).permute(2, 0, 1).float() / 255
+        elif "digits" in row:
+            from scripts.prepare_ocr import draw_digits
+
+            pixels = np.array(draw_digits(row["digits"], row["offset"]), copy=True)
+            image = torch.from_numpy(pixels).permute(2, 0, 1).float() / 255
+        else:
+            image = scene(row["color"], row["shape"], offset=row["offset"])
+    if row["modality"] in ("audio", "joint"):
+        if "audio" in row:
+            values, sample_rate = sf.read(row["audio"], dtype="float32")
+            if values.ndim != 1 or not len(values):
+                raise ValueError("錄音必須是非空單聲道")
+            waveform = torch.from_numpy(values.copy())
+            if sample_rate != 16000:
+                raise ValueError("必須先真正重採樣為 16 kHz")
+        else:
+            waveform = tone(row["frequency"], seconds=row.get("seconds", 0.1)) * (row.get("amplitude", 0.5) / 0.5)
+    return (None if image is None else image.to(ctx.device), None if waveform is None else waveform.to(ctx.device))
+
+ORIGINAL scripts/course_experiments/modalities.py L246-L257
+def _sequence(row, ctx, answer=True):
+    tok = ByteTokenizer()
+    markers = ([] if row["modality"] == "audio" else [tok.image_id]) + (
+        [] if row["modality"] == "vision" else [tok.audio_id]
+    )
+    prefix = [tok.bos_id, tok.user_id] + markers + tok.encode(row["question"]) + [tok.eos_id, tok.assistant_id]
+    tail = tok.encode(row["answer"]) + [tok.eos_id] if answer else []
+    return (
+        torch.tensor(prefix + tail, device=ctx.device),
+        torch.tensor([-100] * len(prefix) + tail, device=ctx.device),
+        len(tail),
+    )
+
+ORIGINAL scripts/course_experiments/modalities.py L287-L364
+def _evaluate(model, records, ctx, ablation="none", tokens=16):
+    model.eval()
+    tok = ByteTokenizer()
+    samples, total_nll, effective = [], 0.0, 0
+    for index, row in enumerate(records):
+        image, waveform = _media(row, ctx)
+        donor = None
+        if ablation in ("blank", "blank_image") and image is not None:
+            image = torch.zeros_like(image)
+        if ablation in ("blank", "blank_audio") and waveform is not None:
+            waveform = torch.zeros_like(waveform)
+        if ablation == "shuffle":
+            donor = (index + max(1, len(records) // 2)) % len(records)
+            image, waveform = _media(records[donor], ctx)
+        ids, labels, count = _sequence(row, ctx)
+        output = model(ids, labels, image=image, waveform=waveform)
+        total_nll += float(masked_loss(output["logits"], output["labels"])) * count
+        effective += count
+        prefix = _sequence(row, ctx, False)[0]
+        generation_error = None
+        try:
+            generated = generate_modal(model, prefix, image, waveform, tokens)
+            generated_ids = generated[len(prefix) :].tolist()
+        except ValueError as error:
+            if "placeholder 缺少配對" not in str(error):
+                raise
+            # 未學模型產生錯誤模態標記也是失敗，不可略過這道題。
+            generation_error = str(error)
+            generated_ids = []
+        raw = generated_ids[: generated_ids.index(tok.eos_id)] if tok.eos_id in generated_ids else generated_ids
+        answer = tok.decode(raw)
+        samples.append(
+            {
+                "row": index,
+                "family": row["family"],
+                "question": row["question"],
+                "target": row["answer"],
+                "generated": answer,
+                "generated_ids": generated_ids,
+                "exact_match": raw == tok.encode(row["answer"]),
+                "eos": tok.eos_id in generated_ids,
+                "generation_error": generation_error,
+                "invalid_special_tokens": sum(token < 8 for token in raw),
+                "donor_row": donor,
+            }
+        )
+    if not samples or not effective:
+        raise ValueError("評估集沒有有效題目")
+    result = {
+        "examples": len(samples),
+        "correct": sum(row["exact_match"] for row in samples),
+        "exact_match": sum(row["exact_match"] for row in samples) / len(samples),
+        "mean_token_nll": total_nll / effective,
+        "effective_tokens": effective,
+        "eos_rate": sum(row["eos"] for row in samples) / len(samples),
+        "generation_errors": sum(row["generation_error"] is not None for row in samples),
+        "invalid_special_tokens": sum(row["invalid_special_tokens"] for row in samples),
+        "ablation": ablation,
+        "skipped": [],
+        "samples": samples,
+    }
+    if records[0]["modality"] == "joint":
+        for part, label in ((0, "shape"), (1, "pitch")):
+            correct = sum(
+                len(s["generated"].split(",")) == 2 and s["generated"].split(",")[part] == s["target"].split(",")[part]
+                for s in samples
+            )
+            result[f"{label}_correct"] = correct
+            result[f"{label}_accuracy"] = correct / len(samples)
+    groups = {}
+    for row, sample in zip(records, samples, strict=True):
+        key = row.get("question", "all")
+        group = groups.setdefault(key, {"correct": 0, "count": 0})
+        group["count"] += 1
+        group["correct"] += int(sample["exact_match"])
+    result["groups"] = groups
+    result["macro_accuracy"] = sum(g["correct"] / g["count"] for g in groups.values()) / len(groups)
+    return result
+
+ORIGINAL scripts/course_experiments/modalities.py L377-L384
+def _freeze(model, scope, modality="vision"):
+    model.requires_grad_(scope == "all")
+    if modality in ("vision", "joint"):
+        model.image_projector.requires_grad_(True)
+    if modality in ("audio", "joint"):
+        model.audio_projector.requires_grad_(True)
+    if scope == "partial":
+        model.language.blocks[-1].requires_grad_(True)
+
+ORIGINAL scripts/course_experiments/modalities.py L772-L802
+def run_vision_ablation(ctx):
+    splits = _vision_records(("shape?", "color?"))
+    manifest = _manifest(ctx, "vision-ablation", splits, "held-out offset families, paired test interventions")
+    source, _ = load_checkpoint(ctx.dependency("vqa"), ctx.device)
+    seed_everything(ctx.seed)
+    model = copy.deepcopy(source)
+    _freeze(model, "all")
+    before = _evaluate(model, splits["test"], ctx)
+    training = _fit(model, _loss_fn(model, splits["train"], ctx), ctx, _steps(ctx, 100, 8), task="vision")
+    results = {ablation: _evaluate(model, splits["test"], ctx, ablation) for ablation in ("none", "blank", "shuffle")}
+    # 真替圖須改 target；這與打亂配對後保持原 target 的消融不同。
+    swapped = [
+        dict(
+            row,
+            shape="square" if row["shape"] == "circle" else "circle",
+            answer=("square" if row["shape"] == "circle" else "circle")
+            if row["question"] == "shape?"
+            else row["answer"],
+        )
+        for row in splits["test"]
+    ]
+    results["shape_swap_relabelled"] = _evaluate(model, swapped, ctx)
+    crop_rows = []
+    ctx.output.mkdir(parents=True, exist_ok=True)
+    for i, row in enumerate(splits["test"]):
+        image, _ = _media(dict(row, offset=7), ctx)
+        image = image.cpu()[:, 4:12, 4:12]
+        path = ctx.output / f"crop-{i}.png"
+        Image.fromarray((image.permute(1, 2, 0).numpy() * 255).astype("uint8")).resize((16, 16)).save(path)
+        crop_rows.append(dict(row, image=str(path)))
+    results["edge_cropped"] = _evaluate(model, crop_rows, ctx)
+

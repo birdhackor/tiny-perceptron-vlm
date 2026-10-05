@@ -1,0 +1,632 @@
+                                                    TrOCR: Transformer-based Optical Character Recognition
+                                                                   with Pre-trained Models
+                                                             Minghao Li1∗, Tengchao Lv2 , Lei Cui2 , Yijuan Lu3 ,
+                                                           Dinei Florencio3 , Cha Zhang3 , Zhoujun Li1 , Furu Wei2
+                                                                              1
+                                                                                Beihang University
+                                                                          2
+                                                                            Microsoft Research Asia
+                                                                              3
+                                                                                Microsoft Azure AI
+                                                               {liminghao1630,lizj}@buaa.edu.cn
+                                                 {tengchaolv,lecu,yijlu,dinei,chazhang,fuwei}@microsoft.com
+                                                                Abstract                               is usually framed as an encoder-decoder problem
+                                                                                                       where existing approaches leveraged CNN-based
+                                             Text recognition is a long-standing research
+                                             problem for document digitalization. Exist-               encoder for image understanding and RNN-based
+                                             ing approaches for text recognition are usu-              decoder for text generation. In this paper, we focus
+arXiv:2109.10282v1 [cs.CL] 21 Sep 2021
+
+
+
+
+                                             ally built based on CNN for image under-                  on the text recognition task for document images
+                                             standing and RNN for char-level text gener-               and leave text detection as the future work.
+                                             ation. In addition, another language model                   Recent progress in text recognition (Diaz et al.,
+                                             is usually needed to improve the overall ac-
+                                                                                                       2021) has witnessed the significant improvements
+                                             curacy as a post-processing step. In this pa-
+                                             per, we propose an end-to-end text recogni-               by taking advantage of the Transformer (Vaswani
+                                             tion approach with pre-trained image Trans-               et al., 2017) architectures. However, existing ap-
+                                             former and text Transformer models, namely                proaches are still based on CNNs as the backbone,
+                                             TrOCR, which leverages the Transformer ar-                where the self-attention is built on top of CNN
+                                             chitecture for both image understanding and               backbones as encoders to understand the text im-
+                                             wordpiece-level text generation. The TrOCR                age. For decoders, Connectionist Temporal Classi-
+                                             model is simple but effective, and can be pre-
+                                                                                                       fication (CTC) (Graves et al., 2006) is usually used
+                                             trained with large-scale synthetic data and fine-
+                                             tuned with human-labeled datasets. Exper-
+                                                                                                       compounded with an external language model on
+                                             iments show that the TrOCR model outper-                  the character-level to improve the overall accuracy.
+                                             forms the current state-of-the-art models on              Despite the great success achieved by the hybrid
+                                             both printed and handwritten text recognition             encoder/decoder method, there is still a lot of room
+                                             tasks. The code and models will be publicly               to improve with pre-trained CV and NLP models:
+                                             available at https://aka.ms/TrOCR.                        1) the network parameters in existing methods are
+                                                                                                       trained from scratch with synthetic/human-labeled
+                                         1   Introduction
+                                                                                                       datasets, leaving large-scale pre-trained models
+                                         Optical Character Recognition (OCR) is the elec-              unexplored. 2) as image Transformers become
+                                         tronic or mechanical conversion of images of typed,           more and more popular (Dosovitskiy et al., 2021;
+                                         handwritten or printed text into machine-encoded              Touvron et al., 2021a), especially the recent self-
+                                         text, whether from a scanned document, a photo                supervised image pre-training (Bao et al., 2021),
+                                         of a document, a scene-photo or from subtitle text            it is straightforward to investigate whether pre-
+                                         superimposed on an image. Typically, an OCR                   trained image Transformers can replace CNN back-
+                                         system includes two main modules: a text detec-               bones, meanwhile exploiting the pre-trained image
+                                         tion module and a text recognition module. Text               Transformers to work together with the pre-trained
+                                         detection aims to localize all text blocks within the         text Transformers in a single framework on the text
+                                         text image, either in word-level or textline-level.           recognition task.
+                                         The text detection task is usually considered as                 To this end, we propose TrOCR, an end-to-end
+                                         an object detection problem where conventional                Transformer-based OCR model for text recogni-
+                                         object detection models such as YoLOv5 and DB-                tion with pre-trained CV and NLP models, which
+                                         Net (Liao et al., 2019) can be applied. Meanwhile,            is shown in Figure 1. Distinct from the existing
+                                         text recognition aims to understand the text image            text recognition models, TrOCR is a simple but
+                                         content and transcribe the visual signals into nat-           effective model which does not use the CNN as
+                                         ural language tokens. The text recognition task               the backbone. Instead, following (Dosovitskiy
+                                             ∗
+                                             Work done during internship at Microsoft Research Asia.   et al., 2021), it first resizes the input text image
+                                                                                                         Outputs
+
+     H1   H2   H3    H4     H5    H6        ……   H37   H38   H39   H40               L IC ENSE E _OF _M CD ON ALD ’ S [EOS]
+
+
+                          Feed Forward                                                             Feed Forward
+                                                                   xN                           Multi-Head Attention               xN
+                    Multi-Head Attention                                                    Masked Multi-Head Attention
+                                                             Encoder                                                           Decoder
+                                                                         Position
+      1   2    3      4     5      6        ……   37    38     39   40
+                                                                         Embedding
+                                                                                   [BOS]    L IC ENSE E _OF _M CD ON ALD ’ S
+                                                                         Patch                       Outputs (shifted right)
+                                            ……
+                                                                         Embedding
+
+                                       Flatten
+
+
+
+
+                           Image Patches                                                              Input Image
+
+
+
+
+Figure 1: Model Architecture of TrOCR, where an encoder-decoder model is designed with a pre-trained image
+Transformer as the encoder and a pre-trained text Transformer as the decoder.
+
+
+into 384 × 384 and then the image is split into a                                 The contributions of this paper are summarized
+sequence of 16 × 16 patches which are used as                                  as follows:
+the input to image Transformers. Standard Trans-
+former architecture with the self-attention mech-                                    1. We propose TrOCR, an end-to-end
+anism is leveraged on both encoder and decoder                                          Transformer-based OCR model for text
+parts, where wordpiece units are generated as the                                       recognition with pre-trained CV and NLP
+recognized text from the input image. To effec-                                         models. To the best of our knowledge,
+tively train the TrOCR model, the encoder can be                                        this is the first work that jointly leverages
+initialized with pre-trained ViT-style models (Doso-                                    pre-trained image and text Transformers for
+vitskiy et al., 2021; Touvron et al., 2021a; Bao et al.,                                the text recognition task in OCR.
+2021) while the decoder can be initialized with pre-
+                                                                                     2. TrOCR achieves state-of-the-art accuracy
+trained BERT-style models (Devlin et al., 2019; Liu
+                                                                                        with a standard Transformer-based encoder-
+et al., 2019; Dong et al., 2019), respectively. There-
+                                                                                        decoder model, which is convolution free
+fore, the advantage of TrOCR is three-fold. First,
+                                                                                        and does not rely on any complex pre/post-
+TrOCR uses the pre-trained image Transformer and
+                                                                                        processing steps.
+text Transformer models, which take advantages
+of large-scale unlabeled data for image understand-                                  3. The TrOCR model and code will be publicly
+ing and language modeling, with no need for an                                          available at https://aka.ms/TrOCR.
+external language model. Second, TrOCR does not
+require any sophisticated convolutional network for                            2       TrOCR
+the backbone, which makes the model very easy
+                                                                               2.1      Model Architecture
+to implement and maintain. Finally, experiment
+results on OCR benchmark datasets show that the                                TrOCR is built up with the Transformer architec-
+TrOCR can achieve state-of-the-art results on both                             ture, including image Transformer for extracting
+printed and handwritten text recognition tasks with-                           the visual features and text Transformer for lan-
+out any complex pre/post-processing steps. Further-                            guage modeling. We adopt the vanilla Transformer
+more, we can easily extend the TrOCR for multilin-                             encoder-decoder structure in TrOCR. The encoder
+gual text recognition with minimum efforts, where                              is designed to obtain the representation of the im-
+just leveraging multilingual pre-trained models in                             age patches and the decoder is to generate the word-
+the decoder-side.                                                              piece sequence while paying attention to the en-
+                                                                               coder output and the previous generation.
+2.1.1   Encoder
+The encoder accepts an input image ximg ∈                 MultiHead(Q, K, V ) = Concat(head1 , ..., headh )W O
+<3×H0 ×W0 , and resizes it to a fixed size (H, W ).               where headi = Attention(QWiQ , KWiK , V WiV )
+Since the Transformer encoder cannot process the
+raw images unless they are a sequence of input to-
+kens, the encoder decomposes the input image into          Different from the features extracted by the CNN-
+a batch of N = HW/P 2 foursquare patches with             like network, the Transformer models have no
+a fixed size of (P, P ), while the width W and the        image-specific inductive biases and process the im-
+height H of the resized image are guaranteed to be        age as a sequence of patches, which enables the
+divisible by the patch size P . After that, the patches   model to pay different attention to either the whole
+are flattened into vectors and linearly projected to      image or the independent patches.
+D-dimension vectors, which are the patch embed-
+                                                          2.1.2 Decoder
+dings and D is the hidden size of the Transformer
+                                                          We use the original Transformer decoder for
+through all of its layers.
+                                                          TrOCR. The standard Transformer decoder also
+   Similar to ViT (Dosovitskiy et al., 2021) and
+                                                          has a stack of identical layers, which have similar
+DeiT (Touvron et al., 2021b), we keep the special
+                                                          structures to the layers in the encoder, except that
+token “[CLS]” that is usually used for the image
+                                                          the decoder inserts the “encoder-decoder attention”
+classification task. The “[CLS]” token brings to-
+                                                          between the multi-head self-attention and feed-
+gether all the information from all the patch embed-
+                                                          forward network, to distribute different attention on
+dings and represents the whole image. Meanwhile,
+                                                          the output of the encoder. In the encoder-decoder
+we also keep the distillation token in the input se-
+                                                          attention module, the keys and values come from
+quence when using the DeiT pre-trained models
+                                                          the encoder output while the queries come from the
+for encoder initialization, which allows the model
+                                                          decoder input. In addition, the decoder leverages
+to learn from the teacher model. The patch embed-
+                                                          the attention masking in the self-attention to pre-
+dings and two special tokens are given learnable
+                                                          vent from getting more information during training
+1D position embeddings according to their abso-
+                                                          than prediction. Based on the fact that the output
+lute positions. Then, the input sequence is passed
+                                                          of the decoder will right shift one position from the
+through a stack of identical encoder layers. Each
+                                                          input of the decoder, the attention masking need to
+Transformer layer has a multi-head self-attention
+                                                          ensure the output for the position i can only pay
+module and a fully connected feed-forward net-
+                                                          attention to the known output, which is the input
+work. Both of these two parts are followed by
+                                                          on the positions less than i:
+residual connection and layer normalization.
+   The attention mechanism is to distribute different
+                                                                     hi = P roj(Emb(T okeni ))
+attention on the values and output the weighted sum
+                                                                             ehij
+of them, where the weights of the values are com-                σ(hij ) = PV
+                                                                                  hik
+                                                                                        f or j = 1, 2, . . . , V
+puted by the corresponding keys and the queries.                            k=1 e
+
+For the self-attention modules, all of the queries,
+keys and values come from the same sequence. The           The embedding from the decoder is projected from
+matrix of the attention output is computed as:            the model dimension to the dimension of the vocab-
+                                                          ulary size V . The probabilities over the vocabulary
+                                      QK T                are calculated by the softmax function and we use
+        Attention(Q, K, V ) = softmax( √ )V
+                                        dk
+                                                          beam search to get the final output.
+ The scaling factor of √1d is applied to avoid the        2.2   Model Initialization
+                          k
+extremely small gradients of the softmax function,        Both the encoder and the decoder are initialized by
+where the dk is the dimension of queries and keys.        the public models pre-trained on large-scale labeled
+The multi-head attention is to project the queries,       and unlabeled datasets.
+keys and values h times with different learnable
+weights of projection, which allows the model to          2.2.1 Encoder Initialization
+jointly gather the information from different repre-      The DeiT (Touvron et al., 2021a) and BEiT (Bao
+sentation subspaces.                                      et al., 2021) models are used for the encoder initial-
+ization in the TrOCR models. DeiT trains the im-        generated output as the next input.
+age Transformer with ImageNet as the sole training
+set, and tries different hyper-parameters and data      2.4     Pre-training
+augmentation to make the model in a data-efficient      We use the text recognition task for the pre-training
+manner. Moreover, they distill the knowledge of a       phase, since this task can make the models learn
+strong image classifier to a distilled tokens in the    the knowledge of both the visual feature extrac-
+initial embeddings, which leads to a competitive        tion and the language model. The pre-training pro-
+result comparing to the CNN-based models.               cess is divided into two stages which differs by
+   Referring to the Masked Language Model pre-          the used dataset. In the first stage, we synthesize
+training task, BEiT proposes the Masked Image           a large dataset consisting of hundreds of millions
+Modeling task to pre-train the image Transformer.       of printed textline images with their corresponding
+For each image, it will be converted to two views,      text content and pre-train the TrOCR models on
+image patches and visual tokens. They tokenize          that. In the second stage, we build two relatively
+the original image into visual tokens by the latent     small datasets which correspond to printed and
+codes of discrete VAE (Ramesh et al., 2021), ran-       handwritten downstream tasks, containing about
+domly mask some image patches and make the              millions of textline images each. Subsequently, we
+model recover the original visual tokens. Essen-        pre-train two separate models on the printed data
+tially, the structure of BEiT is the same as the im-    and the handwritten data of the second stage, both
+age Transformer and lacks the distilled token when      initialized by the first-stage model.
+comparing with DeiT.
+                                                        2.5     Fine-tuning
+2.2.2    Decoder Initialization
+                                                        The pre-trained TrOCR models are fine-tuned on
+We use the RoBERTa models to initialize the de-
+                                                        printed and handwritten text recognition tasks. The
+coder. Generally, RoBERTa is a replication study
+                                                        output of the TrOCR models are based on Byte Pair
+of (Devlin et al., 2019) that carefully measures
+                                                        Encoding (BPE) (Sennrich et al., 2015) and does
+the impact of many key hyperparameters and train-
+                                                        not rely on any task-related vocabularies.
+ing data size. Based on BERT, they remove the
+next sentence prediction objective and dynamically      2.6     Data Augmentation
+change the masking pattern of the Masked Lan-
+guage Model. When loading the RoBERTa models            To enhance the variety of the pre-training data and
+to the decoders, the structures do not exactly match.   the fine-tuning data, we leverage the data augmenta-
+For example, the encoder-decoder attention layers       tion. In total, seven kinds of image transformations
+are absent in the RoBERTa models. To address this,      (including keeping the original input image) are
+we initialize the decoders with the RoBERTa mod-        taken in this work. For each sample, we randomly
+els and the absent layers are randomly initialized.     decide which image transformation to take with
+                                                        equal possibilities. We augment the input images
+2.3     Task Pipeline                                   with random rotation (-10 to 10 degrees), Gaussian
+The pipeline of the text recognition task in this       blurring, image dilation, image erosion, downscal-
+work is described that given the textline images,       ing, underlining or keeping the original.
+the model extracts the visual features and predict
+the wordpiece tokens relying on the image and the       3     Experiments
+context generated before. The sequence of ground        3.1     Data
+truth tokens is followed by an “[EOS]” token which
+normally indicates the end of a sentence. During        3.1.1    Pre-training Dataset
+training, we rotate the sequence backward by one        To build a large-scale high-quality dataset, we sam-
+position and move the “[EOS]” token to the be-          ple two million document pages from the publicly
+ginning. The rotated ground truth sequence is fed       available PDF files on the Internet. Since the PDF
+into the decoder, and the output of that is super-      files are digital-born, we can get pretty-printed
+vised by the original ground truth sequence with        textline images by converting the PDF files into
+the cross-entropy loss. For inference, the decoder      page images, extract the textlines and their cropped
+starts from the “[EOS]” token to predict the out-       images. In total, the first-stage pre-training dataset
+put iteratively, while continuously taking the newly    contains 684M textlines.
+          Stage         Text Type           #Samples                    3.2      Settings
+          First          Printed              684M
+                                                                        The TrOCR models are built upon the Fairseq (Ott
+         Second          Printed              3.3M                      et al., 2019) which is a popular sequence model-
+         Second        Handwritten           17.9M                      ing toolkit. For the encoders, the DeiT models are
+Table 1: Statistics of synthetic data for pre-training.                 implemented and initialized by the code and the
+"Stage" indicates the pre-training pipeline.                            pre-trained models from the timm library (Wight-
+                                                                        man, 2019) while the BEiT models are from the
+                                                                        UniLM’s official repository4 . For the decoders, we
+   For the second stage, we use 5,427 handwritten                       use the RoBERTa models provided by the Fairseq
+fonts1 to synthesize handwritten textline images by                     and the corresponding dictionary. We use 32 V100
+the TRDG2 , an open-source text recognition data                        GPUs with the memory of 32GBs for pre-training
+generator. The text used for generation is crawled                      and 8 V100 GPUs for fine-tuning. For all the mod-
+from random pages of Wikipedia. The handwritten                         els, the batch size is set to 2,048 and the learning
+dataset for the second-stage pre-training consists                      rate is 5e-5. We use the BPE tokenizer from Fairseq
+of 17.9M textlines including IIIT-HWS dataset (Kr-                      to tokenize the textlines to wordpieces.
+ishnan and Jawahar, 2016). In addition, we collect                         We employ the 384 × 384 resolution and 16 × 16
+around 53K receipt images in the real world and                         patch size for DeiT and BEiT encoders. Both
+recognize the text on them by commercial OCR                            the DeiTBASE and the BEiTBASE has 12 layers
+engines. The OCR engine returns the texts with the                      with 768 hidden sizes and 12 heads while the
+two-dimensional coordinates and extra information                       BEiTLARGE has 24 layers with 1024 hidden sizes
+of the input images, like the orientation. We cor-                      and 16 heads. We use 6 layers, 512 hidden sizes
+rect the orientation to the vertical, crop the textlines                and 8 attention heads for the base decoders while
+from the whole receipt images, rotate the textline                      12 layers, 1,024 hidden sizes and 16 heads for the
+images if not horizontal, and prune them. We also                       large decoders. For this task, the higher-level lay-
+use TRDG to synthesize 1M printed textline im-                          ers of the decoder (language model part) are more
+ages with two receipt fonts and the built-in printed                    important, so we only use the last half of all layers
+fonts. The printed dataset for the second-stage pre-                    from the corresponding RoBERTa model, which
+training consists of 3.3M textlines.                                    are the last 6 layers for the RoBERTaBASE and the
+                                                                        last 12 layers for the RoBERTaLARGE .
+3.1.2     SROIE Task 2
+The SROIE (Scanned Receipts OCR and Informa-                            3.2.1      Baselines
+tion Extraction) dataset (Task 2) focuses on text                       We take the CRNN model (Shi et al., 2016a) as the
+recognition in receipt images. There are 626 re-                        baseline model. The CRNN model is composed of
+ceipt images and 361 receipt images in the train                        convolutional layers for image feature extraction,
+and test set of SROIE. In this work, since the text                     recurrent layers for sequence modeling and the final
+detection is not included, we use cropped images                        frame label prediction, and a transcription layer to
+of the textlines for evaluation, which are obtained                     translate the frame predictions to the final label
+by cropping the whole receipt images according to                       sequence. To address the character alignment issue,
+the ground truth bounding boxes.                                        they use the CTC loss to train the CRNN model.
+3.1.3     IAM Handwriting Database                                      For a long time, the CRNN model is the dominant
+                                                                        paradigm for text recognition. We use the PyTorch
+The IAM Handwriting Database is composed of                             implementation5 and initialized the parameters by
+handwritten English text, which is the most popular                     the provided pre-trained model.
+dataset for handwritten text recognition. We use
+the Aachen’s partition of the dataset3 : 6,161 lines                    3.3      Evaluation Metrics
+from 747 forms in the train set, 966 lines from 115
+                                                                        The SROIE dataset is evaluated using the word-
+forms in the validation set and 2,915 lines from 336
+                                                                        level precision, recall and f1 score. If repeated
+forms in the test set.
+                                                                        words appear in the ground truth, they are also
+    1
+      The fonts are obtained from https://fonts.google.com/?category=
+Handwriting and https://www.1001fonts.com/handwritten-fonts.
+                                                                        supposed to appear in the prediction. The definition
+html.
+    2                                                                      4
+      https://github.com/Belval/TextRecognitionDataGenerator                   https://github.com/microsoft/unilm
+    3                                                                      5
+      https://github.com/jpuigcerver/Laia/tree/master/egs/iam                  https://github.com/meijieru/crnn.pytorch
+                         Encoder        Decoder            Precision    Recall      F1
+                        DeiTBASE    RoBERTaBASE              69.28      69.06      69.17
+                        BEiTBASE RoBERTaBASE                 76.45      76.18      76.31
+                        ResNet50    RoBERTaBASE              66.74      67.29      67.02
+                        DeiTBASE RoBERTaLARGE                77.03      76.53      76.78
+                        BEiTBASE RoBERTaLARGE                79.67      79.06      79.36
+                        ResNet50 RoBERTaLARGE                72.54      71.13      71.83
+                               From Scratch                  36.60      36.97      36.78
+                                  CRNN                       28.71      48.58      36.09
+                              Tesseract OCR                  57.50      51.93      54.57
+
+  Table 2: Ablation study on the SROIE dataset, where all the models are trained using the SROIE dataset only.
+
+                                Model                        Recall    Precision     F1
+                              TrOCRBASE                      96.37       96.31      96.34
+                             TrOCRLARGE                      96.59       96.57      96.58
+                        H&H Lab (Shi et al., 2016a)          96.35       96.52      96.43
+                      MSOLab (Sang and Cuong, 2019)          94.77       94.88      94.82
+                      CLOVA OCR (Baek et al., 2019)           94.3       94.88      94.59
+
+Table 3: Evaluation results (word-level Precision, Recall, F1) on the SROIE dataset, where the baselines come
+from the SROIE leaderboard (https://rrc.cvc.uab.es/?ch=13&com=evaluation&task=2).
+
+
+of the precision, recall and f1 score are described       by RoBERTaLARGE . To evaluate the improvement
+as the following:                                         from the initialization of the pre-trained models,
+                                                          we also experiment with the option that all the pa-
+                           Correct matches                rameter is randomly initialized, while both of the
+      P recision =
+                  The number of the detected words        encoder and the decoder are the base settings. For
+                         Correct matches                  further comparison, we also evaluate the CRNN
+      Recall =
+               The number of the ground truth words
+                                                          baseline model and the Tesseract OCR in this sec-
+                    2 × Precision × Recall
+              F1 =
+                      Precision + Recall
+                                           .              tion, while the latter is an open-source OCR Engine
+                                                          using the LSTM network.
+                                                             Table 2 shows the results of combined mod-
+   The IAM dataset is evaluated by the case sensi-        els. From the results, we observe that the BEiT
+tive Character Error Rate (CER). CER represents           encoders show the best performance among the
+the number of insertions (i), substitutions (s) and       three types of encoders while the best decoders
+deletions (d) of characters, aka the Levenshtein dis-     are the RoBERTaLARGE decoders. Apparently,
+tance, and normalized by the number of the charac-        the pre-trained models on the vision task improve
+ters (n) in the reference text. It is described as:       the performance of text recognition models, and
+             CER = [(i + s + d)/n] × 100                  the pure Transformer models are better than the
+                                                          CRNN models and the Tesseract on this task. Ac-
+                                                          cording to the results, we mainly use two settings
+                                                          on the subsequent experiments: TrOCRBASE (to-
+3.4    Results
+                                                          tal parameters=334M) consists of the encoder of
+3.4.1 Architecture Comparison                             BEiTBASE and the decoder of RoBERTaLARGE
+We compare different combinations of the encoder          while TrOCRLARGE (total parameters=558M)
+and decoder to find the best settings. For en-            consists of the encoder of BEiTLARGE and the de-
+coders, we compare DeiT, BEiT and the ResNet-             coder of RoBERTaLARGE .
+50 network. Both the DeiT and BEiT are the
+base models in their original papers. For de-             3.4.2   SROIE Task 2
+coders, we compare the base decoders initialized by       Table 3 shows the results of the TrOCR models
+RoBERTaBASE and the large decoders initialized            and the current SOTA methods on the leaderboard
+             Model                    Architecture           Training Data      External LM       CER
+           TrOCRBASE                  Transformer           Synthetic + IAM          No           3.42
+          TrOCRLARGE                  Transformer           Synthetic + IAM          No           2.97
+   (Bluche and Messina, 2017)        GCRNN / CTC            Synthetic + IAM         Yes            3.2
+      (Michael et al., 2019)      LSTM/LSTM w/Attn                IAM                No           4.87
+       (Wang et al., 2020)             FCN / GRU                  IAM                No            6.4
+       (Kang et al., 2020)        Transformer w/ CNN        Synthetic + IAM          No           4.67
+        (Diaz et al., 2021)           S-Attn / CTC           Internal + IAM          No           3.53
+        (Diaz et al., 2021)           S-Attn / CTC           Internal + IAM         Yes           2.75
+        (Diaz et al., 2021)       Transformer w/ CNN         Internal + IAM          No           2.96
+
+                    Table 4: Evaluation results (CER) on the IAM Handwriting dataset.
+
+
+of the SROIE dataset. To capture the visual in-       ter results, illustrating after pre-training the Trans-
+formation, all of these baselines leverage CNN-       former structures are competent to extract visual
+based networks as the feature extractors while the    features well. From the experiment results, the
+TrOCR models use the image Transformer to em-         TrOCR models exceed all the methods which only
+bed the information from the image patches. For       use synthetic/IAM as the sole training set with pure
+language modeling, MSO Lab (Sang and Cuong,           Transformer structures and achieve a new state-of-
+2019) and CLOVA OCR (Sang and Cuong, 2019)            the-art CER of 2.97. Without leveraging any extra
+use LSTM layers and H&H Lab (Shi et al., 2016a)       human-labeled data, TrOCR even get comparable
+use GRU layers while the TrOCR models use the         results with the methods in (Diaz et al., 2021) using
+Transformer decoder with a pure attention mech-       the additional internal human-labeled dataset.
+anism. According to the results, the TrOCR mod-
+els outperform the existing SOTA models with          4     Related Work
+pure Transformer structures. It is also confirmed     4.1    Scene Text Recognition
+that Transformer-based text recognition models get
+competitive performance compared to CNN-based         For text recognition, the most popular approaches
+networks in visual feature extraction and RNN-        are usually based on the CTC-based models. (Shi
+based networks in language modeling on this task      et al., 2016a) proposed the standard CRNN, an end-
+without any complex pre/post-process steps.           to-end architecture combined by CNN and RNN.
+                                                      The convolutional layers are used to extract the
+3.4.3 IAM Handwriting Database                        visual features and convert them to sequence by
+Table 4 shows the results of the TrOCR models         concatenating the columns, while the recurrent lay-
+and the existing methods on the IAM Handwriting       ers predict the per-frame labels. They use a CTC
+database. According to the results, the methods       decoding strategy to remove the repeated symbols
+with CTC decoders show good performance on this       and all the blanks from the labels to achieve the
+task and the external LM will result in a signifi-    final prediction. (Su and Lu, 2014) used the His-
+cant reduction in CER. By comparing the meth-         togram of Oriented Gradient (HOG) features ex-
+ods (Bluche and Messina, 2017) with the TrOCR         tracted from the image patches in the same column
+models, the TrOCRLARGE achieves a better result,      of the input image, instead of the features from the
+which indicates that the Transformer decoder is       CNN network. A BiLSTM is then trained for label-
+more competitive than the CTC decoder in text         ing the sequential data with the CTC technique to
+recognition and has enough ability for language       find the best match. (Gao et al., 2019) extracted the
+modeling instead of relying on an external LM.        feature by the densely connected network incorpo-
+Most of the methods use sequence models in their      rating the residual attention block and capture the
+encoders after the CNN-based backbone except the      contextual information and sequential dependency
+FCN encoders in (Wang et al., 2020), which leads      by the CNN network. They compute the probabil-
+to a significant improvement on CER. Instead of       ity distribution on the output of the CNN network
+relying on the features from the CNN-based back-      instead of using an RNN network to model them.
+bone, the TrOCR models using the information          After that, CTC translates the probability distribu-
+from the image patches get similar and even bet-      tions into the final label sequence.
+   The Sequence-to-Sequence models (Zhang et al.,        architectures for comparing different recognition
+2020; Wang et al., 2019; Sheng et al., 2019; Bleeker     models. The framework of the former work con-
+and de Rijke, 2019; Lee et al., 2020; Atienza,           sists of four stages, which are the transformation
+2021) are gradually attracting more attention, es-       stage, feature extraction stage, sequence modeling
+pecially after the advent of the Transformer archi-      stage and prediction stage. In contrast, the latter
+tecture (Vaswani et al., 2017). SaHAN (Zhang             focuses more on encoder/decoder comparison.
+et al., 2020), standing for the scale-aware hierar-
+chical attention network, are proposed to address        4.2    Handwritten
+the character scale-variation issue. The authors use     (Memon et al., 2020) gave a systematic literature
+the FPN network and the CRNN models as the en-           review about the modern methods for handwriting
+coder as well as a hierarchical attention decoder to     recognition. Various attention mechanisms and po-
+retain the multi-scale features. (Wang et al., 2019)     sitional encodings are compared in the (Michael
+extracted a sequence of visual features from the         et al., 2019) to address the alignment between the
+input images by the CNN with attention module            input and output sequence. The combination of
+and BiLSTM. The decoder is composed of the pro-          RNN encoders (mostly LSTM) and CTC decoders
+posed Gated Cascade Attention Module (GCAM)              (Bluche and Messina, 2017; Graves and Schmidhu-
+and generates the target characters from the feature     ber, 2008; Pham et al., 2014) took a large part in
+sequence extracted by the encoder. For the Trans-        the related works for a long time. Besides, (Graves
+former models, (Sheng et al., 2019) first applied the    and Schmidhuber, 2008; Voigtlaender et al., 2016;
+Transformer to Scene Text Recognition. Since the         Puigcerver, 2017) have also tried multidimensional
+input of the Transformer architecture is required to     LSTM encoders. Similar to the scene text recog-
+be a sequence, a CNN-based modality-transform            nition, the seq2seq methods and the scheme for
+block is employed to transform 2D input images           attention decoding have been verified in (Michael
+to 1D sequences. (Bleeker and de Rijke, 2019)            et al., 2019; Kang et al., 2020; Poulos and Valle,
+added a direction embedding to the input of the          2017; Chowdhury and Vig, 2018; Bluche, 2016).
+decoder for the bidirectional text decoding with a       (Ingle et al., 2019) addressed the problems in build-
+single decoder, while (Lee et al., 2020) utilized the    ing a large-scale system.
+two-dimensional dynamic positional embedding
+to keep the spatial structures of the intermediate       5     Conclusion and Future Work
+feature maps for recognizing texts with arbitrary ar-
+rangements and large inter-character spacing. (Yu        In this paper, we present TrOCR, an end-to-end
+et al., 2020) proposed semantic reasoning networks       Transformer-based OCR model for text recognition
+to replace RNN-like structures for more accurate         with pre-trained models. Distinct from existing
+text recognition. (Atienza, 2021) only used the im-      approaches, TrOCR does not reply on the conven-
+age Transformer without text Transformer for the         tional CNN models for image understanding. In-
+text recognition in a non-autoregressive way.            stead, it leverages an image Transformer model as
+                                                         the visual encoder and a text Transformer model
+   The texts in natural images may appear in irreg-      as the textual decoder. Moreover, we use the word-
+ular shapes caused by perspective distortion. (Shi       piece as the basic unit for the recognized output in-
+et al., 2016b; Baek et al., 2019; Litman et al., 2020;   stead of the character-based methods, which saves
+Shi et al., 2018; Zhan and Lu, 2019) address this        the computational cost introduced by the additional
+problem by processing the input images with an           language modeling. Experiment results show that
+initial rectification step. For example, thin-plate      TrOCR achieves state-of-the-art accuracy on both
+spline transformation (Shi et al., 2016b; Baek et al.,   printed text and handwritten text recognition With
+2019; Litman et al., 2020; Shi et al., 2018) is ap-      just a simple encoder-decoder model, without any
+plied to find a smooth spline interpolation between      post-processing steps.
+a set of fiducial points and normalize the text re-         For future research, we treat TrOCR as a re-
+gion to a predefined rectangle, while (Zhan and Lu,      search framework where a variety of visual and
+2019) proposed an iterative rectification network        textual pre-trained models are allowed for plug and
+to model the middle line of scene texts as well as       play in terms of architectures and model sizes, in
+the orientation and boundary of textlines. (Baek         order to support cloud/edge computation. Further-
+et al., 2019; Diaz et al., 2021) proposed universal      more, we will investigate more efficient data syn-
+thesis and augmentation strategies that can work          Yunze Gao, Yingying Chen, Jinqiao Wang, Ming Tang,
+well with the pre-trained encoders and decoders, so         and Hanqing Lu. 2019. Reading scene text with
+                                                            fully convolutional sequence modeling. Neurocom-
+as to further improve the text recognition accuracy.
+                                                            puting, 339:161–170.
+We are also interested in extending the TrOCR to
+address the multilingual text recognition problems.       Alex Graves, Santiago Fernández, Faustino Gomez,
+                                                            and Jürgen Schmidhuber. 2006.          Connectionist
+                                                            temporal classification: labelling unsegmented se-
+                                                            quence data with recurrent neural networks. In Pro-
+References                                                  ceedings of the 23rd international conference on Ma-
+Rowel Atienza. 2021. Vision transformer for fast            chine learning, pages 369–376.
+  and efficient scene text recognition. arXiv preprint
+  arXiv:2105.08582.                                       Alex Graves and Jürgen Schmidhuber. 2008. Offline
+                                                            handwriting recognition with multidimensional re-
+Jeonghun Baek, Geewook Kim, Junyeop Lee, Sungrae            current neural networks. Advances in neural infor-
+   Park, Dongyoon Han, Sangdoo Yun, Seong Joon Oh,          mation processing systems, 21:545–552.
+   and Hwalsuk Lee. 2019. What is wrong with scene
+   text recognition model comparisons? dataset and        R Reeve Ingle, Yasuhisa Fujii, Thomas Deselaers,
+   model analysis. In Proceedings of the IEEE/CVF In-       Jonathan Baccash, and Ashok C Popat. 2019. A scal-
+   ternational Conference on Computer Vision, pages         able handwritten text recognition system. In 2019
+  4715–4723.                                                International Conference on Document Analysis and
+                                                            Recognition (ICDAR), pages 17–24. IEEE.
+Hangbo Bao, Li Dong, and Furu Wei. 2021. Beit: Bert
+  pre-training of image transformers.                     Lei Kang, Pau Riba, Marçal Rusiñol, Alicia Fornés,
+                                                            and Mauricio Villegas. 2020. Pay attention to what
+Maurits Bleeker and Maarten de Rijke. 2019. Bidirec-        you read: Non-recurrent handwritten text-line recog-
+ tional scene text recognition with a single decoder.       nition. arXiv preprint arXiv:2005.13044.
+ arXiv preprint arXiv:1912.03656.
+                                                          Praveen Krishnan and C. V. Jawahar. 2016. Generating
+Théodore Bluche. 2016. Joint line segmentation and          synthetic data for text recognition.
+  transcription for end-to-end handwritten paragraph
+  recognition. Advances in Neural Information Pro-        Junyeop Lee, Sungrae Park, Jeonghun Baek,
+  cessing Systems, 29:838–846.                              Seong Joon Oh, Seonghyeon Kim, and Hwal-
+                                                            suk Lee. 2020. On recognizing texts of arbitrary
+Théodore Bluche and Ronaldo Messina. 2017. Gated            shapes with 2d self-attention. In Proceedings of
+  convolutional recurrent neural networks for multilin-     the IEEE/CVF Conference on Computer Vision and
+  gual handwriting recognition. In 2017 14th IAPR           Pattern Recognition Workshops, pages 546–547.
+  international conference on document analysis and
+  recognition (ICDAR), volume 1, pages 646–651.           Minghui Liao, Zhaoyi Wan, Cong Yao, Kai Chen, and
+  IEEE.                                                     Xiang Bai. 2019. Real-time scene text detection
+                                                            with differentiable binarization.
+Arindam Chowdhury and Lovekesh Vig. 2018. An ef-
+  ficient end-to-end neural model for handwritten text    Ron Litman, Oron Anschel, Shahar Tsiper, Roee Lit-
+  recognition. arXiv preprint arXiv:1807.07965.             man, Shai Mazor, and R Manmatha. 2020. Scat-
+                                                            ter: selective context attentional scene text recog-
+Jacob Devlin, Ming-Wei Chang, Kenton Lee, and               nizer. In Proceedings of the IEEE/CVF Conference
+   Kristina Toutanova. 2019. Bert: Pre-training of deep     on Computer Vision and Pattern Recognition, pages
+   bidirectional transformers for language understand-      11962–11972.
+   ing.
+                                                          Yinhan Liu, Myle Ott, Naman Goyal, Jingfei Du, Man-
+Daniel Hernandez Diaz, Siyang Qin, Reeve Ingle, Ya-         dar Joshi, Danqi Chen, Omer Levy, Mike Lewis,
+  suhisa Fujii, and Alessandro Bissacco. 2021. Re-          Luke Zettlemoyer, and Veselin Stoyanov. 2019.
+  thinking text line recognition models.                    Roberta: A robustly optimized bert pretraining ap-
+                                                            proach.
+Li Dong, Nan Yang, Wenhui Wang, Furu Wei, Xi-
+  aodong Liu, Yu Wang, Jianfeng Gao, Ming Zhou,           Jamshed Memon, Maira Sami, Rizwan Ahmed Khan,
+  and Hsiao-Wuen Hon. 2019. Unified language                and Mueen Uddin. 2020. Handwritten optical char-
+  model pre-training for natural language understand-       acter recognition (ocr): A comprehensive system-
+  ing and generation.                                       atic literature review (slr). IEEE Access, 8:142642–
+                                                            142668.
+Alexey Dosovitskiy, Lucas Beyer, Alexander
+  Kolesnikov, Dirk Weissenborn, Xiaohua Zhai,             Johannes Michael, Roger Labahn, Tobias Grüning,
+  Thomas Unterthiner, Mostafa Dehghani, Matthias            and Jochen Zöllner. 2019. Evaluating sequence-
+  Minderer, Georg Heigold, Sylvain Gelly, Jakob             to-sequence models for handwritten text recogni-
+  Uszkoreit, and Neil Houlsby. 2021. An image               tion. In 2019 International Conference on Doc-
+  is worth 16x16 words: Transformers for image              ument Analysis and Recognition (ICDAR), pages
+  recognition at scale. ICLR.                               1286–1293. IEEE.
+Myle Ott, Sergey Edunov, Alexei Baevski, Angela            Hugo Touvron, Matthieu Cord, Matthijs Douze, Fran-
+ Fan, Sam Gross, Nathan Ng, David Grangier, and              cisco Massa, Alexandre Sablayrolles, and Hervé Jé-
+ Michael Auli. 2019. fairseq: A fast, extensible             gou. 2021a. Training data-efficient image trans-
+ toolkit for sequence modeling. In Proceedings of            formers & distillation through attention. In Inter-
+ NAACL-HLT 2019: Demonstrations.                             national Conference on Machine Learning, pages
+                                                             10347–10357. PMLR.
+Vu Pham, Théodore Bluche, Christopher Kermorvant,
+  and Jérôme Louradour. 2014. Dropout improves re-         Hugo Touvron, Matthieu Cord, Matthijs Douze, Fran-
+  current neural networks for handwriting recognition.       cisco Massa, Alexandre Sablayrolles, and Hervé Jé-
+  In 2014 14th international conference on frontiers in      gou. 2021b. Training data-efficient image trans-
+  handwriting recognition, pages 285–290. IEEE.              formers & distillation through attention. In Inter-
+                                                             national Conference on Machine Learning, pages
+Jason Poulos and Rafael Valle. 2017. Attention net-          10347–10357. PMLR.
+   works for image-to-text.
+                                                           Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob
+Joan Puigcerver. 2017. Are multidimensional recurrent        Uszkoreit, Llion Jones, Aidan N Gomez, Łukasz
+  layers really necessary for handwritten text recogni-      Kaiser, and Illia Polosukhin. 2017. Attention is all
+  tion? In 2017 14th IAPR International Conference           you need. In Advances in neural information pro-
+  on Document Analysis and Recognition (ICDAR),              cessing systems, pages 5998–6008.
+  volume 1, pages 67–72. IEEE.
+                                                           Paul Voigtlaender, Patrick Doetsch, and Hermann Ney.
+Aditya Ramesh, Mikhail Pavlov, Gabriel Goh, Scott            2016. Handwriting recognition with large multidi-
+  Gray, Chelsea Voss, Alec Radford, Mark Chen, and           mensional long short-term memory recurrent neural
+  Ilya Sutskever. 2021. Zero-shot text-to-image gener-       networks. In 2016 15th International Conference
+  ation. arXiv preprint arXiv:2102.12092.                    on Frontiers in Handwriting Recognition (ICFHR),
+                                                             pages 228–233. IEEE.
+Dinh Viet Sang and Le Tran Bao Cuong. 2019. Im-
+  proving crnn with efficientnet-like feature extractor    Siwei Wang, Yongtao Wang, Xiaoran Qin, Qijie Zhao,
+  and multi-head attention for text recognition. In Pro-     and Zhi Tang. 2019. Scene text recognition via
+  ceedings of the Tenth International Symposium on           gated cascade attention. In 2019 IEEE International
+  Information and Communication Technology, pages            Conference on Multimedia and Expo (ICME), pages
+  285–290.                                                   1018–1023. IEEE.
+
+Rico Sennrich, Barry Haddow, and Alexandra Birch.          Tianwei Wang, Yuanzhi Zhu, Lianwen Jin, Canjie Luo,
+  2015. Neural machine translation of rare words with        Xiaoxue Chen, Yaqiang Wu, Qianying Wang, and
+  subword units. arXiv preprint arXiv:1508.07909.             Mingxiang Cai. 2020. Decoupled attention network
+                                                              for text recognition. In Proceedings of the AAAI
+Fenfen Sheng, Zhineng Chen, and Bo Xu. 2019. Nrtr:           Conference on Artificial Intelligence, volume 34,
+  A no-recurrence sequence-to-sequence model for              pages 12216–12224.
+  scene text recognition. In 2019 International Con-
+  ference on Document Analysis and Recognition (IC-        Ross Wightman. 2019. Pytorch image mod-
+  DAR), pages 781–786. IEEE.                                 els.  https://github.com/rwightman/
+                                                             pytorch-image-models.
+Baoguang Shi, Xiang Bai, and Cong Yao. 2016a. An
+                                                           Deli Yu, Xuan Li, Chengquan Zhang, Tao Liu, Junyu
+  end-to-end trainable neural network for image-based
+                                                             Han, Jingtuo Liu, and Errui Ding. 2020. Towards
+  sequence recognition and its application to scene
+                                                             accurate scene text recognition with semantic rea-
+  text recognition. IEEE transactions on pattern anal-
+                                                             soning networks. In 2020 IEEE/CVF Conference on
+  ysis and machine intelligence, 39(11):2298–2304.
+                                                             Computer Vision and Pattern Recognition (CVPR),
+Baoguang Shi, Xinggang Wang, Pengyuan Lyu, Cong              pages 12110–12119.
+  Yao, and Xiang Bai. 2016b. Robust scene text recog-      Fangneng Zhan and Shijian Lu. 2019. Esir: End-to-
+  nition with automatic rectification. In Proceedings        end scene text recognition via iterative image rectifi-
+  of the IEEE conference on computer vision and pat-         cation. In Proceedings of the IEEE/CVF Conference
+  tern recognition, pages 4168–4176.                         on Computer Vision and Pattern Recognition, pages
+Baoguang Shi, Mingkun Yang, Xinggang Wang,                   2059–2068.
+  Pengyuan Lyu, Cong Yao, and Xiang Bai. 2018.             Jiaxin Zhang, Canjie Luo, Lianwen Jin, Tianwei Wang,
+  Aster: An attentional scene text recognizer with flex-      Ziyan Li, and Weiying Zhou. 2020. Sahan: Scale-
+  ible rectification. IEEE transactions on pattern anal-      aware hierarchical attention network for scene text
+  ysis and machine intelligence, 41(9):2035–2048.             recognition. Pattern Recognition Letters, 136:205–
+                                                              211.
+Bolan Su and Shijian Lu. 2014. Accurate scene text
+  recognition based on recurrent neural network. In
+  Asian Conference on Computer Vision, pages 35–48.
+  Springer.
+
