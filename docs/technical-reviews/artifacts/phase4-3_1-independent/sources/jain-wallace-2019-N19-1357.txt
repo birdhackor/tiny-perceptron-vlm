@@ -1,0 +1,1031 @@
+                                    Attention is not Explanation
+
+
+                   Sarthak Jain                                     Byron C. Wallace
+               Northeastern University                            Northeastern University
+            jain.sar@husky.neu.edu                           b.wallace@northeastern.edu
+
+
+
+
+                      Abstract                                 after 15 minutes watching the       after 15 minutes watching the
+                                                               movie i was asking myself what to   movie i was asking myself what to
+                                                               do leave the theater sleep or try   do leave the theater sleep or try
+    Attention mechanisms have seen wide adop-                  to keep watching the movie to       to keep watching the movie to
+                                                               see if there was anything worth i   see if there was anything worth i
+    tion in neural NLP models. In addition to                  finally watched the movie what a    finally watched the movie what a
+    improving predictive performance, these are                waste of time maybe i am not a 5    waste of time maybe i am not a 5
+                                                               years old kid anymore               years old kid anymore
+    often touted as affording transparency: mod-
+                                                                          original ↵                         adversarial ↵
+                                                                                                                         ˜
+    els equipped with attention provide a distribu-
+                                                                      f (x|↵, ✓) = 0.01                   f (x|˜
+                                                                                                               ↵, ✓) = 0.01
+    tion over attended-to input units, and this is
+    often presented (at least implicitly) as com-             Figure 1: Heatmap of attention weights induced over
+    municating the relative importance of inputs.             a negative movie review. We show observed model at-
+    However, it is unclear what relationship ex-              tention (left) and an adversarially constructed set of at-
+    ists between attention weights and model out-             tention weights (right). Despite being quite dissimilar,
+    puts. In this work we perform extensive exper-            these both yield effectively the same prediction (0.01).
+    iments across a variety of NLP tasks that aim
+    to assess the degree to which attention weights
+    provide meaningful “explanations" for predic-             interpretability are common in the literature, e.g.,
+    tions. We find that they largely do not. For              (Xu et al., 2015; Choi et al., 2016; Lei et al., 2017;
+    example, learned attention weights are fre-               Martins and Astudillo, 2016; Xie et al., 2017).1
+    quently uncorrelated with gradient-based mea-                Implicit in this is the assumption that the input
+    sures of feature importance, and one can iden-            units (e.g., words) accorded high attention weights
+    tify very different attention distributions that
+                                                              are responsible for model outputs. But as far as
+    nonetheless yield equivalent predictions. Our
+    findings show that standard attention mod-                we are aware, this assumption has not been for-
+    ules do not provide meaningful explanations               mally evaluated, and our findings here suggest that
+    and should not be treated as though they do.              it is problematic. More specifically, we empir-
+    Code to reproduce all experiments is avail-               ically investigate the relationship between atten-
+    able at https://github.com/successar/                     tion weights, inputs, and outputs. Assuming at-
+    AttentionExplanation.                                     tention provides an explanation for model predic-
+                                                              tions, we might expect the following properties to
+1   Introduction and Motivation                               hold. (i) Attention weights should correlate with
+Attention mechanisms (Bahdanau et al., 2014) in-              feature importance measures (e.g., gradient-based
+duce conditional distributions over input units to            measures); (ii) Alternative (or counterfactual) at-
+compose a weighted context vector for down-                   tention weight configurations ought to yield corre-
+stream modules. These are now a near-ubiquitous               sponding changes in prediction (and if they do not
+component of neural NLP architectures. Attention              then are equally plausible as explanations). We re-
+weights are often claimed (implicitly or explic-              port that neither property is consistently observed
+itly) to afford insights into the “inner-workings”            by standard attention mechanisms in the context
+of models: for a given output one can inspect the             of text classification, question answering (QA),
+inputs to which the model assigned large attention            and Natural Language Inference (NLI) tasks when
+weights. Li et al. (2016) summarized this com-                RNN encoders are used.
+monly held view in NLP: “Attention provides an                    1
+                                                                   We do not intend to single out any particular work; in-
+important way to explain the workings of neural               deed one of the authors has himself presented (supervised)
+models". Indeed, claims that attention provides               attention as providing interpretability (Zhang et al., 2016).
+
+                                                        3543
+                                 Proceedings of NAACL-HLT 2019, pages 3543–3556
+            Minneapolis, Minnesota, June 2 - June 7, 2019. c 2019 Association for Computational Linguistics
+   Consider Figure 1. The left panel shows the              equivalent predictions as when using the origi-
+original attention distribution α over the words of         nally induced attention weights, despite attending
+a particular movie review using a standard atten-           to entirely different input features. Further, ran-
+tive BiLSTM architecture for sentiment analysis.            domly permuting attention weights often induces
+It is tempting to conclude from this that the token         only minimal changes in output.
+waste is largely responsible for the model coming
+to its disposition of ‘negative’ (ŷ = 0.01). But one       2       Preliminaries and Assumptions
+can construct an alternative attention distribution         We consider exemplar NLP tasks for which atten-
+α̃ (right panel) that attends to entirely different to-     tion mechanisms are commonly used: classifica-
+kens yet yields an essentially identical prediction         tion, natural language inference (NLI), and ques-
+(holding all other parameters of f , θ, constant).          tion answering.3 We adopt the following general
+   Such counterfactual distributions imply that ex-         modeling assumptions and notation.
+plaining the original prediction by highlighting               We assume model inputs x ∈ RT ×|V | , com-
+attended-to tokens is misleading insofar as alter-          posed of one-hot encoded words at each position.
+native attention distributions would have yielded           These are passed through an embedding matrix E
+an equivalent prediction (e.g., one might conclude          which provides dense (d dimensional) token repre-
+from the right panel that model output was due pri-         sentations xe ∈ RT ×d . Next, an encoder Enc con-
+marily to was rather than waste). Further, the at-          sumes the embedded tokens in order, producing
+tention weights in this case correlate only weakly          T m-dimensional hidden states: h = Enc(xe ) ∈
+with gradient-based measures of feature impor-              RT ×m . We predominantly consider a Bi-RNN
+tance (τg = 0.29). And arbitrarily permuting the            as the encoder module, but for completeness we
+entries in α yields a median output difference of           also analyze convolutional and (unordered) ‘aver-
+0.006 with the original prediction.                         age embedding’ variants.4
+   These and similar findings call into question               A similarity function φ maps h and a query
+the view that attention provides meaningful insight         Q ∈ Rm (e.g., hidden representation of a question
+into model predictions. We thus caution against             in QA, or the hypothesis in NLI) to scalar scores,
+using attention weights to highlight input tokens           and attention is then induced over these: α̂ =
+“responsible for” model outputs and constructing            softmax(φ(h, Q)) ∈ RT . In this work we con-
+just-so stories on this basis, particularly with com-       sider two common similarity functions: Additive
+plex encoders.                                              φ(h, Q) = vT tanh(W1 h + W2 Q) (Bahdanau
+Research questions and contributions. We ex-                et al., 2014) and Scaled Dot-Product φ(h, Q) =
+                                                             hQ
+amine the extent to which the (often implicit) nar-         √
+                                                              m
+                                                                 (Vaswani et al., 2017), where v, W1 , W2 are
+rative that attention provides model transparency2          model parameters.
+holds across tasks by exploring the following em-              Finally, a dense layer Dec with parameters θ
+pirical questions.                                          consumes a weighted instance representation and
+                                                            yields Pa prediction ŷ = σ(θ · hα ) ∈ R|Y| , where
+  1. To what extent do induced attention weights            hα = Tt=1 α̂t · ht ; σ is an output activation func-
+     correlate with measures of feature impor-              tion; and |Y| denotes the label set size.
+     tance – specifically, those resulting from gra-
+     dients and leave-one-out methods?                      3       Datasets and Tasks
+
+  2. Would alternative attention weights (and               For binary text classification, we use:
+     hence distinct heatmaps/“explanations”) nec-              Stanford Sentiment Treebank (SST) (Socher
+     essarily yield different predictions?                  et al., 2013). 10,662 sentences tagged with senti-
+                                                            ment on a scale from 1 (most negative) to 5 (most
+  Our findings with respect to these questions (as-         positive). We filter out neutral instances and di-
+suming a BiRNN encoder) are summarized as fol-              chotomize the remaining sentences into positive
+lows: (1) Only weakly and inconsistently, and, (2)          (4, 5) and negative (1, 2).
+No; it is very often possible to construct adver-               3
+                                                                  While attention is perhaps most common in seq2seq
+sarial attention distributions that yield effectively       tasks like translation, our impression is that interpretability
+                                                            is not typically emphasized for such tasks, in general.
+  2                                                             4
+    Defined as per (Lipton, 2016); we are interested in           In the latter case, ht is the embedding of token t after
+whether attended-to features are responsible for outputs.   being passed through a linear layer and ReLU activation.
+
+                                                        3544
+ Dataset                 |V |    Avg. length           Train size              Test size        Test performance
+ SST                     16175   19                   3034 / 3321              863 / 862               0.81
+ IMDB                    13916   179                 12500 / 12500            2184 / 2172              0.88
+ ADR Tweets              8686    20                  14446 / 1939             3636 / 487               0.61
+ 20 Newsgroups           8853    115                   716 / 710               151 / 183               0.94
+ AG News                 14752   36                  30000 / 30000            1900 / 1900              0.96
+ Diabetes (MIMIC)        22316   1858                 6381 / 1353             1295 / 319               0.79
+ Anemia (MIMIC)          19743   2188                 1847 / 3251              460 / 802               0.92
+ CNN                     74790   761                     380298                   3198                 0.64
+ bAbI (Task 1 / 2 / 3)   40      8 / 67 / 421             10000                   1000           1.0 / 0.65 / 0.64
+ SNLI                    20982   14             182764 / 183187 / 183416   3219 / 3237 / 3368          0.78
+
+Table 1: Dataset characteristics. For train and test size, we list the cardinality for each class, where applicable:
+0/1 for binary classification (top), and 0 / 1 / 2 for NLI (bottom). Average length is in tokens. Test metrics are
+F1 score, accuracy, and micro-F1 for classification, QA, and NLI, respectively; all correspond to performance
+using a BiLSTM encoder. We note that results using convolutional and average (i.e., non-recurrent) encoders are
+comparable for classification though markedly worse for QA tasks.
+
+   IMDB Large Movie Reviews Corpus (Maas                     matic parsing of news articles from CNN. Each
+et al., 2011). Binary sentiment classification               instance comprises a paragraph-question-answer
+dataset containing 50,000 polarized (positive or             triplet, where the answer is one of the anonymized
+negative) movie reviews, split into half for train-          entities in the paragraph.
+ing and testing.                                                bAbI (Weston et al., 2015). We consider the
+   Twitter Adverse Drug Reaction dataset (Nikfar-            three tasks presented in the original bAbI dataset
+jam et al., 2015). A corpus of ∼8000 tweets re-              paper, training separate models for each. These
+trieved from Twitter, annotated by domain experts            entail finding (i) a single supporting fact for a
+as mentioning adverse drug reactions.                        question and (ii) two or (iii) three supporting state-
+   20 Newsgroups (Hockey vs Baseball). Col-                  ments, chained together to compose a coherent
+lection of ∼20,000 newsgroup correspondences,                line of reasoning.
+partitioned (nearly) evenly across 20 categories.
+We extract instances belonging to baseball and               Finally, for Natural Language Inference (NLI):
+hockey, which we designate as 0 and 1, respec-                  The SNLI dataset (Bowman et al., 2015). 570k
+tively, to derive a binary classification task.              human-written English sentence pairs manually
+   AG News Corpus (Business vs World).5 496,835              labeled for balanced classification with the labels
+news articles from 2000+ sources. We follow                  neutral, contradiction, and entailment, supporting
+(Zhang et al., 2015) in filtering out all but the top        the task of natural language inference (NLI). In
+4 categories. We consider the binary classification          this work, we generate an attention distribution
+task of discriminating between world (0) and busi-           over premise words conditioned on the hidden rep-
+ness (1) articles.                                           resentation induced for the hypothesis.
+   MIMIC ICD9 (Diabetes) (Johnson et al., 2016).                We restrict ourselves to comparatively sim-
+A subset of discharge summaries from the MIMIC               ple instantiations of attention mechanisms, as de-
+III dataset of electronic health records. The task is        scribed in the preceding section. This means we
+to recognize if a given summary has been labeled             do not consider recently proposed ‘BiAttentive’
+with the ICD9 code for diabetes (or not).                    architectures that attend to tokens in the respec-
+   MIMIC ICD9 (Chronic vs Acute Anemia) (John-               tive inputs, conditioned on the other inputs (Parikh
+son et al., 2016). A subset of discharge sum-                et al., 2016; Seo et al., 2016; Xiong et al., 2016).
+maries from MIMIC III dataset (Johnson et al.,                  Table 1 provides summary statistics for all
+2016) known to correspond to patients with ane-              datasets, as well as the observed test performances
+mia. Here the task to distinguish the type of ane-           for additional context.
+mia for each report – acute (0) or chronic (1).
+                                                             4    Experiments
+For Question Answering (QA):
+  CNN News Articles (Hermann et al., 2015). A                We run a battery of experiments that aim to ex-
+corpus of cloze-style questions created via auto-            amine empirical properties of learned attention
+  5
+    http://www.di.unipi.it/~gulli/AG_                        weights and to interrogate their interpretability
+corpus_of_news_articles.html                                 and transparency. The key questions are: Do
+
+                                                        3545
+                              Gradient (BiLSTM) τg        Gradient (Average) τg     Leave-One-Out (BiLSTM) τloo
+     Dataset       Class    Mean ± Std.     Sig. Frac.   Mean ± Std. Sig. Frac.     Mean ± Std.      Sig. Frac.
+      SST            0       0.34 ± 0.21      0.48       0.61 ± 0.20      0.87       0.27 ± 0.19       0.33
+                     1       0.36 ± 0.21      0.49       0.60 ± 0.21      0.83       0.32 ± 0.19       0.40
+      IMDB           0       0.44 ± 0.06      1.00       0.67 ± 0.05      1.00       0.34 ± 0.07       1.00
+                     1       0.43 ± 0.06      1.00       0.68 ± 0.05      1.00       0.34 ± 0.07       0.99
+   ADR Tweets        0       0.47 ± 0.18      0.76       0.73 ± 0.13      0.96       0.29 ± 0.20       0.44
+                     1       0.49 ± 0.15      0.85       0.72 ± 0.12      0.97       0.44 ± 0.16       0.74
+     20News          0       0.07 ± 0.17      0.37       0.79 ± 0.07      1.00       0.06 ± 0.15       0.29
+                     1       0.21 ± 0.22      0.61       0.75 ± 0.08      1.00       0.20 ± 0.20       0.62
+    AG News          0       0.36 ± 0.13      0.82       0.78 ± 0.07      1.00       0.30 ± 0.13       0.69
+                     1       0.42 ± 0.13      0.90       0.76 ± 0.07      1.00       0.43 ± 0.14       0.91
+     Diabetes        0       0.42 ± 0.05      1.00       0.75 ± 0.02      1.00       0.41 ± 0.05       1.00
+                     1       0.40 ± 0.05      1.00       0.75 ± 0.02      1.00       0.45 ± 0.05       1.00
+     Anemia          0       0.47 ± 0.05      1.00       0.77 ± 0.02      1.00       0.46 ± 0.05       1.00
+                     1       0.46 ± 0.06      1.00       0.77 ± 0.03      1.00       0.47 ± 0.06       1.00
+       CNN        Overall    0.24 ± 0.07      0.99       0.50 ± 0.10      1.00       0.20 ± 0.07       0.98
+      bAbI 1      Overall    0.25 ± 0.16      0.55       0.72 ± 0.12      0.99       0.16 ± 0.14       0.28
+      bAbI 2      Overall   −0.02 ± 0.14      0.27       0.68 ± 0.06      1.00      −0.01 ± 0.13       0.27
+      bAbI 3      Overall    0.24 ± 0.11      0.87       0.61 ± 0.13      1.00       0.26 ± 0.10       0.89
+       SNLI          0       0.31 ± 0.23      0.36       0.59 ± 0.18      0.80       0.16 ± 0.26       0.20
+                     1       0.33 ± 0.21      0.38       0.58 ± 0.19      0.80       0.36 ± 0.19       0.44
+                     2       0.31 ± 0.21      0.36       0.57 ± 0.19      0.80       0.34 ± 0.20       0.40
+Table 2: Mean and std. dev. of correlations between gradient/leave-one-out importance measures and attention
+weights. Sig. Frac. columns report the fraction of instances for which this correlation is statistically significant;
+note that this largely depends on input length, as correlation does tend to exist, just weakly. Encoders are denoted
+parenthetically. These are representative results; exhaustive results for all encoders are available to browse online.
+
+learned attention weights agree with alternative,            quantifying how different attention weights can be
+natural measures of feature importance? And,                 for a given instance without changing the model
+Had we attended to different features, would the             output by more than some threshold .
+prediction have been different?                                 All results presented below are generated on
+   More specifically, in Section 4.1, we empir-              test sets. We present results for Additive atten-
+ically analyze the correlation between gradient-             tion below. The results for Scaled Dot Product
+based feature importance and learned attention               in its place are comparable. We provide a web
+weights, and between ‘leave-one-out’ (LOO) mea-              interface to interactively browse the (very large
+sures and the same. In Section 4.2 we then con-              set of) plots for all datasets, model variants, and
+sider counterfactual (to those observed) attention           experiment types: https://successar.github.
+distributions. Under the assumption that atten-              io/AttentionExplanation/docs/.
+tion weights are explanatory, such counterfactual               In the following sections, we use Total Vari-
+distributions may be viewed as alternative poten-            ation Distance (TVD) as the measure of change
+tial explanations; if these do not correspondingly           between output distributions, defined as follows.
+                                                                                   P|Y|
+change model output, then the original attention             TVD(ŷ1 , ŷ2 ) = 21 i=1 |ŷ1i − ŷ2i |. We use
+weights do not provide unique explanation for                the Jensen-Shannon Divergence (JSD) to quan-
+predictions, i.e., attending to other features could         tify the difference between two attention dis-
+have resulted in the same output.                            tributions: JSD(α1 , α2 ) = 12 KL[α1 || α1 +α
+                                                                                                         2
+                                                                                                            2
+                                                                                                              ]+
+                                                             1          α1 +α2
+   To generate counterfactual attention distribu-            2 KL[α2 ||     2  ].
+tions, we first consider randomly permuting ob-
+served attention weights and recording associated            4.1   Correlation Between Attention and
+changes in model outputs (4.2.1). We then pro-                     Feature Importance Measures
+pose explicitly searching for “adversarial” atten-           We empirically characterize the relationship be-
+tion weights that maximally differ from the ob-              tween attention weights and corresponding fea-
+served attention weights (which one might show in            ture importance scores. Specifically we measure
+a heatmap and use to explain a model prediction),            correlations between attention and: (1) gradient
+and yet yield an effectively equivalent prediction           based measures of feature importance (τg ), and,
+(4.2.2). The latter strategy also provides a use-            (2) differences in model output induced by leav-
+ful potential metric for the reliability of attention        ing features out (τloo ). While these measures are
+weights as explanations: we can report a measure             themselves insufficient for interpretation of neu-
+
+                                                         3546
+                                                                                                                      0.6
+                                                              0.150                                                                                            0.8
+                        0.125                                                                                         0.5
+                                                              0.125
+                        0.100                                                                                         0.4                                      0.6
+                                                              0.100
+                        0.075                                                                                         0.3
+                                                              0.075                                                                                            0.4
+                        0.050
+                                                                                                                      0.2
+                                                              0.050                                                                                            0.2
+                                                                                                                      0.1
+                        0.025                                 0.025
+                                                                                                                      0.0                                      0.0
+                        0.000                                 0.000                                                          1.0   0.5 0.0   0.5   1.0                1.0   0.5 0.0       0.5   1.0
+                                1.0   0.5 0.0    0.5   1.0                1.0    0.5 0.0          0.5     1.0
+                            (a) SST (BiLSTM)                             (b) SST (Average)                            (c) Diabetes (BiLSTM) 1.0 (d) Diabetes (Average)
+                                                             1.0                                                1.0                                                                                   1.0
+
+0.125                    0.15 0.3                               0.30                                                                                           0.20
+                                                             0.80.15                                            0.80.3                                   0.8                                          0.8
+                                                                0.25                                                        0.15
+0.100                                                                                                                                                          0.15
+                         0.10 0.2                         0.6 0.20                                              0.6                                      0.6                                          0.6
+0.075                                                        0.10                                                 0.2 0.10
+                                                                0.15                                                                                     0.4 0.10
+0.050                                                     0.4                                                   0.4                                                                                   0.4
+                         0.05 0.1                            0.050.10                                             0.1 0.05
+0.025                                                     0.2 0.05                                              0.2                                      0.2 0.05                                     0.2
+0.000                   0.00 0.0                             0.000.00                                           0.0 0.00                                0.00
+        1   0         1        1 1         0 0         1 10.0        1 1                0 0               1 10.0 0.0 0.2 1
+                                                                                                                      1 0.4                 0 1.0 1 0.0
+                                                                                                                                      0.60 0.8      1 0.0 0.21 0.4            0.6 0 0.8     1.0 1
+                                                                                                                                                                                                      0.0
+                                                                                                                                                                                                            0.0   0.2   0.4   0.6   0.8   1.0
+                                                                   0.0    0.2   0.4   0.6   0.8     1.0
+
+                          (e) SNLI (BiLSTM)                         (f) SNLI (Average)                          (g) CNN-QA (BiLSTM)                            (h) BAbI 1 (BiLSTM)
+
+                Figure 2: Histogram of Kendall τ between attention and gradients. Encoder variants are denoted parenthetically;
+                colors indicate predicted classes. Exhaustive results are available for perusal online. Best viewed in color.
+
+
+                ral model behavior (Feng et al., 2018), they do                                                       (recall: 0 indicates no correspondence, 1 im-
+                provide measures of individual feature importance                                                     plies perfect concordance) for the BiRNN encoder.
+                with known semantics (Ross et al., 2017). It is thus                                                  The centrality of observed densities hovers around
+                instructive to ask whether these measures correlate                                                   or below 0.5 in most of the corpora considered.
+                with attention weights.                                                                               Moreover, as per Table 2, correlation is sufficiently
+                   The process we follow to quantify this is de-                                                      weak that a statistically significant correlation be-
+                scribed in Algorithm 1. We denote the input re-                                                       tween attention weights and feature importance
+                sulting from removing the word at position t in x                                                     scores (both gradient and feature erasure based)
+                by x−t . Note that we disconnect the computation                                                      cannot consistently be established across corpora.
+                graph at the attention module so that the gradient                                                       In contrast, gradients in “average” embedding
+                does not flow through this layer.                                                                     based models show very high degree of correspon-
+                                                                                                                      dence with attention weights – on average across
+                Algorithm 1 Feature Importance Computations                                                           corpora, correlation between LOO scores and at-
+                  h ← Enc(x), α̂ ← softmax(φ(h, Q))                                                                   tention weights is ∼0.375 points higher for this
+                  ŷ ← Dec(h, α)                                                                                      encoder, compared to the BiLSTM. These results
+                  gt ← | w=1 1[xtw = 1] ∂x∂ytw | , ∀t ∈ [1, T ]
+                        P|V |
+                                                                                                                      suggest that, in general, attention weights do not
+                  τg ← Kendall-τ (α, g)                                                                               strongly or consistently agree with such feature
+                  ∆ŷt ← TVD(ŷ(x−t ), ŷ(x)) , ∀t ∈ [1, T ]                                                          importance scores in models with contextualized
+                  τloo ← Kendall-τ (α, ∆ŷ)                                                                           embeddings. This is problematic for the view of
+                                                                                                                      attention weights as explanatory, given the face
+                   Table 2 reports summary statistics of Kendall                                                      validity of input gradient/erasure based explana-
+                τ correlations for each dataset. Full distributions                                                   tions (Ross et al., 2017; Li et al., 2016). On some
+                are shown in Figure 2, which plots histograms of                                                      datasets — notably the MIMIC tasks, and to a
+                τg for every data point in the respective corpora.                                                    lesser extent the QA corpora — this correlation
+                (Corresponding plots for τloo are similar and the                                                     is consistently significant but remains relatively
+                full set can be browsed via the online supplement.)                                                   weak. This could be attributed to increased length
+                We plot these separately for each class: orange ()                                                   of documents for these datasets providing stronger
+                represents instances predicted as positive, and pur-                                                  signal to standard hypothesis testing methods.
+                ple () those predicted to be negative. For SNLI,                                                       For reference we report correlations between
+                colors ,  and  code for contradiction, entail-                                                     gradients and LOO scores in the Appendix and
+                ment, and neutral respectively.                                                                       online materials; these are consistently stronger
+                   In general, observed correlations are modest                                                       than the correlation between attention weights and
+
+                                                                                                          3547
+either feature importance score for the recurrent        makes little difference to the prediction.
+(BiLSTM) encoder. These exhibit, on average, a              In some cases, such as predicting ICD codes
+(i) 0.2 and (ii) ∼ 0.25 greater correlation with each    from notes using the MIMIC dataset, one can see
+other than BiLSTM attention and (i) LOO and (ii)         different behavior for the respective classes. For
+gradient scores.                                         the Diabetes task, e.g., attention behaves intu-
+                                                         itively for at least the positive class; perturbing
+4.2   Counterfactual Attention Weights                   attention in this case causes large changes to the
+We next consider what-if scenarios corresponding         prediction. We again conjecture that this is due to
+to alternative (counterfactual) attention weights.       a few tokens serving as high precision indicators
+The idea is to investigate whether the prediction        for the positive class; in their absence (or when
+would have been different, had the model empha-          they are not attended to sufficiently), the predic-
+sized (attended to) different input features. More       tion drops considerably. However, this is the ex-
+precisely, suppose α̂ = {α̂t }Tt=1 are the atten-        ception rather than the rule.
+tion weights induced for an instance, giving rise
+to model output ŷ. We then consider counterfac-         4.2.2 Adversarial Attention
+tual distributions over y, under alternative α.          We next propose a more focused approach to
+   We experiment with two means of construct-            counterfactual attention weights, which we will re-
+ing such distributions. First, we simply scram-          fer to as adversarial attention. The intuition is to
+ble the original attention weights α̂, re-assigning      explicitly seek out attention weights that differ as
+each value to an arbitrary, randomly sampled in-         much as possible from the observed attention dis-
+dex (input feature). Second, we generate an ad-          tribution and yet leave the prediction effectively
+versarial attention distribution: this is a set of at-   unchanged. Such adversarial weights violate an
+tention weights that is maximally distinct from α̂       intuitive property of explanations: shifting model
+but that nonetheless yields an equivalent predic-        attention to very different input features should
+tion (i.e., prediction within some  of ŷ).             yield corresponding changes in the output. Alter-
+                                                         native attention distributions identified adversari-
+4.2.1 Attention Permutation                              ally may then be viewed as equally plausible ex-
+To characterize model behavior when attention            planations for the same output.
+weights are shuffled, we follow Algorithm 2.                Operationally, realizing this objective requires
+                                                         specifying a value  that defines what qualifies as
+Algorithm 2 Permuting attention weights                  a “small” difference in model output. Once this
+  h ← Enc(x), α̂ ← softmax(φ(h, Q))                      is specified, we aim to find k adversarial distri-
+  ŷ ← Dec(h, α̂)                                        butions {α(1) , ..., α(k) }, such that each α(i) max-
+  for p ← 1 to 100 do                                    imizes the distance from original α̂ but does not
+      αp ← Permute(α̂)                                   change the output by more than . In practice we
+      ŷ p ← Dec(h, αp )     . Note : h is not changed   simply set this to 0.01 for text classification and
+      ∆ŷ p ← TVD[ŷ p , ŷ]                             0.05 for QA datasets.6
+  end for                                                   We propose the following optimization problem
+  ∆ŷ med ← Medianp (∆ŷ p )                             to identify adversarial attention weights.
+
+   Figure 3 depicts the relationship between the            maximize f ({α(i) }ki=1 )
+                                                            α(1) ,...,α(k)                                        (1)
+maximum attention value in the original α̂ and the                                           (i)
+median induced change in model output (∆ŷ med )            subject to ∀i TVD[ŷ(x, α ), ŷ(x, α̂)] ≤ 
+across instances in the respective datasets. Colors
+again indicate class predictions, as above.              Where f ({α(i) }ki=1 ) is:
+   We observe that there exist many points with             k
+small ∆ŷ med despite large magnitude attention
+                                                            X                           1     X
+                                                                  JSD[α(i) , α̂] +              JSD[α(i) , α(j) ]
+weights. These are cases in which the attention                                      k(k − 1)
+                                                            i=1                                i<j
+weights might suggest explaining an output by                                                                     (2)
+a small set of features (this is how one might                6
+                                                              We make the threshold slightly higher for QA because
+reasonably read a heatmap depicting the atten-           the output space is larger and thus small dimension-wise per-
+tion weights), but where scrambling the attention        turbations can produce comparatively large TVD.
+
+                                                     3548
+                          [0.00,                                                   [0.00,                                    [0.00,                         [0.00,
+                           0.25)                                                    0.25)                                     0.25)                          0.25)
+                          [0.25,                                                   [0.25,                                    [0.25,                         [0.25,
+
+          Max attention
+
+
+
+
+                                                                   Max attention
+                           0.50)                                                    0.50)                                     0.50)                          0.50)
+                          [0.50,                                                   [0.50,                                    [0.50,                         [0.50,
+                           0.75)                                                    0.75)                                     0.75)                          0.75)
+                          [0.75,                                                   [0.75,                                    [0.75,                         [0.75,
+                           1.00)                                                    1.00)                                     1.00)                          1.00)
+                                    0.0         0.5          1.0                             0.0         0.5          1.0              0.0    0.5    1.0              0.0    0.5    1.0
+                                      Median Output Difference                                 Median Output Difference
+                            (a) SST (BiLSTM)                                            (b) SST (CNN)                       (c) Diabetes (BiLSTM)             (d) Diabetes (CNN)
+                   [0.00,                                                   [0.00,                                          [0.00,                         [0.00,
+                    0.25)                                                    0.25)                                           0.25)                          0.25)
+                   [0.25,                                                   [0.25,                                          [0.25,                         [0.25,
+                    0.50)                                                    0.50)                                           0.50)                          0.50)
+                   [0.50,                                                   [0.50,                                          [0.50,                         [0.50,
+                    0.75)                                                    0.75)                                           0.75)                          0.75)
+                   [0.75,                                                   [0.75,                                          [0.75,                         [0.75,
+                    1.00)                                                    1.00)                                           1.00)                          1.00)
+                                   0.0         0.5         1.0                              0.0         0.5         1.0               0.0    0.5    1.0              0.0    0.5    1.0
+
+             (e) CNN-QA (BiLSTM)                                              (f) bAbI 1 (BiLSTM)                            (g) SNLI (BiLSTM)                 (h) SNLI (CNN)
+
+Figure 3: Median change in output (∆ŷ med ) (x-axis) densities in relation to the max attention (max α̂) (y-axis)
+obtained by randomly permuting instance attention weights. Encoders denoted parenthetically. Plots for all corpora
+and using all encoders are available online.
+
+
+In practice we maximize a relaxed version                                                                                   Algorithm 3 Finding adversarial attention weights
+of this objective via the Adam SGD opti-                                                                                      h ← Enc(x), α̂ ← softmax(φ(h, Q))
+mizer (Kingma and Ba, 2014): f ({α(i) }ki=1 ) +                                                                               ŷ ← Dec(h, α̂)
+λ Pk                             (i)               7                                                                          α(1) , ..., α(k) ← Optimize Eq 1
+ k       i=1 max(0, TVD[ŷ(x, α ), ŷ(x, α̂)] − ).
+     Equation 1 attempts to identify a set of new at-                                                                         for i ← 1 to k do
+tention distributions over the input that is as far                                                                               ŷ (i) ← Dec(h, α(i) )       . h is not changed
+as possible from the observed α (as measured                                                                                      ∆ŷ (i) ← TVD[ŷ, ŷ (i) ]
+by JSD) and from each other (and thus diverse),                                                                                   ∆α(i) ← JSD[α̂, α(i) ]
+while keeping the output of the model within                                                                                 end for
+of the original prediction. We denote the out-                                                                                -max JSD ← maxi 1[∆ŷ (i) ≤ ]∆α(i)
+put obtained under the ith adversarial attention by
+ŷ (i) . Note that the JS Divergence between any two
+categorical distributions (irrespective of length) is                                                                       case that quite different attention distributions over
+bounded from above by 0.69.                                                                                                 inputs would yield essentially the same (within )
+     One can view an attentive decoder as a func-                                                                           output.
+tion that maps from the space of latent input repre-                                                                            In the case of the diabetes task, we again ob-
+sentations and attention weights over input words                                                                           serve a pattern of low JSD for positive examples
+∆T −1 to a distribution over the output space Y.                                                                            (where evidence is present) and high JSD for neg-
+Thus, for any output ŷ, we can define how likely                                                                           ative examples. In other words, for this task, if one
+each attention distribution α will generate the out-                                                                        perturbs the attention weights when it is inferred
+put as inversely proportional to TVD(y(α), ŷ).                                                                             that the patient is diabetic, this does change the
+     Figure 4 depicts the distributions of max JSDs                                                                         output, which is intuitively agreeable. However,
+realized over instances with adversarial attention                                                                          this behavior again is an exception to the rule.
+weights for a subset of the datasets considered.
+                                                                                                                                We also consider the relationship between max
+Colors again indicate predicted class. Mass toward
+                                                                                                                            attention weights (indicating strong emphasis on
+the upper-bound of 0.69 indicates that we are fre-
+                                                                                                                            a particular feature) and the dissimilarity of iden-
+quently able to identify maximally different atten-
+                                                                                                                            tified adversarial attention weights, as measured
+tion weights that hardly budge model output. We
+                                                                                                                            via JSD, for adversaries that yield a prediction
+observe that one can identify adversarial attention
+                                                                                                                            within  of the original model output. Intuitively,
+weights associated with high JSD for a significant
+                                                                                                                            one might hope that if attention weights are peaky,
+number of examples. This means that is often the
+                                                                                                                            then counterfactual attention weights that are very
+   7
+       We set λ = 500.                                                                                                      different but which yield equivalent predictions
+
+                                                                                                                      3549
+                                                                     [0.00,                                                      [0.00,
+                                                                                                                                   0.3                                                      [0.00,                                                      [0.00,
+                                                                      0.25)
+                                                                     0.08                                                         0.25)                                                       0.3
+                                                                                                                                                                                             0.25)                                                       0.25)
+        0.06
+
+
+
+
+                                           Max Attention
+
+
+
+
+                                                                                                       Max Attention
+                                                                     [0.25,                                                      [0.25,
+
+
+
+
+                                                                                                                                                                     Max Attention
+
+
+
+
+                                                                                                                                                                                                                                 Max Attention
+                                                                     0.06
+                                                                      0.50)                                                       0.50)                                                     [0.25,                                                      [0.25,
+                                                                                                                                   0.2                                                       0.50)
+                                                                                                                                                                                              0.2                                                        0.50)
+        0.04
+                                                                     [0.50,
+                                                                     0.04                                                        [0.50,                                                     [0.50,                                                      [0.50,
+                                                                      0.75)                                                       0.75)
+                                                                                                                                   0.1                                                       0.75)                                                       0.75)
+        0.02                                                         0.02                                                                                                                     0.1
+                                                                     [0.75,                                                      [0.75,                                                     [0.75,                                                      [0.75,
+                                                                      1.00)                                                       1.00)                                                      1.00)                                                       1.00)
+        0.00                                                         0.00                                                          0.0                                                        0.0
+               0.0 0.2 0.4 0.6                                             0.00.0 0.20.2 0.40.4 0.60.6                                     0.0 0.2
+                                                                                                                                          0.0    0.2 0.40.4 0.60.6                                   0.0
+                                                                                                                                                                                                      0.0 0.20.2 0.40.4 0.60.6                                   0.0 0.2 0.4 0.6
+               Max JS Divergence within                                   Max
+                                                                            MaxJSJSDivergence
+                                                                                    Divergencewithin
+                                                                                                within                                    Max JS Divergence within                                    Max JS Divergence within                                   Max JS Divergence within
+           (a) SST (BiLSTM)                                                   (b) SST (CNN)                                        (c) Diabetes (BiLSTM)                                        (d) Diabetes (CNN)
+                                                                                                                                   0.10
+                                                                     [0.00,                                                      [0.00,                                                     [0.00,
+
+                                          Max JS Divergence within
+
+
+
+
+                                                                                                      Max JS Divergence within
+
+
+
+
+                                                                                                                                                                 Max JS Divergence within
+                                                                                                                                                                                              0.125                                                     [0.00,
+
+
+
+
+                                                                                                                                                                                                                             Max JS Divergence within
+         0.06                                                         0.25)                                                       0.25)
+                                                                                                                                   0.08                                                      0.25)                                                       0.25)
+                                                                       0.06
+                                                                     [0.25,                                                      [0.25,                                                       0.100
+                                                                                                                                                                                            [0.25,                                                      [0.25,
+         0.04                                                         0.50)                                                        0.06
+                                                                                                                                  0.50)                                                      0.50)                                                       0.50)
+                                                                       0.04                                                                                                                   0.075
+                                                                     [0.50,                                                      [0.50,
+                                                                                                                                   0.04                                                     [0.50,                                                      [0.50,
+         0.02                                                         0.75)                                                       0.75)                                                       0.050
+                                                                                                                                                                                             0.75)                                                       0.75)
+                                                                       0.02                                                        0.02
+                                                                     [0.75,                                                      [0.75,                                                     [0.75,
+                                                                                                                                                                                              0.025                                                     [0.75,
+                                                                      1.00)                                                       1.00)                                                      1.00)                                                       1.00)
+         0.00                                                          0.00                                                        0.00                                                       0.000
+                0.0   0.2   0.4   0.6                                         0.0
+                                                                              0.0 0.2
+                                                                                   0.2 0.4
+                                                                                         0.4 0.60.6                                     0.0 0.2
+                                                                                                                                        0.0  0.2 0.4
+                                                                                                                                                   0.4 0.60.6                                       0.0
+                                                                                                                                                                                                    0.0 0.2 0.40.4 0.60.6                                        0.0    0.2 0.4 0.6
+                                                                                  Max Attention                                             Max Attention                                               Max Attention                                                  Max Attention
+          (e) SNLI (BiLSTM)                                               (f) SNLI (CNN)                                     (g) CNN-QA (BiLSTM)                                             (h) BAbI 1 (BiLSTM)
+
+Figure 4: Histogram of maximum adversarial JS Divergence (-max JSD) between original and adversarial atten-
+tions over all instances. In all cases shown, |ŷ adv − ŷ| < . Encoders are specified in parantheses. Best viewed in
+color.
+
+would be more difficult to identify.                                                                                              work (Alvarez-Melis and Jaakkola, 2017). We
+   Figure 5 illustrates that while there is a nega-                                                                               also note that there has been complementary work
+tive trend to this effect, it is realized only weakly.                                                                            demonstrating correlation between human atten-
+Put another way: there exist many cases (in all                                                                                   tion and induced attention weights, which was rel-
+datasets) in which despite a high attention weight,                                                                               atively strong when humans agreed on an explana-
+an alternative and quite different attention config-                                                                              tion (Pappas and Popescu-Belis, 2016). It would
+uration over inputs yields effectively the same out-                                                                              be interesting to explore if such cases present ex-
+put. In light of this, presenting a heatmap implying                                                                              plicit ‘high precision’ signals in the text (for ex-
+that a particular set of features is primarily respon-                                                                            ample, the positive label in diabetes dataset).
+sible for an output would seem to be misleading.                                                                                     More specific to attention mechanisms, re-
+                                                                                                                                  cent promising work has proposed more princi-
+5   Related Work                                                                                                                  pled attention variants designed explicitly for in-
+                                                                                                                                  terpretability; these may provide greater trans-
+We have focused on attention mechanisms and the
+                                                                                                                                  parency by imposing hard, sparse attention. Such
+question of whether they afford transparency, but a
+                                                                                                                                  instantiations explicitly select (modest) subsets of
+number of interesting strategies unrelated to atten-
+                                                                                                                                  inputs to be considered when making a predic-
+tion mechanisms have been recently proposed to
+                                                                                                                                  tion, which are then by construction responsible
+provide insights into neural NLP models. These
+                                                                                                                                  for model output (Lei et al., 2016; Peters et al.,
+include approaches that measure feature impor-
+                                                                                                                                  2018). Structured attention models (Kim et al.,
+tance based on gradient information (Ross et al.,
+                                                                                                                                  2017) provide a generalized framework for de-
+2017; Sundararajan et al., 2017) (aligned with the
+                                                                                                                                  scribing and fitting attention variants with explicit
+gradient-based measures that we have used here),
+                                                                                                                                  probabilistic semantics. Tying attention weights to
+and methods based on representation erasure (Li
+                                                                                                                                  human-provided rationales is another potentially
+et al., 2016), in which dimensions are removed
+                                                                                                                                  promising avenue (Bao et al., 2018). We hope
+and then the resultant change in output is recorded
+                                                                                                                                  our work motivates further development of these
+(similar to our experiments with removing tokens
+                                                                                                                                  methods, resulting in attention variants that both
+from inputs, albeit we do this at the input layer).
+                                                                                                                                  improve predictive performance and provide in-
+   Comparing such importance measures to atten-
+                                                                                                                                  sights into model predictions.
+tion scores may provide additional insights into
+the working of attention based models (Ghaeini                                                                                    6        Discussion and Conclusions
+et al., 2018). Another novel line of work in this
+direction involves explicitly identifying explana-                                                                                We have provided evidence that correlation be-
+tions of black-box predictions via a causal frame-                                                                                tween intuitive feature importance measures (in-
+
+                                                                                                      3550
+                                                   [0.00,
+                                                       0.10                                                [0.00,0.3                          [0.00,0.3                         [0.00,
+                                                    0.25)                                                   0.25)                              0.25)                             0.25)
+ 0.06                                                  0.08
+
+                                   Max Attention
+
+
+
+
+                                                                                           Max Attention
+                                                   [0.25,                                                  [0.25,                             [0.25,                            [0.25,
+                                                    0.50)
+                                                       0.06                                                 0.50)0.2                           0.50)0.2                          0.50)
+ 0.04
+                                                   [0.50,                                                  [0.50,                             [0.50,                            [0.50,
+                                                       0.04
+                                                    0.75)                                                   0.75)0.1                           0.75)0.1                          0.75)
+ 0.02
+                                                       0.02
+                                                   [0.75,                                                  [0.75,                             [0.75,                            [0.75,
+                                                    1.00)                                                   1.00)                              1.00)                             1.00)
+ 0.00                                                  0.00                                                     0.0                                0.0
+        0.0 0.2 0.4 0.6                                    0.00.0 0.20.2 0.40.4 0.60.6                              0.00.0 0.20.2 0.4
+                                                                                                                                   0.4 0.6
+                                                                                                                                        0.6            0.00.0 0.2
+                                                                                                                                                               0.2 0.4
+                                                                                                                                                                    0.4 0.6
+                                                                                                                                                                         0.6             0.0   0.2   0.4    0.6
+        Max JS Divergence within                          MaxMaxJS Divergence
+                                                                   JS Divergence
+                                                                               within
+                                                                                  within                           Max JS Divergence within
+                                                     (a) SST (BiLSTM)                                          (b) SST (CNN)                  (c) Diabetes (BiLSTM)              (d) Diabetes (CNN)
+0.10
+                                            [0.00,
+                                              0.125                                                 [0.00,                                    [0.00,                           [0.00,
+0.08                                         0.25)                                                     0.06
+                                                                                                     0.25)                                     0.25)                            0.25)
+                                              0.100                                                                                              0.06
+                                            [0.25,                                                  [0.25,                                    [0.25,                           [0.25,
+0.06                                         0.50)
+                                              0.075                                                  0.50)
+                                                                                                       0.04                                    0.50)                            0.50)
+                                                                                                                                                 0.04
+0.04                                        [0.50,
+                                              0.050                                                 [0.50,                                    [0.50,                           [0.50,
+                                             0.75)                                                   0.75)
+                                                                                                       0.02                                    0.75)                            0.75)
+0.02                                                                                                                                             0.02
+                                              0.025
+                                            [0.75,                                                  [0.75,                                    [0.75,                           [0.75,
+                                             1.00)                                                   1.00)                                     1.00)                            1.00)
+0.00                                          0.000                                                    0.00                                      0.00
+       0.0   0.2   0.4   0.6                       0.0   0.2 0.4
+                                                    0.0 0.2       0.6
+                                                              0.4 0.6                                       0.0 0.2
+                                                                                                           0.0        0.4 0.6
+                                                                                                                 0.2 0.4  0.6                        0.0
+                                                                                                                                                      0.0 0.2
+                                                                                                                                                           0.2 0.4
+                                                                                                                                                                0.4 0.6
+                                                                                                                                                                    0.6                  0.0   0.2   0.4   0.6
+
+                                      (e) CNN-QA (BiLSTM)                                            (f) bAbI 1 (BiLSTM)                      (g) SNLI (BiLSTM)                   (h) SNLI (CNN)
+
+                     Figure 5: Densities of maximum JS divergences (-max JSD) (x-axis) as a function of the max attention (y-axis)
+                     in each instance for obtained between original and adversarial attention weights.
+
+                     cluding gradient and feature erasure approaches)                                                                         explanation is an admittedly subjective question.
+                     and learned attention weights is weak when using                                                                            We note that the counterfactual attention ex-
+                     a BiRNN encoder (Section 4.1). We also estab-                                                                            periments demonstrate the existence of alternative
+                     lished that counterfactual attention distributions                                                                       heatmaps that yield equivalent predictions; thus
+                     — which would tell a different story about why                                                                           one cannot conclude that the model made a partic-
+                     a model made the prediction that it did — often                                                                          ular prediction because it attended over inputs in
+                     have no effect on model output (Section 4.2).                                                                            a specific way. But these adversarial weights may
+                        These results suggest that while attention mod-                                                                       themselves be unlikely under the attention module
+                     ules consistently yield improved performance on                                                                          parameters. Further, it may be that multiple plau-
+                     NLP tasks, their ability to provide transparency                                                                         sible explanations exist, complicating interpreta-
+                     for model predictions is (in the sense of point-                                                                         tion. We would maintain that in such cases the
+                     ing to inputs responsible for outputs) questionable.                                                                     model should highlight all plausible explanations,
+                     More generally, how one is meant to interpret the                                                                        but one may instead view a model that provides
+                     ‘heatmaps’ of attention weights placed over inputs                                                                       ‘sufficient’ explanation as reasonable.
+                     that are commonly presented is unclear. These                                                                               An additional limitation is that we have only
+                     seem to suggest a story about how a model arrived                                                                        considered a handful of attention variants, selected
+                     at a particular disposition, but the results here in-                                                                    to reflect common module architectures for the
+                     dicate that the relationship between this and atten-                                                                     respective tasks included in our analysis. Alter-
+                     tion is not obvious, at least for RNN encoders.                                                                          native attention specifications may yield different
+                        There are important limitations to this work                                                                          conclusions; and indeed we hope this work moti-
+                     and the conclusions we can draw from it. We have                                                                         vates further development of principled attention
+                     reported the (generally weak) correlation between                                                                        mechanisms (or encoders). Finally, we have lim-
+                     learned attention weights and various alternative                                                                        ited our evaluation to tasks with unstructured out-
+                     measures of feature importance, e.g., gradients.                                                                         put spaces, i.e., we have not considered seq2seq
+                     We do not imply that such alternative measures are                                                                       tasks, which we leave for future work. However
+                     necessarily ideal or should be considered ‘ground                                                                        we believe interpretability is more often a consid-
+                     truth’. While such measures do enjoy a clear in-                                                                         eration in, e.g., classification than in translation.
+                     trinsic (to the model) semantics, their interpreta-
+                     tion for non-linear neural networks can nonethe-                                                                         Acknowledgements
+                     less be difficult for humans (Feng et al., 2018).                                                                        We thank Zachary Lipton for insightful feedback
+                     Still, that attention consistently correlates poorly                                                                     on a preliminary version of this manuscript.
+                     with multiple such measures ought to give pause to                                                                         This work was supported by the Army Research
+                     practitioners. That said, exactly how strong such                                                                        Office (ARO), award W911NF1810328.
+                     correlations ‘should’ be to establish reliability as
+
+                                                                                                                                         3551
+References                                                 Tao Lei et al. 2017. Interpretable neural models for
+                                                             natural language processing. Ph.D. thesis, Mas-
+David Alvarez-Melis and Tommi S Jaakkola. 2017.              sachusetts Institute of Technology.
+  A causal framework for explaining the predictions
+  of black-box sequence-to-sequence models. arXiv          Jiwei Li, Will Monroe, and Dan Jurafsky. 2016. Un-
+  preprint arXiv:1707.01943.                                  derstanding neural networks through representation
+                                                              erasure. arXiv preprint arXiv:1612.08220.
+Dzmitry Bahdanau, Kyunghyun Cho, and Yoshua Ben-
+  gio. 2014. Neural machine translation by jointly         Zachary C Lipton. 2016. The mythos of model inter-
+  learning to align and translate. arXiv preprint            pretability. arXiv preprint arXiv:1606.03490.
+  arXiv:1409.0473.
+                                                           Andrew L. Maas, Raymond E. Daly, Peter T. Pham,
+Yujia Bao, Shiyu Chang, Mo Yu, and Regina Barzilay.          Dan Huang, Andrew Y. Ng, and Christopher Potts.
+  2018. Deriving machine attention from human ra-            2011. Learning word vectors for sentiment analy-
+  tionales. arXiv preprint arXiv:1808.09367.                 sis. In Proceedings of the 49th Annual Meeting of
+                                                             the Association for Computational Linguistics: Hu-
+Samuel R Bowman, Gabor Angeli, Christopher Potts,            man Language Technologies, pages 142–150, Port-
+  and Christopher D Manning. 2015. A large anno-             land, Oregon, USA. Association for Computational
+  tated corpus for learning natural language inference.      Linguistics.
+  arXiv preprint arXiv:1508.05326.
+                                                           Andre Martins and Ramon Astudillo. 2016. From soft-
+Edward Choi, Mohammad Taha Bahadori, Jimeng Sun,             max to sparsemax: A sparse model of attention and
+  Joshua Kulas, Andy Schuetz, and Walter Stewart.            multi-label classification. In International Confer-
+  2016. Retain: An interpretable predictive model for        ence on Machine Learning, pages 1614–1623.
+  healthcare using reverse time attention mechanism.
+  In Advances in Neural Information Processing Sys-        Azadeh Nikfarjam, Abeed Sarker, Karen OâĂŹCon-
+  tems, pages 3504–3512.                                     nor, Rachel Ginn, and Graciela Gonzalez. 2015.
+                                                             Pharmacovigilance from social media: mining ad-
+Shi Feng, Eric Wallace, Alvin Grissom II, Pedro              verse drug reaction mentions using sequence label-
+  Rodriguez, Mohit Iyyer, and Jordan Boyd-Graber.            ing with word embedding cluster features. Journal
+  2018. Pathologies of neural models make interpreta-        of the American Medical Informatics Association,
+  tion difficult. In Empirical Methods in Natural Lan-       22(3):671–681.
+  guage Processing.
+                                                           Nikolaos Pappas and Andrei Popescu-Belis. 2016. Hu-
+Reza Ghaeini, Xiaoli Fern, and Prasad Tadepalli. 2018.       man versus machine attention in document classifi-
+  Interpreting recurrent and attention-based neural          cation: A dataset with crowdsourced annotations. In
+  models: a case study on natural language inference.        Proceedings of The Fourth International Workshop
+  In Proceedings of the 2018 Conference on Empiri-           on Natural Language Processing for Social Media,
+  cal Methods in Natural Language Processing, pages          pages 94–100.
+  4952–4957.
+                                                           Ankur P Parikh, Oscar Täckström, Dipanjan Das, and
+Karl Moritz Hermann, Tomas Kocisky, Edward                   Jakob Uszkoreit. 2016. A decomposable attention
+  Grefenstette, Lasse Espeholt, Will Kay, Mustafa Su-        model for natural language inference. arXiv preprint
+  leyman, and Phil Blunsom. 2015. Teaching ma-               arXiv:1606.01933.
+  chines to read and comprehend. In Advances in Neu-
+  ral Information Processing Systems, pages 1693–          Ben Peters, Vlad Niculae, and André FT Martins. 2018.
+  1701.                                                      Interpretable structure induction via sparse atten-
+                                                             tion. In Proceedings of the 2018 EMNLP Workshop
+Alistair EW Johnson, Tom J Pollard, Lu Shen,                 BlackboxNLP: Analyzing and Interpreting Neural
+  H Lehman Li-wei, Mengling Feng, Moham-                     Networks for NLP, pages 365–367.
+  mad Ghassemi, Benjamin Moody, Peter Szolovits,
+  Leo Anthony Celi, and Roger G Mark. 2016.                Andrew Slavin Ross, Michael C Hughes, and Finale
+  Mimic-iii, a freely accessible critical care database.     Doshi-Velez. 2017. Right for the right reasons:
+  Scientific data, 3:160035.                                 Training differentiable models by constraining their
+                                                             explanations. arXiv preprint arXiv:1703.03717.
+Yoon Kim, Carl Denton, Luong Hoang, and Alexan-
+  der M Rush. 2017. Structured attention networks.         Minjoon Seo, Aniruddha Kembhavi, Ali Farhadi, and
+  arXiv preprint arXiv:1702.00887.                           Hannaneh Hajishirzi. 2016. Bidirectional attention
+                                                             flow for machine comprehension. arXiv preprint
+Diederik P Kingma and Jimmy Ba. 2014. Adam: A                arXiv:1611.01603.
+  method for stochastic optimization. arXiv preprint
+  arXiv:1412.6980.                                         Richard Socher, Alex Perelygin, Jean Wu, Jason
+                                                             Chuang, Christopher D Manning, Andrew Ng, and
+Tao Lei, Regina Barzilay, and Tommi Jaakkola. 2016.          Christopher Potts. 2013. Recursive deep models
+  Rationalizing neural predictions. arXiv preprint           for semantic compositionality over a sentiment tree-
+  arXiv:1606.04155.                                          bank. In Proceedings of the 2013 conference on
+
+                                                       3552
+    empirical methods in natural language processing,     A.1    BiLSTM
+    pages 1631–1642.
+                                                          We use an embedding size of 300 and hidden size
+Mukund Sundararajan, Ankur Taly, and Qiqi Yan.            of 128 for all datasets except bAbI (for which we
+ 2017. Axiomatic attribution for deep networks.           use 50 and 30, respectively). All models were reg-
+ arXiv preprint arXiv:1703.01365.
+                                                          ularized using `2 regularization (λ = 10−5 ) ap-
+Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob          plied to all parameters. We use a sigmoid activa-
+  Uszkoreit, Llion Jones, Aidan N Gomez, Łukasz           tion functions for binary classification tasks, and
+  Kaiser, and Illia Polosukhin. 2017. Attention is all
+  you need. In Advances in Neural Information Pro-        a softmax for all other outputs. We trained the
+  cessing Systems, pages 5998–6008.                       model using maximum likelihood loss using the
+                                                          Adam Optimizer with default parameters in Py-
+Jason Weston, Antoine Bordes, Sumit Chopra, Alexan-
+   der M Rush, Bart van Merriënboer, Armand Joulin,       Torch.
+   and Tomas Mikolov. 2015. Towards ai-complete
+   question answering: A set of prerequisite toy tasks.   A.2    CNN
+   arXiv preprint arXiv:1502.05698.                       We use an embedding size of 300 and 4 kernels of
+Qizhe Xie, Xuezhe Ma, Zihang Dai, and Eduard Hovy.        sizes [1, 3, 5, 7], each with 64 filters, giving a final
+  2017. An interpretable knowledge transfer model         hidden size of 256 (for bAbI we use 50 and 8 re-
+  for knowledge base completion. arXiv preprint           spectively with same kernel sizes). We use ReLU
+  arXiv:1704.05908.
+                                                          activation function on the output of the filters. All
+Caiming Xiong, Victor Zhong, and Richard Socher.          other configurations remain same as BiLSTM.
+  2016. Dynamic coattention networks for question
+  answering. arXiv preprint arXiv:1611.01604.             A.3    Average
+Kelvin Xu, Jimmy Ba, Ryan Kiros, Kyunghyun Cho,           We use the embedding size of 300 and a projection
+  Aaron Courville, Ruslan Salakhudinov, Rich Zemel,       size of 256 with ReLU activation on the output of
+  and Yoshua Bengio. 2015. Show, attend and tell:
+  Neural image caption generation with visual at-         the projection matrix. All other configurations re-
+  tention. In International Conference on Machine         main same as BiLSTM.
+  Learning, pages 2048–2057.
+                                                          B     Further details regarding attentional
+Xiang Zhang, Junbo Zhao, and Yann LeCun. 2015.
+  Character-level convolutional networks for text clas-         module of gradient
+  sification. In Advances in neural information pro-
+  cessing systems, pages 649–657.                         In the gradient experiments, we made the decision
+                                                          to cut-off the computation graph at the attention
+Ye Zhang, Iain Marshall, and Byron C Wallace. 2016.       module so that gradient does not flow through this
+  Rationale-augmented convolutional neural networks
+  for text classification. In Proceedings of the Con-     layer and contribute to the gradient feature im-
+  ference on Empirical Methods in Natural Language        portance score. For the sake of gradient calcula-
+  Processing (EMNLP), volume 2016, pages 795–804.         tion this effectively treats the attention as a sepa-
+Appendices                                                rate input to the network, independent of the input.
+                                                          We argue that this is a natural choice to make for
+A     Model details                                       our analysis because it calculates: how much does
+For all datasets, we use spaCy for tokenization.          the output change as we perturb particular inputs
+We map out of vocabulary words to a special               (words) by a small amount, while paying the same
+<unk> token and map all words with numeric                amount of attention to said word as originally es-
+characters to ‘qqq’. Each word in the vocabulary          timated and shown in the heatmap?
+was initialized to pretrained embeddings. For gen-
+                                                          C     Correlations between Feature
+eral domain corpora we used either (i) FastText
+                                                                Importance measures
+Embeddings (SST, IMDB, 20News, and CNN)
+trained on Simple English Wikipedia, or, (ii)             A question one might have here is how well cor-
+GloVe 840B embeddings (AGNews and SNLI).                  related LOO and gradients are with one another.
+For the MIMIC dataset, we learned word embed-             We report such results in their entirety on the pa-
+dings using Gensim over all discharge summaries           per website, and we summarize their correlations
+in the corpus. We initialize words not present            relative to those realized by attention in a BiL-
+in the vocabulary using samples from a standard           STM model with LOO measures in Figure 6. This
+Gaussian N (µ = 0, σ 2 = 1).                              reports the mean differences between (i) gradient
+
+                                                      3553
+                 SST                                                                                SST
+               IMDB                                                                               IMDB
+                ADR                                                                                ADR
+           AG News                                                                            AG News
+      20 News Sports                                                                     20 News Sports
+Dataset
+
+
+
+
+                                                                                   Dataset
+            Diabetes                                                                           Diabetes
+             Anemia                                                                             Anemia
+                CNN                                                                                CNN
+              bAbI 1                                                                             bAbI 1
+              bAbI 2                                                                             bAbI 2
+              bAbI 3                                                                             bAbI 3
+                SNLI                                                                               SNLI
+                       0.1     0.0         0.1      0.2      0.3          0.4                          0.0   0.1       0.2     0.3    0.4    0.5     0.6   0.7
+                                   Mean Difference between Correlations                                            Mean Difference between Correlations
+
+  Figure 6: Mean difference in correlation of (i) LOO                               Figure 8: Difference in mean correlation of attention
+  vs. Gradients and (ii) Attention vs. LOO scores using                             weights vs. LOO importance measures for (i) Av-
+  BiLSTM Encoder + Tanh Attention. On average the                                   erage (feed-forward projection) and (ii) BiLSTM En-
+  former is more correlated than the latter by >0.2 τloo .                          coders with Tanh attention. Average correlation (ver-
+                                                                                    tical bar) is on average ∼0.375 points higher for the
+                 SST                                                                simple feedforward encoder, indicating greater corre-
+               IMDB
+                                                                                    spondence with the LOO measure.
+                ADR
+           AG News
+      20 News Sports
+Dataset
+
+
+
+
+            Diabetes                                                                tention and feature importance scores; but as per
+             Anemia
+                CNN                                                                 Figure 7, they do not. We also note that the cor-
+              bAbI 1                                                                relations between the attention weights on top of
+              bAbI 2
+              bAbI 3                                                                feedforward (projection) encoder and LOO scores
+                SNLI                                                                are much stronger, on average, than those be-
+                             0.0         0.1       0.2       0.3          0.4
+                                   Mean Difference between Correlations             tween BiLSTM attention weights and LOO. This
+                                                                                    is shown in Figure 8. Were low correlations due
+  Figure 7: Mean difference in correlation of (i) LOO
+                                                                                    simply to noise, we would not expect this.8
+  vs. Gradients and (ii) Attention vs. Gradients using
+  BiLSTM Encoder + Tanh Attention. On average the
+  former is more correlated than the latter by ∼0.25 τg .                           D            Graphs
+                                                                                    To provide easy navigation of our (large set
+  and LOO correlations, and (ii) attention and LOO                                  of) graphs depicting attention weights on
+  correlations. As expected, we find that these ex-                                 various datasets/tasks under various model
+  hibit, in general, considerably higher correlation                                configuration we have created an interactive
+  with one another (on average) than LOO does with                                  interface to browse these results, accessible
+  attention scores. (The lone exception is on SNLI.)                                at:     https://successar.github.io/
+  Figure 7 shows the same for gradients and atten-                                  AttentionExplanation/docs/.
+  tion scores; the differences are comparable. In the
+  ADR and Diabetes corpora, a few high precision
+                                                                                    E            Adversarial Heatmaps
+  tokens indicate (the positive) class, and in these                                SST
+  cases we see better agreement between LOO/gra-                                       Original: reggio falls victim to relying on the
+  dient measures with attention; this is consistent                                 very digital technology that he fervently scorns
+  with Figure 4 which shows that it is difficult for                                creating a meandering inarticulate and ultimately
+  the BiLSTM variant to find adversarial attention                                  disappointing film
+  distributions for Diabetes.                                                          Adversarial: reggio falls victim to relying on
+     A potential issues with using Kendall τ as our                                 the very digital technology that he fervently scorns
+  metric here is that (potentially many) irrelevant                                 creating a meandering inarticulate and ultimately
+  features may add noise to the correlation mea-                                    disappointing film ∆ŷ: 0.005
+  sures. We acknowledge that this as a shortcoming
+  of the metric. One observation that may mitigate                                  IMDB
+  this concern is that we might expect such noise to                                         8
+                                                                                        The same contrast can be seen for the gradients, as one
+  depress the LOO and gradient correlations to the                                  would expect given the direct gradient paths in the projection
+  same extent as they do the correlation between at-                                network back to individual tokens.
+
+                                                                                3554
+   Original: fantastic movie one of the best film         SNLI
+noir movies ever made bad guys bad girls a jewel             Hypothesis:a man is running on foot
+heist a twisted morality a kidnapping everything is          Original Premise Attention:a man in a gray
+here jean has a face that would make bogart proud         shirt and blue shorts is standing outside of an
+and the rest of the cast is is full of character actors   old fashioned ice cream shop named sara ’s old
+who seem to to know they’re onto something good           fashioned ice cream , holding his bike up , with a
+get some popcorn and have a great time                    wood like table , chairs , benches in front of him .
+   Adversarial: fantastic movie one of the best              Adversarial Premise Attention:a man in a
+film noir movies ever made bad guys bad girls             gray shirt and blue shorts is standing outside of
+a jewel heist a twisted morality a kidnapping             an old fashioned ice cream shop named sara ’s old
+everything is here jean has a face that would make        fashioned ice cream , holding his bike up , with a
+bogart proud and the rest of the cast is is full          wood like table , chairs , benches in front of him .
+of character actors who seem to to know they’re           ∆ŷ: 0.002
+onto something good get some popcorn and have
+a great time ∆ŷ: 0.004                                   Babi Task 1
+                                                             Question: Where is Sandra ?
+20 News Group - Sports                                       Original Attention:John travelled to the garden
+   Original:i meant to comment on this at the time        . Sandra travelled to the garden
+there ’ s just no way baserunning could be that              Adversarial Attention:John travelled to the
+important if it was runs created would n ’ t be           garden . Sandra travelled to the garden ∆ŷ: 0.003
+nearly as accurate as it is runs created is usually
+about qqq qqq accurate on a team level and there          CNN-QA
+’ s a lot more than baserunning that has to account          Question:federal education minister @place-
+for the remaining percent .                               holder visited a @entity15 store in @entity17 ,
+   Adversarial:i meant to comment on this at the          saw cameras
+time there ’ s just no way baserunning could be              Original:@entity1 , @entity2 ( @entity3
+that important if it was runs created would n ’ t be      ) police have arrested four employees of a
+nearly as accurate as it is runs created is usually       popular @entity2 ethnic - wear chain after a
+about qqq qqq accurate on a team level and there          minister spotted a security camera overlooking
+’ s a lot more than baserunning that has to account       the changing room of one of its stores . federal
+for the remaining percent . ∆ŷ: 0.001                    education minister @entity13 was visiting a
+                                                          @entity15 outlet in the tourist resort state of
+ADR                                                       @entity17 on friday when she discovered a
+   Original:meanwhile wait for DRUG and                   surveillance camera pointed at the changing room
+DRUG to kick in first co i need to prep dog food          , police said . four employees of the store
+etc . co omg <UNK> .                                      have been arrested , but its manager – herself
+   Adversarial:meanwhile wait for DRUG and                a woman – was still at large saturday , said
+DRUG to kick in first co i need to prep dog food          @entity17 police superintendent @entity25 . state
+etc . co omg <UNK> . ∆ŷ: 0.002                           authorities launched their investigation right after
+                                                          @entity13 levied her accusation . they found an
+AG News                                                   overhead camera that the minister had spotted
+   Original:general motors and daimlerchrysler            and determined that it was indeed able to take
+say they # qqq teaming up to develop hybrid               photos of customers using the store ’s changing
+technology for use in their vehicles . the two giant      room , according to @entity25 . after the incident
+automakers say they have signed a memorandum              , authorities sealed off the store and summoned
+of understanding                                          six top officials from @entity15 , he said . the
+   Adversarial:general          motors          and       arrested staff have been charged with voyeurism
+daimlerchrysler say they # qqq teaming up                 and breach of privacy , according to the police .
+to develop hybrid technology for use in their             if convicted , they could spend up to three years
+vehicles . the two giant automakers say they have         in jail , @entity25 said . officials from @entity15
+signed a memorandum of understanding . ∆ŷ:               – which sells ethnic garments , fabrics and other
+0.006                                                     products – are heading to @entity17 to work
+
+                                                      3555
+with investigators , according to the company .
+" @entity15 is deeply concerned and shocked at
+this allegation , " the company said in a statement
+. " we are in the process of investigating this
+internally and will be cooperating fully with the
+police . "
+   Adversarial:@entity1 , @entity2 ( @entity3
+) police have arrested four employees of a
+popular @entity2 ethnic - wear chain after a
+minister spotted a security camera overlooking
+the changing room of one of its stores . federal
+education minister @entity13 was visiting a
+@entity15 outlet in the tourist resort state of
+@entity17 on friday when she discovered a
+surveillance camera pointed at the changing room
+, police said . four employees of the store
+have been arrested , but its manager – herself
+a woman – was still at large saturday , said
+@entity17 police superintendent @entity25 . state
+authorities launched their investigation right after
+@entity13 levied her accusation . they found an
+overhead camera that the minister had spotted
+and determined that it was indeed able to take
+photos of customers using the store ’s changing
+room , according to @entity25 . after the incident
+, authorities sealed off the store and summoned
+six top officials from @entity15 , he said . the
+arrested staff have been charged with voyeurism
+and breach of privacy , according to the police .
+if convicted , they could spend up to three years
+in jail , @entity25 said . officials from @entity15
+– which sells ethnic garments , fabrics and other
+products – are heading to @entity17 to work
+with investigators , according to the company .
+" @entity15 is deeply concerned and shocked at
+this allegation , " the company said in a statement
+. " we are in the process of investigating this
+internally and will be cooperating fully with the
+police . " ∆ŷ: 0.005
+
+
+
+
+                                                   3556
+
