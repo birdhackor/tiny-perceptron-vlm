@@ -81,7 +81,7 @@
 | reward model，獎勵模型 | 先學回答比較，再替一份回答估計分數 | [13.10](chapters/13.md#13.10) |
 | policy，策略 | 決定怎樣選回答的機率規則；在有限選卡例子中，決定哪張卡較常被選 | [13.11](chapters/13.md#13.11) |
 | value model／critic、baseline | 價值模型估計這題平常能拿多少分；這個預期分數可作比較此次表現的基準 | [13.11](chapters/13.md#13.11)、[13.14](chapters/13.md#13.14) |
-| fixed reference，固定參考 | 保留後訓練起點的模型副本，用來比較回答傾向偏移多少 | [13.12](chapters/13.md#13.12)、[13.14](chapters/13.md#13.14) |
+| fixed reference，固定參考 | 保留這次偏好或強化學習訓練起點的模型副本，用來比較回答傾向偏移多少 | [13.12](chapters/13.md#13.12)、[13.14](chapters/13.md#13.14) |
 | safety alignment，安全對齊 | 教模型辨認可完成的請求、需要澄清的情境與應拒絕的邊界 | [9.1](chapters/09.md#9.1)、[9.4](chapters/09.md#9.4) |
 | RAG | 先找外部資料，再把相關內容交給模型作答 | [A.2](chapters/0A.md#A.2)、[A.3](chapters/0A.md#A.3) |
 | tool call | 讓模型提出工具要求，由程式檢查並實際執行 | [B.1](chapters/0B.md#B.1)、[B.2](chapters/0B.md#B.2) |
