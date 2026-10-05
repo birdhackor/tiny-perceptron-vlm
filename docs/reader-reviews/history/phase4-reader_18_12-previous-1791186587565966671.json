@@ -1,0 +1,261 @@
+{
+  "lesson_id": "18.12",
+  "source": "course/chapters/18.md#18.12",
+  "reviewer_task": "/root/reader_18_12_retry_fresh",
+  "source_sha256": "d5054a69fb9364628c72ae54bcb711ebc26ad8d59688b8b40ae6d429a8016105",
+  "verdict": "pass",
+  "reader_summary": {
+    "problem": "本節要回答：教師靠多位 expert 計算，學生只靠一套 Dense FFN，學生是否得把教師內部零件照搬才能學它？我理解答案是不用。只要兩邊在同一前文、同一位置對同一組候選給分數，就能把它們轉成分布後比較；內部 16 與 8 項特徵不能直接逐項相減，264 個相同候選則可以配對。",
+    "example": "玩具教師寬 16、有三位 expert 且每個 token 選兩位；學生寬 8、只有一套 Dense。輸入一筆兩個 ID [1,2]，兩邊都輸出一筆、兩個位置、每位置 264 個候選的分數。教師凍結，KL 只讓學生產生梯度，labels=[1,2] 在這裡只標出兩格有效，不表示這是完整對話或正確的下一字標籤。",
+    "output": "實際 CPU 執行原程式，得到教師與學生分數形狀皆 (1, 2, 264)、總參數 18048 與 6104、學生輸出權重有梯度 True。這只證明能算誤差及反向路徑；backward 尚未更新參數，也不能證明隨機教師已有故事能力。",
+    "formal_comparison": "正式教師在 15.13 預先固定為 top-2、auxiliary 0.01，340608 參數，並讀完整 409 篇訓練故事；兩個 33632 參數學生僅讀前 32 篇且同初始化、同抽樣、同 300 次更新。因此 CE 與 CE+KL 兩學生之間較能隔離教師訊號，教師與學生差距仍混有資料預算。測試三者平均下一目標代價為 2.3017、2.4601、2.3890；KL 學生有改善但仍高於教師。測試 41914 個目標=41862 個文字 byte+52 個故事 EOS，驗證 39256=39205+51；EOS 先每篇加一次，切片處不額外加。52 篇固定原文續段精確匹配均 0/52且無 EOS，所列續寫仍重複，所以較低代價不等於故事能力保住。",
+    "exercise": "只把學生那行改為 student = TinyLM(ModelConfig(width=8, vocab_size=265))，教師保持原配置。先預測學生末軸 265、教師 264，然後重新執行到 distillation_kl，應因候選軸大小不同被拒絕。實際得到 (1,2,265) 對 (1,2,264) 及 ValueError；把學生 vocab_size 改回 264 再執行，原形狀、參數數量與 True 都恢復。"
+  },
+  "issues": [],
+  "checks": {
+    "background_and_links": {
+      "status": "pass",
+      "details": "18.12 全文由精確抽取工具完整親讀。我以只懂基本 Python 四則運算與清單為起點，先讀三個明列前置 15.3、18.6、18.8 及正文連結 15.13；仍不懂 FFN、梯度、byte、有效 labels、平均猜錯代價時才沿它們明確指向的精確小節追讀。實際範圍與用途見 prerequisites_read，共 21 個前置範圍；初節 1.1、15.1、18.1 的導言亦已親讀。未讀舊 reader/report、reviews、技術審查、作者討論、progress 或 docs 中的實報，也未把額外教材搜尋當解釋。長節 T.8 完整親讀，但只用其平均代價、切分與固定教師資訊，未擴讀其無關架構或 GPU 連結。"
+    },
+    "terminology": {
+      "status": "pass",
+      "details": "Dense／FFN 由 15.2→15.1 補足：所有 token 共用一套完整特徵處理規則。expert、router、top-k 由 15.2、15.3、15.4 補足：多套獨立規則及每 token 的選擇。logits／softmax、CE、KL 由 18.1、18.4、18.8 補足；W.4 和 1.8 讓我能把 T.8 的 mean_token_nll 理解為每個有效正確下一目標的平均負 log 猜錯代價，越低越好。tensor shape 由 W.3、梯度與 backward 由 W.6、凍結由 18.7、ID 由 1.1、byte 由 6.7、EOS／特殊符號由 18.6、labels 有效遮罩由 18.8 和 7.3 補足。15.8 及 15.11 解釋 auxiliary 0.01 是均衡路由輔助誤差的乘數。所需概念在允許的連結鏈中得到解釋，沒有剩餘必須靠作者討論或外部術語知識才能懂的地方。"
+    },
+    "example": {
+      "status": "pass",
+      "details": "我能分清內部特徵形狀不同與候選輸出介面相同。三位選兩位不表示第三位權重消失，也不能直接推論較快；15.10 和 15.11 補足儲存與實際計時不同。正式結果給了同架構 CE 對照、不同資料預算限制、完整故事目標的分母與失敗續寫，所以沒有把玩具 shape 或較低平均代價誤讀為能力相等。目標數 41862+52=41914、39205+51=39256 是親讀後手算核對；完整正式實驗未重跑。"
+    },
+    "program_explanation": {
+      "status": "pass",
+      "details": "manual_seed 固定初始化，ModelConfig 指定尺寸，TinyLM 建模；教師 eval、requires_grad_(False) 與 no_grad 固定目標，student 仍保留求梯度路徑。兩模型同 ids，取各自字典中的 logits；distillation_kl 在溫度 1、兩格有效的條件比較分布，loss.backward 算學生權重敏感度。tuple(shape) 印各軸長度，description 的 parameters 印總可學數字，output.weight.grad.abs().sum().item()>0 檢查學生輸出權重有非零梯度。已以 OMP_NUM_THREADS=1、MKL_NUM_THREADS=1、.venv/bin/python 離線 CPU 實際執行完整原例，三行輸出與正文完全相符。沒有 optimizer.step，因此不把本例寫成完成參數更新。"
+    },
+    "exercise": {
+      "status": "pass",
+      "details": "修改位置和唯一變動都明確：學生 ModelConfig 加 vocab_size=265，教師不改。預測 shape 為教師 (1,2,264)、學生 (1,2,265)，KL 無法逐欄比較。實際重新執行得到 ValueError：教師／學生的詞表與序列 shape 必須相同，temperature 必須為正。這次溫度仍為 1，所以錯誤來自形狀；在 helper 出錯後，不會到 backward 或後面三行 print。改為 vocab_size=264 再跑，印出兩個 (1,2,264)、18048 6104、True，確認路徑恢復。"
+    }
+  },
+  "figure_sha256": {},
+  "figure_inspection": [
+    {
+      "source": "course/chapters/18.md#18.6",
+      "figure": "course/figures/architecture_vocab_alignment.svg",
+      "sha256": "4fb611238980a8be10ae2766bda4df8a644b5a39e1ce8129918a4431a91104ff",
+      "render_command": "node /tmp/render-course-svg.mjs architecture_vocab_alignment.svg /tmp/reader18_12_vocab_alignment.png 688",
+      "rendered_image": "/tmp/reader18_12_vocab_alignment.png",
+      "view_image_used": true,
+      "status": "pass",
+      "details": "實際查看 688×248 圖：左教師 ID0 貓=0.8、ID1 狗=0.2；右學生 ID0 狗=0.2、ID1 貓=0.8。綠線由左上貓到右下貓，橘線由左下狗到右上狗，兩線交叉，未畫箭頭。底部學生 ID1、學生 ID0 重排得到 [0.8,0.2]，符合正文；所有標籤可讀。"
+    },
+    {
+      "source": "course/chapters/01.md#1.1",
+      "figure": "course/figures/character_ids.svg",
+      "sha256": "9010be747c5159d87bdf0abda52408dd41a7b780bd9c2fff94a3f7dfa44fab86",
+      "render_command": "node /tmp/render-course-svg.mjs character_ids.svg /tmp/reader18_12_character_ids.png 688",
+      "rendered_image": "/tmp/reader18_12_character_ids.png",
+      "view_image_used": true,
+      "status": "pass",
+      "details": "實際查看 688×298 圖：上排貓、看、狗、逗號、狗、看、貓、句號；各有向下箭頭到 3、2、1、4、1、2、3、0。兩張貓及下方 3 都橘色。底下字表 0→句號、1→狗、2→看、3→貓、4→逗號，數字與原句逐位置相符，標籤和方向可讀。"
+    },
+    {
+      "source": "course/first-steps.md#W.3",
+      "figure": "course/figures/foundations_tensor_axes.svg",
+      "sha256": "9a0a44863fdc43f783e830b88d41b1575389e91336e5f656be9ef5c6d1528b5c",
+      "render_command": "node /tmp/render-course-svg.mjs foundations_tensor_axes.svg /tmp/reader18_12_tensor_axes.png 688",
+      "rendered_image": "/tmp/reader18_12_tensor_axes.png",
+      "view_image_used": true,
+      "status": "pass",
+      "details": "實際查看 688×506 圖：shape=[2,3]，兩位同學、三次小考。第一列 60、70、80，第二列 80、90、100；下方向右 dim=1 箭頭跨每列三次小考，橘框每人平均 [70,90]。右邊向下 dim=0 箭頭跨每欄兩位同學，下方每次小考平均 [70,80,90]。數字、軸標和方向與正文相符，沒有裁掉文字。"
+    }
+  ],
+  "prerequisites_read": [
+    {
+      "source": "course/chapters/15.md#15.3",
+      "range": "該 ## 起至下一 ## 前的完整原文",
+      "via": "18.12 明列前置",
+      "source_sha256": "b8d59d9fb5f8b66daa8a6ea38442616f8388279b08f9a7eebfd9df6baadd22aa",
+      "understanding": "理解 MoE 的 router 怎樣把三位 expert 的分數換成混合比例；soft routing 三位都運算，尚未省計算。"
+    },
+    {
+      "source": "course/chapters/18.md#18.6",
+      "range": "該 ## 起至下一 ## 前的完整原文",
+      "via": "18.12 明列前置",
+      "source_sha256": "65de39fe129b4b8814027e3cb26b0efdd590d54c939e1b1c67e4f3549d2ca813",
+      "understanding": "理解相同詞表大小仍須配對候選身份、同一前文及待預測位置；特殊符號 EOS 也要同義。"
+    },
+    {
+      "source": "course/chapters/18.md#18.8",
+      "range": "該 ## 起至下一 ## 前的完整原文",
+      "via": "18.12 明列前置",
+      "source_sha256": "a91bbdce9f395817ee1726fe510a2fca403ea4d871adafa5811b13c72b560cec",
+      "understanding": "理解教師 p 對學生 q 的 KL、labels!=-100 的有效位置、helper 斷開教師路徑及 temperature=1。"
+    },
+    {
+      "source": "course/chapters/15.md#15.13",
+      "range": "該 ## 起至下一 ## 前的完整原文",
+      "via": "18.12 正文精確連結",
+      "source_sha256": "d45aadef222ba94517d64fd6fcb53ed9a2e01394dadafed4c0c487bee89a1505",
+      "understanding": "核對 top-2、輔助係數 0.01 教師為預先指定而非由測試挑選，並分清儲存容量、每 token 容量代理及品質。"
+    },
+    {
+      "source": "course/chapters/15.md#15.2",
+      "range": "該 ## 起至下一 ## 前的完整原文",
+      "via": "15.3 → 15.2",
+      "source_sha256": "41eeecf8b06ab8e60c17129c0b74481287529aaf4f5c50266f20d9c9d91c3415",
+      "understanding": "expert 是各自儲存權重的一份 FFN，初始化時不自帶學科專長；多份獨立參數與重複引用不同。"
+    },
+    {
+      "source": "course/chapters/18.md#18.4",
+      "range": "該 ## 起至下一 ## 前的完整原文",
+      "via": "18.6、18.8 → 18.4",
+      "source_sha256": "ab9cc27c76bf179822d9fef71c0c5b87ac9cc2046d60206d4dddf4e9ddeb2639",
+      "understanding": "補齊軟目標、硬目標、CE，以及 logits/log 機率與學生梯度的意義。"
+    },
+    {
+      "source": "course/chapters/01.md#1.1",
+      "range": "該 ## 起至下一 ## 前的完整原文",
+      "via": "18.6 → 1.1",
+      "source_sha256": "4a62923428cb90b7dab5912ff6a48ca27a6ee06b022cabe80c3b372c3786f18d",
+      "understanding": "補齊文字、詞表、ID、編碼與解碼的約定，ID 不是字義大小；本節完整親讀並補讀該章導言。"
+    },
+    {
+      "source": "course/chapters/18.md#18.7",
+      "range": "該 ## 起至下一 ## 前的完整原文",
+      "via": "18.8 → 18.7",
+      "source_sha256": "a3d51897a1fc74df03bded4591a571e83fcc390c0074a56c680b29c815c7d23e",
+      "understanding": "補齊 eval、requires_grad_(False)、no_grad 三者不同作用；固定教師仍需 forward 計算。"
+    },
+    {
+      "source": "course/chapters/15.md#15.10",
+      "range": "該 ## 起至下一 ## 前的完整原文",
+      "via": "15.13 → 15.10",
+      "source_sha256": "29eed44361cdac526ced4a7deae397e53e6379af53f70cec982bd22f05306c1d",
+      "understanding": "補齊參數是儲存的可學數字，未被選中的 expert 仍要保存；活躍代理不是精確計算次數。"
+    },
+    {
+      "source": "course/chapters/15.md#15.11",
+      "range": "該 ## 起至下一 ## 前的完整原文",
+      "via": "15.13 → 15.11",
+      "source_sha256": "cf9dca16fe36528c58c4503741d4729fed9621bd050311f3f863993fd41417a7",
+      "understanding": "理解分派、搬移和合併成本會影響實測速度，並補齊輔助係數 0.01 是額外均衡誤差的乘數。"
+    },
+    {
+      "source": "course/chapters/06.md#6.7",
+      "range": "該 ## 起至下一 ## 前的完整原文",
+      "via": "18.6 → 6.7",
+      "source_sha256": "73551ff251b63b566c029dd6d937763b36842df619c500263379f5cb1146217d",
+      "understanding": "補齊 byte 與人看到的字不是一對一，完整 UTF-8 bytes 才能還原文字，故 24 byte 不必是 24 個字。"
+    },
+    {
+      "source": "course/chapters/07.md#7.3",
+      "range": "該 ## 起至下一 ## 前的完整原文",
+      "via": "18.8 → 7.3",
+      "source_sha256": "169853b46c7ffaa3daaadd1b96fc992bb24f0c06db64b053e54150d7221d5a13",
+      "understanding": "補齊 label=-100 只忽略直接 loss，問題仍在輸入；正常 labels 對下一項，EOS 可成為有效目標。"
+    },
+    {
+      "source": "course/chapters/15.md#15.8",
+      "range": "該 ## 起至下一 ## 前的完整原文",
+      "via": "15.3、15.13 → 15.8",
+      "source_sha256": "29327b3657052c7011ea0fe06c6d617d4562238939d7012bd7764d953f2bccc1",
+      "understanding": "補齊平均 router 比例不等於實際分派次數，top-k 需要按選中次數計負載；輔助項鼓勵均衡。"
+    },
+    {
+      "source": "course/chapters/15.md#15.1",
+      "range": "該 ## 起至下一 ## 前的完整原文",
+      "via": "15.2、15.10、18.7 → 15.1",
+      "source_sha256": "9153a953ff5eb4a2123efc894f63dd2d99c1bf0fb8c772c492ef72e9f7795af9",
+      "understanding": "Dense 每個 token 用同一組完整 FFN，FFN 先擴寬、啟動再縮回；本節與第 15 章導言完整親讀。"
+    },
+    {
+      "source": "course/first-steps.md#W.6",
+      "range": "該 ## 起至下一 ## 前的完整原文",
+      "via": "18.7、18.4、15.4、15.10 → W.6",
+      "source_sha256": "5d8ab2f94321c8db814758a488259896ea4056dfa573ad1049777a06e56653f0",
+      "understanding": "補齊導數、梯度、參數、backward 和更新是兩步；backward 只把敏感度存到 grad。"
+    },
+    {
+      "source": "course/first-steps.md#W.4",
+      "range": "該 ## 起至下一 ## 前的完整原文",
+      "via": "18.4 → W.4",
+      "source_sha256": "ef4e42ae84c5fa21081214e00beb9f807fc13cd805e7a7ba52abcb2a9720f04d",
+      "understanding": "補齊機率、自然 log 與正確答案機率越小 -log(p) 越大的平均猜錯代價。"
+    },
+    {
+      "source": "course/training.md#T.8",
+      "range": "該 ## 起至下一 ## 前的完整原文",
+      "via": "15.13、15.1 → T.8",
+      "source_sha256": "3dbe9d266bc18079127a54874e1200f8f0d5e2c55d54a685b39a369f06102c4f",
+      "understanding": "為核對正式 TinyStories 切分、平均下一文字代價與保存固定教師，完整親讀 T.8；未執行其中任何資料取得、訓練或 GPU 命令。"
+    },
+    {
+      "source": "course/chapters/15.md#15.4",
+      "range": "該 ## 起至下一 ## 前的完整原文",
+      "via": "15.8、15.10、T.8 → 15.4",
+      "source_sha256": "a193e50c5713e4714fd0ab5b994d751be1441f96146a0fae418d51e06c900a43",
+      "understanding": "補齊 top-k 對每個 token 選比例最大的 k 位，保留索引與比例是不同資訊；只有先選再執行才能省計算。"
+    },
+    {
+      "source": "course/chapters/18.md#18.1",
+      "range": "該 ## 起至下一 ## 前的完整原文",
+      "via": "18.4、18.7 → 18.1",
+      "source_sha256": "b1a20f5fbee7a83cd3c95b7cd52777f24d3fcb1075b17cf4c432f7cae6434d87",
+      "understanding": "補齊蒸餾、文字訊號與分布訊號、logits 與 softmax 的區別；本節與第 18 章導言完整親讀。"
+    },
+    {
+      "source": "course/first-steps.md#W.3",
+      "range": "該 ## 起至下一 ## 前的完整原文",
+      "via": "W.6 → W.3",
+      "source_sha256": "bad23aa0e0b79506991a4d4faf1583bf5ef7f09ed0082901397452733487d3d6",
+      "understanding": "補齊 tensor 軸、shape、tuple(shape)、item 與三軸 [B,T,D]，便能讀 (1,2,264)。"
+    },
+    {
+      "source": "course/chapters/01.md#1.8",
+      "range": "該 ## 起至下一 ## 前的完整原文",
+      "via": "W.4 → 1.8",
+      "source_sha256": "c7ad6f245be1f0ebeb314d2985c81a7468d5326758ce34394435546c697ea574",
+      "understanding": "進一步核對平均硬答案 CE 是正確答案負 log 代價，也確認 logits 是候選分數；不把分數與機率混用。"
+    }
+  ],
+  "prerequisite_intros_read": [
+    {
+      "source": "course/chapters/15.md#intro",
+      "range": "第一個 ## 前的完整導言",
+      "intro_sha256": "cc8f2d926f2ecbf65c196c056b1edb3065b0b00a100176e78ab55080e7f2b62f",
+      "intro_summary": "從一套共享 FFN 到多份獨立 expert，再談路由學習、容量與成本。"
+    },
+    {
+      "source": "course/chapters/18.md#intro",
+      "range": "第一個 ## 前的完整導言",
+      "intro_sha256": "308c37e818baac845d71de87a21706474c7cead4dcde0427e5566d6a52cafc3f",
+      "intro_summary": "小模型可學標準答案及教師訊號，但成功接上教師與品質改善要分別驗證。"
+    },
+    {
+      "source": "course/chapters/01.md#intro",
+      "range": "第一個 ## 前的完整導言",
+      "intro_sha256": "842a034b25d610c7afb358eac4297cc630058c5777a82cb42da5e5db852fcb8f",
+      "intro_summary": "先把文字記為編號，再用可調數字學下一字，區分訓練改數字與生成續寫。"
+    }
+  ],
+  "execution": {
+    "device": "CPU",
+    "threads": {
+      "OMP_NUM_THREADS": "1",
+      "MKL_NUM_THREADS": "1"
+    },
+    "python": ".venv/bin/python",
+    "scope": "原 18.12 Python 區塊、只改學生 vocab_size=265、再恢復 vocab_size=264",
+    "original_output": [
+      "教師/學生分數形狀 (1, 2, 264) (1, 2, 264)",
+      "總參數 18048 6104",
+      "學生輸出權重有梯度 True"
+    ],
+    "exercise_error": "ValueError: 教師／學生的詞表與序列 shape 必須相同，temperature 必須為正",
+    "restored_output": [
+      "教師/學生分數形狀 (1, 2, 264) (1, 2, 264)",
+      "總參數 18048 6104",
+      "學生輸出權重有梯度 True"
+    ],
+    "formal_experiment_run": false
+  },
+  "review_scope": "獨立初學讀者理解報告；18.12 本節無 SVG，figure_sha256 因此為空物件。所有實際追讀範圍內的三張 SVG 已各用指定 node helper 渲染，再由 view_image 親看；完整 SVG SHA 和視覺核對記於 figure_inspection。"
+}

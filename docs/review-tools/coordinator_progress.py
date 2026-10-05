@@ -92,6 +92,24 @@ if args.action in ("collect", "dispatch"):
                 or (state and state["next_index"] != len(state["units"]))
             ):
                 validation.append("trace incomplete or identity mismatch")
+            if intro and header.get("intro_sha256") != reader.sha(intro.encode()):
+                validation.append("trace introduction missing or stale")
+            body_figures = reader.figure_records(body, source)
+            if any(header.get("figure_sha256", {}).get(k) != v for k, v in body_figures.items()):
+                validation.append("trace figure missing or stale")
+            checkpoints = notes[1:]
+            if [note.get("unit_index") for note in checkpoints] != list(range(expected_units or 0)):
+                validation.append("trace checkpoint order mismatch")
+            if header["source_sha256"] == current:
+                expected_hashes = [reader.sha(unit.encode()) for unit in reader.units(intro + body)]
+                if [note.get("unit_sha256") for note in checkpoints] != expected_hashes:
+                    validation.append("trace revealed unit hashes mismatch")
+            if any(
+                not isinstance(note.get(field), str) or not note[field].strip()
+                for note in checkpoints
+                for field in reader.FIELDS
+            ):
+                validation.append("trace actual reading notes missing")
         if not report.get("variation") or not report.get("missing_visuals") or not report.get("visual_checks"):
             validation.append("understanding or visual assessment missing")
         r["format_validation_issues"] = validation
