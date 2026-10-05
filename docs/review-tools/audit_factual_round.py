@@ -21,8 +21,14 @@ def dispatch_errors(record, report_raw, coordinator_task):
     task = report.get("reviewer_task", "")
     errors = []
     matches = [d for d in record.get("dispatches", []) if d.get("reviewer_task") == task]
-    if not task.startswith(coordinator_task + "/") or not matches or any(d.get("fork_turns") != "none" for d in matches):
+    if (
+        not task.startswith(coordinator_task + "/")
+        or not matches
+        or any(d.get("fork_turns") != "none" for d in matches)
+    ):
         errors.append("missing current round fork-none dispatch declaration")
+    if any((d.get("status") or "").startswith("void") for d in matches):
+        errors.append("current report is attributed to a void factual dispatch")
     if record.get("reviewer_task") != task or record.get("report_sha256") != sha(report_raw):
         errors.append("collected identity or report digest is stale")
     if record.get("status") != "pass" or record.get("current_source_sha256") != report.get("source_sha256"):
@@ -52,6 +58,13 @@ def audit(root=ROOT, current_passes_only=False):
         errors.append("not all factual sections are currently passed")
     checked = technical.check(root, selected)
     errors.extend(checked["failures"])
+    declarations = [d for record in progress["records"].values() for d in record.get("dispatches", [])]
+    declared_tasks = {d.get("reviewer_task") for d in declarations if d.get("reviewer_task")}
+    voided_tasks = {
+        d["reviewer_task"]
+        for d in declarations
+        if d.get("reviewer_task") and (d.get("status") or "").startswith("void")
+    }
     for lid in selected:
         record = progress["records"][lid]
         report_raw = (root / "docs/technical-reviews" / (lid + ".json")).read_bytes()
@@ -77,6 +90,8 @@ def audit(root=ROOT, current_passes_only=False):
         "course_sections": len(inventory),
         "checked_current_pass_sections": len(records),
         "distinct_factual_tasks": len(tasks),
+        "recorded_initial_dispatch_tasks": len(declared_tasks),
+        "recorded_void_dispatch_tasks": len(voided_tasks),
         "progress_sha256": sha(progress_raw),
         "verification_program_sha256": sha(Path(__file__).read_bytes()),
         "records": records,
@@ -93,7 +108,15 @@ def main():
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n")
-    print(json.dumps({k: result[k] for k in ("status", "checked_current_pass_sections", "distinct_factual_tasks", "errors")}))
+    keys = (
+        "status",
+        "checked_current_pass_sections",
+        "distinct_factual_tasks",
+        "recorded_initial_dispatch_tasks",
+        "recorded_void_dispatch_tasks",
+        "errors",
+    )
+    print(json.dumps({k: result[k] for k in keys}))
     raise SystemExit(bool(result["errors"]))
 
 

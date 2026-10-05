@@ -41,3 +41,24 @@ def test_full_history_fork_is_not_a_fresh_dispatch():
     record["dispatches"][0]["fork_turns"] = "all"
     errors = audit.dispatch_errors(record, raw, "/root/test_coordinator")
     assert "missing current round fork-none dispatch declaration" in errors
+
+
+def test_void_dispatch_is_preserved_without_invalidating_a_clean_replacement():
+    record, raw = fixture_record()
+    record["dispatches"].insert(
+        0,
+        {
+            "reviewer_task": "/root/test_coordinator/contaminated_section",
+            "fork_turns": "none",
+            "status": "void_contamination_before_verdict",
+            "dispatched_at": None,
+        },
+    )
+    assert audit.dispatch_errors(record, raw, "/root/test_coordinator") == []
+
+
+def test_void_dispatch_cannot_be_the_current_passed_report_owner():
+    record, raw = fixture_record()
+    record["dispatches"][0]["status"] = "void_contamination_before_verdict"
+    errors = audit.dispatch_errors(record, raw, "/root/test_coordinator")
+    assert "current report is attributed to a void factual dispatch" in errors
