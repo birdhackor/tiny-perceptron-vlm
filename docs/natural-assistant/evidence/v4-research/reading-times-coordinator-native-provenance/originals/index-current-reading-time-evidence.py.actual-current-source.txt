@@ -1,0 +1,82 @@
+"""Read-only index of genuine completed time owner originals, not estimates."""
+import argparse
+import hashlib
+import json
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[3]
+
+
+def sha(raw):
+    return hashlib.sha256(raw).hexdigest()
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--journal", required=True)
+    parser.add_argument("--output", required=True)
+    args = parser.parse_args()
+    output = ROOT / args.output
+    assert not output.exists(), "Preserve previous inventories."
+    journal = json.loads((ROOT / args.journal).read_bytes())
+    assert journal["reading_times_complete"]
+    assert len(journal["dispatches"]) == 6
+    files = {}
+    actual_owners = []
+    def add(path, expected, role, owner=None):
+        file = ROOT / path
+        raw = file.read_bytes()
+        assert sha(raw) == expected, path
+        item = files.setdefault(path, {"path": path, "sha256": expected, "bytes": len(raw), "roles": [], "actual_owners": []})
+        assert item["sha256"] == expected
+        if role not in item["roles"]:
+            item["roles"].append(role)
+        if owner and owner not in item["actual_owners"]:
+            item["actual_owners"].append(owner)
+    for dispatch in journal["dispatches"]:
+        assert dispatch["completion_status"] == "actual_owner_current_manual_estimates_FINAL_pass"
+        result = dispatch["actual_result"]
+        owner = dispatch["actual_owner"]
+        assert result["actual_observed_owner_FINAL"] and owner == result["actual_owner"]
+        report_path = result["report_path"]
+        add(report_path, result["report_sha256"], "genuine_actual_owner_report", owner)
+        add(result["metadata_path"], result["metadata_sha256"], "genuine_actual_owner_manual_metadata", owner)
+        report = json.loads((ROOT / report_path).read_bytes())
+        assert report["reviewer_task"] == owner and report["verdict"] == "pass"
+        assert len(report["personally_read_page_ids"]) == result["actual_read_page_count"]
+        for artifact in report["artifacts"]:
+            add(artifact["path"], artifact["sha256"], "genuine_actual_owner_registered_small_evidence", owner)
+        actual_owners.append({"group_id": dispatch["group_id"], "actual_owner": owner,
+                              "actual_read_page_count": result["actual_read_page_count"],
+                              "report_path": report_path, "report_sha256": result["report_sha256"],
+                              "metadata_path": result["metadata_path"], "metadata_sha256": result["metadata_sha256"]})
+    assert sum(r["actual_read_page_count"] for r in actual_owners) == 304
+    for path, role in ((args.journal, "actual_dispatch_and_FINAL_journal"),
+                       (journal["inventory"], "actual_executed_inventory"),
+                       (journal["factual_closure"], "genuine_preceding_factual_closure"),
+                       (journal["continuity_closure"], "genuine_preceding_continuity_closure"),
+                       (journal["actual_merged_metadata_path"], "actual_merged_manual_candidate")):
+        add(path, sha((ROOT / path).read_bytes()), role)
+    candidate = ROOT / journal["actual_merged_metadata_path"]
+    for path in (candidate.with_suffix(".validation.stdout.txt"), candidate.with_suffix(".validation.stderr.txt")):
+        add(path.relative_to(ROOT).as_posix(), sha(path.read_bytes()), "actual_official304_validation_output")
+    selected, excluded = [], []
+    forbidden_segments = {"__pycache__", ".cache", "workspace", "models", "checkpoints"}
+    forbidden_extensions = {".wav", ".tar", ".safetensors", ".pt", ".bin", ".pdf"}
+    for item in files.values():
+        path = Path(item["path"])
+        if forbidden_segments & set(path.parts) or path.suffix in forbidden_extensions or item["bytes"] > 2500000:
+            excluded.append({**item, "reason": "Raw/cache/model/large evidence kept at genuine original path; never deleted or declared published by this index."})
+        else:
+            selected.append(item)
+    receipt = {"kind": "actual_six_fresh_owner_304_manual_time_original_evidence_index_not_product_apply_or_review",
+               "actual_owner_reports": actual_owners, "actual_page_count": 304,
+               "all_registered_reference_count": len(files), "selected_small_files": selected,
+               "excluded_original_files": excluded, "selected_small_bytes": sum(i["bytes"] for i in selected),
+               "scope_limit": "Read-only SHA/identity/actual FINAL provenance index. No minutes, owner reports, code, original evidence, official rules, product metadata or Git staging changed. Current licensed teaching figure renders are small own evidence, not a full image gallery. Root selects files and retains necessary attribution NOTICEs."}
+    output.write_text(json.dumps(receipt, ensure_ascii=False, indent=2) + "\n")
+    print(json.dumps({"actual_pages": 304, "genuine_owners": 6, "selected_small_files": len(selected), "excluded_originals": len(excluded)}))
+
+
+if __name__ == "__main__":
+    main()
