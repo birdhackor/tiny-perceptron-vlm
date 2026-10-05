@@ -1,0 +1,177 @@
+"""Coordinator provenance only: never estimate minutes or edit product metadata."""
+import argparse
+import hashlib
+import importlib.util
+import json
+import subprocess
+from datetime import UTC, datetime
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[3]
+BASE = ROOT / "outputs/natural-v4/review-plan"
+
+def sha(raw):
+    return hashlib.sha256(raw).hexdigest()
+
+
+def read(path):
+    return json.loads((ROOT / path).read_bytes())
+
+
+def write(path, value):
+    (ROOT / path).write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n")
+
+
+def current_inventory(path):
+    inventory = read(path)
+    assert len(inventory["pages"]) == 304
+    for page in inventory["pages"]:
+        assert sha((ROOT / page["snapshot"]).read_bytes()) == page["source_sha256"]
+        for figure, expected in page["figures_sha256"].items():
+            assert sha((ROOT / figure).read_bytes()) == expected
+    return inventory
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("action", choices=("init", "dispatch", "final", "merge"))
+    parser.add_argument("--journal", required=True)
+    parser.add_argument("--inventory")
+    parser.add_argument("--factual-closure")
+    parser.add_argument("--continuity-closure")
+    parser.add_argument("--source-version")
+    parser.add_argument("--preview")
+    parser.add_argument("--group")
+    parser.add_argument("--actual-owner")
+    parser.add_argument("--report")
+    parser.add_argument("--output")
+    parser.add_argument("--observed-actual-tool-receipt", action="store_true", required=True)
+    args = parser.parse_args()
+    now = datetime.now(UTC).isoformat()
+    if args.action == "init":
+        assert not (ROOT / args.journal).exists()
+        factual = read(args.factual_closure)
+        continuity = read(args.continuity_closure)
+        assert factual["whole_factual_phase_complete"] and factual["actual_official_checker_exit_code"] == 0
+        assert factual["actual_identity_introduction_round_exit_code"] == 0
+        assert continuity["whole_continuity_phase_complete"] and continuity["actual_fresh_owner_groups"] == 7
+        assert continuity["factual_closure"] == args.factual_closure
+        assert continuity["factual_closure_sha256"] == sha((ROOT / args.factual_closure).read_bytes())
+        for key in ("actual_numbered_owner_reports", "actual_supplemental_owner_reports"):
+            for record in factual[key]:
+                assert sha((ROOT / record["report_path"]).read_bytes()) == record["report_sha256"]
+        for record in continuity["actual_owner_reports"]:
+            assert sha((ROOT / record["report_path"]).read_bytes()) == record["report_sha256"]
+            for source, expected in record["current_document_sha256"].items():
+                assert sha((ROOT / source).read_bytes()) == expected
+        inventory = current_inventory(args.inventory)
+        pages = {p["page_id"]: p for p in inventory["pages"]}
+        routing = read("outputs/natural-v4/review-plan/reading-time6-routing-preparation.json")
+        all_ids = [sid for group in routing["groups"] for sid in group["canonical_page_ids"]]
+        assert len(all_ids) == len(set(all_ids)) == 304 and set(all_ids) == set(pages)
+        assignments = BASE / "reading-time-current-assignments"
+        assignments.mkdir()
+        groups = []
+        for template in routing["groups"]:
+            group = {"group_id": template["group_id"], "page_count": len(template["canonical_page_ids"]),
+                     "canonical_page_ids": template["canonical_page_ids"],
+                     "pages": [pages[sid] for sid in template["canonical_page_ids"]],
+                     "source_version": args.source_version, "preview": args.preview,
+                     "inventory": args.inventory, "inventory_sha256": sha((ROOT / args.inventory).read_bytes()),
+                     "phase_gate": "Actual current reader/factual/continuity gates closed. Assignment is routing only, not reading or estimates."}
+            ap = assignments / (group["group_id"] + ".json")
+            ap.write_text(json.dumps(group, ensure_ascii=False, indent=2) + "\n")
+            groups.append({**group, "assignment_path": ap.relative_to(ROOT).as_posix()})
+        reader = read(factual["reader_closure"])
+        previous_tasks = {r["actual_owner"] for key in ("numbered_current58", "supplemental_current8") for r in reader[key]}
+        previous_tasks.update(r["actual_owner"] for key in ("actual_numbered_owner_reports", "actual_supplemental_owner_reports") for r in factual[key])
+        previous_tasks.update(r["actual_owner"] for r in continuity["actual_owner_reports"])
+        write(args.journal, {"kind": "actual_current_phase_gates_closed_fresh304_manual_reading_time_routing",
+                            "captured_at": now, "source_version": args.source_version, "preview": args.preview,
+                            "inventory": args.inventory, "inventory_sha256": sha((ROOT / args.inventory).read_bytes()),
+                            "factual_closure": args.factual_closure, "continuity_closure": args.continuity_closure,
+                            "previous_actual_tasks": sorted(previous_tasks), "groups": groups,
+                            "dispatches": [], "reading_times_complete": False})
+        print(json.dumps({"actual_prior_phase_gates_closed": True, "pages_routed": 304, "groups": 6, "estimates_created": False}))
+        return
+    journal = read(args.journal)
+    inventory = current_inventory(journal["inventory"])
+    assert sha((ROOT / journal["inventory"]).read_bytes()) == journal["inventory_sha256"]
+    if args.action == "dispatch":
+        group = next(g for g in journal["groups"] if g["group_id"] == args.group)
+        assert args.actual_owner.startswith("/root/v4_review_coordinator/")
+        assert args.actual_owner not in journal["previous_actual_tasks"]
+        assert not any(d["group_id"] == args.group or d["actual_owner"] == args.actual_owner for d in journal["dispatches"])
+        journal["dispatches"].append({"group_id": args.group, "actual_owner": args.actual_owner,
+                                      "fork_turns": "none", "actual_spawn_receipt_observed": True,
+                                      "observed_tool": "collaboration.spawn_agent", "observed_at": now,
+                                      "assigned_page_ids": group["canonical_page_ids"],
+                                      "completion_status": "awaiting_actual_owner_FINAL"})
+        write(args.journal, journal)
+        print(json.dumps({"actual_dispatch_observed": args.group, "owner": args.actual_owner}))
+        return
+    if args.action == "final":
+        dispatch = next(d for d in journal["dispatches"] if d["group_id"] == args.group)
+        report_raw = (ROOT / args.report).read_bytes()
+        report = json.loads(report_raw)
+        assert report["reviewer_task"] == dispatch["actual_owner"] and report["reviewer_context"] == "fresh"
+        assert report["group_id"] == args.group and report["verdict"] == "pass"
+        ids = dispatch["assigned_page_ids"]
+        assert len(report["personally_read_page_ids"]) == len(ids) and set(report["personally_read_page_ids"]) == set(ids)
+        assert set(report["per_page_reading_scope"]) == set(ids)
+        assert all(isinstance(v, str) and v.strip() for v in report["per_page_reading_scope"].values())
+        required_figures = {fig: expected for p in inventory["pages"] if p["page_id"] in ids for fig, expected in p["figures_sha256"].items()}
+        assert required_figures.items() <= report["personally_viewed_figure_sha256"].items()
+        for fig, expected in report["personally_viewed_figure_sha256"].items():
+            assert sha((ROOT / fig).read_bytes()) == expected
+        assert report["artifacts"]
+        for artifact in report["artifacts"]:
+            assert sha((ROOT / artifact["path"]).read_bytes()) == artifact["sha256"]
+        assert not any(i.get("severity") in {"blocking", "major"} and i.get("status") not in {"closed", "resolved"} for i in report.get("issues", []))
+        metadata_raw = (ROOT / report["metadata_path"]).read_bytes()
+        metadata = json.loads(metadata_raw)
+        spec = importlib.util.spec_from_file_location("unchanged_reading_time_rules", ROOT / "scripts/reading_time.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        estimates = module.load_estimates(ROOT / report["metadata_path"], inventory)
+        assert set(estimates) == set(ids) and all(e["reviewer_task"] == dispatch["actual_owner"] for e in estimates.values())
+        directory = BASE / "reading-time-current-completions" / args.group
+        directory.mkdir(parents=True)
+        (directory / "actual-owner-report.raw.json").write_bytes(report_raw)
+        (directory / "actual-owner-metadata.raw.json").write_bytes(metadata_raw)
+        receipt = {"actual_observed_owner_FINAL": True, "observed_at": now, "actual_owner": dispatch["actual_owner"],
+                   "report_path": args.report, "report_sha256": sha(report_raw),
+                   "metadata_path": report["metadata_path"], "metadata_sha256": sha(metadata_raw),
+                   "actual_read_page_count": len(ids), "scope_limit": "Actual owner FINAL and source/evidence/schema binding only; coordinator does not read or estimate for owner."}
+        (directory / "observed-actual-FINAL-receipt.json").write_text(json.dumps(receipt, ensure_ascii=False, indent=2) + "\n")
+        dispatch.update({"completion_status": "actual_owner_current_manual_estimates_FINAL_pass", "actual_result": receipt})
+        write(args.journal, journal)
+        print(json.dumps({"actual_FINAL": args.group, "page_count": len(ids), "provenance_errors": []}))
+        return
+    assert args.action == "merge" and args.output and not (ROOT / args.output).exists()
+    assert len(journal["dispatches"]) == 6 and len({d["actual_owner"] for d in journal["dispatches"]}) == 6
+    records = []
+    for dispatch in journal["dispatches"]:
+        assert dispatch["completion_status"] == "actual_owner_current_manual_estimates_FINAL_pass"
+        result = dispatch["actual_result"]
+        assert sha((ROOT / result["report_path"]).read_bytes()) == result["report_sha256"]
+        assert sha((ROOT / result["metadata_path"]).read_bytes()) == result["metadata_sha256"]
+        records.extend(read(result["metadata_path"])["pages"])
+    assert len(records) == len({r["page_id"] for r in records}) == 304
+    write(args.output, {"schema_version": 1, "estimate_kind": "ai_estimate", "pages": records})
+    command = [str(ROOT / ".venv/bin/python"), "scripts/reading_time.py", "validate", "--metadata", args.output, "--executed"]
+    result = subprocess.run(command, cwd=ROOT, capture_output=True)
+    output = ROOT / args.output
+    output.with_suffix(".validation.stdout.txt").write_bytes(result.stdout)
+    output.with_suffix(".validation.stderr.txt").write_bytes(result.stderr)
+    assert result.returncode == 0, result.stdout.decode() + result.stderr.decode()
+    journal.update({"reading_times_complete": True, "actual_merged_metadata_path": args.output,
+                    "actual_merged_metadata_sha256": sha(output.read_bytes()),
+                    "actual_validator_command": command, "actual_validator_exit_code": result.returncode,
+                    "candidate_not_applied_to_product_metadata_by_coordinator": True})
+    write(args.journal, journal)
+    print(json.dumps({"actual_current_manual_page_estimates": 304, "actual_fresh_owners": 6, "actual_validator_exit_code": 0, "candidate": args.output}))
+
+
+if __name__ == "__main__":
+    main()
