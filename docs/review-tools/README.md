@@ -6,6 +6,13 @@
 
 `.venv/bin/python docs/review-tools/coordinator_progress.py summary` 只讀取進度。整輪完成後，仍要執行正文審閱 checker 與下述身分核對；進度表不能代替它們。
 
+`audit_readability_round.py` 另核對每個 trace 的凍結導言與主圖、逐段順序及實際揭露單元的 SHA，而非只數 checkpoint。預設要求本輪全部小節通過；`--current-passes-only` 只核對當前已通過部分，回報 `passed_partial`，不能宣稱整輪完成。它不寫讀者判定，也不證明署名者確實閱讀、看懂或查看過圖片。
+
+```bash
+# 全部易讀性修正與原讀者複查完成後，保存本輪版本核對
+.venv/bin/python docs/review-tools/audit_readability_round.py --output docs/course-revision-20261005/readability-trace-audit.json
+```
+
 技術審閱用的 `section_facts.py` 只提取原始 UTF-8 小節、程式區塊與 SVG 指紋；加 `--execute` 才在新的 CPU 程序執行本節 Python。它不產生審閱報告或通過判定。審閱者仍須自行閱讀文本、圖、原始論文與實測證據，依 [技術審閱規約](../technical-review-guide.md)判斷主張。
 
 本輪派工另使用 [單節正確性工作說明](factual-reviewer-instructions.md)：全部易讀性修正完成後才啟動，使用不同的新審閱者；明確區分原碼執行、既有結果核對與尚未實作的成品計畫，不為文字修訂重跑 GPU 訓練。
