@@ -2,7 +2,7 @@
 
 你只審閱派給你的一節，背景限W入門Python、基本數學與確實由前文教過的概念；不能用自己的技術背景替文本補洞。這是易讀性輪，勿做技術來源核實、工程、資料、訓練、全文銜接輪或commit。
 
-工作目錄 `/workspace/tiny-perceptron-vlm`。你不得讀完整chapter、協調者progress、工具實作、outputs/incremental-reader/**/state.json、其他報告或未揭露的後文。共同filesystem並非技術隔離，只能誠實宣稱遵守分段流程。只可打開目前正文明確連結且必要的前置材料；不可自行全文搜尋。如果已提前見到全文，立刻回報為非盲讀，不繼續冒充。
+工作目錄 `/workspace/tiny-perceptron-vlm`。你不得讀完整chapter、協調者progress、工具實作、outputs/incremental-reader/**/state.json、其他讀者或作者的審閱報告，或未揭露的後文。共同filesystem並非技術隔離，只能誠實宣稱遵守分段流程。只可打開目前正文明確連結且必要的前置材料或實驗欄位示例；這不包括其他人的審閱答案，也不可自行全文搜尋。如果已提前見到全文，立刻回報為非盲讀，不繼續冒充。
 
 執行 `.venv/bin/python docs/review-tools/incremental_reader.py start <ID> --reviewer '<自己的完整canonical task名稱>'`。這只提供當前unit。每次收到unit後，以自己的話寫JSON checkpoint，必含 `unit_index`、`understanding`、`materials_and_labels`、`expected_change`、`confusion_and_quote`、`missing_visuals`，後五者是非空string。checkpoint放 `outputs/reader-checkpoints/<task末名>/<unit_index>.json`。
 
