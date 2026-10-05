@@ -1,0 +1,1351 @@
+          Deduplicating Training Data Makes Language Models Better
+
+
+    Katherine Lee∗†           Daphne Ippolito∗†‡               Andrew Nystrom†                     Chiyuan Zhang†
+
+           Douglas Eck†                     Chris Callison-Burch‡                         Nicholas Carlini†
+
+
+
+                      Abstract                                   We show that one particular source of bias, du-
+                                                              plicated training examples, is pervasive: all four
+     We find that existing language modeling
+                                                              common NLP datasets we studied contained dupli-
+     datasets contain many near-duplicate exam-
+     ples and long repetitive substrings.        As           cates. Additionally, all four corresponding valida-
+     a result, over 1% of the unprompted out-                 tion sets contained text duplicated in the training
+     put of language models trained on these                  set. While naive deduplication is straightforward
+     datasets is copied verbatim from the train-              (and the datasets we consider already perform some
+     ing data. We develop two tools that allow                naive form of deduplication), performing thorough
+     us to deduplicate training datasets—for exam-            deduplication at scale is both computationally chal-
+     ple removing from C4 a single 61 word En-                lenging and requires sophisticated techniques.
+     glish sentence that is repeated over 60,000
+     times. Deduplication allows us to train mod-                We propose two scalable techniques to detect
+     els that emit memorized text ten times less              and remove duplicated training data. Exact sub-
+     frequently and require fewer training steps              string matching identifies verbatim strings that are
+     to achieve the same or better accuracy. We               repeated. This allows us to identify cases where
+     can also reduce train-test overlap, which af-            only part of a training example is duplicated (§4.1).
+     fects over 4% of the validation set of stan-             Approximate full document matching uses hash-
+     dard datasets, thus allowing for more accurate           based techniques (Broder, 1997) to identify pairs
+     evaluation. Code for deduplication is released
+     at https://github.com/google-research/
+                                                              of documents with high n-gram overlap (§4.2).
+     deduplicate-text-datasets.                                  We identify four distinct advantages to training
+                                                              on datasets that have been thoroughly deduplicated.
+1    Introduction
+                                                                1. Over 1% of tokens emitted unprompted from
+A key factor behind the recent progress in natural
+                                                                   a model trained on standard datasets (e.g., C4)
+language processing is the development of large-
+                                                                   are part of a memorized sequence (See §6.2)—
+scale text corpora used to train increasingly large
+                                                                   even though the 1.5 billion parameter model
+language models. These datasets have grown from
+                                                                   is much smaller than the 350GB dataset it
+single gigabytes to as much as a terabyte over the
+                                                                   was trained on. By deduplicating the training
+past few years (Chelba et al., 2013; Xue et al., 2020;
+                                                                   dataset we reduce the rate of emitting memo-
+Graff et al., 2003; Brown et al., 2020). Because
+                                                                   rized training data by a factor of 10×.
+it is so expensive to perform manual review and
+curation on massive datasets, they tend to suffer
+                                                                2. Train-test overlap is common in non-
+in quality compared to their smaller predecessors.
+                                                                   deduplicated datasets. For example, we find a
+This has implications far beyond metrics like per-
+                                                                   61-word sequence1 in C4 (Raffel et al., 2020)
+plexity and validation loss, as learned models re-
+                                                                   that is repeated 61,036 times verbatim in the
+flect the biases present in their training data (Ben-
+                                                                   training dataset and 61 times in the validation
+der et al., 2021; Wallace et al., 2019; Sheng et al.,
+                                                                   set (0.02% of the samples in each dataset).
+2020). Quantitatively and qualitatively understand-
+ing these datasets is therefore a research challenge              1
+                                                                    “by combining fantastic ideas, interesting arrangements,
+in its own right (Dodge et al., 2021a).                       and follow the current trends in the field of that make you
+                                                              more inspired and give artistic touches. We’d be honored if
+     ∗
+      Equal contribution. † Google Research, Brain Team.      you can apply some or all of these design in your wedding.
+‡ University of Pennsylvania. Correspond to kather-           believe me, brilliant ideas would be perfect if it can be applied
+inelee@google.com and daphnei@seas.upenn.edu.                 in real and make the people around you amazed!”
+
+                                                         8424
+                                                            1 Association for Computational Linguistics
+                 Proceedings of the 60th Annual Meeting of the
+                                      Volume 1: Long Papers, pages 8424 - 8445
+                           May 22-27, 2022 c 2022 Association for Computational Linguistics
+       This train-test set overlap not only causes re-     is CommonCrawl, an index of public webpages.
+       searchers to over-estimate model accuracy, but      Among the models trained on CommonCrawl in-
+       also biases model selection towards models          clude GPT-3 (Brown et al., 2020) with the addition
+       and hyperparameters that intentionally overfit      of book datasets, GROVER (Zellers et al., 2019) on
+       their training datasets.                            a restricted subset filtered to news domains called
+                                                           RealNews, and T5 (Raffel et al., 2020) on a cleaned
+    3. Training models on deduplicated datasets is
+                                                           version of common crawl called C4. Other models
+       more efficient. Processing a dataset with our
+                                                           are trained on more curated Internet sources—for
+       framework requires a CPU-only linear-time
+                                                           example Guo et al. (2020) used high quality pro-
+       algorithm. And so because these datasets are
+                                                           cessed Wikipedia text from 40 different languages
+       up to 19% smaller, even including the dedu-
+                                                           to train monolingual 141.4M parameter language
+       plication runtime itself, training on dedupli-
+                                                           models. Non-English models necessarily use dif-
+       cated datasets directly reduces the training
+                                                           ferent datasets; Zeng et al. (2021) for instance in-
+       cost in terms of time, dollar, and the environ-
+                                                           troduced PANGU-α, a family of models with up to
+       ment (Bender et al., 2021; Strubell et al., 2019;
+                                                           200B parameters that were trained on a non-public
+       Patterson et al., 2021).
+                                                           corpus of cleaned and filtered Chinese-language
+    4. Deduplicating training data does not hurt           documents from CommonCrawl and other sources.
+       perplexity: models trained on deduplicated          Since many of these datasets are not public, we
+       datasets have no worse perplexity compared          deduplicate three that are: Wiki-40B, C4, and
+       to baseline models trained on the original          RealNews–as well as the One Billion Word Lan-
+       datasets. In some cases deduplication reduces       guage Model Benchmark (Chelba et al., 2013), a
+       perplexity by up to 10%. Further, because re-       smaller dataset commonly used for evaluation.
+       cent LMs are typically limited to training for
+       just a few epochs (Radford et al., 2019; Raffel     Contamination of downstream tasks. When
+       et al., 2020), by training on higher quality data   models are trained on datasets constructed by crawl-
+       the models can reach higher accuracy faster.        ing the Internet, it is possible the model will train
+To summarize, data duplication offers significant          on the test set of downstream target tasks. For ex-
+advantages and no observed disadvantages. In the           ample, Radford et al. (2019, §4) performed a post-
+remainder of this paper we present our text dedu-          hoc analysis to identify 8-gram overlaps between
+plication framework in §4, and study the extent of         GPT-2’s training set and datasets used for evalu-
+duplicate content in common NLP datasets (e.g.,            ation, and Dodge et al. (2021b) analyzed C4 and
+C4, Wiki-40B, and LM1B) in §5. We then exam-               found that up to 14.4% of test examples for various
+ine the impact of deduplication on test perplexity         standard tasks were found verbatim (normalizing
+(§6.1) and on the frequency of emitting memorized          for capitalization and punctuation) in the dataset.
+content (§6.2). Finally, we analyze to what ex-            A more proactive approach removes contaminated
+tent perplexity on existing, released models are           data. Trinh and Le (2018, Appendix B) removed
+skewed as a result of overlap between the train and        documents from their CommonCrawl-based train
+test/validation splits (§6.3).                             set that overlapped substantially with the common-
+                                                           sense reasoning used for evaluation. And GPT-3
+2     Related Work                                         (Brown et al., 2020, §5) did the reverse and re-
+Large language model datasets. While we be-                moved downstream evaluation examples from their
+lieve our results are independent of model archi-          training data by conservatively filtering out any
+tecture, we perform our analysis on Transformer-           train set examples with a 13-gram overlap with
+based decoder-only language models (Vaswani                any evaluation example. Up to 90% of tasks were
+et al., 2017) trained for open-ended text generation.      flagged as potentially contaminated.
+These current state-of-the-art models are trained             In our research, we do not focus on the impact of
+on internet text. For example, the GPT-2 family            duplicate text in pretrained models on downstream
+of models Radford et al. (2019) is trained on Web-         benchmark tasks; instead we address how duplicate
+Text, a dataset of web documents highly ranked on          text in the LM training and validation sets impacts
+Reddit—however this dataset was not made avail-            model perplexity and the extent to which generated
+able publicly. A common dataset starting point             text included memorized content.
+                                                       8425
+                                                        2
+Memorizing training data. The privacy risks of         was introduced as a pre-training dataset for T5, a set
+data memorization, for example the ability to ex-      of encoder-decoder models which have been widely
+tract sensitive data such as valid phone numbers       used in fine-tuned downstream tasks. The dataset
+and IRC usernames, are highlighted by Carlini et al.   was previously deduplicated in a more sophisti-
+(2020). While their paper finds 604 samples that       cated process than the prior two datasets. Each
+GPT-2 emitted from its training set, we show that      paragraph was hashed and paragraphs resulting in
+over 1% of the data most models emit is memorized      hash collisions were removed. This was followed
+training data. In computer vision, memorization of     by a pass that removed placeholder text, code, and
+training data has been studied from various angles     prohibited words. See Dodge et al. (2021a) for a
+for both discriminative and generative models (e.g.    detailed breakdown of the source text in C4.
+Arpit et al., 2017; Webster et al., 2019; Feldman
+                                                       RealNews is a subset of the Common Crawl con-
+and Zhang, 2020; Stephenson et al., 2021; Teter-
+                                                       sisting of articles from news domains (Zellers et al.,
+wak et al., 2021).
+                                                       2019). It contains 31M documents with average
+Duplicate text in training data. The Book Cor-         length 793 BPE tokens. RealNews was dedupli-
+pus (Zhu et al., 2015), which was used to train pop-   cated by inserting a hash of the first 100 characters
+ular models such as BERT, has a substantial amount     of each document into a bloom filter (Bloom, 1970)
+of exact-duplicate documents according to Bandy        and then excluding any document which resulted in
+and Vincent (2021). Allamanis (2019) shows that        a hash collision. Like C4, examples with duplicate
+duplicate examples in code datasets cause wors-        URLs were excluded.
+ened performance on code understanding tasks.
+                                                       4     Methods for Identifying Duplicates
+3   Language Modeling Datasets
+                                                       The simplest technique to find duplicate examples
+We analyze the presence of duplicate text in four      would be to perform exact string matching between
+datasets of varying sizes that have been used for      all example pairs, but as we will show, this is insuf-
+training natural language generation systems, pro-     ficient. We introduce two complementary methods
+ducing general-purpose pre-trained models, and for     for performing deduplication. First, using a suf-
+language model benchmarking. While this paper          fix array (Manber and Myers, 1993), we remove
+restricts itself to English datasets, we expect that   duplicate substrings from the dataset if they oc-
+non-English datasets suffer from similar issues and    cur verbatim in more than one example. Second,
+could likewise benefit from de-duplication.            we use MinHash (Broder, 1997), an efficient algo-
+                                                       rithm for estimating the n-gram similarity between
+Wikipedia (Wiki-40B) consists of multi-lingual         all pairs of examples in a corpus, to remove entire
+cleaned Wikipedia text (Guo et al., 2020). We          examples from the dataset if they have high n-gram
+take the English portion, which contains 2.9M          overlap with any other example.
+Wikipedia pages with an average length of 768 BPE         We consider a dataset D = {xi }N    i=1 as a collec-
+tokens. The dataset creators do not indicate any       tion of examples xi . Each of these examples is itself
+deduplication was performed aside from removing        a sequence of tokens: xi = x1i , x2i , · · · , xsi i .
+redirect-pages (e.g., “sunflower” to “Helianthus”).
+                                                       4.1    Exact Substring Duplication
+One-Billion Word benchmark (LM1B) con-
+tains 30M sentences of news commentary (Chelba         Due to the diversity of possibilities in human lan-
+et al., 2013). Unlike the other datasets we analyze,   guage, it is rare for the same idea to be expressed
+LM1B’s examples are one sentence long rather           identically in multiple documents unless one ex-
+than multi-sentence documents. The average ex-         pression is derived from the other, or both are quot-
+ample length is 32 BPE tokens. While this dataset      ing from a shared source. This observation moti-
+is extremely standard for benchmarking language        vates deduplicating exact substrings. We call our
+models, Radford et al. (2019, Sec 4) note it has       approach E XACT S UBSTR. When two examples
+13.2% overlap of the test set with the train set.      xi and xj share a sufficiently long substring (that
+                                                       is, a substring for which xa..a+k
+                                                                                    i      = xb..b+k
+                                                                                               j     ), that
+Colossal Cleaned Common Crawl (C4) is                  substring is removed from one of them. Based
+made up of 360M web documents, with an average         on statistical analyses (§B), we select k = 50 to-
+length of 486 BPE tokens (Raffel et al., 2020). C4     kens as the minimum matching substring length.
+                                                   8426
+                                                    3
+A breakdown of the computation needed for this             4.2   Approximate Matching with MinHash
+approach can be found in Appendix B.                       We also perform approximate deduplication based
+4.1.1 Suffix Arrays                                        on matching entire examples. This method, which
+                                                           we call N EAR D UP, is a good complement to the
+This exact-substring-matching criterion, while con-        exact substring matching, especially for web crawl
+ceptually simple, is computationally prohibitive           text, as it handles the very common case of docu-
+with naive (quadratic) all-pair matching. To im-           ments being identical except for interspersed tem-
+prove the efficiency, we concatenate all the exam-         plated fields (such as the last row of Table 1).
+ples of the entire dataset D into a giant sequence S,         MinHash (Broder, 1997) is an approximate
+and construct a Suffix Array A of S. A suffix array        matching algorithm widely used in large-scale
+(Manber and Myers, 1993) is a representation of a          deduplication tasks (Versley and Panchenko, 2012;
+suffix tree (Weiner, 1973) that can be constructed         Gabriel et al., 2018; Gyawali et al., 2020), in-
+in linear time in kSk (Kärkkäinen and Sanders,             cluding to deduplicate the training set for a large
+2003) and enables efficient computation of many            Chinese-language LM (Zeng et al., 2021). Given
+substring queries; in particular, they allow us to         two documents xi and xj , the main idea is to repre-
+identify duplicated training examples in linear time.      sent each document by its respective set of n-grams
+Suffix arrays have the advantage over suffix trees         di and dj . We can then use hash functions to ap-
+in that they are 10–100× more memory efficient             proximate the Jaccard Index (Jaccard, 1912):
+(Manber and Myers, 1993), requiring just 8 bytes
+per input token, though they are asymptotically                      Jaccard(di , dj ) = |di ∩dj |/|di ∪dj |
+less efficient for some query types. They have been
+                                                           If the Jaccard Index between di and dj is suffi-
+used widely in NLP, such as for efficient TF-IDF
+                                                           ciently high, it is likely that documents are approx-
+computation (Yamamoto and Church, 2001) and
+                                                           imate matches of each other. To efficiently approx-
+document clustering (Chim and Deng, 2007).
+                                                           imate the Jaccard index, MinHash constructs doc-
+   The suffix array A for a sequence S is a
+                                                           ument signatures by sorting each of the n-grams
+lexicographically-ordered list of all suffixes con-
+                                                           via a hash function, and then keeping only the k
+tained in the sequence. Formally,
+                                                           smallest hashed n-grams. There are multiple ways
+                                                           to construct estimators of the Jaccard index from
+          A(S) = arg sort all_suffixes(S)
+                                                           these kinds of signatures (Cohen, 2016).
+For example, the suffixes of the sequence “banana”            In our implementation, we use 5-grams and a
+are (“banana”, “anana”, “nana” “ana”, “na”, “a”)           signature of size 9,000. The probability that two
+and so the suffix array is the sequence (6 4 2 1 5 3).     documents are considered a potential match is
+In practice, we construct S from the bytes of the          Pr(di , dj | Jaccard(di , dj ) = si,j ) = 1−(1−sbi,j )r
+BPE tokenization of the text (§6).
+                                                           where b = 20 and r = 450 are user-settable pa-
+4.1.2 Substring matching                                   rameters to control the strength of the filter. See
+After constructing A, it is straightforward to iden-       Appendix A for more details.
+tify duplicated training examples. Suppose that               For each pair of documents identified as a poten-
+the sequence s was repeated exactly twice in the           tial match, more computationally expensive similar-
+training dataset S at positions i and j, that is,          ity metrics can be employed as a subsequent filter-
+Si..i+|s| = Sj..j+|s| . Then the indices i, j will occur   ing step. In particular, we identify two documents
+adjacent to each other in the suffix array A.              as duplicates if they are matched by the MinHash
+   Finding all repeated sequences is thus a matter of      algorithm and their edit similarity is greater than
+linearly scanning the suffix array from beginning to       0.8. The edit similarity between token sequences
+end and looking for sequences Ai , Ai+1 that share         xi and xj is defined as:
+a common prefix of at least some threshold length.
+                                                                                         EditDistance(xi , xj )
+Any satisfying sequences are recorded. This al-               EditSim(xi , xj ) = 1 −
+                                                                                           max(|xi |, |xj |)
+gorithm is embarrassingly parallel, and so we can
+efficiently process the dataset. Based on experi-          To build clusters of similar documents, we con-
+mentation (Appendix B), we choose a threshold              struct a graph that has an edge between two doc-
+length of 50 BPE tokens for all experiments.               uments if they are considered a match. Then, we
+                                                       8427
+                                                        4
+                  Dataset                                  Example                                                        Near-Duplicate Example
+                  Wiki-40B      \n_START_ARTICLE_\nHum Award for                  Most Impact-       \n_START_ARTICLE_\nHum Award for Best Actor in a
+                                ful Character \n_START_SECTION_\nWinners and nomi-                   Negative Role \n_START_SECTION_\nWinners and nomi-
+                                nees\n_START_PARAGRAPH_\nIn the list below, winners are              nees\n_START_PARAGRAPH_\nIn the list below, winners are
+                                listed first in the colored row, followed by the other nominees.     listed first in the colored row, followed by the other nominees. [...]
+                                [...]
+                  LM1B          I left for California in 1979 and tracked Cleveland ’s changes on    I left for California in 1979 , and tracked Cleveland ’s changes on
+                                trips back to visit my sisters .                                     trips back to visit my sisters .
+                  C4            Affordable and convenient holiday flights take off from your         Affordable and convenient holiday flights take off from your depar-
+                                departure country, "Canada". From May 2019 to October 2019,          ture country, "USA". From April 2019 to October 2019, Condor
+                                Condor flights to your dream destination will be roughly 6 a         flights to your dream destination will be roughly 7 a week! Book
+                                week! Book your Halifax (YHZ) - Basel (BSL) flight now, and          your Maui Kahului (OGG) - Dubrovnik (DBV) flight now, and look
+                                look forward to your "Switzerland" destination!                      forward to your "Croatia" destination!
+
+
+ Table 1: Qualitative examples of near-duplicates identified by N EAR D UP from each dataset. The similarity be-
+ tween documents is highlighted. Note the small interspersed differences that make exact duplicate matching less
+ effective. Examples ending with “[...]” have been truncated for brevity. More data available in Appendix.
+
+
+                [5001, )                    280                         C4                                             % train examples with                 % valid with
+              [501, 5000)                         2,782                                                              dup in train dup in valid               dup in train
+                 [51, 500)                            23,094
+                  [21, 50)                            28,446                                        C4                     3.04%                1.59%                4.60%
+Group sizes
+
+
+
+
+                  [11, 20)                             42,723                                       RealNews              13.63%                1.25%               14.35%
+                   [6, 10)                               85,567
+                         5                              54,984                                      LM1B                   4.86%                0.07%                4.92%
+                         4                               109,853                                    Wiki40B                0.39%                0.26%                0.72%
+                         3                                 292,575
+                         2                                    1,861,744
+                         1                                             348,320,475              Table 2: The fraction of examples identified by
+                             0100 101 102 103 104 105 106 107 108 109                           N EAR D UP as near-duplicates.
+                                          Number of groups
+
+  Figure 1: The distribution of near-duplicate cluster
+  sizes from running N EAR D UP on C4.
+                                                                                                                        % train tokens with                  % valid with
+                                                                                                                     dup in train dup in valid               dup in train
+  use the method introduced in Łacki
+                                ˛ et al. (2018) to                                                  C4                     7.18%               0.75 %               1.38 %
+                                                                                                    RealNews              19.4 %               2.61 %               3.37 %
+  identify connected components. A breakdown of                                                     LM1B                   0.76%               0.016%               0.019%
+  the computation needed is given in Appendix A.                                                    Wiki40B                2.76%               0.52 %               0.67 %
+
+  5               Deduplication Results                                                         Table 3: The fraction of tokens (note Table 2 reports
+                                                                                                the fraction of examples) identified by E XACT S UBSTR
+ We deduplicate each of the four datasets with both                                             as part of an exact duplicate 50-token substring.
+ of our two techniques. When text was duplicated
+ across multiple data splits, we prioritized keeping
+ a copy in the test or validation set and removing it
+ from the train set.
+                                                                                                   On average with E XACT S UBSTR, we remove
+  5.1 Amount of Text Removed                                                                    more total content than with N EAR D UP (de-
+ With N EAR D UP, we found that the web-scrape                                                  spite E XACT S UBSTR not removing any examples
+ datasets contain between 3.04% (on C4) to 13.63%                                               outright)—for example removing 7.18% of the to-
+ (on RealNews) near duplicates (Table 2). Near-                                                 kens in C4. The exception is LM1B, where E X -
+ duplicate text is much less common in Wiki-40B,                                                ACT S UBSTR removes 8× less data than N EAR D UP.
+ forming only 0.39% of the train set.2 In C4, the ma-                                           On investigation, we find this is due to the fact that
+ jority (1.8M) of near-duplicate clusters consisted of                                          LM1B documents are significantly shorter: 90%
+ just a single pair of examples that matched against                                            of all documents are under 50 tokens, and so are
+ each other, but there were 280 clusters with over                                              not even candidates for potential matches even if
+ 5,000 examples in them (Figure 1), including one                                               the entire sequence matched verbatim. We find
+ cluster of size 250,933.                                                                       that both N EAR D UP and E XACT S UBSTR remove
+              2
+                                                                                                similar content—77% of the training examples that
+       Most duplicates we saw were automatically generated
+  pages, such as the outcomes of sports games. This shows the                                   N EAR D UP removes from C4 have at least one ver-
+  strength of manual curation for creating high-quality datasets.                               batim length-50 match found by E XACT S UBSTR.
+                                                                                          8428
+                                                                                           5
+5.2 Properties of Duplicated Text                                                C4 Original                             Training data
+
+
+
+
+                                                          Evaluation dataset
+                                                                                                                            Original
+While the authors of both RealNews and C4 ex-                                  C4 Duplicates                                NearDup
+plicitly attempted deduplication during dataset con-                                                                        ExactSubstr
+                                                                                  C4 Unique
+struction, the methods were insufficient to capture
+the more subtle types of duplicate text commonly                                      LM1B
+found on the internet. In C4 and Wiki-40B, we                                       Wiki40B
+qualitatively observe that much of the text identi-                                            0   5   10   15    20      25    30       35
+fied as near-duplicated is computer-generated. The                                                          Perplexity
+text is identical except for the names of places, busi-
+                                                            Figure 2: Impact of deduplicating the training set on
+nesses, products, dates, and so on. Because these           validation perplexity. We plot the results from T5 XL
+examples frequently differ by just a few words at           (see Appendix for base-sized model). For C4, we eval-
+a time, deduplication strategies relying on exact           uate on C4 Original, the original validation set; C4
+string matching would fail to identify a match. Ex-         Unique, a subset of the validation set identified by
+ample duplicate pairs from each dataset can be              N EAR D UP as having zero matches across C4; and C4
+found in Table 1 (more examples in the Appendix).           Duplicates, a subset of the validation set identified by
+                                                            N EAR D UP as having a match in the C4 train set.
+    For RealNews and LM1B, derived from news
+sites, we observe that many near-duplicates occur
+because the same news article appears on multiple           with a budget of 50K tokens, which resulted in a
+news sites with slightly different formatting. For          vocabulary the same size as GPT-2’s. We trained
+example, in LM1B, there is one example that starts          with a maximum sequence length of 512 tokens
+“MINEOLA , N.Y. - New York officials say [...]” and         (for longer documents, we randomly extracted sub-
+another that starts “( AP ) - New York officials say        sequences of this length.) Further training details
+[...]”. The two examples are otherwise identical.           can be found in Appendix C.
+5.3 Train / Test Set Leakage                                 6.1                  Model Perplexity
+Both deduplication methods identify overlap be-             We computed the perplexity of our trained mod-
+tween the train set and the validation set (Table 2).       els on the validation sets of LM1B and Wiki-40B,
+For example, 4.6% of the C4 validation set and              and on subsets of the C4 validation set (Figure 2).
+14.4% of the RealNews validation set examples               For the base size, we observe that all models have
+had an approximate duplicate in their respective            similar perplexity on the original C4 validation set
+training sets. Such duplication is problematic since        and on validation set examples that were identi-
+it could cause evaluation metrics to be unfairly in-        fied as unique (no near-duplicate in either train
+flated for models that are better at memorizing their       or validation). However, both models trained on
+train sets. We evaluate the effect of this leakage on       deduplicated data have significantly higher perplex-
+publicly released models in Section 6.3.                    ity on validation set examples that have duplicates
+                                                            in the training set than the model trained on the
+6   Impact on Trained Models
+                                                            original C4. E XACT S UBSTR-deduplicated results
+. We trained 1.5B parameter “XL", decoder-                  in higher perplexity than N EAR D UP-deduplicated.
+only, Transformer-based language models similar             These trends holds true for the XL sized model as
+to GPT-2, on C4-O RIGINAL, C4-N EAR D UP, and               well. While this may suggest E XACT S UBSTR du-
+C4-E XACT S UBSTR, respectively. We use the T5              plication results in models least overfit on the train
+codebase and model architecture from Raffel et al.          set, note that both of these techniques have used
+(2020), and each model was trained for about two            separate duplicate thresholds and a different choice
+epochs on its respective dataset. To better under-          of thresholds could change the results.
+stand the amount of variance in the perplexities               When evaluating on the validation sets of LM1B
+of trained models, we also trained three different          and Wiki-40B, we found that models trained on
+random seeds of the 110M parameter “base" model             N EAR D UP-deduplicated C4 consistently achieved
+for each of the above three datasets—for a total of         lowest perplexity (for LM1B eval with base models,
+nine base-sized models.                                     see Appendix Figure 7). E XACT S UBSTR dedupli-
+   For all experiments, we used a Byte Pair Encod-          cation decreases perplexity of the XL model by
+ing (BPE) vocabulary trained on C4-N EAR D UP               almost 3 points perplexity on Wiki-40B which is
+                                                      8429
+                                                       6
+       Model                 1 Epoch   2 Epochs
+                                                                              train dup
+
+
+
+
+                                                           Prompt source
+       XL-O RIGINAL          1.926%      1.571%
+       XL-N EAR D UP         0.189%      0.264%                            train unique
+       XL-E XACT S UBSTR     0.138%      0.168%
+                                                                           valid in train                           Training data
+Table 4: When generating 100k sequences with no                                                                            Original
+                                                                                                                           NearDup
+prompting, over 1% of the tokens emitted from a model                      valid unique                                    ExactSubstr
+trained on the original dataset are part of a 50-token
+                                                                                        0.0      0.1       0.2       0.3          0.4
+long sequence copied directly from the training dataset.                                        Fraction of LM continuations
+This drops to 0.1% for the deduplicated datasets.                                               matching true continuation
+                                                             Figure 3: The proportion of generations which have
+much larger than the variation of about 1 point per-         edit similarity above 0.8 with the groundtruth continu-
+plexity we observed in the base models. This is              ation when using the LM to generate continuations for
+despite seeing fewer tokens of training data overall.        32-token prompts identified by N EAR D UP as either du-
+                                                             plicated or unique.
+  Lastly, we note all our XL models achieved <35
+perplexity on LM1B, which is less than the 42.16
+                                                                   Model                      Dataset      Orig    Dups        Unique
+perplexity reported for the 1.5B GPT-2 using a
+vocabulary the same size as ours.                                  Transformer-XL             LM1B         21.77   10.11         23.58
+                                                                   GROVER-Base                RealNews     15.44   13.77         15.73
+                                                                   GROVER-XL                  RealNews      9.15    7.68          9.45
+6.2 Generated Text
+Data duplication has the effect of biasing the               Table 5: For each model, the perplexity of the offi-
+trained LM towards particular types of examples.             cial validation set (Orig), valid set examples which
+This can contribute to a lower diversity of genera-          were identified by N EAR D UP as matches of train set
+                                                             examples (Dups), and valid set examples identified by
+tions, and increased likelihood that the generated
+                                                             N EAR D UP as unique (Unique). Due to the size of the
+content is copied from the training data (Carlini            RealNews validation set, we evaluated on only the first
+et al., 2020). For our generation experiments, we            25k examples meeting each condition.
+use top-k random sampling with k = 50 and exper-
+iment with prompted and unprompted generation.
+                                                             amples identified as unique across all splits (valid
+No prompt. We first evaluate memorization ten-               unique). We select the first 32 tokens of each exam-
+dencies in the case where the model is asked                 ple as the prompt, which means we can evaluate the
+to generate text without any prompt sequence.                fraction of generations which are near-duplicates
+We generate 100,000 samples, each up to 512                  with the ground-truth continuation for the prompt
+tokens in length (examples provided in the Ap-               (Figure 3). When the prompt comes from dupli-
+pendix). For each generated token, we say the                cate examples in the train set, XL-O RIGINAL repro-
+token is memorized if it is part of a 50-token sub-          duces the groundtruth continuation over 40% of the
+string that is exactly contained in the training data.       time. XL-E XACT S UBSTR and XL-N EAR D UP still
+On XL-O RIGINAL, over 1% of the generated to-                copy the groundtruth more often when the prompt
+kens belong to memorized sub-sequences (see Ta-              comes from a duplicate example than when the
+ble 4). This is ∼ 10× more memorization than XL-             prompt comes from a unique example, suggesting
+E XACT S UBSTR or XL-N EAR D UP. Some example                that more stringent deduplication may be necessary
+subsequences that were copied verbatim from the              to remove memorization tendencies entirely.
+train set can be found in Table 9 in the Appendix.
+                                                             6.3               Impact on Existing Models
+With prompting. In most real use cases, lan-
+guage model generation is controlled by providing            Train-test leakage does not just impact models
+a prompt for the model to continue. We experi-               trained on C4. Table 5 shows that the presence
+ment with four possible prompt sources: training             of near-duplicates of the evaluation set in the train
+examples identified by E XACT S UBSTR as having              set has a significant impact on model perplexity
+near-duplicates in the train set (train dup), train-         for two standard models: Transformer-XL (Dai
+ing examples identified as unique (train unique),            et al., 2019), which was trained on LM1B, and
+validation set examples with a near-duplicate in             GROVER (Zellers et al., 2019), which was trained
+the train set (valid in train), and validation set ex-       on RealNews. For Transformer XL, the perplexity
+                                                       8430
+                                                        7
+halves on examples identified as near-duplicates.                  as the game AI Dungeon5 , should also not output
+For GROVER, the difference, though not quite as                    memorized content like adverts for real products.
+stark, is present in both model sizes considered.                     We stress that in our experiments, we do not dis-
+   Existing models also suffer from the problem                    tinguish between undesired memorized text (such
+of generating text from their train sets. We find                  as phone numbers), innocuous memorized text
+that 1.38% of the tokens in the official release of                (common phrases), and text we may want to be
+25k GROVER-Mega outputs 3 are part of verbatim                     memorized (such as a quote by a public figure),
+matches in RealNews of at least length 50. Like-                   and instead treat all instances of the LM generat-
+wise, more than 5% of the tokens in ~200k se-                      ing text that closely matches the training set as
+quences outputted by GPT-Neo 1.3B (Black et al.,                   problematic. While we qualitatively observed that
+2021) are part of a 50 token matches of its training               much of the identified memorized content was rel-
+data, the Pile (Gao et al., 2020).                                 atively innocuous, a more systematic study of the
+                                                                   risks associated with the detected memorization
+7    Discussion                                                    was beyond the scope of this work.
+                                                                      We also do not investigate the negative conse-
+The focus of this paper is on the datasets used to                 quences of deduplication. Some language tasks
+train language models. While recent work focused                   explicitly require memorization, like document re-
+on documenting the potential harms that could arise                trieval or closed-book question answering. Also,
+from problematic datasets (Bender and Friedman,                    text that gives attribution is often duplicated across
+2018; Gebru et al., 2020), less work has been done                 documents, so removing duplicate substrings could
+to quantitatively analyze properties of real language              correspond to removing just the attribution, which
+modelling datasets, like Dodge et al. (2021a) has                  could result in models that learn the content with-
+done for C4. Our paper provides analysis on one                    out its attached attribution. Deduplication is also
+particular axis, that of data duplication.                         not sufficient to remove privacy-sensitive data like
+    Our experiments measured what could be quan-                   bank passwords and medical records which should
+tified: the amount of duplicate content in com-                    never be used in training data (Brown et al., 2022).
+mon datasets, the effect of deduplication on trained                  Ultimately, whether memorization is a desired
+model perplexity, and the reduction of memorized                   property of a language model, or else risky and
+content in trained models through deduplication.                   unwanted, depends both on the nature of the text
+We do not focus on the nature of the data being                    that has been memorized and on the downstream
+removed by deduplication or memorized by LMs.                      applications of the trained model. However, since
+    Privacy is an important subject for future work,               the trend has been towards creating datasets and
+as memorized training data has significant privacy                 models that are application-agnostic, we encourage
+consequences. By this, we mean the standard pri-                   researchers to think carefully about the limitations
+vacy definition that a model should not reveal any-                of the data they have collected and the how the
+thing particular to the specific dataset it was trained            model’s intended usage constrains what should be
+on, as opposed to another training dataset from a                  part of the training set. Developing techniques to
+similar distribution (Shokri et al., 2017).4 Train-                memorize or forget specific sequences depending
+ing on standard datasets that have not yet been                    on the end application is a promising research di-
+deduplicated results in models that are particularly               rection.
+sensitive to examples that happened to be repeated
+                                                                   8       Conclusion
+multiple times, and this has negative privacy im-
+plications. For instance, it could violate a person’s              We encourage future language model research to
+expectations of privacy if their publicly available                perform dataset deduplication, either by training
+personal data appeared in a different, surprising                  on the deduplicated datasets we release, using the
+context. Downstream applications of LMs, such                      deduplication tools we release, or following our
+                                                                   approach to deduplicate datasets with new tools.
+    3
+      gs://grover-models/generation_examples/                        The exact technique used to perform dedupli-
+generator=mega~dataset=p0.90.jsonl
+    4
+      Another interpretation of privacy focuses on the sensitiv-   cation is less important than performing stringent
+ity of the data involved, when a model is trained on and able      deduplication in the first place. On the whole, dedu-
+to reproduce personal identifiers or other forms of “private
+                                                                       5
+data.” Our definition is more expansive.                                   https://play.aidungeon.io/
+
+                                                               8431
+                                                                8
+plication does not harm, and sometimes improves,       Brain women who have given us continuous sup-
+model perplexity, despite the fact that the dedupli-   port.
+cated datasets are smaller and faster to train on.        Chris Callison-Burch and Daphne Ippolito’s
+It is especially important that there are no dupli-    research is supported in part by the DARPA
+cates between the training and testing sets, because   KAIROS Program (contract FA8750-19-2-1004),
+overlap here explicitly encourages selecting models    the DARPA LwLL Program (contract FA8750-19-
+that memorize the training data. Lastly, deduplica-    2-0201), and the IARPA BETTER Program (con-
+tion helps to reduce some of the privacy concerns      tract 2019-19051600004). The views and conclu-
+around LMs memorizing their training data.             sions contained herein are those of the authors and
+                                                       should not be interpreted as necessarily represent-
+Ethics                                                 ing the official policies, either expressed or implied,
+                                                       of DARPA, IARPA, or the U.S. Government.
+The developers of large language models typi-
+cally attempt to create training data that reflects    Contributions
+natural human communication, but current meth-
+                                                       Each of the authors on this paper significantly con-
+ods to collect and curate such datasets are falli-
+                                                       tributed to the final results.
+ble. There are multiple reasons some text ends
+up over-represented. For example, bot replies,         • Katherine trained the models used in the pa-
+auto-generated templates, and licenses are repeated      per, built and ran the eval and text generation
+for structural (e.g., legal, economical) reasons (as     pipelines, contributed significantly to writing,
+was also observed by Dodge et al. (2021a)). Ad-          analysis, and project organization and manage-
+ditionally, common techniques for acquiring and          ment.
+“cleaning” data can result in an over-representation
+of particular subsets of world users, often those      • Daphne ran the approximate matching data dedu-
+who are English-speaking and publishing in es-           plication pipelines, extracted prompts and evalu-
+tablished forums. This effectively under-represents      ation datasets, ran eval pipelines, and contributed
+non-English speakers as well as groups whose com-        significantly to planning, writing, and analysis.
+munication mostly occurs outside of the public
+                                                       • Andrew wrote the code to perform deduplica-
+web. In this paper, we focus on the problem of
+                                                         tion with approximate matching, helped evaluate
+over-representation of some types of text (struc-
+                                                         energy expenditure, and helped with analysis.
+tural duplicates) but do not address the problem of
+under-representation of others.                        • Chiyuan helped generate plots and contributed to
+   Additionally, while we discuss when memorized         project scoping, writing, and data analysis.
+content might be desired and when it might not
+be desired, our analysis does not disambiguate         • Chris offered mentorship and guidance through-
+these two cases. Work to disambiguate helpful            out the project and contributed to writing.
+from harmful memorization is tremendously com-
+                                                       • Doug offered mentorship and guidance through-
+plex and would require a different set of research
+                                                         out the project and contributed to writing.
+methodologies than are presented in this work.
+                                                       • Nicholas wrote the suffix array implementation,
+Acknowledgements                                         ran all E XACT S UBSTR deduplication experi-
+                                                         ments, contributed significantly to planning, writ-
+We are grateful to the many researchers whose            ing, and analysis, as well as scoping the project.
+technical help, feedback, and discussions shaped
+this project: Jacob Austin, Samy Bengio, Olivier
+Bousquet, James Bradbury, Fernando Diaz, Mark
+Diaz, Noah Fiedel, Jonathan Frankle, David             References
+Grangier, Stefanie Karp, David Mimno, Gaurav           Miltiadis Allamanis. 2019. The adverse effects of
+Mishra, Michael Mozer, Sharan Narang, Alex Pas-          code duplication in machine learning models of
+                                                         code. In Proceedings of the 2019 ACM SIG-
+sos, Adam Roberts, Hanie Sedghi, Jascha Sohl-            PLAN International Symposium on New Ideas, New
+dickstein, David So, Florian Tramer, and Yun             Paradigms, and Reflections on Programming and
+William Yu. We are also grateful to the Google           Software, pages 143–153.
+
+                                                   8432
+                                                    9
+Devansh Arpit, Stanisław Jastrz˛ebski, Nicolas Ballas,      Proceedings of the 16th International Conference on
+  David Krueger, Emmanuel Bengio, Maxinder S Kan-           World Wide Web, WWW ’07, page 121–130, New
+  wal, Tegan Maharaj, Asja Fischer, Aaron Courville,        York, NY, USA. Association for Computing Machin-
+  Yoshua Bengio, et al. 2017. A closer look at mem-         ery.
+  orization in deep networks. In International Confer-
+  ence on Machine Learning, pages 233–242. PMLR.         Edith Cohen. 2016. Min-hash sketches: A brief survey.
+Jack Bandy and Nicholas Vincent. 2021. Addressing        Zihang Dai, Zhilin Yang, Yiming Yang, Jaime Car-
+   "documentation debt" in machine learning research:      bonell, Quoc V Le, and Ruslan Salakhutdinov.
+   A retrospective datasheet for bookcorpus.               2019. Transformer-xl: Attentive language mod-
+                                                           els beyond a fixed-length context. arXiv preprint
+Emily M. Bender and Batya Friedman. 2018. Data             arXiv:1901.02860.
+  statements for natural language processing: Toward
+  mitigating system bias and enabling better science.
+                                                         Jesse Dodge, Maarten Sap, Ana Marasovic, William
+  Transactions of the Association for Computational
+                                                            Agnew, Gabriel Ilharco, Dirk Groeneveld, and Matt
+  Linguistics, 6:587–604.
+                                                            Gardner. 2021a. Documenting the english colossal
+Emily M. Bender, Timnit Gebru, Angelina McMillan-           clean crawled corpus.
+  Major, and Shmargaret Shmitchell. 2021. On the
+  dangers of stochastic parrots: Can language models     Jesse Dodge, Maarten Sap, Ana Marasovic, William
+  be too big? . In Proceedings of the 2021 ACM              Agnew, Gabriel Ilharco, Dirk Groeneveld, and
+                                                            Matt Gardner. 2021b. Documenting the english
+  Conference on Fairness, Accountability, and Trans-        colossal clean crawled corpus. arXiv preprint
+  parency, FAccT ’21, page 610–623, New York, NY,           arXiv:2104.08758.
+  USA. Association for Computing Machinery.
+
+Sid Black, Leo Gao, Phil Wang, Connor Leahy,             Vitaly Feldman and Chiyuan Zhang. 2020. What neu-
+   and Stella Biderman. 2021. GPT-Neo: Large                ral networks memorize and why: Discovering the
+   scale autoregressive language modeling with mesh-        long tail via influence estimation. In Advances in
+   tensorflow.                                             Neural Information Processing Systems.
+
+Burton H Bloom. 1970. Space/time trade-offs in hash      Rodney A. Gabriel, Tsung-Ting Kuo, Julian McAuley,
+  coding with allowable errors. Communications of          and Chun-Nan Hsu. 2018. Identifying and char-
+  the ACM, 13(7):422–426.                                  acterizing highly similar notes in big clinical note
+                                                           datasets. Journal of Biomedical Informatics, 82:63–
+Andrei Z Broder. 1997. On the resemblance and con-         69.
+  tainment of documents. In Proceedings. Compres-
+  sion and Complexity of SEQUENCES 1997 (Cat. No.        Leo Gao, Stella Biderman, Sid Black, Laurence Gold-
+  97TB100171), pages 21–29. IEEE.                          ing, Travis Hoppe, Charles Foster, Jason Phang,
+                                                           Horace He, Anish Thite, Noa Nabeshima, Shawn
+Hannah Brown, Katherine Lee, Fatemehsadat                  Presser, and Connor Leahy. 2020. The Pile: An
+  Mireshghallah, Reza Shokri, and Florian Tramèr.          800gb dataset of diverse text for language modeling.
+  2022. What does it mean for a language model to          arXiv preprint arXiv:2101.00027.
+  preserve privacy? arXiv preprint.
+                                                         Timnit Gebru, Jamie Morgenstern, Briana Vec-
+Tom B Brown, Benjamin Mann, Nick Ryder, Melanie            chione, Jennifer Wortman Vaughan, Hanna Wal-
+  Subbiah, Jared Kaplan, Prafulla Dhariwal, Arvind         lach, Hal Daumé III au2, and Kate Crawford. 2020.
+  Neelakantan, Pranav Shyam, Girish Sastry, Amanda         Datasheets for datasets.
+  Askell, et al. 2020. Language models are few-shot
+  learners. In Advances in Neural Information Pro-       David Graff, Junbo Kong, Ke Chen, and Kazuaki
+  cessing Systems 33.                                      Maeda. 2003. English gigaword. Linguistic Data
+                                                           Consortium, Philadelphia, 4(1):34.
+Nicholas Carlini, Florian Tramer, Eric Wallace,
+  Matthew Jagielski, Ariel Herbert-Voss, Katherine
+  Lee, Adam Roberts, Tom Brown, Dawn Song, Ul-           Mandy Guo, Zihang Dai, Denny Vrandecic, and Rami
+  far Erlingsson, Alina Oprea, and Colin Raffel. 2020.    Al-Rfou. 2020. Wiki-40b: Multilingual language
+  Extracting training data from large language models.    model dataset. In LREC 2020.
+
+Ciprian Chelba, Tomas Mikolov, Mike Schuster, Qi Ge,     Bikash Gyawali, Lucas Anastasiou, and Petr Knoth.
+  Thorsten Brants, Phillipp Koehn, and Tony Robin-         2020. Deduplication of scholarly documents using
+  son. 2013. One billion word benchmark for measur-        locality sensitive hashing and word embeddings. In
+  ing progress in statistical language modeling. arXiv     Proceedings of the 12th Language Resources and
+  preprint arXiv:1312.3005.                                Evaluation Conference, pages 901–910.
+
+Hung Chim and Xiaotie Deng. 2007. A new suffix           Paul Jaccard. 1912. The distribution of the flora in the
+  tree similarity measure for document clustering. In      alpine zone. New phytologist, 11(2):37–50.
+
+                                                     8433
+                                                      10
+Juha Kärkkäinen and Peter Sanders. 2003. Simple lin-        Trieu H Trinh and Quoc V Le. 2018. A simple
+  ear work suffix array construction. In International         method for commonsense reasoning. arXiv preprint
+  colloquium on automata, languages, and program-              arXiv:1806.02847.
+  ming, pages 943–955. Springer.
+                                                            Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob
+Pang Ko and Srinivas Aluru. 2003. Space efficient             Uszkoreit, Llion Jones, Aidan N Gomez, Lukasz
+  linear time construction of suffix arrays. In An-           Kaiser, and Illia Polosukhin. 2017. Attention is all
+  nual Symposium on Combinatorial Pattern Match-              you need. arXiv preprint arXiv:1706.03762.
+  ing, pages 200–210. Springer.
+                                                            Yannick Versley and Yana Panchenko. 2012. Not just
+Udi Manber and Gene Myers. 1993. Suffix arrays: a             bigger: Towards better-quality web corpora. In Pro-
+  new method for on-line string searches. siam Jour-          ceedings of the seventh Web as Corpus Workshop
+  nal on Computing, 22(5):935–948.                            (WAC7), pages 44–52.
+
+Ge Nong, Sen Zhang, and Wai Hong Chan. 2009. Lin-           Eric Wallace, Shi Feng, Nikhil Kandpal, Matt Gardner,
+  ear suffix array construction by almost pure induced-        and Sameer Singh. 2019. Universal adversarial trig-
+  sorting. In 2009 data compression conference,                gers for attacking and analyzing nlp. arXiv preprint
+  pages 193–202. IEEE.                                         arXiv:1908.07125.
+
+David Patterson, Joseph Gonzalez, Quoc Le, Chen             Ryan Webster, Julien Rabin, Loïc Simon, and Frédéric
+  Liang, Lluis-Miquel Munguia, Daniel Rothchild,              Jurie. 2019. Detecting overfitting of deep generative
+  David So, Maud Texier, and Jeff Dean. 2021. Car-            networks via latent recovery. In 2019 IEEE/CVF
+  bon emissions and large neural network training.            Conference on Computer Vision and Pattern Recog-
+                                                              nition (CVPR), pages 11265–11274.
+Alec Radford, Jeffrey Wu, Rewon Child, David Luan,
+  Dario Amodei, and Ilya Sutskever. 2019. Language          Peter Weiner. 1973. Linear pattern matching algo-
+  models are unsupervised multitask learners. OpenAI          rithms. In 14th Annual Symposium on Switching and
+  blog, 1(8):9.                                               Automata Theory (swat 1973), pages 1–11. IEEE.
+
+Colin Raffel, Noam Shazeer, Adam Roberts, Kather-           Linting Xue, Noah Constant, Adam Roberts, Mi-
+  ine Lee, Sharan Narang, Michael Matena, Yanqi               hir Kale, Rami Al-Rfou, Aditya Siddhant, Aditya
+  Zhou, Wei Li, and Peter J. Liu. 2020. Exploring             Barua, and Colin Raffel. 2020. mt5: A mas-
+  the limits of transfer learning with a unified text-to-     sively multilingual pre-trained text-to-text trans-
+  text transformer. Journal of Machine Learning Re-           former. arXiv preprint arXiv:2010.11934.
+  search, 21(140):1–67.                                     Mikio Yamamoto and Kenneth W Church. 2001. Using
+Noam Shazeer and Mitchell Stern. 2018. Adafactor:             suffix arrays to compute term frequency and docu-
+  Adaptive learning rates with sublinear memory cost.         ment frequency for all substrings in a corpus. Com-
+  In International Conference on Machine Learning,            putational Linguistics, 27(1):1–30.
+  pages 4596–4604. PMLR.                                    Rowan Zellers, Ari Holtzman, Hannah Rashkin,
+Emily Sheng, Kai-Wei Chang, Premkumar Natara-                 Yonatan Bisk, Ali Farhadi, Franziska Roesner, and
+  jan, and Nanyun Peng. 2020. Towards control-                Yejin Choi. 2019. Defending against neural fake
+  lable biases in language generation. arXiv preprint         news. arXiv preprint arXiv:1905.12616.
+  arXiv:2005.00268.                                         Wei Zeng, Xiaozhe Ren, Teng Su, Hui Wang,
+                                                             Yi Liao, Zhiwei Wang, Xin Jiang, ZhenZhang
+Reza Shokri, Marco Stronati, Congzheng Song, and
+                                                             Yang, Kaisheng Wang, Xiaoda Zhang, Chen Li,
+  Vitaly Shmatikov. 2017. Membership inference at-
+                                                              Ziyan Gong, Yifan Yao, Xinjing Huang, Jun
+  tacks against machine learning models. In 2017
+                                                             Wang, Jianfeng Yu, Qi Guo, Yue Yu, Yan Zhang,
+  IEEE Symposium on Security and Privacy (SP),
+                                                             Jin Wang, Hengtao Tao, Dasen Yan, Zexuan Yi,
+  pages 3–18. IEEE.
+                                                              Fang Peng, Fangqing Jiang, Han Zhang, Lingfeng
+Cory Stephenson, Suchismita Padhy, Abhinav Ganesh,            Deng, Yehong Zhang, Zhe Lin, Chao Zhang, Shao-
+  Yue Hui, Hanlin Tang, and SueYeon Chung. 2021.              jie Zhang, Mingyue Guo, Shanzhi Gu, Gaojun
+  On the geometry of generalization and memoriza-             Fan, Yaowei Wang, Xuefeng Jin, Qun Liu, and
+  tion in deep neural networks. In International Con-        Yonghong Tian. 2021. Pangu-α: Large-scale au-
+  ference on Learning Representations.                        toregressive pretrained chinese language models
+                                                             with auto-parallel computation. arXiv preprint
+Emma Strubell, Ananya Ganesh, and Andrew McCal-               arXiv:2104.12369.
+  lum. 2019. Energy and policy considerations for
+  deep learning in nlp.                                     Yukun Zhu, Ryan Kiros, Rich Zemel, Ruslan Salakhut-
+                                                              dinov, Raquel Urtasun, Antonio Torralba, and Sanja
+Piotr Teterwak, Chiyuan Zhang, Dilip Krishnan, and            Fidler. 2015. Aligning books and movies: Towards
+   Michael C Mozer. 2021. Understanding invariance            story-like visual explanations by watching movies
+  via feedforward inversion of discriminatively trained       and reading books. In Proceedings of the IEEE inter-
+   classifiers. In International Conference on Machine        national conference on computer vision, pages 19–
+  Learning, pages 10225–10235. PMLR.                          27.
+
+                                                        8434
+                                                         11
+Jakub Łacki,
+         ˛    Vahab Mirrokni, and Michał Włodarczyk.
+   2018. Connected components at scale via local con-
+   tractions.
+
+
+
+
+                                                    8435
+                                                     12
+A    Further Details on N EAR D UP                        kens in a document. Edit similarity has a worst case
+                                                          complexity of T 2 , so the worst case complexity is
+For our MinHash based deduplication method, doc-
+uments are first space tokenized, then each consec-
+                                                                           O(N + bk 2 T 2 N ) = O(N )
+utive 5-gram is hashed using tabulation hashing.
+The set of these hashes is the signature for the doc-     since b, k, and T are all  N . The left term is the
+ument. For each element in a document’s signature,        complexity of grouping by the signatures, and the
+the element is hashed using k other hash functions.       right represents the pathological worst case of all
+The minimum hashed element for each of the k              documents falling into the same B buckets.
+hash functions is stored. These minimum hashes               The highly distributed N EAR D UP implementa-
+are then partitioned into r buckets, with b hashes        tion we employed is one used for large-scale pro-
+per bucket. These b hashes are augmented into a           duction tasks at Google. On the English C4 dataset,
+single value, then if two documents have the same         the algorithm consumed approximately 41.5 kWh
+value in at least one bucket, they’ll be marked as        of energy. Note that our choices of k and b were
+a potential match. The probability that two doc-          designed to produce very high recall, and with dif-
+uments are considered a potential match is equal          ferent parameters, the algorithm could be made
+to                                                        much more energy efficient while producing simi-
+                                                          lar results.
+Pr(di , dj | Jaccard(di , dj ) = si,j ) = 1−(1−sbi,j )r
+                                                          B        Further Details on E XACT S UBSTR
+where si,j is the Jaccard index between the two
+                                                          Parallel linear time construction. We build a
+documents i and j. For document pairs that were
+                                                          parallelized linear time suffix array algorithm. As
+identified as potential matches, we computed their
+                                                          a building block, we make black-box use of the
+actual Jaccard index, and if that was above 0.8,
+                                                          SA-IS algorithm for constructing a suffix array
+we computed their edit similarity. Document pairs
+                                                          in linear time Nong et al. (2009); Ko and Aluru
+with edit similarity higher than 0.8 were identi-
+                                                          (2003). Unfortunately, this algorithm is not eas-
+fied as duplicates. After some experimentation, we
+                                                          ily parallelized directly, so we introduce a simple
+chose to use b = 20, and r = 450, so k = 9, 000,
+                                                          divide and conquer approach to parallelizing the
+so as to make sure a collision at the desired Jaccard
+                                                          array construction.
+index threshold of 0.8 had a high probability of
+                                                             We build our implementation in Rust and ex-
+occurring.
+                                                          tend an existing suffix array library6 with three
+    We also tested an alternative configuration—
+                                                          modification. The first two are straightforward im-
+filtering to document pairs with Jaccard index of at
+                                                          plementation differences: we modify the code to
+least 0.9 and edit similarity of at least 0.9. In this
+                                                          allow datasets larger than 4GB, and we remove the
+case, we used b = 20, r = 40, and k = 800. Fig-
+                                                          requirement that strings parse as valid UTF-8 se-
+ure 4 shows the histogram of Jaccard similarities
+                                                          quences in favor of raw byte sequences. Our third
+and edit similarities for all document pairs which
+                                                          change is more significant: we re-implement the
+collided in min-hash space, for our chosen configu-
+                                                          algorithm so that we can stream the suffix array
+ration (blue) and for the alternative configuration
+                                                          itself off disk.
+(orange). This allows us verify if the threshold
+chosen has few comparisons around the chosen              Parallel partial suffix array construction. Our
+threshold, then we’ve likely captured the majority        divide and conquer suffix array construction algo-
+of actual near duplicates above that threshold. To        rithm starts by partitioning the dataset into K differ-
+verify that yourself, look at the left hand tails of      ent “splits” with SA-IS run over independently on
+the distributions. Since both 0.8 and 0.9 begin to        each split in parallel. This algorithm still requires
+vanish at the same point (in spite of the fact that the   O(N ) work but runs in O(N/K) wall-clock time.
+two thresholds are optimized for accuracy around          This gives us N separate suffix arrays Ai .
+different thresholds), we feel comfortable saying            Given two suffix arrays A1 and A2 for two se-
+that we’re capturing the majority of actual near          quences S1 and S2 it’s not completely trivial to
+duplicates.                                               construct a single suffix array A for S = S1 || S2
+                                                          because of the boundary conditions. Instead, we
+Computational Analysis Let N be the number
+                                                              6
+of documents and T be the maximal number of to-                   https://github.com/BurntSushi/suffix
+
+                                                      8436
+                                                       13
+document comparisons   0.6        C4 (t=0.8)                  LM1B (t=0.8)                  RealNews (t=0.8)           Wiki40B (t=0.8)
+                                  C4 (t=0.9)                  LM1B (t=0.9)                  RealNews (t=0.9)           Wiki40B (t=0.9)
+    % of pairwise
+
+                       0.4
+
+                       0.2
+
+                       0.0
+                             0.00 0.25 0.50 0.75 1.00   0.00 0.25 0.50 0.75 1.00      0.00 0.25 0.50 0.75 1.00 0.00 0.25 0.50 0.75 1.00
+                                    Edit similarity             Edit similarity              Edit similarity           Edit similarity
+                       0.4
+document comparisons
+
+
+
+
+                                  C4 (t=0.8)                  LM1B (t=0.8)                  RealNews (t=0.8)           Wiki40B (t=0.8)
+                       0.3        C4 (t=0.9)                  LM1B (t=0.9)                  RealNews (t=0.9)           Wiki40B (t=0.9)
+    % of pairwise
+
+
+
+
+                       0.2
+                       0.1
+                       0.0
+                             0.00 0.25 0.50 0.75 1.00    0.00 0.25 0.50 0.75 1.00     0.00 0.25 0.50 0.75 1.00   0.00 0.25 0.50 0.75 1.00
+                                   Jaccard similarity          Jaccard similarity           Jaccard similarity         Jaccard similarity
+
+                                                        Figure 4: Histograms of document similarities.
+
+
+don’t build the data S = S1 || S2 but rather let                                    C so that SBi < SCj < SBj+1 . The case where
+S10 = S1 || S2 [uptoK] for some K greater than                                      K > 2 is identical except that we repeat this over
+the longest substring match. Then we build the                                      all K partial suffix arrays.
+arrays on S10 and S2 . To merge the arrays together
+we can remove the items from the first array af-
+                                                                                    Computational Analysis. We run our algorithm
+ter index |S1 | and merge-sort insert them into the
+                                                                                    on a single VM on the cloud with 96 cores and
+second.
+                                                                                    768GB of memory. Our algorithm is efficient, for
+                                                                                    example processing the Wiki-40B training set (3
+Parallel merge of partial suffix arrays. We                                         million examples containing 4GB of text) in 2.3
+now merge these separate arrays together into a                                     minutes wall-clock time (2.1 CPU-hours of work).
+single suffix array A, Consider the simpler case of                                 The 350GB C4 dataset takes under 12 hours (wall-
+two partial suffix arrays B and C that we would                                     clock) to build a suffix array; although we are still
+like to merge together. We can achieve this by                                      memory constrained and so this corresponds to
+letting i = 0 index B and j = 0 index C. Each                                       ∼ 1000 CPU-hours. Once the suffix array has been
+iteration of the algorithm then pushes Bi into A                                    constructed, it takes under an hour to deduplicate
+if SBi .. < SCi and Ci otherwise, repeating until                                   the C4 dataset.
+i = |B| − 1 and j = |C| − 1. To generalize to K
+splits, we need only replace the single comparison                                     Note that this algorithm still requires that the
+above with a min-heap requiring O(log K)  10                                       dataset itself fits in memory (so that we can effi-
+work on each iteration.                                                             ciently index in arbitrary positions), but we do not
+                                                                                    need to fit the entire suffix array into memory. This
+   Observe that in the general case this algorithm
+                                                                                    is fortunate since our suffix array requires an 8×
+is O(N m log(K)) where N is the length of the
+                                                                                    space overhead. For example, the suffix array for
+dataset, m is the average length of a prefix match,
+                                                                                    the 350GB C4 is 1.5TB.
+and K is the number of splits. It is therefore incor-
+rect to call this algorithm linear time in the general                                 Compared to the cost of training a language
+case, for ours it is. Because the length of the longest                             model on this dataset, the additional work required
+match is bounded above by the length of the longest                                 to deduplicate the training dataset is negligible.
+sequence, as long as the size of the dataset is inde-
+pendent of the length of the longest sequence in the                                Setting a threshold of duplicates. An important
+dataset, this algorithm remains efficient.                                          question is how long must a substring match be
+   Again, we can parallelize this operation among                                   before it is counted as a duplicate. In Figure 5, we
+L simultaneous jobs (in practice we set K = L as                                    plot the frequency of substring matches within the
+the number of threads on our machine). In the K =                                   four datasets we will consider. For each substring
+2 case, job l processes i ∈ [jN/L, (j + 1)N/L],                                     of length k, we compute the probability that there
+choosing the bounds of j by binary searching into                                   exists another sequence of length k identical to this
+                                                                             8437
+                                                                              14
+                                                             parameter base models had 12 layers, each with 12
+                                                             attention heads. The model embedding size was
+                                                             768, the feed forward layers had a hidden size of
+                                                             2,048, and the key/value dimension size for the
+                                                             attention heads 64.
+
+                                                             D   Energy Consumption
+                 LM1B
+                 C4                                          We trained for approximately 131 hours or 5.5
+                 RealNews
+                                                             days on a 128-core TPU v3. The approximate
+                 Wiki-40B
+                                                             deduplicated dataset is 3.9% smaller than the orig-
+                                                             inal dataset and trains in 63 hours/epoch, saving
+                                                             us around 5 hours of compute time for the two
+                                                             epochs. The XL-O RIGINALmodel was trained in
+Figure 5: For each substring of length k, we plot the        North America where the XL-E XACT S UBSTR and
+probability that there exists a second identical length-
+                                                             XL-N EAR D UP were trained in Taiwan. We used
+k substring in the same train set. Matches with length
+under 10 subword tokens are common, and account for
+                                                             data from Patterson et al. (2021) to estimate amount
+90% of tokens. We choose a threshold of 50 for experi-       of energy used in training these models by comput-
+ments.                                                       ing the amount of M W h/hour/core and multiply-
+                                                             ing by our usage (see Table 6 for how we computed
+                                                             these values). For simplicity, we use estimates
+one; formally:                                               from Taiwainese datacenters as an estimate. We es-
+                                                           timate training 2 epochs of XL-O RIGINAL and XL-
+    m(k) = Pr             ∃j 6= i : Si..i+k = Sj..j+k .
+             i∈[N ]                                          E XACT S UBSTR uses 5.86M W h. XL-N EAR D UP
+                                                             is trained for fewer steps and we estimate uses
+We choose 50 tokens as the threshold to be conser-           5.63M W h. Training each base model was approxi-
+vative: the “bend in the knee” occurs at 10 tokens,          mately 3 days on a 64-core TPU v3 pod slice which
+and manual inspection of length-25 matches found             uses an estimated 1.61M W h.
+no false positives. We then doubled this value to               In addition to model training, evaluation and in-
+have an exceptionally large margin for error.                ference were performed on 64-core TPU v3 pod
+                                                             slices. Generating 100,000 sequences from the XL
+C    Further Details on Model Training                       models takes approximately 0.64 hours. We gen-
+Each model was trained for two epochs. Since both            erated 100,000 sequences for each of five types of
+C4-O RIGINAL and C4-E XACT S UBSTR contain ap-               prompts for two checkpoints of the model for a
+proximately 365M examples, we performed 152K                 total of 1M sequences per model. This took ap-
+steps with a batch size of 4800 (or approximately            proximately 19.2 hours. We estimate generating
+2 epochs). C4-N EAR D UP contains approximately              3M sequences uses 0.43M W h.
+350M examples, we performed 146K steps (or ap-
+proximately 2 epochs). On a 128-core TPU v3 pod              E More Results
+slice, XL models trained on C4-O RIGINAL and C4-             Qualitative Examples. Table 8 shows several ex-
+E XACT S UBSTR took approximately 131 hours (5.5             amples of pairs of documents in C4 whose edit dis-
+days) to train, while the XL model trained on C4-            tance is close to our chosen edit similarity thresh-
+N EAR D UP took approximately 126 hours to train.            old of 0.8. Table 9 shows substrings which were
+Like T5, models were trained with the Adafactor              identified by E XACT S UBSTR as being in C4 more
+optimizer (Shazeer and Stern, 2018). A constant              than once. Table 10 shows several examples of
+learning rate of 0.01 was used for the base models           unprompted generations which were identified as
+and 0.001 for the XL models.                                 memorized are shown.
+   The 1.5B parameter XL models had 24 layers,
+each with 32 attention heads. The model embed-               Distribution of memorization. Figure 6 shows
+ding size was 2,048, the feed forward layers had             the distribution in memorization amount over all
+a hidden size of 5,120, and the key/value dimen-             generated sequences when using four types of
+sion size for the attention heads 64. The 110M               prompting: train example with duplicates in train,
+                                                          8438
+                                                           15
+                                                                             XL-O RIGINAL                                   Base-O RIGINAL
+                                                              T5 11B       XL-E XACT S UBSTR            XL-N EAR D UP     Base-E XACT S UBSTR        Total Inference
+                                TPU v3 cores                      512                         128                  128                         64                 64
+                                Training time (days)               20                        5.47                 5.26                          3               0.80
+                                TPU hrs                       245760                     16804.70             16149.31                      4608             1228.80
+                                Energy (MWh)                    85.70                        5.86                 5.63                       1.61               0.43
+
+  Table 6: Estimates of energy usage based on the data in Patterson et al. (2021). The first column is Patterson et al.
+  (2021)’s estimate of the T5 11B encoder-decoder model, which we based our own estimates on. Inference includes
+  all XL models. We generated 100,000 sequences from 3 models, with 5 prompts, and at 2 different checkpoints.).
+
+                                 Dataset                                 Example                                             Near-Duplicate Example
+                            Wiki-40B              \n_START_ARTICLE_\nHum                      Award            \n_START_ARTICLE_\nHum Award for Best Actor
+                                                  for          Most       Impactful        Character           in a Negative Role \n_START_SECTION_\nWinners
+                                                  \n_START_SECTION_\nWinners and nom-                          and nominees\n_START_PARAGRAPH_\nIn the list
+                                                  inees\n_START_PARAGRAPH_\nIn the list                        below, winners are listed first in the colored row, fol-
+                                                  below, winners are listed first in the colored row,          lowed by the other nominees. [...]
+                                                  followed by the other nominees. [...]
+                            LM1B                  I left for California in 1979 and tracked Cleveland          I left for California in 1979 , and tracked Cleveland
+                                                  ’s changes on trips back to visit my sisters .               ’s changes on trips back to visit my sisters .
+                            RealNews              KUALA LUMPUR (Reuters) - Roads in South-                     A visitor looks at a Triumph motorcycle on dis-
+                                                  east Asia have been getting a little louder lately           play at the Indonesian International Motor Show
+                                                  as motorcycle makers, an aspiring middle class               in Jakarta September 19, 2014. REUTERS/Darren
+                                                  and easy bank credit come together to breed a new            Whiteside\nKUALA LUMPUR (Reuters) - Roads in
+                                                  genus of motorcyclists – the big-bike rider. [...]           Southeast Asia have been getting a little [...] big-bike
+                                                                                                               rider. [...]
+                            C4                    Affordable and convenient holiday flights take               Affordable and convenient holiday flights take off
+                                                  off from your departure country, "Canada". From              from your departure country, "USA". From April
+                                                  May 2019 to October 2019, Condor flights to your             2019 to October 2019, Condor flights to your dream
+                                                  dream destination will be roughly 6 a week! Book             destination will be roughly 7 a week! Book your
+                                                  your Halifax (YHZ) - Basel (BSL) flight now, and             Maui Kahului (OGG) - Dubrovnik (DBV) flight now,
+                                                  look forward to your "Switzerland" destination!              and look forward to your "Croatia" destination!
+
+  Table 7: Qualitative examples of near-duplicates identified by N EAR D UP from each dataset. The similarlity be-
+  tween documents is highlighted. Note the small interspersed differences that make exact duplicate matching less
+  effective. Examples ending with “[...]” have been truncated for brevity.
+
+
+                                                                                                          train examples without any duplicates, validation
+                                                                                                          examples with duplicates in train, and validation
+                                                                                                          examples without any duplicates.
+
+                                                          model                                           URLs with many duplicates. Table 11 shows
+                                           Original       NearDup         ExactSubstr
+                                                                                                          the URLs had the largest proportion of examples
+and groundtruth continuations
+ edit sim between generated
+
+
+
+
+                                1.0                                                                       identified by N EAR D UP as near-duplicates. For
+                                0.8                                                                       C4, these tend to be websites that sell many similar
+                                0.6                                                                       products and thus have a large amount of templated
+                                0.4                                                                       text. For RealNews, content aggregators seem es-
+                                0.2                                                                       pecially common.
+                                0.0
+                                                                                                          N EAR D UP cluster sizes. Figure 8 shows the dis-
+                                      train dup        train unique   valid in train    valid unique
+                                                              Prompt Source                               tribution of cluster sizes from running N EAR D UP
+                                                                                                          on RealNews, LM1B, and Wiki-40B (results for
+                           Figure 6: Memorized continuations distribution
+                                                                                                          C4 are in Figure 1 the main paper).
+
+                                                                                                          Dataset Sizes Table 13 gives the size in BPE to-
+                                                                                                          kens and in examples of each dataset before and
+                                                                                                          after deduplication. Because most datasets were
+                                                                                                       8439
+                                                                                                        16
+ Due to high demand, we have yet to critique this request. That     Due to a heavy overflow, we have not been able to critique
+ said, we assure that the review will be produced in due time       this request. That said, we assure that the review will be pro-
+ by our dilligent and unwavering staff in a professional manner.    duced in due time by our dilligent and unshakable staff in a
+ This site is highly regarded amongst its peers in terms of speed   professional manner. This site is highly regarded amongst its
+ and reliability, so feel free to check us out!                     peers in terms of efficiency and reliability, so feel free to visit!
+ Need Pop Tacos parking? You can reserve parking near Pop           Il Sole parking. Reserve parking near Il Sole in NYC.\nYou
+ Tacos with SpotHero. Find low rates without parking coupons        can reserve parking near Il Sole with SpotHero. Find low rates
+ by booking a guaranteed spot online. Avoid circling, getting       without parking coupons by booking a guaranteed spot online.
+ ticketed or running out to feed your meter. Search our parking     Avoid circling, getting ticketed or running out to feed your
+ map, compare parking rates and reserve a discounted parking        meter. Search our parking map, compare parking rates and
+ spot today. Happy parking, and enjoy your meal at Pop Tacos!       reserve a discounted parking spot today. Happy parking, and
+                                                                    enjoy your meal at Il Sole!
+ This item was available on Vinyl 7" but is now sold out on all     This item was available on CD but is now sold out on all for-
+ formats, sorry. Take a look at what else we have in by Jumbo,      mats, sorry. Take a look at what else we have in by Sirconical,
+ check out some related artists, head over to our new releases      Misty Dixon, Various, check out some related artists, head
+ or knock yourself out reading our latest music news & album        over to our new releases or knock yourself out reading our
+ reviews.\n2nd single edn of 550.                                   latest music news & album reviews.\nTwisted Nerve comp
+                                                                    mini album.
+ Here is all the information you need about "No One Killed          Here is all the information you need about "A Land Imagined"
+ Jessica" on American Netflix. Details include the date it was      on Netflix in the UK. Details include the date it was added to
+ added to Netflix in the USA, any known expiry dates and new        UK Netflix, any known expiry dates and new episodes/seasons,
+ episodes/seasons, the ratings and cast etc. So scroll down for     the ratings and cast etc. So scroll down for more information
+ more information or share the link on social media to let your     or share the link on social media to let your friends know what
+ friends know what you’re watching.                                 you’re watching.
+ 8 + 8 = Solve this simple math problem and enter the result.       Math question * 7 + 1 = Solve this simple math problem and
+ E.g. for 1+3, enter 4.                                             enter the result. E.g. for 1+3, enter 4.
+ Long Island College Hospital is committed to providing out-        Morristown Memorial Hospital is committed to providing out-
+ standing patient care in the Brooklyn, NY area, but before you     standing patient care in the Morristown, NJ area, but before
+ commit to Long Island College Hospital for a Endometrial           you commit to Morristown Memorial Hospital for a Breast
+ Ablation make sure you compare and shop other medical fa-          Ultrasound make sure you compare and shop other medical
+ cilities. It may save you hundreds (in some cases thousands)       facilities. It may save you hundreds (in some cases thousands)
+ of dollars. View a Endometrial Ablation cost comparison for        of dollars. View a Breast Ultrasound cost comparison for
+ Brooklyn and Request a Free Quote before you make a deci-          Morristown and Request a Free Quote before you make a
+ sion.                                                              decision.
+
+Table 8: Several examples of pairs of documents in C4 that were found by the Approximate Matching algorithm
+and identified as having edit similarity of almost exactly 0.8. Pairs of documents less similar than 0.8 were not
+identified as duplicates. For readability, matching subsequences have been highlighted.
+
+
+
+
+                                                              8440
+                                                               17
+                                                       Text                                                        Freq in C4
+    HD wallpaper. This wallpaper was upload at April 19, 2019 upload by admin in.You can download it                   40,340
+    in your computer by clicking resolution image in Download by size:. Don’t forget to rate and comment
+    if you interest with this wallpaper.
+    to the address posted below. Include our failure information form,a packing slip with your Company                  5,900
+    name, contact person, and Email address or phone number. Upon receipt of your repair, we\’ll inspect it
+    and then contact you with a quote or evaluation notice. Normal turn around for repair is 5 to 7 business
+    days, with "Rush Repair" available.
+    is a great place to begin your search. Whether you are a first-time home buyer or you are already                   5,358
+    familiar with the home buying process, you can be assured that you have the best tools and the perfect
+    agent available to help with your
+    pics at these awesome group starting P letter. Desktop wallpapers were first introduced way back in                  848
+    the 1980s and have gained immense popularity since then. It is possible to come across more than 80
+    million sites on the web offering some sort of wallpaper.
+    flowers will let them know you’re thinking of them and wishing them well. Cheerful yellow flowers                    479
+    bring their own sunshine and will get right to work on lifting spirits, and a colorful vase will bring
+    loads of smiles to friends and visitors! Get Well flower arrangements from
+    our premier 24 hour emergency* plumbing and heating solutions. We realise that when your heating                      56
+    fails or pipes and drains leak it can cause havoc with your routine and even cause damage to your
+    property. When a plumbing problem occurs that requires an immediate response we provide qualified
+    local plumbers throughout
+    is to remove all images that violate copyrights. Please contact us to request that images be removed or               48
+    to assign proper credit. The images displayed on this site may be used for Free or educational purposes
+    only. If you would like to use any of the images displayed on this site for any other purpose, please
+    obtain permission from the owner. www.
+    list of fishing locations, providing interactive maps that show each location’s GPS coordinates, nearby                5
+    facilities (like restaurants, gas stations, marinas and fishing shops), their current and forecasted weather
+    and, if available, their water conditions.\nFind any of the 8
+    . Dyer, Ph.D., is an internationally renowned author and speaker in the field of self-development. He’s                5
+    the author of 30 books, has created many audio programs and videos, and has appeared on thousands
+    of television and radio shows.
+
+Table 9: A selection of substrings identified by E XACT S UBSTR as being in C4 multiple times. The number of
+times this exact substring occurs in C4 is also given.
+
+
+already deduplicated of exact matches during their
+creation, E XACT S UBSTRdeduplication does not
+actually remove any examples.
+Perplexity on LM1B. Figure 7 is the same as
+Figure 2 of the main paper, except with perplexity
+on LM1B included. LM1B was omitted from the
+main paper’s figure in order to improve readability.
+
+
+
+
+                                                               8441
+                                                                18
+                                                   C4 Original                                    Training data
+                            Evaluation dataset
+
+
+
+
+                                                                                                       Original
+                                                 C4 Duplicates                                         NearDup
+                                                                                                       ExactSubstr
+                                                    C4 Unique
+                                                        LM1B
+                                                      Wiki40B
+                                                                 0   10        20        30       40       50
+                                  (a) Base model                                    Perplexity
+                                                   C4 Original                                   Training data
+                            Evaluation dataset
+
+
+
+
+                                                                                                    Original
+                                                 C4 Duplicates                                      NearDup
+                                                                                                    ExactSubstr
+                                                    C4 Unique
+                                                        LM1B
+                                                      Wiki40B
+                                                                 0   5    10        15    20      25     30      35
+                                  (b) XL model                                      Perplexity
+Figure 7: Impact of deduplicating the training set on validation perplexity. In (a), we plot the results from T5 base
+(110M parameters) across three training runs with different random initializations. The black bar represent the
+lowest perplexity to the highest perplexity, and the colored bar the median perplexity. In (b), we plot the results
+from T5 XL (1.5B parameters).
+
+
+
+
+                                                                          8442
+                                                                           19
+                                                Generated Text                                                    Freq in C4
+    , you’ll need to be knowledgeable to make the very best decisions. We will make sure you know what                 5,497
+    can be expected. We take the surprises from the picture by giving accurate and thorough information.
+    You can start by talking about your task with our client service staff when
+    you dial 888-353-1299. We’ll address all of your questions and arrange the initial meeting. We work
+    closely with you through the whole project, and our team can show up promptly and prepared.
+    then Waterside Lodge are well equipped for the task. Our fully equipped family sized lodges offer                   571
+    a comfortable luxurious stay for a fantastic price, giving you beautiful views of the lakes and the
+    surrounding countryside. Offering luxurious self-catering holidays in our fully featured Scandinavian
+    holiday lodges. Perfectly located to explore the beaches, coastline. All of our lodges are sized for 6
+    people and are furnished to the highest standards to ensure you have a stay like no other. At Waterside
+    Lodge the stay itself is only half of the package, Waterside lodge is situated closely to the Heritage
+    Coast which makes our lodges the perfect stay for anyone wanting to get away and have a relaxing
+    countryside break from the city. Whilst you stay with us be sure to take advantage of all the activities
+    Waterside Lodge has to offer. Such as the use of our on-site fishing lakes for the keen fisherman, free
+    internet access, outside relaxation areas, comfortable lounges and much more.
+    you are only looking to find rent to own homes in your city or are open to exploring all kinds of rent to            51
+    own home listings, our database does it all. One of the best aspects of iRentToOwn.com is that, besides
+    options to rent to buy a house, it has numerous other categories of home sale options. These include
+    bank foreclosure homes, pre-foreclosure homes, short sales, HUD/government foreclosures, auction
+    homes and owner-financing/FSBO (For Sale By Owner) homes. With help from the convenient search
+    features offered by our site, shoppers are able to find their ideal lease to own home, real estate company,
+    and more in South
+    , IL employs journeyman as licensed to work by themselves, without direct supervision, installing                     6
+    wiring, outlets and fixtures. Our journeyman also does service work, troubleshooting when a breaker
+    fails or a light stops working. Our journeyman does not offer permits that must be issued by our master.
+    Our journeyman follows our master’s plans and directions. Our journeyman’s responsibilities will vary
+    based on the work that needs to be done. Our journeymen are skilled with residential, commercial and
+    industrial installations and repairs.ust work from six years as an apprentice, under direct supervision of
+    our master, and pass a journeyman test. This person also must have some classroom education on the
+    National Electrical Code and fundamental electricity in a technical school a program affiliated with the
+    National Joint Apprenticeship Training Council. Journeyman training combines hands-on work with
+    education on basic electricity.
+    combustion process of a petrol engine is never perfect. Dangerous gases, such as nitrogen oxide, carbon               5
+    monoxide and hydrocarbons will arise and it is the job of the catalytic converter to reduce these to safer
+    emissions. These cat converters can fail by becoming clogged, or if the engine has bad exhaust valves
+    or the plugs fail, causing unburned fuel to overheat the converter. Mettam’s Mufflers can resolve these
+    issues with your Karr
+    ,ANDREW Find the ancestral town: Many a researcher is stuck behind records that say, BIRTHPLACE:                      2
+    IRELAND without saying where in Ireland, or whatever other country. Remember that your immigrant
+    ancestor’s siblings probably were born in the same ancestral town, so check all o
+    f their records, too. Around 1900, the Roman Catholic churches reported marriages to the churches
+    where the persons were baptised, and before the wedding, they would require a baptismal certificate
+    from that church, without marriage notations, to make sure that the persons were no
+    t already married, ordained, or whatever, and were free to marry. Do check the Catholic records
+    especially for ex loco and the home town. If your ancestor’s sister had a daughter who generated a
+    marriage or death record saying, MOTHER’S BIRTHPLACE: and the exact town, then y
+    ou know where to start searching for records that will confirm it is your ancestor’s home town.
+    BEWARE: Just because you find a family with the same names does not mean they are the same family,
+    as they could very well be an unrelated family from a different town in the same an
+    cestral country. The webmaster has learned this. One clue was that one family was still having babies
+    in Potenza city, Italy while the other was having babies in Colorado, U.S.A.
+    will not want to search for Power Washing companies in Wyoming on an extensive basis. The service                     1
+    personnel will be at your doorsteps through online or phone booking. The power wash solutions offered
+    by us are matchless and you can compare with others in Winfield, IL. The power wash services offered
+    by us are very economical. Gutter brightener will be applied which will be followed by cleaning through
+    double scrub. The cleaning will be done by using a soft bristle brush. The bond and contaminants will
+    be released in an effortless manner.
+    Z3 Plus are valid in all major cities of India like Delhi, Gurgaon, Noida, Mumbai, Chennai, Bangalore,                1
+    Hyderabad, Kolkata, Pune, Ahmedabad, Coimbatore, Lucknow, Trichy, Madurai, Trivandrum, Mysore,
+    Jaipur, Chandigarh, Pondicherry, Bhopal, Patna, Bhubaneswar, Amritsar, Cochin,
+    Allahabad, Srinagar, New Delhi, Surat, Ludhiana, Navi Mumbai, Ghaziabad, Bengaluru, Indore,
+    Nagpur, Thane, Agra, Meerut, Ranchi. The delivery feasibility and charges may be varying, hence for
+    them please check with the particular seller or store.
+
+Table 10: A selection of substrings generated by XL-O RIGINAL with no prompting (and top-k with k=50) that
+were identified by E XACT S UBSTR as being in C4 multiple times. The number of times each substring was found
+in C4 is given. We observe that most memorized generations tend to be from advertisements.
+
+                                                              8443
+                                                               20
+               RealNews Url            # Total   Frac Dups                   C4 Url               # Total    Frac Dups
+    medicalnewstoday.com.                  12         1.00     hairtechkearney.com                  4883             1
+    dodbuzz.com                           301         0.99     keywordsking.com                     1786             1
+    undertheradar.military.com            187         0.97     sydneysitalianfruitshops.online      1178             1
+    q.usatoday.com                         33         0.94     moewiki.usamimi.info                 1001             1
+    ad-test.thirdage.com                  354         0.94     swarovskijewelryoutlet.org            984             1
+    amp.nymag.com                          15         0.93     forzadurto.org                        980             1
+    citizenwire.com                      1022         0.93     producerati.com                       971             1
+    paycheck-chronicles.military.com      363         0.92     sourceryforge.org                     908             1
+    product-reviews.net                 73403         0.92     heavenz-kitchen.com                   876             1
+    kitup.military.com                    196         0.92     little-eclipse.com                    822             1
+    gcaptain.com                        33903         0.92     walops.com                            819             1
+    dev.screenrant.com                     70         0.91     16thstlaunderland.com                 713             1
+    live.swissinfo.ch                      66         0.91     theroyalstarinfo.com                  696             1
+    news.theepochtimes.com                 82         0.87     code4kt.com                           684             1
+    opinion.toledoblade.com               986         0.87     nflfalconsjerseys.us                  682             1
+    cdn.moneytalksnews.com                121         0.86     quiltingbeeshop.com                   676             1
+    amp.fox23.com                          14         0.86     ulifeinsurancemiami.com               675             1
+    sales.rollingstone.com                 20         0.85     wowkeyword.com                        673             1
+    ftp.screenrant.com                     20         0.85     taspetro.com                          671             1
+
+Table 11: On the left, we show the URLs that had the greatest proportion of examples marked as near-duplicates by
+N EAR D UP(filtered to URLs which occurred at least 10 times). On the right, we show the 20 most frequent URLs
+in C4 for which all examples were marked as near-duplicates by N EAR D UP.
+
+
+
+
+                Training Dataset:            C4-O RIGINAL           C4-N EAR D UP     C4-E XACT S UBSTR
+                Epoch:                          1      2             1        2         1          2
+                No prompt                   1.93%      1.57%     0.19%      0.26%     0.14%        0.17%
+                Duplicate Train Prompts    35.88%     34.34%     3.34%      3.15%     5.71%        4.67%
+                Unique Train Prompt         0.42%      0.41%     0.42%      0.41%     0.22%        0.23%
+                Duplicate Test Prompt      16.27%     15.32%     1.61%      1.52%     0.34%        0.25%
+                Unique Test Prompt          0.25%      0.22%     0.21%      0.23%     0.03%        0.08%
+
+Table 12: Percentage of tokens in 100k generations that were part of memorized substring according to E XACT-
+S UBSTR. Models trained with approximate or exact deduplication have 10× less memorization than the model
+trained on the original (non-deduplicated) dataset.
+
+
+
+
+                            Final train set size in tokens                   Final train set size in examples
+                     O RIGINAL N EAR D UP E XACT S UBSTR              O RIGINAL N EAR D UP E XACT S UBSTR
+        C4              177.3B        173.7B               165.4B      364.87M         350.48M             350.48M
+        Real News        24.7B          22.4B               20.1B        31.16M         28.39M              28.39M
+        LM1B              1.0B          0.94B               0.90B        30.30M         29.87M              30.16M
+        Wiki40B          2.25B          2.24B               2.19B         2.93M           2.91M               2.93M
+
+Table 13: Each row shows the size in tokens (according to our 50k BPE vocab) and in examples of a train set in its
+original form, with N EAR D UP deduplication, and with E XACT S UBSTR deduplication.
+
+
+
+
+                                                        8444
+                                                         21
+                [5001, ) 0                                       LM1B
+              [501, 5000) 0
+                 [51, 500)          13
+                  [21, 50)               66
+Group sizes
+
+
+
+
+                  [11, 20)                    340
+                   [6, 10)                          2,762
+                         5                           4,432
+                         4                              15,825
+                         3                                 68,775
+                         2                                     595,632
+                         1                                               29,096,827
+                           0 100   101 102 103 104 105 106 107
+                                         Number of groups
+                [5001, ) 0                                   Real News
+              [501, 5000)           11
+                 [51, 500)                129
+                  [21, 50)                 243
+Group sizes
+
+
+
+
+                  [11, 20)                    1,150
+                   [6, 10)                              24,889
+                         5                               34,487
+                         4                                 89,017
+                         3                                   231,913
+                         2                                       1,715,379
+                         1                                             27,917,044
+                           0 100   101 102 103 104 105 106 107
+                                         Number of groups
+                [5001, ) 0                                      Wiki40B
+              [501, 5000)      1
+                 [51, 500)               24
+                  [21, 50)                 60
+Group sizes
+
+
+
+
+                  [11, 20)                   163
+                   [6, 10)                     391
+                         5                    245
+                         4                     399
+                         3                       833
+                         2                          3,557
+                         1                                               3,228,888
+                           0 100    101 102 103 104 105 106
+                                         Number of groups
+
+  Figure 8: The distribution of near-duplicate cluster
+  sizes from running N EAR D UP on each dataset.
+
+
+
+
+                                                                                      8445
+                                                                                       22
+

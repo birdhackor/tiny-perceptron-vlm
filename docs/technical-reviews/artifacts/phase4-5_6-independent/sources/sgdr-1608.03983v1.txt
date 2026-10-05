@@ -1,0 +1,616 @@
+                                         SGDR: S TOCHASTIC G RADIENT D ESCENT                                                            WITH
+                                         R ESTARTS
+                                          Ilya Loshchilov & Frank Hutter
+                                          University of Freiburg
+                                          Freiburg, Germany,
+                                          {ilya,fh}@cs.uni-freiburg.de
+arXiv:1608.03983v1 [cs.LG] 13 Aug 2016
+
+
+
+
+                                                                                       A BSTRACT
+                                                  Restart techniques are common in gradient-free optimization to deal with multi-
+                                                  modal functions. Partial restarts are also gaining popularity in gradient-based op-
+                                                  timization to improve the rate of convergence in accelerated gradient schemes to
+                                                  deal with ill-conditioned functions. In this paper, we propose a simple restart tech-
+                                                  nique for stochastic gradient descent to improve its anytime performance when
+                                                  training deep neural networks. We empirically study its performance on CIFAR-
+                                                  10 and CIFAR-100 datasets where we demonstrate new state-of-the-art results
+                                                  below 4% and 19%, respectively. Our source code is available at
+                                                  https://github.com/loshchil/SGDR.
+
+
+                                         1    I NTRODUCTION
+                                         Deep neural networks (DNNs) are currently the best-performing method for many classification
+                                         problems, such as object recognition from images (Krizhevsky et al., 2012; Donahue et al., 2014)
+                                         or speech recognition from audio data (Deng et al., 2013). Their training on large datasets (where
+                                         DNNs perform particularly well) is the main computational bottleneck: it often requires several
+                                         days, even on high-performance GPUs, and any speedups would be of substantial value.
+                                         The training of a DNN with n free parameters can be formulated as the problem of minimizing a
+                                         function f : Rn → R. The commonly used procedure to optimize f is to iteratively adjust xt ∈ Rn
+                                         (the parameter vector at time step t) using gradient information ∇ft (xt ) obtained on a relatively
+                                         small t-th batch of b datapoints. The Stochastic Gradient Descent (SGD) procedure then becomes
+                                         an extension of the Gradient Descent (GD) to stochastic optimization of f as follows:
+
+
+                                                                              xt+1 = xt − ηt ∇ft (xt ),                                         (1)
+
+                                         where ηt is a learning rate. One would like to consider second-order information
+
+
+                                                                            xt+1 = xt − ηt H−1
+                                                                                            t ∇ft (xt ),                                        (2)
+
+                                         but this is often infeasible since the computation and storage of the inverse Hessian H−1         t  is in-
+                                         tractable for large n. The usual way to deal with this problem by using limited-memory quasi-
+                                         Newton methods such as L-BFGS (Liu & Nocedal, 1989) is not currently in favor in deep learning,
+                                         not the least due to (i) the stochasticity of ∇ft (xt ), (ii) ill-conditioning of f and (iii) the presence
+                                         of saddle points as a result of the hierarchical geometric structure of the parameter space (Fukumizu
+                                         & Amari, 2000). Despite some recent progress in understanding and addressing the latter problems
+                                         (Bordes et al., 2009; Dauphin et al., 2014; Choromanska et al., 2014; Dauphin et al., 2015), state-of-
+                                         the-art optimization techniques tend to approximate the inverse Hessian in a reduced way, e.g., by
+                                         considering only its diagonal to achieve adaptive learning rates. AdaDelta (Zeiler, 2012) and Adam
+                                         (Kingma & Ba, 2014) are notable examples of such methods.
+                                         Intriguingly enough, the current state-of-the-art results on CIFAR-10, CIFAR-100, SVHN, Ima-
+                                         geNet, PASCAL VOC and MS COCO datasets were obtained by Residual Neural Networks
+
+
+                                                                                             1
+                                                 Learning rate schedule
+                                    0
+                                   10
+                                                                        Default, lr=0.1
+                                                                        Default, lr=0.05
+                                    −1                                  T0 = 50, Tmult = 1
+                                   10
+                                                                        T = 100, T         =1
+                                                                          0         mult
+                                                                        T = 1, T        =2
+                                                                          0      mult
+
+
+                   Learning rate
+                                    −2                                  T0 = 10, Tmult = 2
+                                   10
+
+                                    −3
+                                   10
+
+                                    −4
+                                   10
+
+
+
+                                            50           100            150                  200
+                                                        Epochs
+
+Figure 1: Alternative schedule schemes of learning rate ηt over batch index t: default schemes with
+η0 = 0.1 (blue line) and η0 = 0.05 (red line) as used in (Zagoruyko & Komodakis, 2016); restarts
+simulated every T0 = 50 (green line) and T0 = 100 (black line) epochs with ηt decaying during
+                i               i
+i-th run from ηmax  = 0.05 to ηmin  = 0 according to eq. (5); restarts starting from epoch T0 = 1
+(yellow line) and T0 = 10 (magenta line) with doubling (Tmult = 2) periods Ti at every new restart.
+
+
+(He et al., 2015; Huang et al., 2016; He et al., 2016; Zagoruyko & Komodakis, 2016) trained with-
+out the use of advanced methods such as AdaDelta and Adam. Instead, they simply use SGD with
+momentum 1 :
+
+
+                                         vt+1 = µt vt − ηt ∇ft (xt ),                              (3)
+                                                xt+1 = xt + vt+1 ,                                 (4)
+
+where vt is a velocity vector initially set to 0, ηt is a decreasing learning rate and µt is a momentum
+rate which defines the trade-off between the current and past observations of ∇ft (xt ). The main
+difficulty in training a DNN is then associated with the scheduling of the learning rate and the
+amount of L2 weight decay regularization employed. A common learning rate schedule is to use a
+constant learning rate and divide it by a fixed constant in (approximately) regular intervals. The blue
+line in Figure 1 shows an example of such a schedule, as used by Zagoruyko & Komodakis (2016)
+to obtain the current state-of-the-art results on CIFAR-10, CIFAR-100 and SVHN datasets.
+In this paper, we propose to periodically simulate restarts of SGD, where in each restart the learning
+rate is initialized to some value and is scheduled to decrease. Four different instantiations of this
+new learning rate schedule are visualized in Figure 1 Our empirical results suggest that SGD with
+restarts requires 2× to 4× fewer epochs than the currently-used learning rate schedule schemes to
+achieve comparable or even better results. Using this technique, we obtain new state-of-the-art error
+rates below 4% for CIFAR-10 and below 19% for CIFAR-100.
+
+2       R ELATED W ORK
+2.1       R ESTARTS IN GRADIENT- FREE OPTIMIZATION
+
+When optimizing multimodal functions one may want to find all global and local optima. The
+tractability of this task depends on the landscape of the function at hand and the budget of func-
+    1
+        More specifically, they employ Nesterov’s momentum(Nesterov, 1983; 2013)
+
+
+                                                        2
+tion evaluations. Gradient-free optimization approaches based on niching methods (Preuss, 2015)
+usually can deal with this task by covering the search space with dynamically allocated niches of
+local optimizers. However, these methods usually work only for relatively small search spaces,
+e.g., n < 10, and do not scale up due to the curse of dimensionality (Preuss, 2010). Instead, the
+current state-of-the-art gradient-free optimizers employ various restart mechanisms (Hansen, 2009;
+Loshchilov et al., 2012). One way to deal with multimodal functions is to iteratively sample a large
+number λ of candidate solutions, make a step towards better solutions and slowly shape the sampling
+distribution to maximize the likelihood of successful steps to appear again (Hansen & Kern, 2004).
+The larger the λ, the more global search is performed requiring more function evaluations. In order
+to achieve good anytime performance, it is common to start with a small λ and increase it (e.g., by
+doubling) after each restart. This approach works best on multimodal functions with a global funnel
+structure and also improves the results on ill-conditioned problems where numerical issues might
+lead to premature convergence when λ is small (Hansen, 2009).
+
+2.2   R ESTARTS IN GRADIENT- BASED OPTIMIZATION
+
+Gradient-based optimization algorithms such as BFGS also perform restarts to deal with multimodal
+functions (Ros, 2009). In large-scale settings when the usual number of variables n is on the order
+of 103 − 109 , the availability of gradient information provides a speedup of a factor of n w.r.t.
+gradient-free approaches. Restarts are usually employed to improve the convergence rate rather than
+to deal with multimodality: often it is sufficient to approach any local optimum to a given precision
+and in many cases the problem at hand is unimodal. Fletcher & Reeves (1964) proposed to flesh
+the history of conjugate gradient. the conjugate gradient method every n or (n + 1) iterations.
+Powell (1977) proposed to check whether enough orthogonality between ∇f (xt−1 ) and ∇f (xt ) has
+been lost to warrant another restart. Recently, O’Donoghue & Candes (2012) noted that the iterates
+of accelerated gradient schemes proposed by Nesterov (1983; 2013) exhibit a periodic behavior if
+momentum is overused. The period of the oscillations is proportional to the square root of the local
+condition number of the (smooth convex) objective function. The authors showed that fixed restarts
+of the algorithm with a period proportional to the conditional number achieves the optimal linear
+convergence rate of the original accelerated gradient scheme. Since the condition number is an
+unknown parameter and its value may vary during the search, they proposed two adaptive restart
+techniques (O’Donoghue & Candes, 2012):
+
+       • The function scheme restarts whenever the objective function increases.
+       • The gradient scheme restarts whenever the angle between the momentum term and the
+         negative gradient is obtuse, i.e, when the momentum seems to be taking us in a bad direc-
+         tion, as measured by the negative gradient at that point. This scheme resembles the one of
+         Powell (1977) for the conjugate gradient method.
+
+O’Donoghue & Candes (2012) showed (and it was confirmed in a set of follow-up works) that these
+simple schemes provide an acceleration on smooth functions and can be adjusted to accelerate state-
+of-the-art methods such as FISTA on nonsmooth functions.
+
+
+3     S TOCHASTIC G RADIENT D ESCENT WITH RESTARTS (SGDR)
+
+The existing restart techniques can also be used for stochastic gradient descent if the stochasticity
+is taken into account. Since gradients and loss values can vary widely from one batch of the data
+to another, one should denoise the incoming information: by considering averaged gradients and
+losses, e.g., once per epoch, the above-mentioned restart techniques can be used again.
+In this work, we consider one of the simplest restart approaches. We simulate a new warm-started
+run / restart of SGD once Ti epochs are performed, where i is the index of the run. Importantly, the
+restarts are not performed from scratch but emulated by increasing the learning rate ηt while the old
+value of xt is used as an initial solution. The amount of this increase controls to which extent the
+previously acquired information (e.g., momentum) is used.
+Within the i-th run, we decay the learning rate for each batch as follows:
+
+                                                  3
+                             i    1 i       i              Tcur
+                       ηt = ηmin + (ηmax − ηmin )(1 + cos(      π)),                                (5)
+                                  2                         Ti
+        i          i
+where ηmin  and ηmax   are ranges for the learning rate, and Tcur accounts for how many epochs have
+                                                     i
+been performed since the last restart. Thus, ηt = ηmax    when t = 0 and Tcur = 0. Once Tcur = Ti ,
+                                                       i
+the cos function will output −1 and thus set ηt = ηmin    . The decrease of the learning rate is shown
+in Figure 1 for fixed Ti = 50 and Ti = 100; note that the logarithmic axis obfuscates the typical
+shape of the cosine function.
+In order to improve any-time performance, we suggest an option to start with an initially small Ti
+and increase it by a factor of Tmult at every restart (see, e.g., Figure 1 for T0 = 1, Tmult = 2 and
+                                                                    i         i
+T0 = 10, Tmult = 2). It might be of great interest to decrease ηmax      and ηmin  at every new restart.
+                                                     i           i
+However, for the sake of simplicity, here, we keep ηmax   and ηmin    the same for every i to reduce the
+number of hyperparameters involved.
+Since our simulated restarts (the increase of the learning rate) often temporarily worsen performance,
+we do not always use the last xt as our recommendation for the best solution (also called the incum-
+bent solution). While our recommendation during the first run (before the first restart) is indeed the
+last xt , our recommendation after this is a solution obtained at the end of the last performed run at
+         i
+ηt = ηmin    . We emphasize that with the help of this strategy, our method does not require a separate
+validation data set to determine a recommendation.
+
+
+4     E XPERIMENTAL RESULTS
+
+4.1   E XPERIMENTAL SETTINGS
+
+We consider the problem of training Wide Residual Neural Networks (WRNs; see Zagoruyko &
+Komodakis (2016) for details) on the CIFAR-10 and CIFAR-100 datasets (Krizhevsky, 2009). We
+will use the abbreviation WRN-d-k to denote a WRN with depth d and width k. Zagoruyko &
+Komodakis (2016) obtained the best results with a WRN-28-10 architecture, i.e., a Residual Neural
+Network with d = 28 layers and k = 10 times more filters per layer than used in the original
+Residual Neural Networks (He et al., 2015; 2016).
+The CIFAR-10 and CIFAR-100 datasets (Krizhevsky, 2009) consist of 32×32 color images drawn
+from 10 and 100 classes, respectively, split into 50,000 train and 10,000 test images. For image
+preprocessing Zagoruyko & Komodakis (2016) performed global contrast normalization and ZCA
+whitening. For data augmentation they performed horizontal flips and random crops from the image
+padded by 4 pixels on each side, filling missing pixels with reflections of the original image.
+For training, Zagoruyko & Komodakis (2016) used SGD with Nesterov’s momentum with initial
+learning rate set to η0 = 0.1, weight decay to 0.0005, dampening to 0, momentum to 0.9 and
+minibatch size to 128. The learning rate is dropped by a factor of 0.2 at 60, 120 and 160 epochs,
+with a total budget of 200 epochs. We reproduce the results of Zagoruyko & Komodakis (2016) with
+the same settings except that i) we subtract per-pixel mean only and do not use ZCA whitening; ii)
+we use SGD with momentum as described by eq. (3-4) and not Nesterov’s momentum.
+The schedule of ηt used by Zagoruyko & Komodakis (2016) is depicted by the blue line in Figure 1.
+The same schedule but with η0 = 0.05 is depicted by the red line. The schedule of ηt used in SGDR
+is also shown in Figure 1, with two initial learning rates T0 and two restart doubling periods.
+
+4.2   R ESULTS
+
+Table 1 shows that our experiments reproduce the results given by Zagoruyko & Komodakis (2016)
+for WRN-28-10 both on CIFAR-10 and CIFAR-100. These “default” experiments with η0 = 0.1
+and η0 = 0.05 correspond to the blue and red lines in Figure 2. The results for η0 = 0.05 show
+better performance, and therefore we use η0 = 0.05 in our later experiments.
+SGDR with T0 = 50, Tmult = 1 and T0 = 100, Tmult = 1 performs restarts every 50 and 100
+epochs, respectively. A single run of SGD with the schedule given by eq. (5) for T0 = 100 show the
+
+                                                   4
+                                            depth-k    # params     # runs      CIFAR-10      CIFAR-100
+ original-ResNet (He et al., 2015)            110        1.7M      mean of 5      6.43          25.16
+                                             1202       10.2M      mean of 5      7.93          27.82
+ stoc-depth (Huang et al., 2016)              110        1.7M       1 run         5.23          24.58
+                                             1202       10.2M       1 run         4.91           n/a
+ pre-act-ResNet (He et al., 2016)             110        1.7M      med. of 5      6.37           n/a
+                                              164        1.7M      med. of 5      5.46          24.33
+                                             1001       10.2M      med. of 5      4.62          22.71
+ WRN (Zagoruyko & Komodakis, 2016)           16-8       11.0M       1 run         4.81          22.07
+                                             28-10      36.5M       1 run         4.17          20.50
+ with dropout                                28-10      36.5M       1 run          n/a          20.04
+ WRN (ours)
+ default with η0 = 0.1                       28-10       36.5M     med. of 5       4.24          20.33
+ default with η0 = 0.05                      28-10       36.5M     med. of 5       4.13          20.21
+ T0 = 50, Tmult = 1                          28-10       36.5M     med. of 5       4.17          19.99
+ T0 = 100, Tmult = 1                         28-10       36.5M     med. of 5       4.07          19.87
+ T0 = 1, Tmult = 2                           28-10       36.5M     med. of 5       4.09          19.74
+ T0 = 10, Tmult = 2                          28-10       36.5M     med. of 5       4.03          19.58
+ default with η0 = 0.1                       28-20      145.8M     med. of 2       4.08          19.53
+ default with η0 = 0.05                      28-20      145.8M     med. of 2       3.96          19.67
+ T0 = 50, Tmult = 1                          28-20      145.8M     med. of 2       4.01          19.28
+ T0 = 100, Tmult = 1                         28-20      145.8M     med. of 2       3.77          19.24
+ T0 = 1, Tmult = 2                           28-20      145.8M     med. of 2       3.91          18.90
+ T0 = 10, Tmult = 2                          28-20      145.8M     med. of 2       3.74          18.70
+
+Table 1: Test errors of different methods on CIFAR-10 and CIFAR-100 with moderate data aug-
+mentation (flip/translation). In the second column k is a widening factor for WRNs. Note that the
+computational and memory resources used to train all WRN-28-10 are the same. In all other cases
+they are different, but WRNs are usually faster than original ResNets to achieve the same accuracy
+(e.g., up to a factor of 8 according to Zagoruyko & Komodakis (2016)). Bold text is used only to
+highlight better results and is not based on statistical tests (too few runs).
+
+
+
+
+best results suggesting that the original schedule of WRNs might be suboptimal w.r.t. the test error
+in these settings.
+SGDR with T0 = 1, Tmult = 2 and T0 = 10, Tmult = 2 performs its first restart after 1 and 10
+epochs, respectively. Then, it doubles the maximum number of epochs for every new restart. The
+main purpose of this doubling is to reach good test error as soon as possible, i.e., achieve good
+anytime performance. Figure 2 shows that this is achieved and test errors around 4% on CIFAR-10
+and around 20% on CIFAR-100 can be obtained about 2-4 times faster than with the default schedule
+used by Zagoruyko & Komodakis (2016).
+Since SGDR achieves good performance faster, it may allow us to train larger networks. We there-
+fore investigated whether results on CIFAR-10 and CIFAR-100 can be further improved by making
+WRNs two times wider, i.e., by training WRN-28-20 instead of WRN-28-10. Table 1 shows that
+the results indeed improved, by about 0.25% on CIFAR-10 and by about 0.5-1.0% on CIFAR-100.
+While network architecture WRN-28-20 requires roughly four times more computation than WRN-
+28-10, the aggressive learning rate reduction of SGDR nevertheless allowed us to achieve a better
+error rate in the same time on WRN-28-20 as we spent on 200 epochs of training on WRN-28-10.
+Specifically, Figure 2 (right middle and right bottom) show that after only 50 epochs, SGDR (even
+without restarts, using T0 = 50, Tmult = 1) achieved an error rate below 19% (whereas none of the
+learning methods performed better than 19.5% on WRN-28-10). We therefore have hope that – by
+
+
+                                                 5
+                                  WRN−28−10 on CIFAR−10                                                                   WRN−28−10 on CIFAR−100
+                     25                                                                                         50
+                                                          Default, lr=0.1                                                                                       Default, lr=0.1
+                                                          Default, lr=0.05                                                                                      Default, lr=0.05
+                                                          T = 50, T      =1                                                                                     T = 50, T      =1
+                     20                                    0        mult
+                                                                                                                40                                               0        mult
+                                                          T0 = 100, Tmult = 1                                                                                   T0 = 100, Tmult = 1
+                                                          T0 = 1, Tmult = 2                                                                                     T0 = 1, Tmult = 2
+    Test error (%)
+
+
+
+
+                                                                                               Test error (%)
+                                                          T0 = 10, Tmult = 2                                                                                    T0 = 10, Tmult = 2
+                     15                                                                                         30
+
+
+                     10                                                                                         20
+
+
+                      5                                                                                         10
+
+
+                      0                                                                                         0
+                                50        100        150                       200                                       50       100        150                                     200
+                                        Epochs                                                                                   Epochs
+                                  WRN−28−10 on CIFAR−10                                                                   WRN−28−10 on CIFAR−100
+                      5                                                                                         21
+
+                                                                                                       20.5
+                     4.5
+                                                                                                                20
+ Test error (%)
+
+
+
+
+                      4                                                              Test error (%)    19.5
+                           Default, lr=0.1                                                                           Default, lr=0.1
+                           Default, lr=0.05                                                                          Default, lr=0.05
+                           T0 = 50, Tmult = 1                                                                   19   T0 = 50, Tmult = 1
+                     3.5   T0 = 100, Tmult = 1                                                                       T0 = 100, Tmult = 1
+
+                           T0 = 1, Tmult = 2                                                           18.5          T0 = 1, Tmult = 2
+
+                           T0 = 10, Tmult = 2                                                                        T0 = 10, Tmult = 2
+                      3                                                                                         18
+                                50        100        150                       200                                       50       100        150                                     200
+                                        Epochs                                                                                   Epochs
+                                  WRN−28−20 on CIFAR−10                                                                   WRN−28−20 on CIFAR−100
+                      5                                                                                         21
+                                                                                                                                          Default, lr=0.1
+                                                                                                                                          Default, lr=0.05
+                                                                                                       20.5                               T0 = 50, Tmult = 1
+                     4.5                                                                                                                  T0 = 100, Tmult = 1
+                                                                                                                20                        T0 = 1, Tmult = 2
+ Test error (%)
+
+
+
+
+                                                                                     Test error (%)
+
+
+
+
+                                                                                                                                          T0 = 10, Tmult = 2
+                      4                                                                                19.5
+                           Default, lr=0.1
+                           Default, lr=0.05
+                           T0 = 50, Tmult = 1                                                                   19
+                     3.5   T0 = 100, Tmult = 1
+                           T0 = 1, Tmult = 2                                                           18.5
+                           T0 = 10, Tmult = 2
+                      3                                                                                         18
+                                50                100     150                  200                                       50                 100                 150                  200
+                                                 Epochs                                                                                    Epochs
+
+
+
+Figure 2: Test errors on CIFAR-10 (left column) and CIFAR-100 (right column) datasets. Note that
+for SGDR we only plot the recommended solutions. The top and middle rows show the same results
+on WRN-28-10, with the middle row zooming into the good performance region of low test error.
+The bottom row shows performance with a wider network, WRN-28-20.
+The results of the default learning rate schedules of Zagoruyko & Komodakis (2016) with η0 = 0.1
+and η0 = 0.05 are depicted by the blue and red lines, respectively. The schedules of ηt used in
+SGDR are shown with i) restarts every T0 = 50 epochs (green line); ii) restarts every T0 = 100
+epochs (black line); iii) restarts with doubling (Tmult = 2) periods of restarts starting from the first
+epoch (T0 = 1, yellow line); and iv) restarts with doubling (Tmult = 2) periods of restarts starting
+from the tenth epoch (T0 = 10, magenta line).
+
+
+
+
+enabling researchers to test new architectures faster – SGDR’s good anytime performance may also
+lead to improvements of the state of the art.
+
+
+                                                                                     6
+In a final experiment, Figure 3 compares SGDR and the default schedule with respect to training
+and test performance. As the figure shows, SGDR optimizes training loss faster than the standard
+default schedule until about epoch 120. After this, the default schedule overfits, as can be seen by
+an increase of the test error both on CIFAR-10 and CIFAR-100 (see, e.g., the right middle plot of
+Figure 3). In contrast, we only witnessed very mild overfitting for SGDR.
+
+5   D ISCUSSION
+
+Our results suggest that even without any restarts the proposed aggressive learning rate schedule
+given by eq. (5) is competitive w.r.t. the default schedule when training WRNs on the CIFAR-10
+and CIFAR-100 datasets. In practice, the proposed schedule requires only two hyper-parameters to
+be defined: the initial learning rate and the total number of epochs.
+One should not suppose that the parameter values used in this study and many other works with
+(Residual) Neural Networks are selected to demonstrate the fastest decrease of the training error.
+Instead, the best validation or/and test errors are in focus. Notably, the validation error is rarely
+used when training Residual Neural Networks because the recommendation is defined by the final
+solution (in our approach, the final solution of each run). One could use the validation error to
+determine the optimal initial learning rate and then run on the whole dataset; this could further
+improve results.
+The main purpose of the proposed restart scheme for SGD is to improve its any-time performance.
+While we mentioned that restarts can be useful to deal with multi-modal functions, we do not claim
+that we observe any effect related to multi-modality.
+                                           i           i
+As we noted earlier, one could decrease ηmax    and ηmin   at every new simulated restart to control
+the amount of divergence. If new restarts are worse than the old ones w.r.t. validation error, then
+one might also consider to go back to the last best solution and perform a new restart with adjusted
+hyperparameters.
+
+6   C ONCLUSION
+
+In this paper, we investigated a simple restart mechanism for SGD to accelerate the training of
+DNNs. Our SGDR simulates restarts by scheduling the learning rate to achieve competitive results
+on CIFAR-10 and CIFAR-100 roughly two to four times faster. We also achieved new state-of-
+the-art results with SGDR, mainly by using even wider WRNs. Future empirical studies should
+also consider the ImageNet and MS COCO datasets, for which Residual Neural Networks showed
+the best results so far. Alternative network structures should be also considered; e.g., Zhang et al.
+(2016) just reported results that are basically the same as our best ones (with T0 = 10, Tmult = 2)
+on CIFAR-10 and (only) one percent worse than ours on CIFAR-100. Their new variant of Residual
+Neural Networks is very promising since it requires less parameters to achieve the same performance
+as WRNs and thus it should be tested whether our results can be further improved by using it instead
+of WRNs.
+
+R EFERENCES
+Bordes, Antoine, Bottou, Léon, and Gallinari, Patrick. Sgd-qn: Careful quasi-newton stochastic
+  gradient descent. The Journal of Machine Learning Research, 10:1737–1754, 2009.
+
+Choromanska, Anna, Henaff, Mikael, Mathieu, Michael, Arous, Gérard Ben, and LeCun, Yann. The
+  loss surface of multilayer networks. arXiv preprint arXiv:1412.0233, 2014.
+
+Dauphin, Yann N, Pascanu, Razvan, Gulcehre, Caglar, Cho, Kyunghyun, Ganguli, Surya, and Ben-
+  gio, Yoshua. Identifying and attacking the saddle point problem in high-dimensional non-convex
+  optimization. In Advances in Neural Information Processing Systems, pp. 2933–2941, 2014.
+
+Dauphin, Yann N, de Vries, Harm, Chung, Junyoung, and Bengio, Yoshua. Rmsprop and equi-
+  librated adaptive learning rates for non-convex optimization. arXiv preprint arXiv:1502.04390,
+  2015.
+
+
+                                                 7
+Deng, L., Hinton, G., and Kingsbury, B. New types of deep neural network learning for speech
+  recognition and related applications: An overview. In Proc. of ICASSP’13, 2013.
+Donahue, J., Jia, Y., Vinyals, O., Hoffman, J., Zhang, N., Tzeng, E., and Darrell, T. Decaf: A deep
+  convolutional activation feature for generic visual recognition. In Proc. of ICML’14, 2014.
+Fletcher, Reeves and Reeves, Colin M. Function minimization by conjugate gradients. The computer
+  journal, 7(2):149–154, 1964.
+Fukumizu, Kenji and Amari, Shun-ichi. Local minima and plateaus in hierarchical structures of
+  multilayer perceptrons. Neural Networks, 13(3):317–327, 2000.
+Hansen, Nikolaus. Benchmarking a BI-population CMA-ES on the BBOB-2009 function testbed.
+  In Proceedings of the 11th Annual Conference Companion on Genetic and Evolutionary Compu-
+  tation Conference: Late Breaking Papers, pp. 2389–2396. ACM, 2009.
+Hansen, Nikolaus and Kern, Stefan. Evaluating the cma evolution strategy on multimodal test
+  functions. In International Conference on Parallel Problem Solving from Nature, pp. 282–291.
+  Springer, 2004.
+He, Kaiming, Zhang, Xiangyu, Ren, Shaoqing, and Sun, Jian. Deep residual learning for image
+  recognition. arXiv preprint arXiv:1512.03385, 2015.
+He, Kaiming, Zhang, Xiangyu, Ren, Shaoqing, and Sun, Jian. Identity mappings in deep residual
+  networks. arXiv preprint arXiv:1603.05027, 2016.
+Huang, Gao, Sun, Yu, Liu, Zhuang, Sedra, Daniel, and Weinberger, Kilian. Deep networks with
+  stochastic depth. arXiv preprint arXiv:1603.09382, 2016.
+Kingma, Diederik and Ba, Jimmy. Adam: A method for stochastic optimization. arXiv preprint
+  arXiv:1412.6980, 2014.
+Krizhevsky, A., Sutskever, I., and Hinton, G. Imagenet classification with deep convolutional neural
+  networks. In Proc. of NIPS’12, pp. 1097–1105, 2012.
+Krizhevsky, Alex. Learning multiple layers of features from tiny images. 2009.
+Liu, Dong C and Nocedal, Jorge. On the limited memory bfgs method for large scale optimization.
+  Mathematical programming, 45(1-3):503–528, 1989.
+Loshchilov, Ilya, Schoenauer, Marc, and Sebag, Michele. Alternative restart strategies for CMA-
+  ES. In International Conference on Parallel Problem Solving from Nature, pp. 296–305. Springer,
+  2012.
+Nesterov, Yurii. A method of solving a convex programming problem with convergence rate o
+  (1/k2). In Soviet Mathematics Doklady, volume 27, pp. 372–376, 1983.
+Nesterov, Yurii. Introductory lectures on convex optimization: A basic course, volume 87. Springer
+  Science & Business Media, 2013.
+O’Donoghue, Brendan and Candes, Emmanuel. Adaptive restart for accelerated gradient schemes.
+  arXiv preprint arXiv:1204.3982, 2012.
+Powell, Michael James David. Restart procedures for the conjugate gradient method. Mathematical
+  programming, 12(1):241–254, 1977.
+Preuss, Mike. Niching the CMA-ES via nearest-better clustering. In Proceedings of the 12th annual
+  conference companion on Genetic and evolutionary computation, pp. 1711–1718. ACM, 2010.
+Preuss, Mike. Niching methods and multimodal optimization performance. In Multimodal Opti-
+  mization by Means of Evolutionary Algorithms, pp. 115–137. Springer, 2015.
+Ros, Raymond. Benchmarking the bfgs algorithm on the bbob-2009 function testbed. In Pro-
+  ceedings of the 11th Annual Conference Companion on Genetic and Evolutionary Computation
+  Conference: Late Breaking Papers, pp. 2409–2414. ACM, 2009.
+
+
+                                                 8
+                                  WRN−28−10 on CIFAR−10                                                                    WRN−28−10 on CIFAR−100
+                      1                                                                                       1
+                                                            Default, lr=0.1
+                                                            Default, lr=0.05
+                                                            T = 50, T      =1
+                     0.8                                     0        mult
+                                                                                                             0.8
+                                                            T0 = 100, Tmult = 1
+                                                            T0 = 1, Tmult = 2
+    Training loss
+
+
+
+
+                                                                                             Training loss
+                                                            T0 = 10, Tmult = 2
+                     0.6                                                                                     0.6
+
+                                                                                                                     Default, lr=0.1
+                     0.4                                                                                     0.4     Default, lr=0.05
+                                                                                                                     T0 = 50, Tmult = 1
+                                                                                                                     T0 = 100, Tmult = 1
+                     0.2                                                                                     0.2
+                                                                                                                     T = 1, T        =2
+                                                                                                                      0       mult
+                                                                                                                     T0 = 10, Tmult = 2
+                      0                                                                                       0
+                                50        100        150                         200                                      50       100        150                         200
+                                        Epochs                                                                                    Epochs
+                                  WRN−28−10 on CIFAR−10                                                                    WRN−28−10 on CIFAR−100
+                     0.2
+                                      Default, lr=0.1                                                                                                Default, lr=0.1
+                                      Default, lr=0.05                                                                                               Default, lr=0.05
+               0.19                   T0 = 50, Tmult = 1                                                                                             T0 = 50, Tmult = 1
+                                                                                                             1.1
+                                                                                                                                                     T0 = 100, Tmult = 1
+                                      T0 = 100, Tmult = 1
+                                                                                                                                                     T0 = 1, Tmult = 2
+               0.18                   T0 = 1, Tmult = 2
+                                                                                                                                                     T0 = 10, Tmult = 2
+                                                                                                              1
+Test loss
+
+
+
+
+                                                                                             Test loss
+                                      T0 = 10, Tmult = 2
+               0.17
+                                                                                                             0.9
+               0.16
+
+                                                                                                             0.8
+               0.15
+
+                                                                                                             0.7
+                                50        100        150                         200                                      50       100        150                         200
+                                        Epochs                                                                                    Epochs
+                                  WRN−28−10 on CIFAR−10                                                                    WRN−28−10 on CIFAR−100
+                      5                                                                                       21
+
+                                                                                                        20.5
+                     4.5
+                                                                                                              20
+    Test error (%)
+
+
+
+
+                                                                                       Test error (%)
+
+
+
+
+                      4                                                                                 19.5
+                           Default, lr=0.1                                                                           Default, lr=0.1
+                           Default, lr=0.05                                                                          Default, lr=0.05
+                           T0 = 50, Tmult = 1                                                                 19     T0 = 50, Tmult = 1
+                     3.5   T0 = 100, Tmult = 1                                                                       T0 = 100, Tmult = 1
+
+                           T0 = 1, Tmult = 2                                                            18.5         T0 = 1, Tmult = 2
+
+                           T0 = 10, Tmult = 2                                                                        T0 = 10, Tmult = 2
+                      3                                                                                       18
+                                50                100       150                  200                                      50                100      150                  200
+                                                 Epochs                                                                                    Epochs
+
+
+
+Figure 3: Training cross-entropy loss (top row), test loss (middle row) and test error (bottom row)
+on CIFAR-10 (left column) and CIFAR-100 (right column).
+
+
+Zagoruyko, Sergey and Komodakis, Nikos.                                                                      Wide residual networks.                arXiv preprint
+  arXiv:1605.07146, 2016.
+Zeiler, Matthew D. Adadelta: An adaptive learning rate method. arXiv preprint arXiv:1212.5701,
+  2012.
+Zhang, K., Sun, M., Han, T. X., Yuan, X., Guo, L., and Liu, T. Residual Networks of Residual
+  Networks: Multilevel Residual Networks. ArXiv e-prints, August 2016.
+
+
+
+
+                                                                                       9
+

@@ -1,0 +1,32 @@
+# 5.6 fresh independent factual inspection
+
+Reviewer: `/root/phase4_factual_coordinator/factual_5_6`; accessed 2026-10-05.
+
+I read the current 5.6 section (source lines 183–214), its original Python fence, its SVG, the complete `tiny_perceptron/training.py`, the CLI parser/training metadata/resume comparison/update loop in `scripts/train.py`, the Notebook bootstrap and the linked continuation contract. I first read the four prescribed method/schema files. I did not read prior technical or reader report content, did not edit the section or figure, and did not run a training recipe. No existing weights or dataset were inputs.
+
+## Original authorities personally inspected
+
+- Loshchilov and Hutter, *SGDR: Stochastic Gradient Descent with Restarts*, original arXiv `1608.03983v1`, 13 Aug 2016. Direct HTTPS author-paper PDF; the first page prints title, authors and that exact version. I read the first-page learning-rate update definition (Eq.1) and section 3 on printed pages 3–4, especially Eq.5 and the adjacent endpoint explanation. Its formula is `eta_min +(eta_max-eta_min)/2*(1+cos(pi*T_cur/T_i))`. It supports a continuous half-cosine interpolation between chosen endpoints within a run. Its restarts and reported image-classification results are outside this review; SGDR does not establish the course's initial linear warmup, 25% cap, indexing, or a universally optimal schedule.
+- Hugging Face Transformers official GitHub source at the pinned release `v4.57.1`, `src/transformers/optimization.py`, fetched directly from the official organization's raw HTTPS URL. I personally read lines 132–172 (`get_cosine_schedule_with_warmup` documentation and binding), 324–384 (the later active lambda definition and min-rate variant), and 387–409 (the start-rate variant). These document and implement offered linear-warmup/cosine schedules driven by the current step, total training steps and declared endpoints. The later definition at line 324 replaces the earlier same-named lambda in the module. The ordinary API starts warmup at `current_step/warmup`; another API uses `(current_step+1)/warmup` and a different decay endpoint. Neither should be silently substituted for this repository. Transformers is not installed and no Hugging Face package was executed; this is official-source reading, not an installed-version API test.
+
+## Numeric and software evidence
+
+The exact original fence ran under the repository's `.venv`, Python 3.13.5 and PyTorch 2.14.1+cpu, with the extraction helper's CPU/offline/artifact-only guard and a 30-second bound. It completed, fence count is one, and guard events and stderr are empty. The original section, fence, bootstrap, environment and execution receipt were copied byte-for-byte into permanent `original-run/` evidence. The helper's restrictions were read before execution and did not prevent this fence.
+
+For total 40, peak 0.001 and warmup 5, the effective warmup is 5. Indexes 0–4 yield 0.0002/0.0004/0.0006/0.0008/0.001, within floating-point representation. At index 5 the cosine phase is 0, so peak 0.001 occurs again. The final training index is 39, phase 34/35, not phase 1; the last three rates are 0.00011621671268686605, 0.00010723168513061665 and 0.00010181156770214242. Index 40 would reach exactly the declared 0.0001 floor and is outside this 40-update list. The prose says “接近” and “向…靠近”, which correctly describes this endpoint convention.
+
+The independent check used the SGDR closed form with min 0.0001 and max 0.001 and exact rational phases, then compared all 35 decay values with absolute tolerance 1e-18. It also checked that the 40 values never exceed the peak. The displayed `1e-9` literal is 0.000000001 and the fence assertion is an upper-bound check, not proof of optimality or a change to the configured peak.
+
+Warmup 10 gives index 0=0.0001, index 4=0.0005, index 9=0.001; all 40 values were checked. Warmup 30 is exactly the same list as warmup 10 because the repository clamps it to `max(1,total//4)`. Total lengths 1,2,3,4,7,8,40 were checked with explicit expected caps 1,1,1,1,1,2,10. Integer flooring is consistent with “四分之一以內”. For 1–2 updates there may be no decrease during the actual list; the section only states their warmup cap and does not claim that these short lists reach the floor.
+
+For the same 20th update (index 19), with the same peak and warmup 5, total 40 gives 0.0006890576474687264 and total 100 gives 0.0009526281984193435. `scripts/train.py` stores `schedule_steps`/`peak_lr`, assigns the per-step learning rate before `optimizer.step`, and rejects changed schedule metadata on `--resume`. The original metadata function and exact original resume-comparison AST were executed without invoking training: total 40 accepted; total 100 rejected against saved total 40. This verifies the metadata contract only, not a completed full checkpoint/resume training experiment.
+
+The fence only imports the helper, computes a list, prints slices and checks a maximum. In the bounded rerun, a pre-existing CPU sentinel parameter and optimizer remained unchanged and no gradient appeared. This supports the stated “只計時間表” scope; it does not establish any learned model quality. There are no empirical accuracy/loss scores, data sample counts or training-result JSON asserted in this section. The current-run JSON receipts and generated numeric JSON were read and their counts/values checked.
+
+## Figure inspection
+
+I rendered the original SVG with Inkscape 1.4 to a 640×680 PNG and actually viewed the PNG with `view_image`. Title, numeric tick labels, update-axis labels 1/20/40, warmup/decrease captions and the “沒有更新模型” caption are visible and match the prose. The curve includes all 40 schedule values: `x=184+416*i/39`, `y=424-300*lr/0.001`. Maximum x/y discrepancy is 0.00333334/0.00498620 pixel, within the 0.0051-pixel tolerance for SVG coordinates rounded to two decimals. The floor grid line is y394, peak is y124 and 0.0005 is y274. The last point is above the floor, consistently with index 39.
+
+Inkscape emitted two PangoFT2FontMap/GtkRecentManager initialization warnings, saved in `render.stderr.txt`; output creation and visual inspection succeeded. This is a static rendered-SVG check. Browser/mobile page presentation was not tested and is not claimed.
+
+Verdict: pass. The claims explicitly describe the course helper's own boundaries, preserve the distinction from named external schedules, and make no unsupported model-performance claim.

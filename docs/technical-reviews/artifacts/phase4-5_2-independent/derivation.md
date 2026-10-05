@@ -1,0 +1,15 @@
+# Hand calculation and boundary conditions for 5.2
+
+For `[B,T,C]=[2,4,5]`, `loss_sum` reshapes logits to `[B*T,C]=[8,5]` and labels to `[8]`. The class axis stays length 5. Five class-index targets are valid; three are ignored. Batch sample count is 2, available position count is 8, and the loss denominator is 5 valid targets. These are different counts.
+
+For every zero-logit row, `softmax_c=exp(0)/sum_{j=0}^4 exp(0)=1/5=0.2`. Unweighted, unsmoothed class-index cross entropy is `ell=-ln(0.2)=ln(5)=1.6094379124341003` nat per valid target. Original sum is `5*ln(5)=8.047189562170502` nat, and global target mean is `sum/5=ln(5)` nat/target. The float32 original differs from these real-valued formulas by less than 1e-6; its displayed three-decimal rounding is 8.047 and 1.609. One added valid target gives `6*ln(5)=9.656627474604601`, rounding to 9.657, with unchanged mean and class-axis length.
+
+Token/target weighting is `(ell_1+ell_2+ell_3+ell_4+ell_5)/5`, so each target weight is 1/5. Averaging within each sample and then averaging the two samples gives `((ell_1+ell_2+ell_3+ell_4)/4+ell_5)/2`: the four long-sample targets each weigh 1/8, and the single short-sample target weighs 1/2. Equal individual losses make the scalar means equal but do not make these weights equal.
+
+For a valid row, `d mean/d z_c=(p_c - 1[c=target])/5`. Thus the original target-class derivative is -0.8/5=-0.16, and each other class derivative is 0.2/5=0.04. An ignored row has zero derivative from this loss. Under sample averaging, target derivatives are -0.8/8=-0.1 for each long-sample position and -0.8/2=-0.4 for the short-sample position. These checks concern logits derivatives; they do not infer that all model parameters receive the same or nonzero gradients.
+
+At the same parameter point theta with constant valid-target denominator N, linearity gives `grad(sum_i ell_i(theta)/N)=sum_i grad(ell_i(theta))/N`. The two micro-batches must use the overall N=5 and must not run an intervening step for this equivalence. `Tensor.backward` accumulates `.grad`; `SGD.step` changes theta using the collected gradient. Running a step after each recomputed sample or answer changes the point at which later gradients are evaluated, so it is a different sequence from collecting all gradients and updating once. The probe retains global N even in the sequential comparison to isolate this update boundary.
+
+The original fence builds no model and no optimizer. It performs score/label loss computation and backward once, leaving the logits numerically unchanged. The three returned/computed values are 0-dimensional, one-element tensors. `count.item()` is an int, and the other `.item()` values are floats; printing these does not replace `mean_loss` with a Python number before backward.
+
+No claim is made that all repository tasks, class-weighted losses, label-smoothed losses, auxiliary losses, or stochastic architectures obey this exact simple reduction. This verifies the particular unweighted, unsmoothed class-index helper used in 5.2. `loss_sum` rejects an entirely ignored batch before division; that is its actual empty-denominator contract.

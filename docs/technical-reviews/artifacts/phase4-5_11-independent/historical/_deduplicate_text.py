@@ -1,0 +1,9 @@
+def _deduplicate_text(rows):
+    """只去完整內容重複；近重複仍需另外審計，不假裝已全部消除。"""
+    result, seen = [], set()
+    for row in rows:
+        key = " ".join(row["text"].split())
+        if key not in seen:
+            result.append({**row, "family": hashlib.sha256(key.encode()).hexdigest()})
+            seen.add(key)
+    return result
