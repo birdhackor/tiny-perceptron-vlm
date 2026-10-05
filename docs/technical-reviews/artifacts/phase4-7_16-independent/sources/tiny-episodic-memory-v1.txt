@@ -1,0 +1,667 @@
+                                                                      Continual Learning with Tiny Episodic Memories
+
+                                                           Arslan Chaudhry1∗ , Marcus Rohrbach2 , Mohamed Elhoseiny2,4 ,
+                                             Thalaiyasingam Ajanthan3† , Puneet K. Dokania1 , Philip H. S. Torr1 , Marc’Aurelio Ranzato2
+                                                       1
+                                                         University of Oxford, 2 Facebook AI Research, 3 Australian National University
+                                                                    4
+                                                                      King Abdullah University of Science and Technology
+arXiv:1902.10486v1 [cs.LG] 27 Feb 2019
+
+
+
+
+                                                                     Abstract                                  This decades old problem of CL [Ring, 1997; Thrun, 1998]
+                                                                                                            is now seeing a surge of interest in the research community.
+                                                 Learning with less supervision is a major challenge        Recently, several works have attempted to reduce forgetting by
+                                                 in artificial intelligence. One sensible approach to       adding a regularization term to the objective function. In some
+                                                 decrease the amount of supervision is to leverage          of these works [Kirkpatrick et al., 2016; Zenke et al., 2017;
+                                                 prior experience and transfer knowledge from tasks         Chaudhry et al., 2018; Aljundi et al., 2018], the regularization
+                                                 seen in the past. However, a necessary condition for       term discourages change in parameters that were important
+                                                 a successful transfer is the ability to remember how       to solve past tasks. In other works [Li and Hoiem, 2016;
+                                                 to perform previous tasks. The Continual Learn-            Rebuffi et al., 2017], regularization is used to penalize feature
+                                                 ing (CL) setting, whereby an agent learns from a           drift on already learned tasks. Yet another approach is to
+                                                 stream of tasks without seeing any example twice,          use an episodic memory storing data from past tasks [Rebuffi
+                                                 is an ideal framework to investigate how to accrue         et al., 2017; Chaudhry et al., 2018]; one effective approach
+                                                 such knowledge. In this work, we consider super-           to leverage such episodic memory is to use it to constrain
+                                                 vised learning tasks and methods that leverage a           the optimization such that the loss on past tasks can never
+                                                 very small episodic memory for continual learning.         increase [Lopez-Paz and Ranzato, 2017].
+                                                 Through an extensive empirical analysis across four
+                                                                                                               In this work, we do a quantitative study of CL methods on
+                                                 benchmark datasets adapted to CL, we observe that
+                                                                                                            four benchmark datasets under the assumption that i) each
+                                                 a very simple baseline, which jointly trains on both
+                                                                                                            task is fully supervised, ii) that each example from a task
+                                                 examples from the current task as well as examples
+                                                                                                            can only be seen once using the learning protocol proposed
+                                                 stored in the memory, outperforms state-of-the-art
+                                                                                                            by Chaudhry et al. [2019] (see §3), and iii) that the learner has
+                                                 CL approaches with and without episodic memory.
+                                                                                                            access to a very small episodic memory to store and replay
+                                                 Surprisingly, repeated learning over tiny episodic
+                                                                                                            examples from the past. Restricting the size of the episodic
+                                                 memories does not harm generalization on past
+                                                                                                            memory is important because it makes the learning problem
+                                                 tasks, as joint training on data from subsequent tasks
+                                                                                                            more realistic and more distinct from multi-task learning.
+                                                 acts like a data dependent regularizer. We discuss
+                                                 and evaluate different approaches to write into the           While Lopez-Paz and Ranzato [2017] and Chaudhry et al.
+                                                 memory. Most notably, reservoir sampling works             [2019] used the memory as a constraint, here we drastically
+                                                 remarkably well across the board, except when the          simplify the optimization problem and directly train on the
+                                                 memory size is extremely small. In this case, writ-        memory, resulting in better performance and more efficient
+                                                 ing strategies that guarantee an equal representation      learning. Earlier works [Isele and Cosgun, 2018] explored a
+                                                 of all classes work better. Overall, these methods         similar usage of episodic memory, dubbed Experience Replay
+                                                 should be considered as a strong baseline candidate        (ER)2 , but for RL tasks where the learner does multiple passes
+                                                 when benchmarking new CL approaches.1                      over the data using a very large episodic memory. Our work is
+                                                                                                            instead most similar to Riemer et al. [2019], who also consid-
+                                         1       Introduction and Related Work                              ered the same single-pass through the data learning setting and
+                                                                                                            trained directly on the episodic memory. Our contribution is
+                                         Arguably, the objective of continual learning (CL) is to rapidly   to extend their study by a) considering much smaller episodic
+                                         learn new skills from a sequence of tasks leveraging the knowl-    memories, b) investigating different strategies to write into the
+                                         edge accumulated in the past. Catastrophic forgetting [Mc-         memory and c) analyzing why training on tiny memories does
+                                         Closkey and Cohen, 1989], i.e. the inability of a model to         not lead to overfitting.
+                                         recall how to perform tasks seen in the past, makes such rapid
+                                         or efficient adaptation extremely difficult.                          Our extensive empirical analysis shows that when the size of
+                                             ∗
+                                               Corresponding Author: arslan.chaudhry@eng.ox.ac.uk              2
+                                                                                                                 For consistency to prior work in the literature, we will refer to
+                                             †
+                                               Work done while at University of Oxford                      this approach which trains on the episodic memory as ER, although
+                                             1
+                                               Code: https://goo.gl/AqM6ZC                                  its usage for supervised learning tasks is far less established.
+Algorithm 1 Experience Replay for Continual Learning.                                  Algorithm 2 Reservoir sampling update. mem sz is the num-
+ 1: procedure ER(D, mem sz, batch sz, lr)                                              ber of examples the memory can store, t is the task id, n is the number
+ 2:    M ← {} ∗ mem sz                  . Allocate memory buffer of size mem sz        of examples observed so far in the data stream, and B is the input
+ 3:    n←0                     . Number of training examples seen in the continuum     mini-batch.
+ 4:    for t ∈ {1, · · · , T } do                                                       1: procedure U PDATE M EMORY(mem sz, t, n, B)
+                              K                                                         2:      j←0
+ 5:              for Bn ∼ Dt do . Sample without replacement a mini-batch of size
+                                                                                        3:      for (x, y) in B do
+      K from task t
+                               K                                                        4:          M ← |M|          . Number of samples currently stored in the memory
+ 6:                    BM ∼ M              . Sample a mini-batch from M                 5:          if M < mem sz then
+ 7:                    θ ← SGD(Bn ∪ BM , θ, lr) . Single gradient step to               6:              M.append(x, y, t)
+      update the parameters by stacking current minibatch with minibatch from memory
+                                                                                        7:          else
+ 8:                M ← UpdateMemory(mem sz, t, n, Bn )                                  8:              i = randint(0, n + j)
+    . Memory update, see §2                                                             9:              if i < mem sz then
+ 9:                n ← n + batch sz      . Counter update                              10:                   M[i] ← (x, y, t)                . Overwrite memory slot.
+10:     return θ, M                                                                    11:           j ←j+1
+                                                                                       12:       return M
+the episodic buffer is reasonably large, ER with reservoir sam-
+pling outperforms current state-of-the-art CL methods [Kirk-                           Algorithm 3 Ring buffer.
+patrick et al., 2016; Chaudhry et al., 2019; Riemer et al., 2019].                      1: procedure U PDATE M EMORY(mem sz, t, n, B)
+However, when the episodic buffer is very small, reservoir                              2:    for (x, y) in B do
+sampling-based ER suffers a performance loss because there                              3:        # Assume FIFO stacks M[t][y] of fixed size are already initialized
+is no guarantee that each class has at least one representative                         4:        M[t][y].append(x)
+example stored in the memory. In this regime, other sampling
+strategies that sacrifice perfect randomization for balancing                           5:       return M
+the population across classes work better. This observation
+motivated us to introduce a simple hybrid approach which                               parameter vector, ER makes two modifications. First, it has an
+combines the best of both worlds and does not require prior                            episodic memory which is updated at every time step, line
+knowledge of the total number of tasks: it starts by using reser-                      8. Second, it doubles the size of the minibatch used to com-
+voir sampling but then switches to a balanced strategy when                            pute the gradient descent parameter update by stacking the
+it detects that at least one class has too few examples stored                         actual minibatch of examples from the current task with a
+in the memory. Importantly and counter intuitively, repeti-                            minibatch of examples taken at random from the memory,
+tive learning on the same tiny episodic memory still yields a                          line 7. As we shall see in our empirical validation, these
+significant boost of performance thanks to the regularization                          two simple modifications yield much better generalization and
+effect brought by training on subsequent tasks, a topic which                          substantially limit forgetting, while incurring in a negligible
+we investigate at length in §4.5. In conclusion, ER on tiny                            additional computational cost on modern GPU devices.
+episodic memories offers very strong performance at a very                                Next, we describe various strategies to write into the mem-
+small additional computational cost. We believe that this ap-                          ory. All these methods assume access to a continuous stream
+proach will serve as a stronger baseline for the development                           of data and a small additional temporary memory, which rules
+of future CL approaches.                                                               out approaches relying on the temporary storage of all the
+2     Experience Replay                                                                examples seen so far. This restriction is consistent with our
+                                                                                       definition of CL; a learning experience through a stream of
+Recent works [Lopez-Paz and Ranzato, 2017; Chaudhry et                                 data under the constraint of a fixed and small sized memory
+al., 2019] have shown that methods relying on episodic mem-                            and limited compute budget.
+ory have superior performance than regularization based ap-
+proaches (e.g., [Kirkpatrick et al., 2016; Zenke et al., 2017])                        Reservoir Sampling: Similarly to Riemer et al. [2019],
+when using a “single-pass through the data” protocol, see                              Reservoir sampling [Vitter, 1985] takes as input a stream of
+§3 for details. While Lopez-Paz and Ranzato [2017] and                                 data of unknown length and returns a random subset of items
+Chaudhry et al. [2019] used the episodic memory as a mean                              from that stream. If ‘n’ is the number of points observed so
+to project gradients, more recently Riemer et al. [2019] pro-                          far and k is the size of the reservoir (sampling buffer), this
+posed an approach that achieves even better generalization                             selection strategy samples each data point with a probability
+                                                                                       k
+by training directly with the examples stored in the memory.                           n . The routine to update the memory is given in Alg. 2.
+In this work, we build upon Riemer et al. [2019] and further                           Ring Buffer: Similarly to Lopez-Paz and Ranzato [2017],
+investigate the use of memory as a source of training data                             for each task, the ring buffer strategy allocates as many equally
+when the memory size is very small. Moreover, we compare                               sized FIFO buffers as there are classes. If C is the total num-
+various heuristics for writing into the memory.                                        ber of classes across all tasks, each stack has a buffer of size
+   The overall training procedure is given in Alg. 1. Com-                             mem sz . As shown in Alg. 3, the memory stores the last few
+                                                                                           C
+pared to the simplest baseline model that merely tunes the                             observations from each class. Unlike reservoir sampling, in
+parameters on the new task starting from the previous task                             this strategy the samples stored for older tasks do not change
+Algorithm 4 K-Means. Memory is populated using samples                                     3     Learning Framework
+closest (in feature space) to sequential K-Means centroids.                                We use the same learning framework proposed by Chaudhry
+ 1: procedure U PDATE M EMORY(mem sz, t, n, B)                                             et al. [2019]. There are two streams of tasks, DCV and DEV .
+ 2:    # Assume array M[t][y] of fixed size is already initialized                         The former contains only a handful of tasks and it is only
+ 3:    # Assume K centroids cj are already initialized                                     used for cross-validation purposes. Tasks from DCV can be
+ 4:    # Assume cluster counters nj are already initialized to 0                           replayed as many times as needed and have various degree
+ 5:    for (x, y) in B do                                                                  of similarity to tasks in the training and evaluation dataset
+ 6:          j ← argminj∈{1,··· ,K} ||φθ (x) − cj ||                                       DEV . The latter stream instead can be played only once; the
+ 7:          nj ← nj + 1                                                                   learner will observe examples in sequence and will be tested
+ 8:          cj ← cj + n1j ∗ (φθ (x) − cj )                                                throughout the learning experience. The final performance
+ 9:                d = ||φθ (x) − cj ||                                                    will be reported on the held-out test set drawn from DEV .
+10:                if d < M[t][y][j].get dst() then                  . Store the current      The k-th task in any of these streams consists of Dk =
+      example if it is closer to the centroid
+                                                                                           {(xki , tki , yik )ni=1
+                                                                                                                k
+                                                                                                                   }, where each triplet constitutes an example
+11:                M[t][y][j] ← (x, d)                                                     defined by an input (xk ∈ X ), a task descriptor (tk ∈ T )
+                                                                                           which is an integer id in this work, and a target vector (y k ∈
+12:         return M
+                                                                                           yk ), where yk is the set of labels specific to task k and yk ⊂
+                                                                                           Y.
+Algorithm 5 Mean of Features. Store examples that are closest                              3.1    Metrics
+to the running average feature vector.
+                                                                                           We measure performance using two metrics, as standard prac-
+ 1: procedure U PDATE M EMORY(mem sz, t, n, B)                                             tice in the literature [Lopez-Paz and Ranzato, 2017; Chaudhry
+ 2:    # Assume heaps M[t][y] of fixed size are already initialized                        et al., 2018]:
+ 3:    # Assume average features f [t][y] are already initialized
+                                                                                           Average Accuracy (A ∈ [0, 1]) Let ai,j be the performance
+ 4:    # Assume moving average decay hyper-parameter (α) is given
+                                                                                           of the model on the held-out test set of task ‘j’ after the model
+ 5:    for (x, y) in B do                                                                  is trained on task ‘i’. The average accuracy at task T is then
+ 6:          f [t][y] ← α ∗ f [t][y] + (1 − α) ∗ φθ (x)                                    defined as:
+ 7:         d = ||φθ (x) − f [t][y]||                                                                                        1 X
+                                                                                                                                  T
+
+ 8:         if M[t][y].find max() > d then                          . Store the current                               AT =         aT,j                    (1)
+                                                                                                                             T j=1
+      example if it is closer to the center
+ 9:                M[t][y].delete max()                                                     Forgetting (F ∈ [−1, 1]) Let fji be the forgetting on task
+10:                M[t][y].insert(x; d)                                                    ‘j’ after the model is trained on task ‘i’ which is computed as:
+11:         return M
+                                                                                                              fji =       max          al,j − ai,j         (2)
+                                                                                                                      l∈{1,··· ,i−1}
+
+                                                                                           The average forgetting measure at task T is then defined as:
+throughout training, leading to potentially stronger overfitting.
+                                                                                                                                 T −1
+Also, at early stages of training the memory is not fully uti-                                                               1 X T
+lized since each stack has constant size throughout training.                                                     FT =                fj                   (3)
+                                                                                                                           T − 1 j=1
+However, this simple sampling strategy guarantees equal rep-
+resentation of all classes in the memory, which is particularly                            4     Experiments
+important when the memory is very small.                                                   In this section, we review the benchmark datasets we used in
+                                                                                           our evaluation, as well as the architectures and the baselines
+k-Means: For each class, we use online k-Means to estimate                                 we compared against. We then report the results we obtained
+k centroids in feature space, using the representation before                              using episodic memory and ER, and we conclude with a brief
+the last classification layer. We then store in the memory the                             analysis investigating generalization when using ER on tiny
+input examples whose feature representation is the closest to                              memories.
+such centroids, see Alg. 4. This memory writing strategy has
+similar benefits and drawbacks of ring buffer, except that it has                          4.1    Datasets
+potentially better coverage of the feature space in L2 sense.                              We consider four commonly used benchmarks in CL literature.
+                                                                                           Permuted MNIST [Kirkpatrick et al., 2016] is a variant of
+Mean of Features (MoF): Similarly to Rebuffi et al. [2017],                                MNIST [LeCun, 1998] dataset of handwritten digits where
+for each class we compute a running estimate of the average                                each task has a certain random permutation of the input pixels
+feature vector just before the classification layer and store in                           which is applied to all the images of that task. Our Permuted
+the memory examples whose feature representation is closest                                MNIST benchmark consists of a total of 23 tasks.
+to such average feature vector, see details in Alg. 5. This                                   Split CIFAR [Zenke et al., 2017] consists of splitting the
+writing strategy has the same balancing guarantees of ring                                 original CIFAR-100 dataset [Krizhevsky and Hinton, 2009]
+buffer and k-means, but it populates the memory differently.                               into 20 disjoint subsets, each of which is considered as a sepa-
+Instead of populating the memory at random or using k-Means,                               rate task. Each task has 5 classes that are randomly sampled
+it puts examples that are closest to the mode in feature space.                            without replacement from the total of 100 classes.
+                             0.80                                                                                                                  A-GEM
+
+
+
+
+             Avg. Accuracy
+
+
+
+
+                                                                                Avg. Accuracy
+                                                                                                0.65                                               MER
+                             0.75                                                                                                                  ER-Reservoir
+                                                                                                0.60                                               ER-Ringbuffer
+                                                                                                                                                   ER-K-Means
+                             0.70                                                                                                                  ER-MoF
+                                                                                                0.55
+                             0.65
+                                                                                                0.50
+                                    1                                10                                1                                  10
+                                              Memory per Class                                                   Memory per Class
+                                              (a) MNIST                                                                  (b) CIFAR
+                             0.75                                                               0.60                                               A-GEM
+             Avg. Accuracy
+
+
+
+
+                                                                                Avg. Accuracy
+                                                                                                                                                   MER
+                             0.70                                                                                                                  ER-Reservoir
+                                                                                                0.55                                               ER-Ringbuffer
+                             0.65                                                                                                                  ER-K-Means
+                                                                                                0.50                                               ER-MoF
+                             0.60
+                             0.55                                                               0.45
+                                    1                                     10                           1                                  10
+                                              Memory per Class                                                   Memory per Class
+                                                (c) CUB                                                              (d) miniImageNet
+Figure 1: Average accuracy as a function of episodic memory size. The average accuracy of ‘FINETUNE’ and ‘EWC’ is: MNIST [FINETUNE
+(53.5), EWC (63.1)], CIFAR [FINETUNE (40.6), EWC (41.2)], CUB [FINETUNE (55.7), EWC (55.0)], miniImageNet [FINETUNE (34.7), EWC
+(37.7)]. The performance is averaged over 5 runs. Uncertainty estimates are provided in the Appendix.
+
+                                                                                                0.7
+            Avg Accuracy
+
+
+
+
+                                                                                                                                                   ER-K-Means
+
+
+                                                                                Avg Accuracy
+                             0.65
+                                                                                                                                                   EWC
+                             0.60                                                                                                                  FINETUNE
+                                                                                                0.6
+                             0.55                                                                                                                  MER
+                                                                                                                                                   A-GEM
+                             0.50                                                               0.5                                                ER-MoF
+                                                                                                                                                   ER-Ringbuffer
+                             0.45                                                                                                                  ER-Reservoir
+                             0.40                                                               0.4
+                                    1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17                          1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17
+                                                    Tasks                                                              Tasks
+                                              (a) 1 Sample                                                            (b) 13 Samples
+Figure 2: CIFAR: Evolution of average accuracy (Ak ) as new tasks are learned when using ‘1’ and ‘13’ samples per class. The performance
+is averaged over 5 runs. Uncertainty estimates are provided in the Appendix.
+
+
+   Similarly to Split CIFAR, Split miniImageNet is con-                             mini-batch sampled from the episodic memory is also set to
+structed by splitting miniImageNet [Vinyals et al., 2016], a                        10 irrespective of the size of the episodic buffer.
+subset of ImageNet with a total of 100 classes and 600 images
+per class, to 20 disjoint subsets.                                                   4.3               Baselines
+   Finally, Split CUB [Chaudhry et al., 2019] is an incremen-                       We compare against the following baselines:
+tal version of the fine-grained image classification dataset                          • FINETUNE, a model trained continually without any reg-
+CUB [Wah et al., 2011] of 200 bird categories split into 20                             ularization and episodic memory, with parameters of a
+disjoint subsets of classes.                                                            new task initialized from the parameters of the previous
+   In all cases, DCV consisted of 3 tasks while DEV contained                           task.
+the remainder. As described in § 3.1, we report metrics on                            • EWC [Kirkpatrick et al., 2016], a regularization-based ap-
+DEV after doing a single training pass over each task in the                            proach that avoids catastrophic forgetting by limiting
+sequence. The hyper-parameters selected via cross-validation                            learning of parameters critical to the performance of
+on DCV are reported in Appendix Tab. 7.                                                 past tasks, as measured by the Fisher information matrix
+4.2   Architectures                                                                     (FIM). In particular, we compute the FIM as a moving
+                                                                                        average similar to EWC ++ in Chaudhry et al. [2018] and
+For MNIST, we use a fully-connected network with two hidden                             online EWC in Schwarz et al. [2018].
+layers of 256 ReLU units each. For CIFAR and miniImageNet,
+a reduced ResNet18, similar to Lopez-Paz and Ranzato [2017],                          • A - GEM [Chaudhry et al., 2019], a model that uses
+is used and a standard ResNet18 with ImageNet pretraining                               episodic memory as an optimization constraint to avoid
+is used for CUB. The input integer task id is used to select                            catastrophic forgetting. Since GEM and A - GEM have sim-
+a task specific classifier head, and the network is trained via                         ilar performance, as shown by Chaudhry et al. [2019],
+cross-entropy loss.                                                                     we only consider the latter in our experiments due to its
+   For a given dataset stream, all models use the same archi-                           computational efficiency.
+tecture, and all models are optimized via stochastic gradient                         • MER [Riemer et al., 2019], a model that also leverages an
+descent with a mini-batch size equal to 10. The size of the                             episodic memory and uses a loss that approximates the
+                                                                    ER-Reservoir                            Table 1: Training Time [s]
+  Avg Accuracy
+                 0.65                                               ER-Ringbuffer
+                                                                    ER-Ringbuffer-Full
+                 0.60                                               ER-Hybrid
+                                                                                                   Methods                   Training Time [s]
+                 0.55                                                                                                        MNIST CIFAR
+                 0.50
+                                                                                                   FINETUNE                     44         87
+                        1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17
+                                        Tasks                                                      EWC
+                                                                                                   A - GEM
+                                                                                                                                47
+                                                                                                                                48
+                                                                                                                                          159
+                                                                                                                                          230
+Figure 3: Evolution of average accuracy (Ak ) as new tasks are                                     ER - RINGBUFFER (ours)       44        116
+learned in Split CIFAR. The memory has only 85 slots (in average 1
+slot per class). The vertical bar marks where the hybrid approach
+switches from reservoir to ring buffer strategy. The hybrid approach
+works better than both reservoir (once more tasks arrive) and ring
+buffer (initially, when the memory is otherwise not well utilized). The                  per class, work the best (even better than reservoir sam-
+orange curve is a variant of ring buffer that utilizes the full memory                   pling). All methods that have this property, ring buffer, k-
+at all times, by reducing the ring buffer size of observed classes as                    Means and Mean of Features, have a rather similar perfor-
+new classes arrive. Overall, the proposed hybrid approach works at                       mance which is substantially better than the reservoir sam-
+least as good as the other approaches throughout the whole learning                      pling. For instance, on CIFAR, with one example per class in
+experience. (Averaged over 3 runs).                                                      the memory, ER with reservoir sampling is 3.5% worse than
+                                                                                         ER K-Means, but ER K-Means, ER Ring Buffer and ER MoF
+         dot products of the gradients of current and previous tasks                     are all within 0.5% from each other (see Tab. 3 in Appendix
+         to avoid forgetting. To make the experimental setting                           for numerical values). These findings are further confirmed by
+         more comparable to the other methods (in terms of SGD                           looking at the evolution of the average accuracy (Fig. 2 left)
+         updates), we set the number of inner gradient steps to                          as new tasks arrive when the memory can store at most one
+         1 for each outer Reptile [Nichol and Schulman, 2018]                            example per class.
+         meta-update with the mini-batch size of 10.                                        The better performance of strategies like ring buffer for tiny
+                                                                                         episodic memories, and reservoir sampling for bigger episodic
+4.4          Results                                                                     memories, suggests a hybrid approach, whereby the writing
+In the first experiment, we measured average accuracy at the                             strategy relies on reservoir sampling till some classes have too
+end of the learning experience on DEV as a function of the                               few samples stored in the memory. At that point, the writing
+size of the memory. From the results in Fig. 1 we can make                               strategy switches to the ring buffer scheme which guarantees a
+several observations. First and not surprisingly, average ac-                            minimum number of examples for each class. For instance, in
+curacy increases with the memory size and average accuracy                               the experiment of Fig. 3 the memory budget consists of only
+is much better than the baseline FINETUNE and EWC, show-                                 85 memory slots (as there are 17 tasks and 5 classes per task),
+ing that CL methods with episodic memories are indeed very                               an average of 1 sample per class by the end of the learning
+effective. For instance, on CIFAR the improvement brought                                experience. The learner switches from reservoir sampling to
+by an episodic memory storing a single example per class is                              ring buffer once it observes that any of the classes seen in the
+at least 10% (difference between performance of MER, the                                 past has only one sample left in the memory. When the switch
+worst performing method using episodic memory, and EWC,                                  happens (marked by a red vertical line in the figure), the learner
+the best performing baseline not relying on episodic memory),                            only keeps randomly picked min(n, |M|    K ) examples per class
+a gain that further increases to 20% when the memory stores                              in the memory, where n is the number of examples of class c
+10 examples per class.                                                                   in the memory and K are the total number of classes observed
+   Second, methods using ER outperform not only the                                      so far. The overwriting happens opportunistically, removing
+baseline approaches that do not have episodic memory                                     examples from over-represented classes as new classes are
+(FINETUNE and EWC) but also state-of-the-art approaches                                  observed. Fig. 3 shows that when the number of tasks is
+relying on an episodic memory of the same size (A - GEM                                  small, the hybrid version enjoys the high accuracy of reservoir
+and MER). For instance, on CIFAR the gain over A - GEM                                   sampling. As more tasks arrive and the memory per task
+brought by ER is 1.7% when the memory only stores 1 exam-                                shrinks, the hybrid scheme achieves superior performance
+ple per class, and more than 5% when the memory stores 13                                than reservoir (and at least similar to ring buffer).
+examples per class. This finding might seem quite surprising
+and will be investigated in more depth in §4.5.                                             Finally, experience replay methods are not only outper-
+   Third, experience replay based on reservoir sampling works                            forming all other approaches in terms of accuracy (and lower
+the best across the board except when the memory size is very                            forgetting as reported in Appendix Tab. 2, 3, 4 and 5), but also
+small (less than 3 samples per class). Empirically we observed                           in terms of compute time. Tab. 1 reports training time on both
+that as more and more tasks arrive and the size of the memory                            Permuted MNIST and Split CIFAR, using ring buffer as a use
+per class shrinks, reservoir sampling often ends up evicting                             case since all other ER methods have the same computational
+some of the earlier classes from the memory, thereby inducing                            complexity. We observe that ER adds only a slight overhead
+higher forgetting.                                                                       compared to the finetuning baseline, but it is much cheaper
+   Fourth, when the memory is tiny, sampling methods that                                than stronger baseline methods like A - GEM and MER, particu-
+by construction guarantee a balanced number of samples                                   larly when the model is bigger, like on the CIFAR dataset.
+           0.88                                                             0.8                                          D2                 0.8                                          D2
+                                                                                                                         D2&M1                                                           D2&M1
+Accuracy
+
+
+
+
+                                                                 Accuracy
+
+
+
+
+                                                                                                                                 Accuracy
+           0.86                                                             0.7                                                             0.6
+           0.84
+                                                                            0.6                                                             0.4
+           0.82                                          D2
+           0.80
+                                                         D2&M1              0.5
+                                                                                                                                            0.2
+                  0   25     50       75    100    125   150                      0   25     50       75     100   125   150                      0   25     50       75    100    125   150
+                                  Iterations (k)                                                  Iterations (k)                                                  Iterations (k)
+                           (a) 20° rotation                                                (b) 40° rotation                                                (c) 60° rotation
+Figure 4: Analysis on MNIST Rotation: Test accuracy on Task 1 as a function of the training iterations over Task 2. The red curves are the
+accuracy when the model is trained using only D2 , the training set of Task 2. The green curves are the accuracy when in addition to D2 , the
+model uses the memory from Task 1, M1 (experience replay). (Averaged over 3 runs).
+
+
+4.5               Analysis                                                                                 see red curve in Fig. 4(a). However, when we train on both
+                                                                                                           D2 and M1 , generalization on T1 is better than FINETUNE
+The strong performance of experience replay methods which                                                  baseline, i.e., training with D2 only, regardless of the degree
+directly learn using the examples stored in the memory may be                                              of relatedness between the two tasks, as shown by the green
+surprising. In fact, Lopez-Paz and Ranzato [2017] discounted                                               curves in Fig. 4.
+this loss design option by saying: “Obviously, minimizing                                                     These findings suggest that while the model essentially
+the loss at the current example together with [the loss on the                                             memorizes the examples in the memory, this does not neces-
+episodic memory] results in overfitting to the examples stored                                             sarily have a detrimental effect in terms of generalization as
+in [the memory]”. How can the repeated training over the                                                   long as such learning is performed in conjunction with the
+same very small handful of examples possibly generalize?                                                   examples of T2 . Moreover, there are two major axes control-
+   To investigate this matter we conducted an additional exper-                                            ling this regularizer: the number of examples in T2 and the
+iment. For simplicity, let us assume there are only two tasks,                                             relatedness between the tasks. The former sets the strength of
+T1 and T2 , and let’s study the generalization performance on                                              the regularizer. The latter, as measured by the accuracy on T1
+T1 as we train on T2 . We denote by D2 the training set of T2                                              when training only on D2 , controls its effectiveness. When T1
+and by M1 the memory storing examples from T1 ’s training                                                  and T2 are closely related, Fig. 4(a), training on D2 prevents
+set. One hypothesis is that although direct training on the                                                overfitting to M1 by providing a data dependent regulariza-
+examples in M1 (in addition to those coming from D2 ) does                                                 tion that, even by itself, produces positive transfer. When T1
+indeed lead to strong memorization of M1 (as measured by                                                   and T2 are somewhat related, Fig. 4(b), training on T2 still
+nearly zero cross-entropy loss on M1 ), such training is still                                             improves generalization on T1 albeit to a much lesser extent.
+overall beneficial in terms of generalization on the original                                              However, when the tasks are almost adversarial to each other
+task T1 because the joint learning over the examples of the cur-                                           as an upside down 2 may look like a 5, the resulting regular-
+rent task T2 acts as a strong, albeit implicit and data dependent,                                         ization becomes even harmful, Fig. 4(c). In this case, accuracy
+regularizer for T1 .                                                                                       drops from 40% (training only on M1 ) to 30% (training on
+   To validate this hypothesis, we conducted experiments on                                                both M1 and D2 ).
+the MNIST Rotations dataset [Lopez-Paz and Ranzato, 2017],
+where each task has digits rotated by a certain degree. We                                                 Conclusions
+choose this dataset because it enables fine control over the
+relatedness between the tasks. We considered the same archi-                                               In this work we studied ER methods for CL. Our empirical
+tecture used for the Permuted MNIST, with only 10 memory                                                   analysis on several benchmark streams of data shows that
+slots, one for each class of T1 . First, we verified that the loss                                         ER methods offer the best performance at a very marginal
+on the memory M1 quickly drops to nearly 0 as the model                                                    increase of computational cost. We tested several baseline
+is trained using both M1 and D2 . As expected, the model                                                   approaches to populate the episodic memory and found that
+achieves a perfect performance on the examples in the mem-                                                 reservoir sampling, works the best when the memory is rel-
+ory, which is not true for methods like A - GEM which make less                                            atively large. However, when the memory is tiny, methods
+direct use of the memory (see Tab. 6 in Appendix). We then                                                 sacrificing randomness for balancing among classes yield bet-
+verified that only training on M1 without D2 , yields strong                                               ter performance. Based on these observations we proposed a
+overfitting to the examples in the memory and poor general-                                                hybrid approach that offers the best of both worlds; the high
+ization performance, with a mere average accuracy of 40% on                                                performance of reservoir sampling at early stages of training
+T1 from the initial 85% which was obtained just after training                                             and the high performance of the second class of methods when
+on T1 . If we only train on D2 without using M1 (same as                                                   more tasks arrive and the memory of each task shrinks.
+FINETUNE baseline), we also observed overfitting to D2 as                                                     Our study also sheds light into a very interesting phe-
+long as T2 and T1 are sufficiently unrelated, Fig. 4(b) and 4(c).                                          nomenon: memorization (zero cross-entropy loss) of tiny
+When the two tasks are closely related instead (difference of                                              memories is useful for generalization because training on sub-
+rotation angles less than 20 degrees), we observe that even                                                sequent tasks acts like a data dependent regularizer. To the
+without the memory, generalization on T1 improves as we                                                    best of our knowledge this is the first investigation of this kind,
+train on T2 because of positive transfer from the related task,                                            as memory replay has mostly being used in past literature
+for reinforcement learning settings in conjunction with very
+large memories [Wang et al., 2017; Isele and Cosgun, 2018].
+Overall, we hope the CL community will adopt experience
+replay methods as a baseline, given their strong empirical
+performance, efficiency and simplicity of implementation.
+   There are several avenues of future work. For instance, we
+would like to investigate what are the optimal inputs that best
+mitigate expected forgetting and optimal strategies to remove
+samples from the memory when this is entirely filled up.
+
+Acknowledgments
+This work was supported by the Rhodes Trust, ERC grant
+ERC-2012-AdG 321162-HELIOS, EPSRC grant Seebibyte
+EP/M013774/1 and EPSRC/MURI grant EP/N019474/1. We
+would also like to acknowledge the Royal Academy of Engi-
+neering and FiveAI.
+References                                                       Sebastian Thrun. Lifelong learning algorithms. In Learning
+Rahaf Aljundi, Francesca Babiloni, Mohamed Elhoseiny,              to learn, pages 181–209. Springer, 1998.
+  Marcus Rohrbach, and Tinne Tuytelaars. Memory aware            Oriol Vinyals, Charles Blundell, Timothy Lillicrap, Daan Wier-
+  synapses: Learning what (not) to forget. In ECCV, 2018.          stra, et al. Matching networks for one shot learning. In
+                                                                   Advances in neural information processing systems, pages
+Arslan Chaudhry, Puneet K Dokania, Thalaiyasingam Ajan-
+                                                                   3630–3638, 2016.
+  than, and Philip HS Torr. Riemannian walk for incremental
+  learning: Understanding forgetting and intransigence. In       Jeffrey S Vitter. Random sampling with a reservoir. ACM
+  ECCV, 2018.                                                      Transactions on Mathematical Software (TOMS), 11(1):37–
+                                                                   57, 1985.
+Arslan Chaudhry, Marc’Aurelio Ranzato, Marcus Rohrbach,
+  and Mohamed Elhoseiny. Efficient lifelong learning with        C. Wah, S. Branson, P. Welinder, P. Perona, and S. Belongie.
+  a-gem. In ICLR, 2019.                                            The caltech-ucsd birds-200-2011 dataset. Technical Re-
+                                                                   port CNS-TR-2011-001, California Institute of Technology,
+David Isele and Akansel Cosgun. Selective experience replay        2011.
+  for lifelong learning. arXiv preprint arXiv:1802.10269,
+  2018.                                                          Z. Wang, V. Bapst, N. Heess, V. Mnih, R. Munos,
+                                                                   K. Kavukcuoglu, and N. de Freitas. Sample efficient actor-
+James Kirkpatrick, Razvan Pascanu, Neil C. Rabinowitz, Joel        critic with experience replay. In International Conference
+  Veness, Guillaume Desjardins, Andrei A. Rusu, Kieran             on Learning Representations, 2017.
+  Milan, John Quan, Tiago Ramalho, Agnieszka Grabska-
+  Barwinska, Demis Hassabis, Claudia Clopath, Dharshan           F. Zenke, B. Poole, and S. Ganguli. Continual learning through
+  Kumaran, and Raia Hadsell. Overcoming catastrophic                synaptic intelligence. In ICML, 2017.
+  forgetting in neural networks. Proceedings of the Na-
+  tional Academy of Sciences of the United States of America
+  (PNAS), 2016.
+Alex Krizhevsky and Geoffrey Hinton.                 Learn-
+  ing multiple layers of features from tiny images.
+  https://www.cs.toronto.edu/ kriz/cifar.html, 2009.
+Yann LeCun. The mnist database of handwritten digits.
+  http://yann.lecun.com/exdb/mnist/, 1998.
+Zhizhong Li and Derek Hoiem. Learning without forgetting.
+  In European Conference on Computer Vision, pages 614–
+  629, 2016.
+David Lopez-Paz and Marc’Aurelio Ranzato. Gradient
+  episodic memory for continuum learning. In NIPS, 2017.
+Michael McCloskey and Neal J Cohen. Catastrophic inter-
+ ference in connectionist networks: The sequential learning
+ problem. Psychology of learning and motivation, 24:109–
+ 165, 1989.
+Alex Nichol and John Schulman. Reptile: a scalable metalearn-
+  ing algorithm. arXiv preprint arXiv:1803.02999, 2018,
+  2018.
+S-V. Rebuffi, A. Kolesnikov, and C. H. Lampert. iCaRL:
+  Incremental classifier and representation learning. In CVPR,
+  2017.
+Matthew Riemer, Ignacio Cases, Robert Ajemian, Miao Liu,
+ Irina Rish, Yuhai Tu, and Gerald Tesauro. Learning to learn
+ without forgetting by maximizing transfer and minimizing
+ interference. In ICLR, 2019.
+Mark B Ring. Child: A first step towards continual learning.
+ Machine Learning, 28(1):77–104, 1997.
+Jonathan Schwarz, Jelena Luketina, Wojciech M. Czarnecki,
+  Agnieszka Grabska-Barwinska, Yee Whye Teh, Razvan
+  Pascanu, and Raia Hadsell. Progress and compress: A
+  scalable framework for continual learning. In International
+  Conference in Machine Learning, 2018.
+Table 2: Permuted MNIST: Performance (average accuracy (left column) and forgetting (right column)) for different number of
+samples per class. The average accuracy numbers from the this table are used to generate Fig. 1 in §4.4 of the main paper.
+
+ Methods                                                  Episodic Memory (Samples Per Class)
+                                   Average Accuracy [AT (%)]                                              Forgetting [FT ]
+                        1                3               5              15               1               3               5               15
+ A - GEM           62.1 (± 1.39)   63.2 (± 1.47)   64.1 (± 0.74)   66.0 (± 1.78)   0.21 (± 0.01)    0.20 (± 0.01)   0.19 (± 0.01)   0.17 (± 0.02)
+ MER               69.9 (± 0.40)   74.9 (± 0.49)   78.3 (± 0.19)   81.2 (± 0.28)   0.14 (± 0.01)    0.09 (± 0.01)   0.06 (± 0.01)   0.03 (± 0.01)
+ ER - RINGBUFFER   70.2 (± 0.56)   73.5 (± 0.43)   75.8 (± 0.24)   79.4 (± 0.43)   0.12 (± 0.01)    0.09 (± 0.01)   0.07 (± 0.01)   0.04 (± 0.01)
+ ER - MOF          69.9 (± 0.68)   73.9 (± 0.64)   75.9 (± 0.21)   79.7 (± 0.19)   0.13 (± 0.01)    0.09 (± 0.01)   0.07 (± 0.01)   0.04 (± 0.01)
+ ER - K - MEANS    70.5 (± 0.42)   74.7 (± 0.62)   76.7 (± 0.51)   79.1 (± 0.32)   0.12 (± 0.01)    0.08 (± 0.01)   0.06 (± 0.01)   0.04 (± 0.01)
+ ER - RESERVOIR    68.9 (± 0.89)   75.2 (± 0.33)   76.2 (± 0.38)   79.8 (± 0.26)   0.15 (± 0.01)    0.08 (± 0.01)   0.07 (± 0.01)   0.04 (± 0.01)
+ FINETUNE          53.5 (± 1.46)         -               -               -         0.29 (± 0.01)          -                  -
+ EWC               63.1 (± 1.40)         -               -               -         0.18 (± 0.01)          -                  -
+
+
+Table 3: Split CIFAR: Performance (average accuracy (left column) and forgetting (right column)) for different number of
+samples per class. The average accuracy numbers from the this table are used to generate Fig. 1 in §4.4 of the main paper.
+
+ Methods                                                  Episodic Memory (Samples Per Class)
+                                   Average Accuracy [AT (%)]                                              Forgetting [FT ]
+                        1               3               5               13               1                3              5               13
+ A - GEM           54.9 (± 2.92)   56.9 (± 3.45)   59.9 (± 2.64)   63.1 (± 1.24)   0.14 (± 0.03)    0.13 (± 0.03)   0.10 (± 0.02)   0.07 (± 0.01)
+ MER               49.7 (± 2.97)   57.7 (± 2.59)   60.6 (± 2.09)   62.6 (± 1.48)   0.19 (± 0.03)    0.11 (± 0.01)   0.09 (± 0.02)   0.07 (± 0.01)
+ ER - RINGBUFFER   56.2 (± 1.93)   60.9 (± 1.44)   62.6 (± 1.77)   64.3 (± 1.84)   0.13 (± 0.01)    0.09 (± 0.01)   0.08 (± 0.02)   0.06 (± 0.01)
+ ER - MOF          56.6 (± 2.09)   59.9 (± 1.25)   61.1 (± 1.62)   62.7 (± 0.63)   0.12 (± 0.01 )   0.10 (± 0.01)   0.08 (± 0.01)   0.07 (± 0.01)
+ ER - K - MEANS    56.6 (± 1.40)   60.1 (± 1.41)   62.2 (± 1.20)   65.2 (± 1.81)   0.13 (± 0.01)    0.09 (± 0.01)   0.07 (± 0.01)   0.04 (± 0.01)
+ ER - RESERVOIR    53.1 (± 2.66)   59.7 (± 3.87)   65.5 (± 1.99)   68.5 (± 0.65)   0.19 (± 0.02)    0.12 (± 0.03)   0.09 (± 0.02)   0.05 (± 0.01)
+ FINETUNE          40.6 (± 3.83)         -               -               -         0.27 (± 0.04)          -                  -
+ EWC               41.2 (± 2.67)         -               -               -         0.27 (± 0.02)          -                  -
+
+
+Table 4: miniImageNet: Performance (average accuracy (left column) and forgetting (right column)) for different number of
+samples per class. The average accuracy numbers from the this table are used to generate Fig. 1 in §4.4 of the main paper.
+
+ Methods                                                  Episodic Memory (Samples Per Class)
+                                   Average Accuracy [AT (%)]                                              Forgetting [FT ]
+                        1                3               5              13               1               3               5               13
+ A - GEM           48.2 (± 2.49)   51.6 (± 2.69)   54.3 (± 1.56)    54 (± 3.63)    0.13 (± 0.02)    0.10 (± 0.02)   0.08 (± 0.01)   0.09 (± 0.03)
+ MER               45.5 (± 1.49)   49.4 (± 3.43)   54.8 (± 1.79)   55.1 (± 2.91)   0.15 (± 0.01)    0.12 (± 0.02)   0.07 (± 0.01)   0.07 (± 0.01)
+ ER - RINGBUFFER   49.0 (± 2.61)   53.5 (± 1.42)   54.2 (± 3.23)   55.9 (± 4.05)   0.12 (± 0.02)    0.07 (± 0.02)   0.08 (± 0.02)   0.06 (± 0.03)
+ ER - MOF          48.5 (± 1.72)   53.3 (± 2.80)   53.3 (± 3.11)   56.5 (± 1.92)   0.12 (± 0.01)    0.08 (± 0.01)   0.08 (± 0.02)   0.05 (± 0.02)
+ ER - K - MEANS    48.5 (± 0.35)   52.3 (± 3.12)   56.6 (± 2.48)   55.1 (± 1.86)   0.12 (± 0.02)    0.09 (± 0.02)   0.06 (± 0.01)   0.06 (± 0.01)
+ ER - RESERVOIR    44.4 (± 3.22)   50.7 (± 3.36)   56.2 (± 4.12)   61.3 (± 6.72)   0.17 (± 0.02)    0.12 (± 0.03)   0.07 (± 0.04)   0.04 (± 0.06)
+ FINETUNE          34.7 (± 2.69)         -               -               -         0.26 (± 0.03)          -                  -
+ EWC               37.7 (± 3.29)         -               -               -         0.21 (± 0.03)          -                  -
+
+
+Table 5: CUB: Performance (average accuracy (left column) and forgetting (right column)) for different number of samples per
+class. The average accuracy numbers from the this table are used to generate Fig. 1 in §4.4 of the main paper.
+
+ Methods                                                  Episodic Memory (Samples Per Class)
+                                   Average Accuracy [AT (%)]                                              Forgetting [FT ]
+                        1                3               5              10               1               3               5               10
+ A - GEM           62.1 (± 1.28)   62.1 (± 1.87)   63.4 (± 2.33)   62.5 (± 2.34)   0.09 (± 0.01)    0.08 (± 0.02)   0.07 (± 0.01)   0.08 (± 0.02)
+ MER               55.4 (± 1.03)   65.3 (± 1.68)   68.1 (± 1.61)   71.1 (± 0.93)   0.10 (± 0.01)    0.04 (± 0.01)   0.03 (± 0.01)   0.03 (± 0.01)
+ ER - RINGBUFFER   65.0 (± 0.96)   71.4 (± 1.53)   73.6 (± 1.57)   75.5 (± 1.84)   0.03 (± 0.01)    0.01 (± 0.01)   0.01 (± 0.01)   0.02 (± 0.01)
+ ER - K - MEANS    67.9 (± 0.87)   71.6 (± 1.56)   73.9 (± 2.01)   76.1 (± 1.74)   0.02 (± 0.01)    0.02 (± 0.01)   0.02 (± 0.01)   0.01 (± 0.01)
+ ER - RESERVOIR    61.7 (± 0.62)   71.4 (± 2.57)   75.5 (± 1.92)   76.5 (± 1.56)   0.09 (± 0.01)    0.04 (± 0.01)   0.02 (± 0.01)   0.03 (± 0.02)
+ FINETUNE          55.7 (± 2.22)         -               -               -         0.13 (± 0.03)          -                  -
+ EWC               55.0 (± 2.34)         -               -               -         0.14 (± 0.02)          -                  -
+                                                                                                                                                                            ER-K-Means
+
+     Avg Accuracy
+
+
+
+
+                                                                                      Avg Accuracy
+                    0.8                                                                              0.8                                                                    EWC
+                                                                                                                                                                            FINETUNE
+                                                                                                                                                                            MER
+                    0.7                                                                              0.7                                                                    A-GEM
+                                                                                                                                                                            ER-MoF
+                    0.6                                                                              0.6                                                                    ER-Ringbuffer
+                                                                                                                                                                            ER-Reservoir
+
+                          1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20                                1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20
+                                              Tasks                                                                             Tasks
+                                        (a) 1 Sample                                                                             (b) 15 Samples
+Figure 5: MNIST: Evolution of average accuracy (Ak ) as new tasks are learned when ‘1’ and ‘15’ samples per class are used.
+    Avg Accuracy
+
+
+
+
+                                                                                                                                                                            ER-K-Means
+
+
+
+
+                                                                                      Avg Accuracy
+                                                                                                     0.60
+                   0.50                                                                                                                                                     EWC
+                                                                                                     0.55                                                                   FINETUNE
+                   0.45                                                                              0.50                                                                   MER
+                                                                                                                                                                            A-GEM
+                                                                                                     0.45                                                                   ER-MoF
+                   0.40                                                                                                                                                     ER-Ringbuffer
+                                                                                                     0.40                                                                   ER-Reservoir
+                   0.35                                                                              0.35
+                          1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17                                         1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17
+                                              Tasks                                                                              Tasks
+                                        (a) 1 Sample                                                                             (b) 13 Samples
+Figure 6: miniImageNet: Evolution of average accuracy (Ak ) as new tasks are learned when ‘1’ and ‘13’ samples per class are
+used.
+
+                                                                                                                                                                            ER-K-Means
+    Avg Accuracy
+
+
+
+
+                                                                                      Avg Accuracy
+
+                   0.70
+                                                                                                                                                                            EWC
+                   0.65                                                                              0.7                                                                    FINETUNE
+                                                                                                                                                                            MER
+                                                                                                                                                                            A-GEM
+                   0.60                                                                              0.6                                                                    ER-Ringbuffer
+                                                                                                                                                                            ER-Reservoir
+                   0.55
+                                                                                                     0.5
+                          1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17                                         1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17
+                                              Tasks                                                                             Tasks
+                                        (a) 1 Sample                                                                             (b) 10 Samples
+ Figure 7: CUB: Evolution of average accuracy (Ak ) as new tasks are learned when ‘1’ and ‘10’ samples per class are used.
+
+                                         Table 6: MNIST Rotation Performance of task 1 after training on task 2.
+
+                     Task 2 Samples                                                           Rotation Angle
+                                                                     10                                                                    90
+                                              ER - RINGBUFFER                     A - GEM                        ER - RINGBUFFER                        A - GEM
+
+                                           Train     Mem      Test        Train    Mem               Test      Train     Mem      Test          Train    Mem       Test
+                     1000                  85.6       1       86.2        81.5     86.6              82.5      68.7       1       69.4          51.7     73.3      52.1
+                     20000                 91.4       1       91.6        91.4      1                91.5      32.7       1       33.4          31.6      1        33.0
+
+
+Table 7: Hyper-parameters selection on the four benchmark datasets. ‘lr’ is the learning rate, ‘λ’ is the synaptic strength for
+EWC , ‘γ’ is the with in batch meta-learning rate for MER , ‘s’ is current example learning rate multiplier for MER .
+
+                    Methods                        MNIST                           CIFAR                                  CUB                       miniImageNet
+                    FINETUNE                        lr (0.1)                       lr (0.03)                            lr (0.03)                        lr (0.03)
+                    EWC                        lr (0.1), λ (10)               lr (0.03), λ (10)                    lr (0.03), λ (10)                lr (0.03), λ (10)
+                    A - GEM                         lr (0.1)                       lr (0.03)                            lr (0.03)                        lr (0.03)
+                    MER                   lr (0.03), γ (0.1), s (10)      lr (0.03), γ (0.1), s (5)             lr (0.1), γ (0.1), s (5)        lr (0.03), γ (0.1), s (5)
+                    ER - RESERVOIR                  lr (0.1)                        lr (0.1)                            lr (0.03)                         lr (0.1)
+                    ER -[ OTHERS ]                  lr (0.1)                       lr (0.03)                            lr (0.03)                        lr (0.03)
+
