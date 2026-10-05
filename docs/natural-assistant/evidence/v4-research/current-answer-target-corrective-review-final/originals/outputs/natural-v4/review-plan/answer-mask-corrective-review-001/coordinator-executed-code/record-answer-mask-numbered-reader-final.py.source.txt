@@ -1,0 +1,72 @@
+"""Record observed original reader FINALs; no substantive review is performed."""
+import argparse
+import hashlib
+import importlib.util
+import json
+import re
+from datetime import UTC, datetime
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[3]
+BASE = ROOT / "outputs/natural-v4/review-plan"
+
+
+def sha(raw):
+    return hashlib.sha256(raw).hexdigest()
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("lesson", choices=("20.7", "20.8"))
+    parser.add_argument("--observed-owner-final", action="store_true", required=True)
+    args = parser.parse_args()
+    path = BASE / "answer-mask-corrective-review-001/dispatch-journal.json"
+    journal = json.loads(path.read_bytes())
+    entry = next(r for r in journal["dispatches"] if r.get("scope") == args.lesson and r["phase"] == "reader")
+    route = next(r for r in journal["routes"] if r.get("scope") == args.lesson and r["phase"] == "reader")
+    before = next(r for r in journal["originals"] if r["original_path"] == route["prior_report_path"])
+    assert entry["completion_status"] == "awaiting_actual_same_owner_FINAL"
+    assert entry["actual_dispatch_observed"]
+    assert sha((ROOT / before["archive_path"]).read_bytes()) == before["sha256"]
+    report_path = ROOT / route["prior_report_path"]
+    raw = report_path.read_bytes()
+    report = json.loads(raw)
+    assert report["reviewer_task"] == entry["actual_owner"]
+    assert report["reviewer_context"] == "fresh" and report["verdict"] in {"pass", "revise"}
+    source = (ROOT / report["source"].split("#")[0]).read_bytes()
+    heads = list(re.finditer(rb"(?m)^## ([A-Z\d]+\.\d+) [^\r\n]+", source))
+    i = next(i for i, h in enumerate(heads) if h[1].decode() == args.lesson)
+    body = source[heads[i].start():heads[i + 1].start() if i + 1 < len(heads) else len(source)]
+    assert sha(body) == report["source_sha256"]
+    if i == 0:
+        assert sha(source[:heads[0].start()]) == report["intro_sha256"]
+    for fig, expected in report["figure_sha256"].items():
+        assert sha((ROOT / fig).read_bytes()) == expected
+    spec = importlib.util.spec_from_file_location("unchanged_reader_checker", ROOT / "scripts/check_course_reviews.py")
+    checker = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(checker)
+    if report["verdict"] == "pass":
+        for key in ("background_and_links", "terminology", "examples", "program_explanation", "exercise"):
+            assert checker.checked(report["checks"][key], allow_not_applicable=key == "program_explanation" and b"```" not in body)
+    directory = BASE / "answer-mask-corrective-review-001/reader-completions" / args.lesson
+    directory.mkdir(parents=True)
+    (directory / "actual-owner-report.raw.json").write_bytes(raw)
+    (directory / "current-raw-section.md").write_bytes(body)
+    receipt = {"lesson_id": args.lesson, "actual_owner": report["reviewer_task"],
+               "actual_owner_FINAL_observed": True, "observed_at": datetime.now(UTC).isoformat(),
+               "actual_owner_verdict": report["verdict"], "report_sha256": sha(raw),
+               "current_source_sha256": report["source_sha256"], "current_figure_sha256": report["figure_sha256"],
+               "actual_owner_issues_unchanged": report["issues"],
+               "validation_scope": "Observed actual same owner FINAL; read-only source/identity/check declaration provenance. Global native checker runs once after all corrective readers close. This collector does not read or judge lesson content."}
+    rp = directory / "coordinator-observed-owner-FINAL.json"
+    rp.write_text(json.dumps(receipt, ensure_ascii=False, indent=2) + "\n")
+    route["dispatch_status"] = "actual_same_owner_current_reader_FINAL_pass" if report["verdict"] == "pass" else "actual_same_owner_reader_revision_needed"
+    journal["completions"].append({"phase": "reader", "scope": args.lesson, **receipt})
+    entry.update({"completion_status": "actual_same_owner_current_reader_FINAL_pass" if report["verdict"] == "pass" else "actual_same_owner_reader_revision_needed",
+                  "actual_observed_owner_FINAL_receipt": rp.relative_to(ROOT).as_posix()})
+    path.write_text(json.dumps(journal, ensure_ascii=False, indent=2) + "\n")
+    print(json.dumps(receipt, ensure_ascii=False))
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,3 @@
+# Independent engineering-handoff and answer-target wording audits
+
+A genuinely fresh independent owner checked the proposed engineering handoff against original data/training/selection/test/release/student-trial/review records, with independent arithmetic. A separate subsequent actual SVG/source/authority inspection found the answer alignment correct and the direction word nonblocking but ambiguous. The simplified current diagram receives separate original-owner corrective reviews. These audits preserve the original decisions and prospective application conditions; they do not substitute for whole-book checks or public deployment.
