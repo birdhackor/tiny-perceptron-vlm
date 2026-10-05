@@ -79,6 +79,10 @@ def _artifacts(root, value, errors):
     for identifier, artifact in result.items():
         label = f"artifact {identifier}"
         _hash_file(root, artifact.get("path"), artifact.get("sha256"), errors, label)
+        if _text(artifact.get("path")) and not (root / artifact["path"]).resolve().is_relative_to(
+            (root / "docs/technical-reviews/artifacts").resolve()
+        ):
+            errors.append(f"{label}: 正式證據須在docs/technical-reviews/artifacts，不能只引用暫存輸入")
         if not _text(artifact.get("description")):
             errors.append(f"{label}: 缺少證據用途")
         if _kind(artifact.get("kind")) not in {"execution", "derivation", "figure_render", "source_snapshot", "code"}:

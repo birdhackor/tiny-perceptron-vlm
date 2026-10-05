@@ -180,6 +180,18 @@ def test_pass_and_exact_reader_section_boundaries(reviewed_course):
     assert list(technical.sections(source)) == list(readers.sections(source))
 
 
+def test_existing_temporary_input_is_not_a_permanent_artifact(reviewed_course):
+    root, reports = reviewed_course
+    target = root / "outputs/temporary-input.txt"
+    target.parent.mkdir()
+    target.write_text("4\n")
+    report = copy.deepcopy(reports["14.1"])
+    report["artifacts"][0]["path"] = target.relative_to(root).as_posix()
+    report["artifacts"][0]["sha256"] = digest(target.read_bytes())
+    write_report(root, report)
+    assert_failure(root, "不能只引用暫存輸入", ["14.1"])
+
+
 @pytest.mark.parametrize("target", ["body", "figure", "artifact"])
 def test_changed_content_requires_reaudit(reviewed_course, target):
     root, _ = reviewed_course
