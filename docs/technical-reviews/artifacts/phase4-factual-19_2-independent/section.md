@@ -1,0 +1,36 @@
+## 19.2 為什麼成品選 MoE，卻仍保留 Dense 路線？
+
+同一個輸入位置需要一組前饋規則。Dense 每次使用同一組；MoE 準備多組 expert，由 router 按目前特徵選少數組。多組規則可以增加可學容量，但所有組的權重仍要存放，分派也要時間。因此選 MoE 是為了把前面學過的路由放進整合模型，並不是先承諾比 Dense 更快。
+
+共同核心的注意力、字元嵌入與輸出表仍共享。expert 是一組可調前饋網路，並沒有預先指定「一號讀圖、二號聽聲音」；它實際處理哪些輸入，要看路由紀錄。訓練若一直選同一位 expert，其他組很少更新，就要檢查負載與資料配比。
+
+下面建立的是**舊合成任務架構**的隨機 MoE 與 Dense，用實際參數表說明儲存與啟用量的差別。這份 MoE 每層四位 expert、每位置選兩位；新成品的寬度、層數與路由設定另由試跑決定。
+
+```python
+from tiny_perceptron.capstone import CapstoneModel, default_config
+
+for dense in (False, True):
+    model = CapstoneModel(default_config(dense=dense))
+    report = model.description()
+    total = report["parameters"]
+    print("Dense" if dense else "MoE", "全部參數", total)
+    print("邏輯active參數", report["logical_active_parameters"], "FP32權重bytes", total * 4)
+```
+
+`parameters` 數所有參數；`logical_active_parameters` 是共享部分加選中 expert 的結構代理，不能直接當 FLOPs。FP32 每個數字佔4 bytes，因此 `total * 4` 估權重數字的儲存，不包含梯度、Adam 狀態、暫存與檔案資訊。兩個模型不是等總參數或等計算量，光看這幾行不能判誰更好。
+
+新成品保留 Dense 對照，要沿用相同素材切分、問題與評分，並明說配對的是訓練 token、總參數還是啟用計算量。這些條件無法全靠「兩層」就變相同。若 MoE 在這個小尺寸沒有好處，仍應保留結果；能解釋取捨比預設勝負更有教學價值。
+
+<details>
+<summary>補充：舊架構的機制對照與量測範圍</summary>
+
+相同寬度、層數的Dense每層只用一組FFN，主MoE每個位置用兩組，所以這樣配對並不是等active參數或等計算量。本成品的字表與輸出表各自儲存，沒有綁成同一份權重；正式檔案還有格式資訊，大小需另外量。
+
+訓練時還要看工作是否全部擠向少數expert。[Switch Transformer第2.2節（第6頁）](https://jmlr.org/papers/volume23/21-0998/21-0998.pdf)使用可微分的輔助誤差鼓勵較均衡分派；本成品也記錄這項負載平衡誤差，並排除補齊長度的PAD位置。它是在調整工作分配，不是替每位expert指定「看圖」或「算數」專業。
+
+另一次L4、FP32的機制對照，讓已訓練MoE與寬度80的隨機Dense讀同一批資料；先暖機，再量前向與反向，不做更新器更新，權重前後不變。兩者邏輯active數接近，MoE中位時間卻為21.464毫秒，Dense為11.338毫秒，MoE的新增GPU配置也較高。這個反例說明結構計數不能代替實測；兩者並非等FLOPs或等品質，隨機Dense也沒有完成相同訓練，不能說它能力相同。
+
+記憶體只量PyTorch分配器相對測量起點增加的峰值，不含整張卡、驅動或所有常駐模型，不能拿來當學生電腦的最低需求。[完整機制實報](https://github.com/birdhackor/tiny-perceptron-vlm/blob/1df335318bda03fd771807f66976953231d5a00b/docs/course-experiments/capstone-evidence/deployment/mechanism-benchmark.json)保留條件、每次時間、暖機與記憶體範圍；實際存檔與較小包裝另見[19.10](19.md#19.10)。
+
+</details>
+
