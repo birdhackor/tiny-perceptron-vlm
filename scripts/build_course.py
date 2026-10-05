@@ -181,9 +181,13 @@ def build(check=False):
                 }
             )
     if not index:
-        raise RuntimeError("没有教材來源")
-    outline = (ROOT / "docs/curriculum.md").read_text(encoding="utf-8")
-    expected = set(re.findall(r"^- ([\dABC]+\.\d+) ", outline, flags=re.M))
+        raise RuntimeError("沒有教材來源")
+    contract = json.loads((ROOT / "course/lesson-contract.json").read_text(encoding="utf-8"))
+    if contract.get("schema_version") != 1 or not isinstance(contract.get("lesson_ids"), list):
+        raise RuntimeError("小節編號清單格式不正確")
+    expected = set(contract["lesson_ids"])
+    if len(expected) != len(contract["lesson_ids"]):
+        raise RuntimeError("小節編號清單有重複")
     actual = {item["id"] for item in index}
     if expected != actual or len(index) != len(actual):
         raise RuntimeError(f"編號覆蓋不完整：missing={sorted(expected - actual)}, extra={sorted(actual - expected)}")
@@ -192,7 +196,7 @@ def build(check=False):
     rows = [
         "# 全部小節",
         "",
-        "每節可獨立開啟，所需背景在正文提供具體連結。需要時查[基礎暖身](first-steps.md)，也可從[閱讀指南](README.md)挑一條路線。",
+        "每節聚焦一個問題，網站與Notebook使用同一份正文。需要時查[基礎暖身](first-steps.md)，也可從[閱讀指南](README.md)挑一條路線。",
         "",
         "| 小節 | 正文 | Notebook |",
         "| --- | --- | --- |",

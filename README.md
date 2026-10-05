@@ -12,19 +12,15 @@
 
 ## 教材提供什麼
 
-20章與A／B／C支線，共266份逐課Notebook；加上閱讀指南、暖身、訓練操作與名詞頁，共292個編號小節。教材另有自製SVG圖解與逐步提示。前段只用小矩陣、接字表、MLP與手寫注意力；後段才加入現代架構、Dense／MoE、cache／SDPA、量化與蒸餾。可以來回跳章，不需要從頭把同一個模型訓練到底。
+20章與A／B／C支線，共283份逐課Notebook；加上閱讀指南、暖身、訓練操作與名詞頁，共309個編號小節。前段只用小矩陣、接字表、MLP與手寫注意力；後段才加入現代架構、Dense／MoE、長上下文、cache／SDPA、量化與蒸餾。每節聚焦一個問題，可以回跳，也不必一路訓練同一個模型。
 
-文字與圖音模型、對話遮罩、DPO、量化儲存與訓練基本件直接以 PyTorch 實作。資料、訓練、推論與評估有可執行入口；LoRA、QAT 與小型 RL 等概念提供局部實驗。第20章再把公開的圖文模型與華語辨識串成可試用的成品。
+用幾個字看懂運作後，[7.17](course/chapters/07.md#7.17)解釋為什麼常先預訓練，再做後訓練；[第13章](course/chapters/13.md)逐步介紹偏好回饋、獎勵模型、PPO與DPO。指令遵循分開檢查內容、指定範圍、格式與停止；長上下文則分開討論容納長度、位置表示、計算成本與資訊使用。
 
-想知道業界為什麼常分預訓練與後訓練，先看[7.11的實際接續](course/chapters/07.md#7.11)，再讀[7.17–7.18](course/chapters/07.md#7.17)。SFT示範、RLHF回饋與PPO／DPO的關係，從[13.1的兩篇回答](course/chapters/13.md#13.1)進入[13.10–13.17](course/chapters/13.md#13.10)；其中PPO使用有限候選選卡，沒有訓練逐步生成文字的語言模型。
+[第19章整合專題](course/chapters/19.md#19.1)把自行訓練的文字、圖片、聲音與工具使用組成一位小助理。任務限於明確教過的情境：商品與空間關係、已知中文字卡、有限真人語音需求，以及共用對話紀錄和計算器。MoE是否划算仍由總參數、每次計算與硬體量測判斷。教材先交代任務與介面；擴充成品的訓練、逐題驗收與權重在工程階段完成後交付，不把設計目標當成已測能力。舊版合成小世界的權重與逐題報告保留於[固定實驗](docs/course-experiments/README.md)。
 
-[第19章整合專題](course/chapters/19.md#19.1)已在同一個小型MoE底座接續文字、對話與聯合任務訓練，保存DPO對照、量化版本與[部署評估](docs/course-experiments/results/capstone_deployment.json)。任務限於可逐題核對的合成小世界；推薦的聯合任務模型通過78／90題，仍有未學會的項目，完整成功與失敗見[19.12](course/chapters/19.md#19.12)。親手試用前，先依[19.11](course/chapters/19.md#19.11)取得指定推論檔，再回19.1開啟試用介面。成品與學生共11份推論檔已公開，使用[第19章固定下載清單](docs/course-experiments/capstone-public.json)；與下方原有30組／120份各章權重放在同一Hugging Face倉庫，兩批清單分開查閱。
+[第20章](course/chapters/20.md#20.1)是成熟模型的應用延伸：Qwen3-VL處理圖文，Whisper先把語音轉成文字。它另有[操作](docs/natural-assistant/v4/STUDENT.md)、[資料](docs/natural-assistant/v4/DATA.md)與[訓練](docs/natural-assistant/v4/TRAINING.md)指引。上游模型的能力與自行訓練主線分開驗收。
 
-[較小Dense學生](course/chapters/19.md#19.10)也已完成示範與蒸餾對照：同一份90題中，只學示範通過62題，加入教師分布的蒸餾版通過61題，後者量化成4-bit仍通過61題。這次蒸餾沒有勝過直接學示範；逐題結果保留於[學生實報](docs/course-experiments/results/capstone_student.json)，沒有把它說成通用助理。
-
-[第20章](course/chapters/20.md#20.1)接手已有圖文能力的Qwen3-VL-2B-Instruct，用照片、中文讀字與聊天示範建立LoRA候選並與原底座比較。本版依驗證保留原底座，不加修正；真人華語由Whisper-large-v3-turbo先轉文字，再交給同一聊天核心。先按[20.2](course/chapters/20.md#20.2)或[學生操作指引](docs/natural-assistant/v4/STUDENT.md)開啟成品，能力範圍集中在[20.13](course/chapters/20.md#20.13)。想自己重做則另看[資料](docs/natural-assistant/v4/DATA.md)與[訓練](docs/natural-assistant/v4/TRAINING.md)，不需先親手完成第19章訓練。
-
-第一次接觸本專案也能從第一節開始；Python、tensor、機率、矩陣與梯度都有可按需查閱的暖身，不必先修完所有數學。每節先說明問題與具體例子，所需背景提供可點擊的小節連結。CPU 小程式用來核對零件；另外的正式訓練會更新權重、固定留出題，並保存程式版本、資料來源與逐題結果。合成小任務與自然資料的短訓成績各有適用範圍，不能合起來宣稱通用助理能力。見[正式實驗與進度](docs/course-experiments/README.md)及[驗證報告](docs/validation.md)。
+第一次讀可以直接從[1.1](course/chapters/01.md#1.1)開始。Python、tensor、機率、矩陣與梯度有按需暖身；想動手時再開啟同一節Notebook。各章的訓練入口集中在[操作頁](course/training.md)，來源與實測證據見[驗證範圍](docs/validation.md)。
 
 ## 安裝與開啟 Notebook
 

@@ -107,7 +107,11 @@ def checked_notebook(original, executed_path):
 
 
 def reading_markdown(content, source_path, targets, lesson_targets, revision):
-    """只調整發布連結與錨點；正文、程式和圖解仍使用已審閱的來源。"""
+    """調整發布連結、錨點及HTML內的Markdown呈現，保留正文與程式。"""
+
+    # GitHub與Notebook可接受普通details；Zensical的md_in_html需要明確啟用。
+    # 未加此屬性時，補充內的小標題、連結與程式會成為未解析的原始文字。
+    content = re.sub(r"<details>", '<details markdown="1">', content)
 
     def convert(match):
         target = match[2]
@@ -192,7 +196,7 @@ def home_introduction(index, executed_outputs=False):
             if executed_outputs
             else "可以先當書讀：這份建置包含正文與程式，尚未附上執行結果。"
         )
-        + "遇到陌生背景，每節都提供對應的前置連結。想先看個性、安全、圖片或量化，"
+        + "遇到陌生概念，可以按需查暖身與回讀連結。想先看個性、安全、圖片或量化，"
         "[閱讀指南](course.md)會帶你挑需要的幾節。\n\n"
         "## 找到想讀的內容\n\n"
         f"上方搜尋可以找小節標題和正文中的概念。章節目錄收錄全部 {len(index)} 個小節；"
