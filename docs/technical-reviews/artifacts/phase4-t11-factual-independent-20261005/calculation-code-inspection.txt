@@ -1,0 +1,167 @@
+scripts/course_experiments/applications.py _rag_records
+171: def _rag_records(seed_value):
+172:     rng = random.Random(seed_value)
+173:     records = []
+174:     # 同一店名的全部地址、來源及提示變形共用 family，避免逐筆切分洩漏。
+175:     for index in range(120):
+176:         key = f"K{index:03d}"
+177:         for variant in range(8):
+178:             address = f"{rng.choice('ABCD')}{rng.randrange(10)}"
+179:             source = f"D{rng.randrange(10)}"
+180:             correct = {"id": source, "text": f"{key} address={address}"}
+181:             distractor = {
+182:                 "id": f"D{(int(source[1:]) + 1) % 10}",
+183:                 "text": f"Z{index:03d} address={rng.choice('ABCD')}{rng.randrange(10)}",
+184:             }
+185:             documents = [correct] if variant < 2 else [correct, distractor]
+186:             if variant == 6:
+187:                 documents = []
+188:             elif variant == 7:
+189:                 documents = [distractor]
+190:             elif variant % 2:
+191:                 documents.reverse()
+192:             answer = f"{address}[{source}]" if variant < 6 else "UNKNOWN"
+193:             records.append(
+194:                 {
+195:                     "family": key,
+196:                     "key": key,
+197:                     "address": address,
+198:                     "source": source,
+199:                     "documents": documents,
+200:                     "variant": variant,
+201:                     "messages": _conversation(_rag_question(key, documents), answer),
+202:                 }
+203:             )
+204:     return records
+
+scripts/course_experiments/applications.py _rag_splits
+207: def _rag_splits(seed_value):
+208:     splits = split_records(_rag_records(seed_value), seed_value)
+209:     for records in splits.values():
+210:         keys = sorted({row["key"] for row in records})
+211:         for row in records:
+212:             # 干擾店也使用 Kxxx；只從同 split 選店，不能把 heldout 店放進訓練。
+213:             unrelated = keys[(keys.index(row["key"]) + 1) % len(keys)]
+214:             for document in row["documents"]:
+215:                 if document["text"].startswith("Z"):
+216:                     document["text"] = unrelated + document["text"][4:]
+217:             row["messages"][0]["content"] = _rag_question(row["key"], row["documents"])
+218:     return splits
+
+scripts/course_experiments/applications.py _grounding
+258: def _grounding(sample, documents, expected):
+259:     text = sample["generated"]
+260:     parsed = re.fullmatch(r"([A-E][0-9])\[(D[0-9])\]", text)
+261:     citation = parsed[2] if parsed else None
+262:     address = parsed[1] if parsed else None
+263:     valid_ids = {document["id"] for document in documents}
+264:     supported = bool(
+265:         parsed
+266:         and any(document["id"] == citation and f"address={address}" in document["text"] for document in documents)
+267:     )
+268:     clean = not sample["invalid_special_tokens"]
+269:     return {
+270:         "expected": expected,
+271:         "exact_match": clean and text == expected,
+272:         "parsed_address": address,
+273:         "parsed_citation": citation,
+274:         "citation_valid": clean and citation in valid_ids,
+275:         "supported_by_cited_source": clean and supported,
+276:         "unknown": clean and text == "UNKNOWN",
+277:     }
+
+scripts/course_experiments/applications.py _tool_records
+462: def _tool_records():
+463:     records = []
+464:     for a in range(10):
+465:         for b in range(10):
+466:             for operation in ("add", "multiply"):
+467:                 family = f"pair:{min(a, b)}:{max(a, b)}"
+468:                 request = {"name": operation, "arguments": {"a": a, "b": b}}
+469:                 answer = call_tool(request)
+470:                 messages = [
+471:                     {"role": "system", "content": _TOOLS_SYSTEM},
+472:                     {"role": "user", "content": f"CALC:{operation}({a},{b})"},
+473:                     {"role": "assistant", "content": _json(request)},
+474:                     {"role": "user", "content": f"TOOL_RESULT:{answer}"},
+475:                     {"role": "assistant", "content": _json({"done": True, "answer": answer})},
+476:                 ]
+477:                 records.append(
+478:                     {"family": family, "operation": operation, "a": a, "b": b, "answer": answer, "messages": messages}
+479:                 )
+480:     for value in range(10):
+481:         records.append(
+482:             {
+483:                 "family": f"copy:{value}",
+484:                 "operation": "copy",
+485:                 "answer": value,
+486:                 "messages": [
+487:                     {"role": "system", "content": _TOOLS_SYSTEM},
+488:                     {"role": "user", "content": f"COPY:{value}"},
+489:                     {"role": "assistant", "content": _json({"done": True, "answer": value})},
+490:                 ],
+491:             }
+492:         )
+493:     return records
+
+scripts/course_experiments/applications.py _reasoning_records
+679: def _reasoning_records():
+680:     rows = []
+681:     for a in range(6):
+682:         for b in range(6):
+683:             for c in range(6):
+684:                 rows.append(
+685:                     {
+686:                         # 相同數字的所有排列共用 family，測試沒有訓練題的重新排列。
+687:                         "family": ":".join(map(str, sorted((a, b, c)))),
+688:                         "a": a,
+689:                         "b": b,
+690:                         "c": c,
+691:                         "question": f"({a}+{b})+{c}=?",
+692:                         "truth": a + b + c,
+693:                     }
+694:                 )
+695:     return rows
+
+scripts/course_experiments/applications.py _verify_reasoning
+707: def _verify_reasoning(sample, row, mode):
+708:     text = sample["generated"].strip()
+709:     clean = not sample["invalid_special_tokens"]
+710:     if mode == "direct":
+711:         parsed = int(text) if clean and re.fullmatch(r"-?[0-9]+", text) else None
+712:         return {
+713:             "final_answer": parsed,
+714:             "parsed": parsed is not None,
+715:             "final_correct": parsed == row["truth"],
+716:             "fully_verified": parsed == row["truth"],
+717:         }
+718:     matched = re.fullmatch(
+719:         r"(-?[0-9]+)\+(-?[0-9]+)=(-?[0-9]+);(-?[0-9]+)\+(-?[0-9]+)=(-?[0-9]+);answer=(-?[0-9]+)", text
+720:     )
+721:     if not matched or not clean:
+722:         # 結尾格式可獨立解析，讓「最終對但過程錯」保留在資料中。
+723:         final_match = re.search(r";answer=(-?[0-9]+)$", text) if clean else None
+724:         parsed = int(final_match[1]) if final_match else None
+725:         return {
+726:             "final_answer": parsed,
+727:             "parsed": False,
+728:             "final_correct": parsed == row["truth"],
+729:             "equations_valid": False,
+730:             "linked": False,
+731:             "task_operands_valid": False,
+732:             "fully_verified": False,
+733:         }
+734:     a, b, subtotal, previous, c, total, final = map(int, matched.groups())
+735:     equations = a + b == subtotal and previous + c == total
+736:     linked = previous == subtotal and total == final
+737:     task = (a, b, c) == (row["a"], row["b"], row["c"])
+738:     return {
+739:         "final_answer": final,
+740:         "parsed": True,
+741:         "steps": [[a, b, subtotal], [previous, c, total]],
+742:         "final_correct": final == row["truth"],
+743:         "equations_valid": equations,
+744:         "linked": linked,
+745:         "task_operands_valid": task,
+746:         "fully_verified": equations and linked and task and final == row["truth"],
+747:     }

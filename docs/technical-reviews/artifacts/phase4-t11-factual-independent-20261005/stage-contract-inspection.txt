@@ -1,0 +1,137 @@
+scripts/course_experiments/capstone.py lines 70-116
+70: def train_stage(
+71:     stage,
+72:     output,
+73:     *,
+74:     input_checkpoint=None,
+75:     resume=None,
+76:     device="cpu",
+77:     steps=None,
+78:     seconds=540,
+79:     seed=42,
+80:     batch_size=24,
+81:     dense=False,
+82:     validation=True,
+83: ):
+84:     if stage not in STAGES:
+85:         raise ValueError("Unknown stage")
+86:     if str(device).startswith("cuda") and not torch.cuda.is_available():
+87:         raise RuntimeError("CUDA requested but unavailable; no silent CPU fallback")
+88:     if batch_size < 1 or seconds <= 0:
+89:         raise ValueError("batch_size and seconds must be positive")
+90:     steps = DEFAULT_STEPS[stage] if steps is None else steps
+91:     if steps < 1:
+92:         raise ValueError("A training stage needs at least one optimizer update")
+93:     output = Path(output)
+94:     output.mkdir(parents=True, exist_ok=True)
+95:     torch.set_num_threads(2)
+96:     seed_everything(seed)
+97:     splits, manifest = build_dataset(seed)
+98:     write_json(output / "data-manifest.json", manifest)
+99:     source = resume or input_checkpoint
+100:     if source:
+101:         model, previous = load_capstone(source, device)
+102:         if previous["metadata"].get("data_manifest") != manifest:
+103:             raise ValueError("Checkpoint and frozen training data differ")
+104:         if resume:
+105:             if previous.get("inference_only") or previous["stage"] != stage:
+106:                 raise ValueError("Resume requires a training checkpoint for the same stage")
+107:             if previous["metadata"]["requested_steps"] != steps:
+108:                 raise ValueError("Cannot change the fixed update schedule while resuming")
+109:         else:
+110:             expected = STAGES[STAGES.index(stage) - 1] if stage != "pretrain" else None
+111:             if previous["stage"] != expected or not previous["metadata"].get("schedule_completed"):
+112:                 raise ValueError("A stage requires the completed immediate predecessor")
+113:     else:
+114:         if stage != "pretrain":
+115:             raise ValueError("Later stages cannot silently start from random weights")
+116:         model, previous = CapstoneModel(default_config(dense)).to(device), None
+
+scripts/course_experiments/capstone.py lines 140-174
+140:         if previous.get("optimizer") is None:
+141:             raise ValueError("Resume checkpoint has no optimizer state")
+142:         optimizer.load_state_dict(previous["optimizer"])
+143:         sampler.setstate(state["sampler_rng"])
+144:         torch.set_rng_state(previous["torch_rng"])
+145:         random.setstate(previous["python_rng"])
+146:         if str(device).startswith("cuda") and previous["cuda_rng"]:
+147:             torch.cuda.set_rng_state_all(previous["cuda_rng"])
+148:         if reference is not None:
+149:             if previous["reference"] is None:
+150:                 raise ValueError("DPO resume checkpoint is missing its original frozen reference")
+151:             reference.load_state_dict(previous["reference"], strict=True)
+152:         step = previous["step"]
+153:     metadata = {
+154:         "data_version": DATA_VERSION,
+155:         "seed": seed,
+156:         "data_manifest": manifest,
+157:         "requested_steps": steps,
+158:         "schedule_completed": False,
+159:         "parent_checkpoint_sha256": previous["metadata"].get("parent_checkpoint_sha256")
+160:         if resume
+161:         else file_sha256(source)
+162:         if source
+163:         else None,
+164:         "code_sha256": {
+165:             "tiny_perceptron/capstone.py": file_sha256(
+166:                 Path(__file__).resolve().parents[2] / "tiny_perceptron/capstone.py"
+167:             ),
+168:             "scripts/course_experiments/capstone.py": file_sha256(__file__),
+169:         },
+170:         "task_scope": "synthetic RGB shapes/tone/text, explicit calculator, tiny trained Chinese grammar; not a general assistant",
+171:     }
+172:     if resume and previous["metadata"]["code_sha256"] != metadata["code_sha256"]:
+173:         raise ValueError("Resume code hashes changed; do not silently alter the experiment")
+174:     model.train()
+
+scripts/course_experiments/capstone.py lines 228-277
+228:                 )
+229:             if step % 100 == 0:
+230:                 save_progress()
+231:     except BaseException:
+232:         _sync(device)
+233:         state["elapsed_training_seconds"] += time.perf_counter() - started
+234:         save_progress()
+235:         raise
+236:     _sync(device)
+237:     elapsed = time.perf_counter() - started
+238:     state["elapsed_training_seconds"] += elapsed
+239:     save_progress()
+240:     receipt = export_inference(output / "model-training.pt", output / "model.pt")
+241:     validation_result = None
+242:     if validation and step == steps:
+243:         validation_result = evaluate_rows(model, splits["validation"])
+244:         write_json(output / "validation.json", validation_result)
+245:     report = {
+246:         "data_version": DATA_VERSION,
+247:         "stage": stage,
+248:         "requested_steps": steps,
+249:         "steps": step,
+250:         "new_steps": step - initial_step,
+251:         "schedule_completed": step == steps,
+252:         "budget_exhausted": step < steps,
+253:         "seed": seed,
+254:         "device": str(device),
+255:         "seconds": elapsed,
+256:         "elapsed_training_seconds": state["elapsed_training_seconds"],
+257:         "parameters": model.description(),
+258:         "effective_tokens": state["effective_tokens"],
+259:         "history": state["history"],
+260:         "data_manifest": manifest,
+261:         "parent_checkpoint_sha256": metadata["parent_checkpoint_sha256"],
+262:         "code_sha256": metadata["code_sha256"],
+263:         "checkpoint": "model.pt",
+264:         "training_checkpoint": "model-training.pt",
+265:         "inference_export": receipt,
+266:         "objective": "next-byte CE + valid-token router balance"
+267:         if stage == "pretrain"
+268:         else "assistant-only CE + valid-token router balance"
+269:         if stage in ("sft", "joint")
+270:         else "DPO(beta=.1,frozen immediate-predecessor) + .2 assistant-only replay CE + valid-token router balance",
+271:         "validation_summary": None
+272:         if validation_result is None
+273:         else {key: value for key, value in validation_result.items() if key != "records"},
+274:         "test_evaluated": False,
+275:     }
+276:     write_json(output / "train-report.json", report)
+277:     return report

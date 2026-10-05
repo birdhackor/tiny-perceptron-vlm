@@ -1,0 +1,8 @@
+# Actual commands executed from /workspace/tiny-perceptron-vlm, bash login:false.
+PATH="$PWD/.venv/bin:$PATH" CUDA_VISIBLE_DEVICES='' HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1 TRANSFORMERS_OFFLINE=1 python scripts/fetch_training_assets.py --list > docs/technical-reviews/artifacts/phase4-t_1-independent-20261005/list-stdout.jsonl
+CUDA_VISIBLE_DEVICES='' HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1 TRANSFORMERS_OFFLINE=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 PYTHONPATH="$PWD" .venv/bin/python docs/technical-reviews/artifacts/phase4-t_1-independent-20261005/bounded_check.py > docs/technical-reviews/artifacts/phase4-t_1-independent-20261005/bounded-stdout.jsonl 2> docs/technical-reviews/artifacts/phase4-t_1-independent-20261005/bounded-stderr.txt
+CUDA_VISIBLE_DEVICES='' HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1 TRANSFORMERS_OFFLINE=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 PYTHONPATH="$PWD" .venv/bin/python docs/technical-reviews/artifacts/phase4-t_1-independent-20261005/modality_check.py > docs/technical-reviews/artifacts/phase4-t_1-independent-20261005/modality-stdout.jsonl 2> docs/technical-reviews/artifacts/phase4-t_1-independent-20261005/modality-stderr.txt
+pdftotext -layout docs/technical-reviews/artifacts/phase4-t_1-independent-20261005/external/gpt2-original.pdf docs/technical-reviews/artifacts/phase4-t_1-independent-20261005/external/gpt2-original.txt
+# The original --asset tinystories download command was inspected, not executed.
+# bounded_check-attempt1.py failed on an incorrect homogeneous metadata assumption;
+# saved attempt1 stdout/stderr are unchanged. The corrected per-schema check exited 0.

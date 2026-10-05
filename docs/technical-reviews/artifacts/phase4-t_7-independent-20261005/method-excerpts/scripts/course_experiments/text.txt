@@ -1,0 +1,77 @@
+Original source: scripts/course_experiments/text.py
+Full original SHA-256: 04b0a75d151b6920dd8c28b5f7b6cadf94d27a71776a7ca7952be39ae05a0b59
+
+--- original lines 34-88 ---
+def _steps(ctx, count):
+    """正式預設完整跑；本機通路檢查可由 caller 明示 step_scale。"""
+    return max(1, round(count * getattr(ctx, "step_scale", 1.0)))
+
+
+def _json_bytes(value):
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+
+
+def _digest(value):
+    return hashlib.sha256(_json_bytes(value)).hexdigest()
+
+
+def _save_splits(ctx, parts, name="data"):
+    directory = ctx.output / name
+    directory.mkdir(parents=True, exist_ok=True)
+    result = {}
+    for split, rows in parts.items():
+        path = directory / f"{split}.jsonl"
+        path.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows), encoding="utf-8")
+        result[split] = {
+            "records": len(rows),
+            "families": len({str(row.get("family", row.get("id", _digest(row)))) for row in rows}),
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "path": str(path.relative_to(ctx.output)),
+        }
+    result["split_unit"] = "family before tokenization; no family crosses splits"
+    write_json(directory / "manifest.json", result)
+    return result
+
+
+def _evaluations(model, parts, mode="sft", tokens=32):
+    result = {split: evaluate_lm(model, parts[split], mode=mode, tokens=tokens) for split in ("validation", "test")}
+    if mode == "text":
+        for split, report in result.items():
+            raw_bytes = sum(len(row["text"].encode("utf-8")) for row in parts[split])
+            report["raw_utf8_bytes"] = raw_bytes
+            report["bpb_including_eos_boundary_targets"] = report["nll_sum"] / (raw_bytes * math.log(2))
+    return result
+
+
+def _asset_rows(ctx, identifier, basename):
+    root = Path(extract_asset(ctx, identifier))
+    manifest = json.loads((ctx.assets / "manifest.json").read_text(encoding="utf-8"))
+    entry = next(asset for asset in manifest["assets"] if asset["id"] == identifier)
+    # 多個來源都使用 train-first-100.jsonl，必須限定到此來源的 target。
+    directory = root / entry["target"]
+    if not directory.is_dir() and root.name == Path(entry["target"]).name:
+        directory = root
+    matches = list(directory.rglob(basename))
+    if root.is_file() and root.name == basename:
+        matches = [root]
+    if len(matches) != 1:
+        raise ValueError(f"{identifier}: expected one {basename}, found {len(matches)}")
+    return load_jsonl(matches[0])
+
+--- original lines 596-611 ---
+def arithmetic_records():
+    records = []
+    for a in range(8):
+        for b in range(8):
+            records.append(
+                {
+                    "family": f"{min(a, b)}+{max(a, b)}",
+                    "a": a,
+                    "b": b,
+                    "messages": [
+                        {"role": "user", "content": f"{a}+{b}=?"},
+                        {"role": "assistant", "content": str(a + b)},
+                    ],
+                }
+            )
+    return records

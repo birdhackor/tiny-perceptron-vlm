@@ -1,0 +1,326 @@
+Original source: scripts/course_experiments/posttraining.py
+Full original SHA-256: 862dc12680fee8374679d52a1cc55a2dd325a7aebbf634668731fa7def08aa04
+
+--- original lines 31-184 ---
+ROOT = Path(__file__).resolve().parents[2]
+RESERVED_TEST_FAMILY = "pair:1:2"
+MODES = ("number", "explain", "missing")
+CONFIG = {
+    "seed": 42,
+    "cpu_threads": 2,
+    "sft_steps": 60,
+    "sft_batch_size": 32,
+    "sft_learning_rate": 0.01,
+    "sft_label_smoothing": 0.2,
+    "reward_steps": 300,
+    "reward_batch_size": 64,
+    "reward_learning_rate": 0.01,
+    "ppo_rollout_batches": 120,
+    "ppo_rollout_size": 64,
+    "ppo_epochs_per_rollout": 3,
+    "ppo_learning_rate": 0.005,
+    "value_learning_rate": 0.01,
+    "ppo_clip_range": 0.2,
+    "reference_kl_coefficient": 0.1,
+    "dpo_steps": 360,
+    "dpo_batch_size": 64,
+    "dpo_learning_rate": 0.005,
+    "dpo_beta": 0.1,
+}
+
+
+def rule_best_action(mode):
+    """獨立驗收規則，沒有讀取 RM、policy 或候選機率。"""
+    return {"number": 0, "explain": 1, "missing": 3}[mode]
+
+
+def build_records():
+    """人工指定偏好規則；題目與候選由固定 Python 模板生成。"""
+    records = []
+    # 單價限制為正，避免單價 0 時即使不知道數量也能確定總價的例外。
+    for a in range(1, 11):
+        for b in range(a, 11):
+            for mode in MODES:
+                if mode == "missing":
+                    prompt = f"單價 {a} 元，運費 {b} 元，總價多少？"
+                    candidates = [
+                        str(a + b),
+                        f"單價加運費是 {a + b} 元，所以總價是 {a + b} 元。",
+                        str(a + b + 1),
+                        "請補充購買數量。",
+                    ]
+                    # 數量未給：只能確定澄清比任何擅自報總價更好，不強迫錯答互相排名。
+                    preferences = [[3, other] for other in range(3)]
+                    correctness = [False, False, False, True]
+                else:
+                    prompt = f"{'只回數字' if mode == 'number' else '用一句話解釋'}：{a} 加 {b} 等於多少？"
+                    candidates = [str(a + b), f"{a} 加 {b} 是 {a + b}。", str(a + b + 1), "請再提供更多資訊。"]
+                    ranking = [0, 1, 3, 2] if mode == "number" else [1, 0, 3, 2]
+                    preferences = [
+                        [winner, loser] for index, winner in enumerate(ranking) for loser in ranking[index + 1 :]
+                    ]
+                    correctness = [True, True, False, False]
+                best = rule_best_action(mode)
+                records.append(
+                    {
+                        "family": f"pair:{a}:{b}",
+                        "operands": [a, b],
+                        "mode": mode,
+                        "prompt": prompt,
+                        "candidates": candidates,
+                        "features": [a / 10, b / 10, float(mode == "explain"), float(mode == "missing")],
+                        "preference_pairs": preferences,
+                        "expected_action": best,
+                        "candidate_content_or_clarification_correct": correctness,
+                        "candidate_meets_full_request": [action == best for action in range(4)],
+                        "label_source": "human-designed fixed ranking rules, applied by Python; no recruited human raters",
+                        "candidate_source": "Python templates compute answers in advance; policy does not calculate or generate text",
+                    }
+                )
+    return records
+
+
+def split_records(records, seed_value=42):
+    """55 個未排序加數家族整組切分，預先保留 1+2 作最後檢查。"""
+    families = sorted({row["family"] for row in records})
+    if len(families) != 55 or RESERVED_TEST_FAMILY not in families:
+        raise ValueError("需要完整的 55 個加數家族")
+    families.remove(RESERVED_TEST_FAMILY)
+    random.Random(seed_value).shuffle(families)
+    owners = {
+        "train": set(families[:44]),
+        "validation": set(families[44:49]),
+        "test": set(families[49:]) | {RESERVED_TEST_FAMILY},
+    }
+    return {name: [row for row in records if row["family"] in selected] for name, selected in owners.items()}
+
+
+def _features(rows, device):
+    return torch.tensor([row["features"] for row in rows], dtype=torch.float32, device=device)
+
+
+def _pairs(rows):
+    return [(index, winner, loser) for index, row in enumerate(rows) for winner, loser in row["preference_pairs"]]
+
+
+def _state_sha256(model):
+    digest = hashlib.sha256()
+    for name, tensor in sorted(model.state_dict().items()):
+        digest.update(name.encode())
+        digest.update(tensor.detach().cpu().contiguous().numpy().tobytes())
+    return digest.hexdigest()
+
+
+def _checkpoint(path, model, metadata):
+    torch.save({"model": model.state_dict(), "metadata": metadata}, path)
+    data = path.read_bytes()
+    return {
+        "file": path.name,
+        "bytes": len(data),
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "state_sha256": _state_sha256(model),
+    }
+
+
+def _update(optimizer, parameters, loss):
+    if not torch.isfinite(loss):
+        raise FloatingPointError("nonfinite training loss")
+    optimizer.zero_grad(set_to_none=True)
+    loss.backward()
+    torch.nn.utils.clip_grad_norm_(parameters, 1.0, error_if_nonfinite=True)
+    optimizer.step()
+
+
+def _normalized_scores(raw_scores, scale):
+    # 減去每題所有候選的平均分，不改同題排序；除数只由 train 計算且全程固定。
+    return (raw_scores - raw_scores.mean(-1, keepdim=True)) / scale
+
+
+def clipping_probe():
+    """正負 advantage 的六個解析核對點；梯度是相對 ratio 而非 log ratio。"""
+    result = []
+    for advantage in (1.0, -1.0):
+        for value in (0.7, 1.0, 1.3):
+            ratio = torch.tensor([value], requires_grad=True)
+            terms = ppo_clipped_objective(ratio.log(), torch.zeros(1), torch.tensor([advantage]))
+            terms["policy_loss"].backward()
+            result.append(
+                {
+                    "ratio": value,
+                    "advantage": advantage,
+                    "unclipped": float(terms["unclipped"].detach()),
+                    "clipped": float(terms["clipped"].detach()),
+                    "surrogate": float(terms["surrogate"].detach()),
+                    "policy_loss": float(terms["policy_loss"].detach()),
+                    "loss_derivative_wrt_ratio": float(ratio.grad),
+                }
+            )
+    return result
+
+--- original lines 256-387 ---
+def run_posttraining(ctx):
+    """完成固定配置；不依驗證或 test 結果挑 checkpoint／重調超參數。"""
+    if ctx.device != "cpu":
+        raise ValueError("這個數百參數教學實驗固定使用 CPU")
+    if getattr(ctx, "step_scale", 1.0) != 1.0:
+        raise ValueError("固定教學證據不提供縮短步數的結果")
+    seed(ctx.seed)
+    torch.set_num_threads(CONFIG["cpu_threads"])
+    ctx.output.mkdir(parents=True, exist_ok=True)
+    splits = split_records(build_records(), ctx.seed)
+    write_json(ctx.output / "records.json", splits)
+    train = splits["train"]
+    x = _features(train, ctx.device)
+    pairs = _pairs(train)
+    pair_tensor = torch.tensor(pairs, dtype=torch.long, device=ctx.device)
+    sampler = random.Random(ctx.seed + 1)
+    started = time.perf_counter()
+    policy = FiniteResponsePolicy().to(ctx.device)
+    sft_optimizer = torch.optim.Adam(policy.parameters(), lr=CONFIG["sft_learning_rate"])
+    sft_indices = [index for index, row in enumerate(train) if row["mode"] == "number"]
+    sft_history = []
+    stage_started = time.perf_counter()
+    for step in range(CONFIG["sft_steps"]):
+        indices = torch.tensor(sampler.choices(sft_indices, k=CONFIG["sft_batch_size"]), device=ctx.device)
+        loss = F.cross_entropy(
+            policy(x[indices]),
+            torch.zeros(len(indices), dtype=torch.long, device=ctx.device),
+            label_smoothing=CONFIG["sft_label_smoothing"],
+        )
+        _update(sft_optimizer, policy.parameters(), loss)
+        if step in (0, CONFIG["sft_steps"] - 1):
+            sft_history.append({"step": step + 1, "loss_before_update": float(loss.detach())})
+    sft_seconds = time.perf_counter() - stage_started
+    reference = copy.deepcopy(policy).requires_grad_(False).eval()
+    sft_hash = _state_sha256(reference)
+    checkpoints = [
+        _checkpoint(
+            ctx.output / "sft.pt",
+            reference,
+            {"stage": "sft", "config": CONFIG, "train_record_sha256": records_sha256(train)},
+        )
+    ]
+
+    reward_model = FiniteRewardModel().to(ctx.device)
+    reward_optimizer = torch.optim.Adam(reward_model.parameters(), lr=CONFIG["reward_learning_rate"])
+    reward_history = []
+    stage_started = time.perf_counter()
+    for step in range(CONFIG["reward_steps"]):
+        selection = torch.tensor(sampler.choices(range(len(pairs)), k=CONFIG["reward_batch_size"]), device=ctx.device)
+        contexts, winners, losers = pair_tensor[selection].unbind(-1)
+        scores = reward_model(x[contexts])
+        loss = preference_loss(
+            scores.gather(1, winners[:, None]).squeeze(1), scores.gather(1, losers[:, None]).squeeze(1)
+        )
+        _update(reward_optimizer, reward_model.parameters(), loss)
+        if step == 0 or (step + 1) % 50 == 0:
+            reward_history.append({"step": step + 1, "loss_before_update": float(loss.detach())})
+    reward_seconds = time.perf_counter() - stage_started
+    reward_model.requires_grad_(False).eval()
+    with torch.no_grad():
+        raw_scores = reward_model(x)
+        scale = float((raw_scores - raw_scores.mean(-1, keepdim=True)).std(unbiased=False).clamp_min(1e-6))
+    checkpoints.append(
+        _checkpoint(
+            ctx.output / "reward.pt",
+            reward_model,
+            {"stage": "reward", "scale_from_training_candidates": scale, "config": CONFIG},
+        )
+    )
+
+    ppo = copy.deepcopy(reference).requires_grad_(True)
+    dpo = copy.deepcopy(reference).requires_grad_(True)
+    ppo_initial_hash, dpo_initial_hash = _state_sha256(ppo), _state_sha256(dpo)
+    value = FiniteValueModel().to(ctx.device)
+    optimizer = torch.optim.Adam(ppo.parameters(), lr=CONFIG["ppo_learning_rate"])
+    value_optimizer = torch.optim.Adam(value.parameters(), lr=CONFIG["value_learning_rate"])
+    action_generator = torch.Generator(device=ctx.device).manual_seed(ctx.seed + 2)
+    ppo_history, first_rollout = [], []
+    stage_started = time.perf_counter()
+    for rollout in range(CONFIG["ppo_rollout_batches"]):
+        indices = torch.tensor(sampler.choices(range(len(train)), k=CONFIG["ppo_rollout_size"]), device=ctx.device)
+        features = x[indices]
+        with torch.no_grad():
+            old_log_probs = ppo(features).log_softmax(-1)
+            actions = torch.multinomial(old_log_probs.exp(), 1, generator=action_generator).squeeze(1)
+            old_selected = old_log_probs.gather(1, actions[:, None]).squeeze(1).clone()
+            old_values = value(features).clone()
+            rewards = _normalized_scores(reward_model(features), scale).gather(1, actions[:, None]).squeeze(1)
+            advantages = bandit_advantage(rewards, old_values)
+            reference_logits = reference(features)
+        fixed_old_hash = hashlib.sha256(old_selected.numpy().tobytes()).hexdigest()
+        for epoch in range(CONFIG["ppo_epochs_per_rollout"]):
+            logits = ppo(features)
+            selected = logits.log_softmax(-1).gather(1, actions[:, None]).squeeze(1)
+            terms = ppo_clipped_objective(selected, old_selected, advantages, CONFIG["ppo_clip_range"])
+            kl = exact_kl(logits, reference_logits).mean()
+            policy_loss = terms["policy_loss"] + CONFIG["reference_kl_coefficient"] * kl
+            _update(optimizer, ppo.parameters(), policy_loss)
+            value_loss = F.mse_loss(value(features), rewards)
+            _update(value_optimizer, value.parameters(), value_loss)
+            if rollout == 0:
+                with torch.no_grad():
+                    updated = ppo(features).log_softmax(-1).gather(1, actions[:, None]).squeeze(1)
+                first_rollout.append(
+                    {
+                        "epoch": epoch + 1,
+                        "train_context_indices": indices.tolist(),
+                        "sampled_actions": actions.tolist(),
+                        "old_selected_log_probabilities": old_selected.tolist(),
+                        "old_values": old_values.tolist(),
+                        "normalized_rm_rewards": rewards.tolist(),
+                        "fixed_advantages": advantages.tolist(),
+                        "log_probabilities_before_update": selected.detach().tolist(),
+                        "ratios_before_update": terms["ratio"].detach().tolist(),
+                        "log_probabilities_after_update": updated.tolist(),
+                        "old_log_probability_sha256": fixed_old_hash,
+                        "reference_state_sha256": sft_hash,
+                    }
+                )
+            if hashlib.sha256(old_selected.numpy().tobytes()).hexdigest() != fixed_old_hash:
+                raise AssertionError("PPO rollout log probability changed during reuse")
+        if rollout == 0 or (rollout + 1) % 20 == 0:
+            ppo_history.append(
+                {
+                    "rollout_batch": rollout + 1,
+                    "policy_updates": (rollout + 1) * CONFIG["ppo_epochs_per_rollout"],
+                    "sampled_reward_mean": float(rewards.mean()),
+                    "sampled_advantage_mean": float(advantages.mean()),
+                    "last_epoch_policy_surrogate_loss_before_update": float(terms["policy_loss"].detach()),
+                    "last_epoch_exact_reference_kl_before_update": float(kl.detach()),
+                    "last_epoch_ratio_outside_clip_interval_fraction": float(terms["clip_fraction"].detach()),
+                    "last_epoch_value_mse_before_update": float(value_loss.detach()),
+
+--- original lines 414-445 ---
+    dpo_optimizer = torch.optim.Adam(dpo.parameters(), lr=CONFIG["dpo_learning_rate"])
+    dpo_history = []
+    stage_started = time.perf_counter()
+    for step in range(CONFIG["dpo_steps"]):
+        selection = torch.tensor(sampler.choices(range(len(pairs)), k=CONFIG["dpo_batch_size"]), device=ctx.device)
+        contexts, winners, losers = pair_tensor[selection].unbind(-1)
+        logits = dpo(x[contexts]).log_softmax(-1)
+        with torch.no_grad():
+            reference_scores = reference(x[contexts]).log_softmax(-1)
+        chosen = logits.gather(1, winners[:, None]).squeeze(1)
+        rejected = logits.gather(1, losers[:, None]).squeeze(1)
+        ref_chosen = reference_scores.gather(1, winners[:, None]).squeeze(1)
+        ref_rejected = reference_scores.gather(1, losers[:, None]).squeeze(1)
+        loss = dpo_loss(chosen, rejected, ref_chosen, ref_rejected, beta=CONFIG["dpo_beta"])
+        _update(dpo_optimizer, dpo.parameters(), loss)
+        if step == 0 or (step + 1) % 60 == 0:
+            dpo_history.append({"step": step + 1, "loss_before_update": float(loss.detach())})
+    dpo_seconds = time.perf_counter() - stage_started
+    checkpoints.append(
+        _checkpoint(
+            ctx.output / "dpo.pt",
+            dpo,
+            {
+                "stage": "dpo",
+                "config": CONFIG,
+                "initial_state_sha256": dpo_initial_hash,
+                "reference_state_sha256": sft_hash,
+            },
+        )
+    )
+    if _state_sha256(reference) != sft_hash:
+        raise AssertionError("the fixed SFT reference was modified")

@@ -1,0 +1,11 @@
+# Actual commands and outcomes
+
+All commands ran in /workspace/tiny-perceptron-vlm with bash login:false and the existing .venv CPU wheel.
+
+1. `.venv/bin/python docs/review-tools/section_facts.py course/training.md#T.8 --output /tmp/phase4-t8-own-20261005` — exit 0; extraction only, no Python fences, no figures. Necessary original extraction files were SHA-checked and permanently retained.
+2. `.venv/bin/python /tmp/t8_fetch_original_sources.py` — exit 0; direct HTTPS original papers and exact official source. Actual code retained as fetch_original_sources.py. The exact CrossEntropyLoss original was subsequently fetched in a short inline urllib/AST extraction; URL/full-original hash/retained original range are in external/locators.json.
+3. `.venv/bin/python docs/technical-reviews/artifacts/phase4-t8-own-factual-20261005/cpu_check.py > docs/technical-reviews/artifacts/phase4-t8-own-factual-20261005/cpu_check.stdout.txt 2> docs/technical-reviews/artifacts/phase4-t8-own-factual-20261005/cpu_check.stderr.txt` — first attempt exit 1 (own nonexistent key); initial code and output retained as attempt1-*. Corrected attempt exit 0, all independent assertions passed. cpu_results.json contains actual argv/cwd/exit status of every original prepare command and bounded architecture/evaluate subprocess; corresponding stdout/stderr files are retained. Temporary generated weights were not retained.
+4. `.venv/bin/python docs/technical-reviews/artifacts/phase4-t8-own-factual-20261005/entry_contract_check.py > docs/technical-reviews/artifacts/phase4-t8-own-factual-20261005/entry_contract.stdout.txt 2> docs/technical-reviews/artifacts/phase4-t8-own-factual-20261005/entry_contract.stderr.txt` — exit 0; actual prerequisite, experiment selection and no-run guard checks.
+5. `git show 48a4f3e912b483d70aee57c42c2aac226534a9a6:scripts/course_experiments/architecture.py` and the corresponding run.py source retrieval — exit 0; exact SHA matched original result code_sha256, relevant methods compared against inspected methods; raw-contract-methods.json retains evidence.
+
+The original CUDA efficiency/precision/flash_probe recipes and 200-update architecture recipes were not executed in full. No GPU, data/model download, or new capability evaluation occurred.

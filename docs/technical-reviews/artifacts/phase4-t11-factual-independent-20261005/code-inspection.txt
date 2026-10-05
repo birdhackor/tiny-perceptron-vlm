@@ -1,0 +1,722 @@
+scripts/evaluate.py chat_prompt
+17: def chat_prompt(messages, tok):
+18:     ids = [tok.bos_id]
+19:     roles = {"user": tok.user_id, "assistant": tok.assistant_id, "system": tok.system_id}
+20:     for message in messages:
+21:         ids += [roles[message["role"]]] + tok.encode(message["content"]) + [tok.eos_id]
+22:     return ids + [tok.assistant_id]
+
+scripts/evaluate.py answer_sample
+25: def answer_sample(tok, generated_ids, target):
+26:     """只移除正常末尾的 EOS；其他控制 ID 和首尾空白都參與核對。"""
+27:     report = generation_report(tok, generated_ids)
+28:     ids = report["generated_ids"]
+29:     ended = bool(ids and ids[-1] == tok.eos_id and ids.count(tok.eos_id) == 1)
+30:     content_ids = ids[:-1] if ended else ids
+31:     expected = tok.encode(target)
+32:     exact = content_ids == expected and not report["invalid_special_tokens"]
+33:     report["generated"] = report.pop("answer")
+34:     return {
+35:         "target": target,
+36:         "expected_content_ids": expected,
+37:         **report,
+38:         "exact_match": exact,
+39:         "completed_exact_match": exact and ended,
+40:     }
+
+scripts/evaluate.py evaluate
+44: def evaluate(model, records, mode="text", max_new_tokens=32, tokenizer=None):
+45:     tok = tokenizer or ByteTokenizer()
+46:     if not isinstance(model, TinyLM):
+47:         raise ValueError("此入口只評估 TinyLM 文字 checkpoint；多模態模型請使用對應評估入口")
+48:     if model.config.vocab_size != tok.vocab_size:
+49:         raise ValueError("tokenizer 詞表與模型 config 不相容；非 byte 模型需指定配對 tokenizer")
+50:     if max_new_tokens < 1 or mode not in ("text", "sft"):
+51:         raise ValueError("需要正數生成長度與 text/sft 模式")
+52:     records = list(records)
+53:     was_training = model.training
+54:     model.eval()
+55:     device = next(model.parameters()).device
+56:     total_nll, total_tokens, text_bytes, loss_records = 0.0, 0, 0, 0
+57:     samples, skipped = [], []
+58:     try:
+59:         for index, record in enumerate(records):
+60:             if mode == "text":
+61:                 text = record["text"]
+62:                 ids = [tok.bos_id] + tok.encode(text) + [tok.eos_id]
+63:                 text_bytes += len(text.encode("utf-8"))
+64:                 # 每個目標只計一次。BOS 是第一格輸入，目標是文字單位與 EOS。
+65:                 for start in range(0, len(ids) - 1, model.config.max_length):
+66:                     x, y = shifted(ids[start : start + model.config.max_length + 1])
+67:                     logits = model(x[None].to(device))["logits"]
+68:                     total, count = loss_sum(logits, y[None].to(device))
+69:                     total_nll += total.item()
+70:                     total_tokens += int(count.item())
+71:                 loss_records += 1
+72:                 prompt_text = text[: min(4, len(text))]
+73:                 prefix = [tok.bos_id] + tok.encode(prompt_text)
+74:                 target = text[len(prompt_text) :]
+75:                 if len(prefix) >= model.config.max_length:
+76:                     skipped.append(
+77:                         {
+78:                             "row": index,
+79:                             "phase": "generation",
+80:                             "reason": "prompt_context_too_long",
+81:                             "source": record,
+82:                             "prompt": prompt_text,
+83:                         }
+84:                     )
+85:                     continue
+86:             else:
+87:                 messages = record.get("messages")
+88:                 if messages is None and "question" in record and "answer" in record:
+89:                     messages = [
+90:                         {"role": "user", "content": record["question"]},
+91:                         {"role": "assistant", "content": record["answer"]},
+92:                     ]
+93:                 if not messages or messages[-1]["role"] != "assistant":
+94:                     raise ValueError(f"第 {index} 筆 SFT 評估需要完整且以 assistant 結束的 messages")
+95:                 x, y = render_chat(messages, tok)
+96:                 prefix = chat_prompt(messages[:-1], tok)
+97:                 if len(x) > model.config.max_length or len(prefix) >= model.config.max_length:
+98:                     skipped.append(
+99:                         {"row": index, "phase": "loss_and_generation", "reason": "context_too_long", "source": record}
+100:                     )
+101:                     continue
+102:                 total, count = loss_sum(model(x[None].to(device))["logits"], y[None].to(device))
+103:                 total_nll += total.item()
+104:                 total_tokens += int(count.item())
+105:                 loss_records += 1
+106:                 target = messages[-1]["content"]
+107:             output = generate(model, torch.tensor([prefix], device=device), max_new_tokens, eos_id=tok.eos_id)
+108:             sample = {"row": index, **answer_sample(tok, output[0, len(prefix) :].tolist(), target)}
+109:             if mode == "text":
+110:                 sample["prompt"] = prompt_text
+111:             samples.append(sample)
+112:         if total_tokens == 0:
+113:             raise ValueError("沒有有效評估 token；不能報成零 loss 或成功")
+114:     finally:
+115:         model.train(was_training)
+116:     denominator = len(samples)
+117:     return {
+118:         "mean_token_nll": total_nll / total_tokens,
+119:         "effective_tokens": total_tokens,
+120:         "bpb_including_eos_boundary_targets": total_nll / (text_bytes * math.log(2))
+121:         if mode == "text" and text_bytes
+122:         else None,
+123:         "raw_text_bytes": text_bytes if mode == "text" else None,
+124:         "exact_match": sum(sample["exact_match"] for sample in samples) / denominator
+125:         if mode == "sft" and denominator
+126:         else None,
+127:         "completed_exact_match": sum(sample["completed_exact_match"] for sample in samples) / denominator
+128:         if mode == "sft" and denominator
+129:         else None,
+130:         "eos_rate": sum(sample["eos"] for sample in samples) / denominator if denominator else None,
+131:         "records_read": len(records),
+132:         "records_selected": len(records),
+133:         "loss_evaluated_records": loss_records,
+134:         "generation_evaluated_records": denominator,
+135:         "loss_skipped_records": sum(item["phase"] == "loss_and_generation" for item in skipped),
+136:         "generation_skipped_records": len(skipped),
+137:         "metric_denominators": {
+138:             "mean_token_nll": total_tokens,
+139:             "bpb_including_eos_boundary_targets": text_bytes if mode == "text" else None,
+140:             "exact_match": denominator if mode == "sft" else None,
+141:             "completed_exact_match": denominator if mode == "sft" else None,
+142:             "eos_rate": denominator,
+143:         },
+144:         "skipped": skipped,
+145:         "samples": samples,
+146:         "note": "exact_match 比較原始內容 ID，不刪空白或非法控制；completed_exact_match 另要求正常 EOS 結束。"
+147:         "生成比例以實際生成題數為分母；跳過題及未選取題另列，不算答對。文字 NLL 分窗重置上下文，"
+148:         "BPB 以原文 UTF-8 bytes 為分母，目標含 EOS、不含 BOS。toy 分數不代表開放世界能力。",
+149:     }
+
+scripts/evaluate.py parse_limit
+152: def parse_limit(value):
+153:     if value == "all":
+154:         return None
+155:     try:
+156:         limit = int(value)
+157:     except ValueError as error:
+158:         raise argparse.ArgumentTypeError("limit 必須是正整數或 all") from error
+159:     if limit < 1:
+160:         raise argparse.ArgumentTypeError("limit 必須是正整數或 all")
+161:     return limit
+
+scripts/evaluate.py main
+164: def main():
+165:     p = argparse.ArgumentParser(description=__doc__)
+166:     p.add_argument("checkpoint", type=Path)
+167:     p.add_argument("--data", type=Path)
+168:     p.add_argument("--mode", choices=["text", "sft"], default="text")
+169:     p.add_argument("--split-label", choices=["train-diagnostic", "validation", "test"], default="validation")
+170:     p.add_argument("--limit", type=parse_limit, default=20, help="最多選取的資料筆數；all 選取整份資料（預設 20）")
+171:     p.add_argument("--tokens", type=int, default=32)
+172:     p.add_argument("--tokenizer", type=Path, help="訓練時的 BPE／byte JSON；核對詞表、特殊 ID 與 checkpoint SHA 綁定")
+173:     p.add_argument("--device", default="auto")
+174:     p.add_argument("--output", type=Path, default=Path("outputs/evaluation.json"))
+175:     args = p.parse_args()
+176:     model, payload = load_checkpoint(args.checkpoint, choose_device(args.device))
+177:     if not isinstance(model, TinyLM):
+178:         raise ValueError("此入口只評估 TinyLM 文字 checkpoint；多模態模型請使用對應評估入口")
+179:     tok = load_tokenizer(args.tokenizer, model.config.vocab_size, payload)
+180:     records = (
+181:         load_jsonl(args.data)
+182:         if args.data
+183:         else (
+184:             [{"text": text} for text in toy_documents()]
+185:             if args.mode == "text"
+186:             else [{"messages": messages} for messages in toy_conversations()]
+187:         )
+188:     )
+189:     selected = records if args.limit is None else records[: args.limit]
+190:     report = evaluate(model, selected, args.mode, args.tokens, tokenizer=tok)
+191:     report.update(
+192:         checkpoint=str(args.checkpoint),
+193:         data=str(args.data) if args.data else None,
+194:         declared_split=args.split_label,
+195:         records_read=len(records),
+196:         unselected_records=len(records) - len(selected),
+197:         limit="all" if args.limit is None else args.limit,
+198:         tokenizer={
+199:             "file": str(args.tokenizer) if args.tokenizer else None,
+200:             "sha256": hashlib.sha256(args.tokenizer.read_bytes()).hexdigest() if args.tokenizer else None,
+201:             "vocab_size": tok.vocab_size,
+202:         },
+203:     )
+204:     if args.data is None:
+205:         report["declared_split"] = "train-diagnostic"
+206:         report["note"] += " 預設 toy 例也用於訓練，這是 diagnostic，不是 held-out。"
+207:     args.output.parent.mkdir(parents=True, exist_ok=True)
+208:     args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+209:     print(json.dumps({key: value for key, value in report.items() if key != "samples"}, ensure_ascii=False, indent=2))
+
+scripts/quantize.py main
+14: def main():
+15:     p = argparse.ArgumentParser(description=__doc__)
+16:     p.add_argument("checkpoint", type=Path)
+17:     p.add_argument("--bits", type=int, choices=[4, 8], default=4)
+18:     p.add_argument("--output", type=Path, default=Path("checkpoints/quantized.pt"))
+19:     args = p.parse_args()
+20:     if args.checkpoint.resolve() == args.output.resolve():
+21:         raise ValueError("量化輸出請用另一個檔名，保留原始 checkpoint 供比較")
+22:     model, source = load_checkpoint(args.checkpoint)
+23:     if source.get("format_version") != 1:
+24:         raise ValueError("請從原始浮點 checkpoint 量化，避免反覆量化")
+25:     was_tied = model.config.tied
+26:     replace_linear_layers(model, args.bits)
+27:     model.config.tied = False
+28:     metadata = {
+29:         "source": str(args.checkpoint),
+30:         "input_output_sharing_removed": was_tied,
+31:         "scope": "Linear weight-only; embeddings/norms remain float; dequantized reference forward",
+32:     }
+33:     state = model.state_dict()
+34:     payload = {
+35:         "format_version": "quantized-v1",
+36:         "config": asdict(model.config),
+37:         "bits": args.bits,
+38:         "model": state,
+39:         "optimizer": None,
+40:         "tokenizer": source["tokenizer"],
+41:         "metadata": metadata,
+42:     }
+43:     args.output.parent.mkdir(parents=True, exist_ok=True)
+44:     torch.save(payload, args.output)
+45:     report = {
+46:         "bits": args.bits,
+47:         "source_file_bytes": args.checkpoint.stat().st_size,
+48:         "quantized_file_bytes": args.output.stat().st_size,
+49:         "model_tensor_storage_bytes": sum(t.numel() * t.element_size() for t in state.values()),
+50:         "note": "原檔可能含 optimizer；檔案大小比例不是純權重壓縮率，也不是執行記憶體。",
+51:         **metadata,
+52:     }
+53:     print(json.dumps(report, ensure_ascii=False))
+
+scripts/infer.py main
+14: def main():
+15:     parser = argparse.ArgumentParser(description=__doc__)
+16:     parser.add_argument("checkpoint")
+17:     parser.add_argument("--adapter", help="正式 lora-v1 權重；基底 hash、config 與各層 A/B 尺寸必須匹配")
+18:     parser.add_argument("--prompt", default="顏色=")
+19:     parser.add_argument("--chat", action="store_true")
+20:     parser.add_argument("--tokens", type=int, default=32)
+21:     parser.add_argument("--temperature", type=float, default=0.0)
+22:     parser.add_argument("--cache", action="store_true")
+23:     parser.add_argument("--tokenizer", help="模型訓練使用的 BPE JSON；264-ID byte 模型可省略")
+24:     parser.add_argument("--json", action="store_true", help="一併列出原始 IDs、EOS 與非法控制標記")
+25:     parser.add_argument("--device", default="auto")
+26:     args = parser.parse_args()
+27:     device = choose_device(args.device)
+28:     model, payload = load_checkpoint(args.checkpoint, device)
+29:     if not isinstance(model, TinyLM):
+30:         raise ValueError("多模態 checkpoint 請使用 scripts/infer_modal.py")
+31:     if args.tokens < 1:
+32:         raise ValueError("tokens 必須為正")
+33:     adapter = None
+34:     if args.adapter:
+35:         if payload.get("format_version") != 1:
+36:             raise ValueError("--adapter 需要原始浮點 native checkpoint 基底")
+37:         adapter = load_lora_adapter(model, args.adapter, base_state=payload["model"])
+38:         adapter["base_checkpoint"] = args.checkpoint
+39:     tok = load_tokenizer(args.tokenizer, model.config.vocab_size, payload)
+40:     ids = [tok.bos_id] + tok.encode(args.prompt)
+41:     if args.chat:
+42:         ids = [tok.bos_id, tok.user_id] + tok.encode(args.prompt) + [tok.eos_id, tok.assistant_id]
+43:     output = generate(
+44:         model,
+45:         torch.tensor([ids], device=device),
+46:         args.tokens,
+47:         args.temperature,
+48:         eos_id=tok.eos_id,
+49:         use_cache=args.cache,
+50:     )
+51:     report = generation_report(tok, output[0, len(ids) :].tolist())
+52:     if adapter is not None:
+53:         report["adapter"] = adapter
+54:     print(json.dumps(report, ensure_ascii=False) if args.json else report["answer"])
+
+scripts/course_experiments/applications.py _sample
+42: def _sample(model, messages, ctx, count=1, tokens=32, temperature=0.0):
+43:     """實際 batch 抽樣，保留 EOS、非法特殊 token 與測得的生成成本。"""
+44:     tokenizer = ByteTokenizer()
+45:     prompt = _prompt_ids(messages, tokenizer)
+46:     if len(prompt) + tokens > model.config.max_length:
+47:         raise ValueError(f"輸入 {len(prompt)} + 答案預留 {tokens} > {model.config.max_length}")
+48:     was_training = model.training
+49:     model.eval()
+50:     current = torch.tensor([prompt] * count, device=ctx.device)
+51:     active = torch.ones(count, dtype=torch.bool, device=ctx.device)
+52:     outputs = [[] for _ in range(count)]
+53:     state = None
+54:     forward_tokens = 0
+55:     _sync(ctx)
+56:     started = time.perf_counter()
+57:     try:
+58:         for _ in range(tokens):
+59:             result = model(current, cache=state)
+60:             forward_tokens += current.numel()
+61:             scores = result["logits"][:, -1]
+62:             chosen = (
+63:                 scores.argmax(-1)
+64:                 if temperature <= 0
+65:                 else torch.multinomial((scores / temperature).softmax(-1), 1).squeeze(-1)
+66:             )
+67:             was_active = active.tolist()
+68:             for row, (keep, token) in enumerate(zip(was_active, chosen.tolist(), strict=True)):
+69:                 if keep:
+70:                     outputs[row].append(token)
+71:             active = active & (chosen != tokenizer.eos_id)
+72:             if not active.any():
+73:                 break
+74:             current = chosen.masked_fill(~active, tokenizer.pad_id).unsqueeze(1)
+75:             state = result["cache"]
+76:     finally:
+77:         model.train(was_training)
+78:     _sync(ctx)
+79:     seconds = time.perf_counter() - started
+80:     samples = []
+81:     for output in outputs:
+82:         raw = output[:-1] if output and output[-1] == tokenizer.eos_id else output
+83:         samples.append(
+84:             {
+85:                 "generated": tokenizer.decode(raw),
+86:                 "generated_ids": output,
+87:                 "eos": bool(output and output[-1] == tokenizer.eos_id),
+88:                 "invalid_special_tokens": [token for token in raw if token < 8],
+89:                 "generated_tokens": len(output),
+90:             }
+91:         )
+92:     return {
+93:         "messages": messages,
+94:         "input_ids": prompt,
+95:         "input_tokens": len(prompt),
+96:         "samples": samples,
+97:         "candidate_count": count,
+98:         "temperature": temperature,
+99:         "max_new_tokens": tokens,
+100:         "generated_tokens": sum(len(output) for output in outputs),
+101:         "forward_input_tokens": forward_tokens,
+102:         "seconds": seconds,
+103:     }
+
+scripts/course_experiments/applications.py _rate
+106: def _rate(numerator, denominator):
+107:     return {
+108:         "numerator": numerator,
+109:         "denominator": denominator,
+110:         "rate": numerator / denominator if denominator else None,
+111:     }
+
+scripts/course_experiments/applications.py _split_summary
+114: def _split_summary(splits):
+115:     return {
+116:         name: {
+117:             "records": len(rows),
+118:             "families": len({row["family"] for row in rows}),
+119:             "sha256": records_sha256(rows),
+120:         }
+121:         for name, rows in splits.items()
+122:     }
+
+scripts/course_experiments/applications.py _tool_episode
+527: def _tool_episode(model, record, ctx, max_steps=3):
+528:     messages = copy.deepcopy(record["messages"][:2])
+529:     trace = []
+530:     answer = None
+531:     status = "step_limit"
+532:     started = time.perf_counter()
+533:     for step in range(max_steps):
+534:         try:
+535:             generation = _sample(model, messages, ctx, tokens=64)
+536:         except ValueError as error:
+537:             status = "context_limit"
+538:             trace.append({"step": step + 1, "error": str(error), "messages": copy.deepcopy(messages)})
+539:             break
+540:         raw = generation["samples"][0]
+541:         event = {"step": step + 1, "generation": generation, "executed": False}
+542:         trace.append(event)
+543:         try:
+544:             if raw["invalid_special_tokens"]:
+545:                 raise ValueError("模型產生未允許的特殊 token")
+546:             action = _parse_json_action(raw["generated"])
+547:             event["parsed"] = action
+548:             if "done" in action:
+549:                 status, answer = "done", action["answer"]
+550:                 event["done"] = True
+551:                 break
+552:             # 唯一真正執行工具的位置；參數不從標準答案替換或修正。
+553:             result = call_tool(action)
+554:             finite_result = type(result) is not float or math.isfinite(result)
+555:             event.update(
+556:                 {
+557:                     "executed": True,
+558:                     "finite_result": finite_result,
+559:                     "tool_result": result if finite_result else repr(result),
+560:                 }
+561:             )
+562:             event["request_matches_question"] = record["operation"] != "copy" and action == {
+563:                 "name": record["operation"],
+564:                 "arguments": {"a": record["a"], "b": record["b"]},
+565:             }
+566:             if not finite_result:
+567:                 event["error"] = "工具確實已執行，但運算 overflow 產生非有限結果；保留文字證據並停止。"
+568:                 status = "invalid_tool_result"
+569:                 break
+570:             messages += [
+571:                 {"role": "assistant", "content": raw["generated"]},
+572:                 {"role": "user", "content": f"TOOL_RESULT:{result}"},
+573:             ]
+574:         except (ValueError, TypeError, KeyError, OverflowError) as error:
+575:             event["error"] = str(error)
+576:             status = "invalid_request"
+577:             break
+578:     completed_answer_correct = status == "done" and type(answer) in (int, float) and answer == record["answer"]
+579:     executions = [event for event in trace if event.get("executed")]
+580:     required_call_satisfied = (
+581:         not executions
+582:         if record["operation"] == "copy"
+583:         else bool(
+584:             executions
+585:             and executions[-1]["finite_result"]
+586:             and any(event["request_matches_question"] for event in executions)
+587:             and answer == executions[-1]["tool_result"]
+588:         )
+589:     )
+590:     return {
+591:         "family": record["family"],
+592:         "operation": record["operation"],
+593:         "question": record["messages"][1]["content"],
+594:         "expected": record["answer"],
+595:         "status": status,
+596:         "answer": answer,
+597:         "answer_correct": completed_answer_correct,
+598:         "required_tool_behavior": required_call_satisfied,
+599:         "correct": completed_answer_correct and required_call_satisfied,
+600:         "trace": trace,
+601:         "max_steps": max_steps,
+602:         "actual_tool_calls": sum(event["executed"] for event in trace if "executed" in event),
+603:         "generated_tokens": sum(event["generation"]["generated_tokens"] for event in trace if "generation" in event),
+604:         "seconds": time.perf_counter() - started,
+605:     }
+
+scripts/course_experiments/applications.py _reasoning_samples
+750: def _reasoning_samples(model, rows, ctx, mode):
+751:     budgets = []
+752:     for candidate_count in (1, 2, 4, 8):
+753:         samples = []
+754:         for row in rows:
+755:             generation = _sample(
+756:                 model,
+757:                 [{"role": "user", "content": row["question"]}],
+758:                 ctx,
+759:                 count=candidate_count,
+760:                 tokens=8 if mode == "direct" else 48,
+761:                 temperature=0.7,
+762:             )
+763:             candidates = [{**sample, **_verify_reasoning(sample, row, mode)} for sample in generation["samples"]]
+764:             answers = [candidate["final_answer"] for candidate in candidates if candidate["final_answer"] is not None]
+765:             majority = Counter(answers).most_common(1)[0][0] if answers else None
+766:             verified = next(
+767:                 (candidate["final_answer"] for candidate in candidates if candidate["fully_verified"]), None
+768:             )
+769:             samples.append(
+770:                 {
+771:                     **row,
+772:                     "generation": {key: value for key, value in generation.items() if key != "samples"},
+773:                     "candidates": candidates,
+774:                     "oracle_coverage": any(candidate["final_correct"] for candidate in candidates),
+775:                     "majority_answer": majority,
+776:                     "majority_correct": majority == row["truth"],
+777:                     "verified_answer": verified,
+778:                     "verifier_correct": verified == row["truth"],
+779:                     "selection_failed_despite_coverage": any(candidate["final_correct"] for candidate in candidates)
+780:                     and majority != row["truth"],
+781:                 }
+782:             )
+783:         candidates = [candidate for sample in samples for candidate in sample["candidates"]]
+784:         covered = [sample for sample in samples if sample["oracle_coverage"]]
+785:         budgets.append(
+786:             {
+787:                 "candidate_count": candidate_count,
+788:                 "oracle_coverage": _rate(len(covered), len(samples)),
+789:                 "majority_accuracy": _rate(sum(sample["majority_correct"] for sample in samples), len(samples)),
+790:                 "verifier_accuracy": _rate(sum(sample["verifier_correct"] for sample in samples), len(samples)),
+791:                 "majority_accuracy_given_coverage": _rate(
+792:                     sum(sample["majority_correct"] for sample in covered), len(covered)
+793:                 ),
+794:                 "parsed_candidates": _rate(sum(candidate["parsed"] for candidate in candidates), len(candidates)),
+795:                 "candidate_final_accuracy": _rate(
+796:                     sum(candidate["final_correct"] for candidate in candidates), len(candidates)
+797:                 ),
+798:                 "fully_verified_candidates": _rate(
+799:                     sum(candidate["fully_verified"] for candidate in candidates), len(candidates)
+800:                 ),
+801:                 "final_correct_but_steps_invalid": _rate(
+802:                     sum(candidate["final_correct"] and not candidate["fully_verified"] for candidate in candidates),
+803:                     len(candidates),
+804:                 ),
+805:                 "generated_tokens": sum(sample["generation"]["generated_tokens"] for sample in samples),
+806:                 "forward_input_tokens": sum(sample["generation"]["forward_input_tokens"] for sample in samples),
+807:                 "generation_seconds": sum(sample["generation"]["seconds"] for sample in samples),
+808:                 "samples": samples,
+809:             }
+810:         )
+811:     return budgets
+
+scripts/course_experiments/common.py split_records
+50: def split_records(records, seed=42, family="family"):
+51:     """Keep all descendants of a family in one split; never split individual answers."""
+52:     groups = {}
+53:     seen = set()
+54:     for record in records:
+55:         encoded = json.dumps(record, ensure_ascii=False, sort_keys=True)
+56:         if encoded in seen:
+57:             continue
+58:         seen.add(encoded)
+59:         key = str(record.get(family, hashlib.sha256(encoded.encode()).hexdigest()))
+60:         groups.setdefault(key, []).append(record)
+61:     keys = sorted(groups)
+62:     if len(keys) < 3:
+63:         raise ValueError("At least three distinct families are required for train/validation/test")
+64:     random.Random(seed).shuffle(keys)
+65:     a = min(max(1, int(len(keys) * 0.8)), len(keys) - 2)
+66:     b = min(max(a + 1, int(len(keys) * 0.9)), len(keys) - 1)
+67:     return {
+68:         name: [record for key in selected for record in groups[key]]
+69:         for name, selected in (("train", keys[:a]), ("validation", keys[a:b]), ("test", keys[b:]))
+70:     }
+
+scripts/course_experiments/common.py records_sha256
+73: def records_sha256(records):
+74:     return hashlib.sha256(json.dumps(records, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+
+tiny_perceptron/capstone.py evaluate_rows
+499: def evaluate_rows(model, rows, *, max_new_tokens=64, batch_size=24):
+500:     traces = generate_traces(model, rows, max_new_tokens, batch_size)
+501:     followups, indices, records = [], [], []
+502:     for i, (row, trace) in enumerate(zip(rows, traces, strict=True)):
+503:         action = parse_action(trace)
+504:         record = {
+505:             "id": row["id"],
+506:             "family": row["family"],
+507:             "task": row["task"],
+508:             "expected_action": row["answer"],
+509:             "expected_final": expected_final(row),
+510:             "action_trace": trace,
+511:             "parsed_action": action,
+512:             "runtime": None,
+513:             "final_trace": None,
+514:             "answer": None,
+515:             "action_correct": trace["eos"] and trace["raw"] == row["answer"],
+516:         }
+517:         if action["status"] in ("direct", "ask"):
+518:             record["answer"] = action["content"]
+519:         elif action["status"] == "tool":
+520:             result = calculator_runtime(action, row["available"])
+521:             record["runtime"] = result
+522:             if result["status"] == "ok":
+523:                 followup = dict(row, image=None, audio=None)
+524:                 followup["user"] = f"原題：{action['a']}+{action['b']}。計算器回報：{result['result']}。請回答。"
+525:                 followups.append(followup)
+526:                 indices.append(i)
+527:         records.append(record)
+528:     for index, trace in zip(indices, generate_traces(model, followups, max_new_tokens, batch_size), strict=True):
+529:         records[index]["final_trace"] = trace
+530:         parsed = parse_action(trace)
+531:         if parsed["status"] == "direct":
+532:             records[index]["answer"] = parsed["content"]
+533:     by_task = {}
+534:     for record in records:
+535:         record["end_to_end_correct"] = record["action_correct"] and record["answer"] == record["expected_final"]
+536:         task = by_task.setdefault(record["task"], {"count": 0, "action_correct": 0, "end_to_end_correct": 0})
+537:         task["count"] += 1
+538:         task["action_correct"] += int(record["action_correct"])
+539:         task["end_to_end_correct"] += int(record["end_to_end_correct"])
+540:     return {
+541:         "count": len(records),
+542:         "action_correct": sum(r["action_correct"] for r in records),
+543:         "end_to_end_correct": sum(r["end_to_end_correct"] for r in records),
+544:         "by_task": by_task,
+545:         "records": records,
+546:         "protocol": "exact generated action + EOS; requested calculator arguments must match; runtime return is input to a second generation",
+547:     }
+
+tiny_perceptron/capstone.py parse_action
+550: def parse_action(trace):
+551:     if not trace["eos"]:
+552:         return {"status": "invalid", "reason": "unterminated_generation"}
+553:     raw = trace["raw"]
+554:     if raw.startswith("DIRECT:") and len(raw) > 7:
+555:         return {"status": "direct", "content": raw[7:]}
+556:     if raw.startswith("ASK:") and len(raw) > 4:
+557:         return {"status": "ask", "content": raw[4:]}
+558:     match = re.fullmatch(r"TOOL:([a-z_]+):([0-9]{1,3})\+([0-9]{1,3})", raw)
+559:     if match:
+560:         return {"status": "tool", "name": match[1], "a": int(match[2]), "b": int(match[3])}
+561:     return {"status": "invalid", "reason": "malformed_action"}
+
+tiny_perceptron/capstone.py calculator_runtime
+564: def calculator_runtime(action, available=True):
+565:     if action.get("status") != "tool":
+566:         return {"status": "error", "reason": "not_a_tool_request"}
+567:     if not available:
+568:         return {"status": "error", "reason": "calculator_unavailable"}
+569:     if action.get("name") != "calculator":
+570:         return {"status": "error", "reason": "tool_not_allowlisted"}
+571:     a, b = action.get("a"), action.get("b")
+572:     if type(a) is not int or type(b) is not int or not (0 <= a <= 999 and 0 <= b <= 999):
+573:         return {"status": "error", "reason": "invalid_arguments"}
+574:     return {"status": "ok", "result": str(a + b)}
+
+tiny_perceptron/capstone.py run_assistant
+577: def run_assistant(model, row, max_new_tokens=64, runtime=calculator_runtime):
+578:     first = generate_trace(model, row, max_new_tokens)
+579:     action = parse_action(first)
+580:     record = {"action_trace": first, "parsed_action": action, "runtime": None, "final_trace": None, "answer": None}
+581:     if action["status"] in ("direct", "ask"):
+582:         record["answer"] = action["content"]
+583:     elif action["status"] == "tool":
+584:         try:
+585:             result = runtime(action, available=row["available"])
+586:         except Exception as error:
+587:             result = {"status": "error", "reason": "runtime_failure", "error_type": type(error).__name__}
+588:         record["runtime"] = result
+589:         # Error outcomes are exposed, never fabricated as a successful model answer.
+590:         if result.get("status") == "ok":
+591:             followup = dict(row, image=None, audio=None)
+592:             followup["user"] = f"原題：{action['a']}+{action['b']}。計算器回報：{result['result']}。請回答。"
+593:             final = generate_trace(model, followup, max_new_tokens)
+594:             record["final_trace"] = final
+595:             parsed_final = parse_action(final)
+596:             if parsed_final["status"] == "direct":
+597:                 record["answer"] = parsed_final["content"]
+598:     return record
+
+tiny_perceptron/natural_assistant.py load_core
+263: def load_core(options, *, adapter=None, train=False):
+264:     from transformers import AutoProcessor, Qwen3VLForConditionalGeneration
+265: 
+266:     dtype = {"float32": torch.float32, "float16": torch.float16, "bfloat16": torch.bfloat16}[options.dtype]
+267:     if options.device == "cpu" and dtype != torch.float32:
+268:         raise ValueError("Use float32 for the documented CPU route")
+269:     common = {
+270:         "revision": options.model_revision,
+271:         "cache_dir": options.cache_dir,
+272:         "local_files_only": options.local_files_only,
+273:     }
+274:     processor = AutoProcessor.from_pretrained(
+275:         options.model, min_pixels=options.min_pixels, max_pixels=options.max_pixels, **common
+276:     )
+277:     model = Qwen3VLForConditionalGeneration.from_pretrained(
+278:         options.model, dtype=dtype, attn_implementation="sdpa", **common
+279:     ).to(options.device)
+280:     model.requires_grad_(False)
+281:     if adapter:
+282:         from peft import PeftModel
+283: 
+284:         model = PeftModel.from_pretrained(model, adapter, is_trainable=train)
+285:     elif train:
+286:         from peft import LoraConfig, TaskType, get_peft_model
+287: 
+288:         model = get_peft_model(
+289:             model,
+290:             LoraConfig(
+291:                 r=options.lora_rank,
+292:                 lora_alpha=2 * options.lora_rank,
+293:                 lora_dropout=0.0,
+294:                 target_modules=LORA_TARGETS,
+295:                 task_type=TaskType.CAUSAL_LM,
+296:             ),
+297:         )
+298:     if train:
+299:         model.config.use_cache = False
+300:         model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+301:         if any(parameter.requires_grad for name, parameter in model.named_parameters() if ".visual." in name):
+302:             raise RuntimeError("Practical branch must freeze the pretrained vision encoder")
+303:         model.train()
+304:     else:
+305:         model.eval()
+306:     return model, processor
+
+tiny_perceptron/natural_assistant.py provenance
+416: def provenance(options, manifest=None):
+417:     return {
+418:         "schema_version": 1,
+419:         "observed_at": datetime.now(UTC).isoformat(),
+420:         "architecture": "Dense pretrained Qwen3-VL; explicit frozen Whisper ASR -> same text/vision core",
+421:         "model": options.model,
+422:         "model_revision": options.model_revision,
+423:         "asr_model": options.asr_model,
+424:         "asr_revision": options.asr_revision,
+425:         "versions": environment_versions(),
+426:         "device": options.device,
+427:         "dtype": options.dtype,
+428:         "gpu_name": torch.cuda.get_device_name(options.device)
+429:         if str(options.device).startswith("cuda") and torch.cuda.is_available()
+430:         else None,
+431:         "attention_implementation": "sdpa",
+432:         "max_pixels": options.max_pixels,
+433:         "min_pixels": options.min_pixels,
+434:         "max_tokens": options.max_tokens,
+435:         "seed": options.seed,
+436:         "dataset_version": manifest.get("dataset_version") if manifest else None,
+437:         "manifest_sha256": manifest.get("manifest_sha256") if manifest else None,
+438:         "asset_sha256": manifest.get("asset_sha256", {}) if manifest else {},
+439:         "sources": manifest.get("sources", []) if manifest else [],
+440:         "pretrained_boundary": "Base vision/language and ASR knowledge was learned by their original authors; this course trains a language-attention LoRA adapter only",
+441:     }
+
+tiny_perceptron/natural_assistant.py load_asr
+687: def load_asr(options):
+688:     from transformers import WhisperForConditionalGeneration, WhisperProcessor
+689: 
+690:     common = {
+691:         "revision": options.asr_revision,
+692:         "cache_dir": options.cache_dir,
+693:         "local_files_only": options.local_files_only,
+694:     }
+695:     processor = WhisperProcessor.from_pretrained(options.asr_model, **common)
+696:     model = WhisperForConditionalGeneration.from_pretrained(options.asr_model, dtype=torch.float32, **common)
+697:     return model.eval(), processor

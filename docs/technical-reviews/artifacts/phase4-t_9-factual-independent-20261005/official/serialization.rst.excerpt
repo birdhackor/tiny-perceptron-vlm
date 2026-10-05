@@ -1,0 +1,117 @@
+Saving and loading tensors preserves views
+---------------------------------------------
+
+Saving tensors preserves their view relationships:
+
+::
+
+    >>> numbers = torch.arange(1, 10)
+    >>> evens = numbers[1::2]
+    >>> torch.save([numbers, evens], 'tensors.pt')
+    >>> loaded_numbers, loaded_evens = torch.load('tensors.pt')
+    >>> loaded_evens *= 2
+    >>> loaded_numbers
+    tensor([ 1,  4,  3,  8,  5, 12,  7, 16,  9])
+
+Behind the scenes, these tensors share the same "storage." See
+`Tensor Views <https://pytorch.org/docs/main/tensor_view.html>`_ for more
+on views and storage.
+
+When PyTorch saves tensors it saves their storage objects and tensor
+metadata separately. This is an implementation detail that may change in the
+future, but it typically saves space and lets PyTorch easily
+reconstruct the view relationships between the loaded tensors. In the above
+snippet, for example, only a single storage is written to 'tensors.pt'.
+
+In some cases, however, saving the current storage objects may be unnecessary
+and create prohibitively large files. In the following snippet a storage much
+larger than the saved tensor is written to a file:
+
+::
+
+    >>> large = torch.arange(1, 1000)
+    >>> small = large[0:5]
+    >>> torch.save(small, 'small.pt')
+    >>> loaded_small = torch.load('small.pt')
+    >>> loaded_small.storage().size()
+    999
+
+Instead of saving only the five values in the `small` tensor to 'small.pt,'
+the 999 values in the storage it shares with `large` were saved and loaded.
+
+When saving tensors with fewer elements than their storage objects, the size of
+the saved file can be reduced by first cloning the tensors. Cloning a tensor
+produces a new tensor with a new storage object containing only the values
+in the tensor:
+
+::
+
+    >>> large = torch.arange(1, 1000)
+    >>> small = large[0:5]
+    >>> torch.save(small.clone(), 'small.pt')  # saves a clone of small
+    >>> loaded_small = torch.load('small.pt')
+    >>> loaded_small.storage().size()
+    5
+
+Since the cloned tensors are independent of each other, however, they have
+none of the view relationships the original tensors did. If both file size and
+view relationships are important when saving tensors smaller than their
+storage objects, then care must be taken to construct new tensors that minimize
+the size of their storage objects but still have the desired view relationships
+before saving.
+Saving and loading torch.nn.Modules
+-----------------------------------
+
+See also: `Tutorial: Saving and loading modules <https://pytorch.org/tutorials/beginner/saving_loading_models.html>`_
+
+In PyTorch, a module’s state is frequently serialized using a ‘state dict.’
+A module’s state dict contains all of its parameters and persistent buffers:
+
+::
+
+    >>> bn = torch.nn.BatchNorm1d(3, track_running_stats=True)
+    >>> list(bn.named_parameters())
+    [('weight', Parameter containing: tensor([1., 1., 1.], requires_grad=True)),
+     ('bias', Parameter containing: tensor([0., 0., 0.], requires_grad=True))]
+
+    >>> list(bn.named_buffers())
+    [('running_mean', tensor([0., 0., 0.])),
+     ('running_var', tensor([1., 1., 1.])),
+     ('num_batches_tracked', tensor(0))]
+
+    >>> bn.state_dict()
+    OrderedDict([('weight', tensor([1., 1., 1.])),
+                 ('bias', tensor([0., 0., 0.])),
+                 ('running_mean', tensor([0., 0., 0.])),
+                 ('running_var', tensor([1., 1., 1.])),
+                 ('num_batches_tracked', tensor(0))])
+
+Instead of saving a module directly, for compatibility reasons it is recommended
+to instead save only its state dict. Python modules even have a function,
+:meth:`~torch.nn.Module.load_state_dict`, to restore their states from a state dict:
+
+::
+
+    >>> torch.save(bn.state_dict(), 'bn.pt')
+    >>> bn_state_dict = torch.load('bn.pt')
+    >>> new_bn = torch.nn.BatchNorm1d(3, track_running_stats=True)
+    >>> new_bn.load_state_dict(bn_state_dict)
+    <All keys matched successfully>
+
+Note that the state dict is first loaded from its file with :func:`torch.load`
+``torch.load`` with ``weights_only=True``
+-----------------------------------------
+
+Starting in version 2.6, ``torch.load`` will use ``weights_only=True`` if the ``pickle_module``
+argument is not passed.
+
+.. _weights-only-security:
+
+weights_only security
+^^^^^^^^^^^^^^^^^^^^^
+
+As discussed in the documentation for :func:`torch.load`, ``weights_only=True`` restricts
+the unpickler used in ``torch.load`` to only executing functions/building classes required for
+``state_dicts`` of plain ``torch.Tensors`` as well as some other primitive types. Further,
+unlike the default ``Unpickler`` provided by the ``pickle`` module, the ``weights_only`` Unpickler
+is not allowed to dynamically import anything during unpickling.
