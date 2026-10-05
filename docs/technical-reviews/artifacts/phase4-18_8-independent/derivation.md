@@ -1,0 +1,13 @@
+Independent derivation, reviewer /root/phase4_factual_coordinator/factual_18_8, 2026-10-05.
+
+Let p and q be normalized positive probabilities on the same candidate set. For finite logits, softmax supplies this positive regime. KL(p||q)=sum_i p_i(log p_i-log q_i). With -log u >= 1-u for u>0, KL >= sum_i p_i(1-q_i/p_i)=sum_i p_i-sum_i q_i=0. Equality requires q_i/p_i=1 at every i. The nonnegativity statement is about the summed divergence, not each summand. Its natural-log unit is nats. At boundary probabilities, the conventional zero-mass limit and support/infinite-divergence conditions apply; the lesson's tensors do not use that boundary.
+
+For p=(.8,.2), q=(.5,.5), the two natural-log summands are 0.3760029033965885 and -0.183258146374831, total 0.19274475702175747. Reversing weights gives KL(q||p)=0.2231435513142097, different from the forward KL. A first-place label/tie result cannot reconstruct either entire vector.
+
+CE(p,q)=-sum_i p_i log q_i=0.6931471805599453; H(p)=-sum_i p_i log p_i=0.5004024235381879. Subtracting H from CE yields KL=0.19274475702175747 to <1e-15 in the independent Python float calculation. If teacher p is detached/fixed, dH/d(student logits)=0, hence CE and KL give the same student gradient. This equality does not exchange KL's weighting distribution.
+
+For student logits z, q_T=softmax(z/T), p_T=softmax(v/T), and N valid positions, L=(T^2/N) sum_valid sum_i p_Ti(log p_Ti-log q_Ti). Since p_T is detached, dL/dz_i = (T/N)(q_Ti-p_Ti) at each valid output position. Invalid output rows get zero direct derivative. At T=1, N=2, q-p=(-.3,.3) gives (-.15,.15); N=3 gives (-.1,.1) for each identical row. The denominator is valid positions, after summing the whole vocabulary: it is neither vocabulary width nor all sequence positions.
+
+At T=2 in the same example, teacher p_T=(2/3,1/3), student q_T=(1/2,1/2). Multiplication by T^2 once gives loss 0.2265320490605296; derivative at each of two valid positions is (-1/6,1/6). The code's float32 casts permit rounding error under 1e-6 for this check.
+
+Masking a direct output loss does not remove a prefix input or sever all shared computation. The bounded cumsum-prefix variant constructs causal output scores from preceding features. Its masked output row has logits gradient (0,0), while its earlier feature has derivative -0.6000000238418579 from later valid outputs. This supports the ability of an ordinary ignored prompt/context to influence later features. It does not claim a properly attention-masked PAD must influence later outputs, nor does the independent-logits original fence itself demonstrate contextual modeling.

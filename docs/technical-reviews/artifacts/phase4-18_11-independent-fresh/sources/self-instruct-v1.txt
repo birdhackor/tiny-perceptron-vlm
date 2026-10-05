@@ -1,0 +1,1686 @@
+                                                                    SELF-INSTRUCT: Aligning Language Model
+                                                                         with Self Generated Instructions
+                                                         Yizhong Wang♣ Yeganeh Kordi♢ Swaroop Mishra♡ Alisa Liu♣
+                                                           Noah A. Smith♣+ Daniel Khashabi♠            Hannaneh Hajishirzi♣+
+                                                       ♣
+                                                         University of Washington Tehran Polytechnic ♡ Arizona State University
+                                                                                    ♢
+                                                                     ♠
+                                                                       Johns Hopkins University + Allen Institute for AI
+                                                                              yizhongw@cs.washington.edu
+
+
+                                                                   Abstract                                  can follow natural language instructions (Mishra
+                                                                                                             et al., 2022; Wei et al., 2022; Sanh et al., 2022;
+                                                 Large “instruction-tuned” language models
+                                                                                                             Wang et al., 2022; Ouyang et al., 2022; Chung et al.,
+                                                 (finetuned to respond to instructions) have
+                                                 demonstrated a remarkable ability to gener-                 2022, i.a.). These developments are powered by
+arXiv:2212.10560v1 [cs.CL] 20 Dec 2022
+
+
+
+
+                                                 alize zero-shot to new tasks. Nevertheless,                 two key components: large pre-trained language
+                                                 they depend heavily on human-written instruc-               models (LM) and human-written instruction data.
+                                                 tion data that is limited in quantity, diver-               PROMPTSOURCE (Bach et al., 2022) and SUPER-
+                                                 sity, and creativity, therefore hindering the               NATURALINSTRUCTIONS (Wang et al., 2022) are
+                                                 generality of the tuned model. We intro-                    two notable recent datasets that use extensive man-
+                                                 duce SELF-INSTRUCT, a framework for im-
+                                                                                                             ual annotation for collecting instructions to con-
+                                                 proving the instruction-following capabilities
+                                                 of pretrained language models by bootstrap-
+                                                                                                             struct T0 (Bach et al., 2022; Sanh et al., 2022) and
+                                                 ping off its own generations. Our pipeline                  T𝑘-INSTRUCT (Wang et al., 2022). However, this
+                                                 generates instruction, input, and output sam-               process is costly and often suffers limited diver-
+                                                 ples from a language model, then prunes                     sity given that most human generations tend to be
+                                                 them before using them to finetune the orig-                popular NLP tasks, falling short of covering a true
+                                                 inal model. Applying our method to vanilla                  variety of tasks and different ways to describe them.
+                                                 GPT3, we demonstrate a 33% absolute im-                     Given these limitations, continuing to improve the
+                                                 provement over the original model on SUPER-
+                                                                                                             quality of instruction-tuned models necessitates the
+                                                 NATURALINSTRUCTIONS, on par with the per-
+                                                 formance of InstructGPT001 1 , which is trained             development of alternative approaches for supervis-
+                                                 with private user data and human annotations.               ing instruction-tuned models.
+                                                 For further evaluation, we curate a set of                     In this work, we introduce SELF-INSTRUCT, a
+                                                 expert-written instructions for novel tasks, and            semi-automated process for instruction-tuning a
+                                                 show through human evaluation that tuning                   pretrained LM using instructional signals from the
+                                                 GPT3 with SELF-INSTRUCT outperforms using
+                                                                                                             model itself. The overall process is an iterative
+                                                 existing public instruction datasets by a large
+                                                 margin, leaving only a 5% absolute gap behind               bootstrapping algorithm (see Figure 1), which starts
+                                                 InstructGPT001 . SELF-INSTRUCT provides an                  off with a limited (e.g., 175 in our study) seed set
+                                                 almost annotation-free method for aligning pre-             of manually-written instructions that are used to
+                                                 trained language models with instructions, and              guide the overall generation. In the first phase, the
+                                                 we release our large synthetic dataset to facili-           model is prompted to generate instructions for new
+                                                 tate future studies on instruction tuning2 .                tasks. This step leverages the existing collection of
+                                                                                                             instructions to create more broad-coverage instruc-
+                                         1       Introduction
+                                                                                                             tions that define (often new) tasks. Given the newly-
+                                         The recent NLP literature has witnessed a tremen-                   generated set of instructions, the framework also
+                                         dous amount of activity in building models that                     creates input-output instances for them, which can
+                                             1
+                                                Unless otherwise specified, our comparisons are with the     be later used for supervising the instruction tuning.
+                                         text-davinci-001 engine. We focus on this engine since it           Finally, various measures are used to prune low-
+                                         is the closest to our experimental setup: supervised fine-tuning    quality and repeated instructions, before adding
+                                         with human demonstrations. The newer engines are more
+                                         powerful, though they use more data (e.g., code completion or       them to the task pool. This process can be repeated
+                                         latest user queries) or algorithms (e.g., PPO) that are difficult   for many interactions until reaching a large number
+                                         to compare with.                                                    of tasks.
+                                              2
+                                                Code and data will be available at https://github.
+                                         com/yizhongw/self-instruct.                                            To evaluate SELF-INSTRUCT empirically, we run
+                                                                                                                                Step 2: Classification
+                            Task Pool                             Step 1: Instruction Generation
+                                                                                                                                 Task Identification
+
+                                                                 Task
+                                               LM                                                                      LM
+                                                               Instruction : Give me a quote from a
+                                                               famous person on this topic.
+
+175 seed tasks with
+ 1 instruction and
+                                                             Step 3: Instance Generation
+1 instance per task
+                                           Task
+                                                                                                                                Yes
+                                        Instruction : Find out if the given text is in favor of or against abortion.
+        Step 4: Filtering               Class Label: Pro-abortion
+                                        Input:
+                                            TaskText: I believe that women should have the right to choose whether          Output-first
+                                        or not they want to have an abortion.                                                                 LM
+
+
+                                           Task
+                                         Instruction : Give me a quote from a famous person on this topic.                       No
+
+                                         Input:
+                                            TaskTopic: The importance of being honest.
+                                         Output: "Honesty is the first chapter in the book of wisdom." - Thomas
+                                         Jefferson                                                                            Input-first
+
+
+Figure 1: A high-level overview of SELF-INSTRUCT. The process starts with a small seed set of tasks (one instruc-
+tion and one input-output instance for each task) as the task pool. Random tasks are sampled from the task pool,
+and used to prompt an off-the-shelf LM to generate both new instructions and corresponding instances, followed
+by filtering low-quality or similar generations, and then added back to the initial repository of tasks. The resulting
+data can be used for the instruction tuning of the language model itself later to follow instructions better. Tasks
+shown in the figure are generated by GPT3. See Table 10 for more creative examples.
+
+
+this framework on GPT3 (Brown et al., 2020),                            data; (2) We demonstrate its effectiveness via exten-
+which is a vanilla LM (§4). The iterative SELF-                         sive instruction-tuning experiments; (3) We release
+INSTRUCT process on this model leads to about                           a large synthetic dataset of 52K instructions and a
+52k instructions, paired with about 82K instance                        set of manually-written novel tasks for building and
+inputs and target outputs. We observe that the result-                  evaluating future instruction-following models.
+ing data provides a diverse range of creative tasks
+and over 50% of them have less than 0.3 ROUGE-                          2     Related Work
+L overlaps with the seed instructions (§4.2). On
+                                                                        Instruction-following language models. A se-
+this resulting data, we build GPT3SELF-INST by
+                                                                        ries of works have found evidence that vanilla lan-
+fine-tuning GPT3 (i.e., the same model used for
+                                                                        guage models can be effective at following general
+generating the instructional data). We evaluate
+                                                                        language instructions if tuned with annotated “in-
+GPT3SELF-INST in comparison to various other mod-
+                                                                        structional” data – datasets containing language
+els on both typical NLP tasks included in SUPER-
+                                                                        instructional commands and their desired outcome
+NATURALINSTRUCTIONS (Wang et al., 2022), and
+                                                                        based on human judgement (Weller et al., 2020;
+a set of new instructions that are created for novel
+                                                                        Mishra et al., 2022; Wang et al., 2022; Wei et al.,
+usage of instruction-following models (§5). The
+                                                                        2022; Sanh et al., 2022; Ouyang et al., 2022; Par-
+SUPERNI results indicate that GPT3SELF-INST out-
+                                                                        mar et al., 2022; Scialom et al., 2022; Chung et al.,
+performs GPT3 (the original model) by a large
+                                                                        2022; Luo et al., 2022; Puri et al., 2022; Yin et al.,
+margin (+33.1%) and nearly matches the perfor-
+                                                                        2022; Chakrabarty et al., 2022; Lin et al., 2022;
+mance of InstructGPT001 . Moreover, our human
+                                                                        Gupta et al., 2022; Muennighoff et al., 2022). Addi-
+evaluation on the newly-created instruction set
+                                                                        tionally, they show a direct correlation between the
+shows that GPT3SELF-INST demonstrates a broad
+                                                                        size and diversity of the “instructional” data and the
+range of instruction following ability, outperform-
+                                                                        generalizability of resulting models to unseen tasks.
+ing models trained on other publicly available in-
+                                                                        Since these developments depend on human anno-
+struction datasets and leaving only a 5% gap behind
+                                                                        tated “instructional” data, this poses a bottleneck
+InstructGPT001 .
+                                                                        for progress toward more generalizable models (for
+   In summary, our contributions are: (1) SELF-                         example see Fig. 5a in Wang et al., 2022). Our
+INSTRUCT, a method for inducing instruction-                            work aims to tackle this bottleneck by reducing the
+following capability with minimal human-labeled                         dependence on human annotators.
+   Additionally, despite the remarkable perfor-            SELF-INSTRUCT produces a variety of tasks from
+mance of models like InstructGPT (Ouyang et al.,           scratch.
+2022), their construction process remains quite
+                                                           Knowledge distillation. Knowledge distilla-
+opaque. In particular, the role of data has remained
+                                                           tion (Hinton et al., 2015; Sanh et al., 2019; West
+understudied due to limited transparency and data
+                                                           et al., 2021; Magister et al., 2022) often involves
+released by major corporate entities behind these
+                                                           the transfer of knowledge from larger models to
+key models. Addressing such challenges necessi-
+                                                           smaller ones. SELF-INSTRUCT can also be viewed
+tates the creation of a large-scale, public dataset
+                                                           as a form of “knowledge distillation", however, it
+covering a broad range of tasks.
+                                                           differs from this line in the following ways: (1)
+   Instruction-following models have also been of
+                                                           the source and target of distillation are the same,
+interest in the multi-modal learning literature (Fried
+                                                           i.e., a model’s knowledge is distilled to itself; (2)
+et al., 2018; Shridhar et al., 2020; Min et al., 2022;
+                                                           the content of distillation is in the form of an
+Weir et al., 2022). SELF-INSTRUCT, as a general
+                                                           instruction task (i.e., instructions that define a task,
+approach to expanding data, can potentially also be
+                                                           and a set of examples that instantiate it).
+helpful in those settings; however, this is out of the
+scope of this work.                                        Bootstrapping with limited resources. A series
+                                                           of recent works use language models to boot-
+Language models for data generation and aug-               strap some inferences using specialized methods.
+mentation. A variety of works have relied on               NPPrompt (Zhao et al., 2022) provides a method
+generative LMs for data generation (Schick and             to generate predictions for semantic labels without
+Schütze, 2021; Wang et al., 2021; Liu et al., 2022;        any fine-tuning. It uses a model’s own embeddings
+Meng et al., 2022) or augmentation (Feng et al.,           to automatically find words relevant to the label of
+2021; Yang et al., 2020; Mekala et al., 2022). For         the data sample and hence reduces the dependency
+example, Schick and Schütze (2021) propose to              on manual mapping from model prediction to la-
+replace human annotations of a given task with             bel (verbalizers). STAR (Zelikman et al., 2022)
+prompting large LMs and use the resulting data for         iteratively leverages a small number of rationale
+fine-tuning (often smaller) models in the context          examples and a large dataset without rationales, to
+of SuperGLUE tasks (Wang et al., 2019). While              bootstrap a model’s ability to perform reasoning.
+our work can be viewed as a form of “augmenta-             Self-Correction (Welleck et al., 2022) decouples an
+tion,” our work differs from this line in that it is not   imperfect base generator (model) from a separate
+specific to a particular task (say, QA or NLI). In         corrector that learns to iteratively correct imperfect
+contrast, a distinct motivation for SELF-INSTRUCT          generations and demonstrates improvement over the
+is to bootstrap new task definitions that may not          base generator. Our work instead focuses on boot-
+have been defined before by any NLP practitioner           strapping new tasks in the instruction paradigm.
+(though potentially still important for downstream
+users).                                                    Instruction generation. A series of recent
+                                                           works (Zhou et al., 2022b; Ye et al., 2022; Singh
+Self-training. A typical self-training framework           et al., 2022; Honovich et al., 2022) generate instruc-
+(He et al., 2019; Xie et al., 2020; Du et al., 2021;       tions of a task given a few examples. While SELF-
+Amini et al., 2022; Huang et al., 2022) uses trained       INSTRUCT also involves instruction generation, a
+models to assign labels to unlabeled data and then         major difference in our case is it is task-agnostic;
+leverages the newly labeled data to improve the            we generate new tasks (instructions along with in-
+model. In a similar line, Zhou et al. (2022a) use          stances) from scratch.
+multiple prompts to specify a single task and pro-
+                                                           3   Method
+pose to regularize via prompt consistency, encour-
+aging consistent predictions over the prompts. This        Annotating large-scale instruction data can be chal-
+allows either finetuning the model with extra un-          lenging for humans because it requires 1) creativity
+labeled training data, or direct application at infer-     to come up with novel tasks and 2) expertise for
+ence time. While SELF-INSTRUCT has some simi-              writing the labeled instances for each task. In this
+larities with the self-training literature, most self-     section, we detail our process for SELF-INSTRUCT,
+training methods assume a specific target task as          which refers to the pipeline of generating tasks with
+well as unlabeled examples under it; in contrast,          a vanilla pretrained language model itself and
+then conducting instruction tuning with this gener-        task or not.3 We prompt vanilla GPT3 few-shot to
+ated data in order to align the language model to          determine this, using 12 classification instructions
+follow instructions better. This pipeline is depicted      and 19 non-classification instructions from the seed
+in Figure 1.                                               tasks. The prompting template is shown in Table 7.
+
+3.1   Defining Instruction Data                            Instance Generation. Given the instructions and
+The instruction data we want to generate contains          their task type, we generate instances for each in-
+a set of instructions {𝐼𝑡 }, each of which defines a       struction independently. This is challenging be-
+task 𝑡 in natural language. Each task has one or           cause it requires the model to understand what the
+more input-output instances (𝑋𝑡 , 𝑌𝑡 ). A model 𝑀          target task is, based on the instruction, figure out
+is expected to produce the output 𝑦, given the task        what additional input fields are needed and gen-
+instruction 𝐼𝑡 and the instance input 𝑥: 𝑀(𝐼𝑡 , 𝑥) =       erate them, and finally complete the task by pro-
+𝑦, for (𝑥, 𝑦) ∈ (𝑋𝑡 , 𝑌𝑡 ). Note that the instruction      ducing the output. We found that pretrained lan-
+and instance input does not have a strict boundary         guage models can achieve this to a large extent when
+in many cases. For example, “write an essay about          prompted with instruction-input-output in-context
+school safety” can be a valid instruction that we          examples from other tasks. A natural way to do this
+expect models to respond to directly, while it can         is the Input-first Approach, where we can ask a
+also be formulated as “write an essay about the fol-       language model to come up with the input fields
+lowing topic” as the instruction, and “school safety”      first based on the instruction, and then produce the
+as an instance input. To encourage the diversity of        corresponding output. This generation order is sim-
+the data format, we allow such instructions that do        ilar to how models are used to respond to instruction
+not require additional input (i.e., 𝑥 is empty).           and input, but here with in-context examples from
+                                                           other tasks. The prompting template is shown in
+3.2   Automatic Instruction Data Generation                Table 8.
+Our pipeline for generating the instruction data con-         However, we found that this approach can gen-
+sists of four steps: 1) instruction generation, 2) iden-   erate inputs biased toward one label, especially for
+tifying whether the instruction represents a classifi-     classification tasks (e.g., for grammar error detec-
+cation task or not, 3) instance generation with the        tion, it usually generates grammatical input). There-
+input-first or the output-first approach, and 4) filter-   fore, we additionally propose an Output-first Ap-
+ing low-quality data.                                      proach for classification tasks, where we first gener-
+                                                           ate the possible class labels, and then condition the
+Instruction Generation. SELF-INSTRUCT is                   input generation on each class label. The prompting
+based on a finding that large pretrained language          template is shown in Table 9.4 We apply the output-
+models can be prompted to generate new and                 first approach to the classification tasks identified
+novel instructions when presented with some                in the former step, and the input-first approach to
+existing instructions in the context. This provides        the remaining non-classification tasks.
+us with a way to grow the instruction data from a
+small set of seed human-written instructions. We           Filtering and Postprocessing. To encourage di-
+propose to generate a diverse set of instructions in       versity, a new instruction is added to the task pool
+a bootstrapping fashion. We initiate the task pool         only when its ROUGE-L overlap with any exist-
+with 175 tasks (1 instruction and 1 instance for           ing instruction is less than 0.7. We also exclude
+each task) written by our authors. For every step,         instructions that contain some specific keywords
+we sample 8 task instructions from this pool as            (e.g., images, pictures, graphs) that usually can not
+in-context examples. Of the 8 instructions, 6 are          be processed by language models. When generat-
+from the human-written tasks, and 2 are from the           ing new instances for each instruction, we filter out
+model-generated tasks in previous steps to promote         instances that are exactly the same or those with
+diversity. The prompting template is shown in              the same input but different outputs.
+Table 6.                                                      3
+                                                                 More concretely, we regard tasks that have a limited and
+                                                           small output label space as classification tasks.
+Classification Task Identification. Because we                 4
+                                                                 In this work, we use a fixed set of seed tasks for prompt-
+need two different approaches for classification and       ing the instance generation, and thus only generate a small
+                                                           number of instances per task in one round. Future work can
+non-classification tasks, we next identify whether         use randomly sampled tasks to prompt the model to generate
+the generated instruction represents a classification      a larger number of instances in multiple rounds.
+3.3       Finetuning the LM to Follow Instructions          the parse tree as well as its first direct noun object.
+After the creation of the large-scale instruction data,     26,559 out of the 52,445 instructions contain such
+we use this data to finetune the original language          structure; other instructions usually contain more
+model (i.e., SELF-INSTRUCT). To do this, we con-            complex clauses (e.g., “Classify whether this tweet
+catenate the instruction and instance input as a            contains political content or not.”) or are framed
+prompt and train the model to generate the instance         as questions (e.g., “Which of these statements are
+output in a standard supervised way. To make the            true?”). We plot the top 20 most common root
+model robust to different formats, we use multiple          verbs and their top 4 direct noun objects in Figure 2,
+templates to encode the instruction and instance            which accounts for 14% of the entire set. Overall,
+input together. For example, the instruction can            we see quite diverse intents and textual formats in
+be prefixed with “Task:” or not, the input can be           these instructions.
+prefixed with “Input:” or not, “Output:” can be                We further study how the generated instructions
+appended at the end of the prompt, and different            differ from the seed instructions that are used to
+numbers of break lines can be put in the middle,            prompt the generation. For each generated instruc-
+etc.                                                        tion, we compute its highest ROUGE-L overlap
+                                                            with the 175 seed instructions. We plot the dis-
+4       SELF-INSTRUCT Data from GPT3                        tribution of these ROUGE-L scores in Figure 3,
+In this section, we apply our method for inducing           indicating a decent number of new instructions that
+instruction data to GPT3 as a case study. We use the        do not have much overlap with the seeds. We also
+largest GPT3 language model (“davinci” engine)              demonstrate diversity in length of the instructions,
+accessed through the OpenAI API5 . The parameters           instance inputs, and instance outputs in Figure 4.
+for making queries are described in Appendix A.1.
+Here we present an overview of the generated data.
+                                                            4.3    Quality
+4.1       Statistics
+                                                            So far, we have shown the quantity and diversity
+Table 1 describes the basic statistics of the gener-
+                                                            of the generated data, but its quality remains uncer-
+ated data. We generate a total of over 52K instruc-
+                                                            tain. To investigate this, we randomly sample 200
+tions, and more than 82K instances corresponding
+                                                            instructions and randomly select 1 instance per in-
+to these instructions after filtering.
+                                                            struction. We asked an expert annotator (co-author
+                                                            of this work) to label whether each instance is cor-
+         statistic
+                                                            rect or not, in terms of the instruction, the instance
+         # of instructions                         52,445
+          - # of classification instructions       11,584   input, and the instance output. Evaluation results
+          - # of non-classification instructions   40,861   in Table 2 show that most of the generated instruc-
+         # of instances                            82,439   tions are meaningful, while the generated instances
+          - # of instances with empty input        35,878
+         ave. instruction length (in words)         15.9    may contain more noise (to a reasonable extent).
+         ave. non-empty input length (in words)     12.7    However, we found that even though the genera-
+         ave. output length (in words)              18.9    tions may contain errors, most of them are still in
+                                                            the correct format or even partially correct, which
+Table 1: Statistics of the generated data by applying
+SELF-INSTRUCT to GPT3.
+                                                            can provide useful guidance for training models to
+                                                            follow instructions. We listed a number of good
+                                                            generations and bad generations in Table 10 and
+4.2       Diversity                                         Table 11 respectively.
+To study what types of instructions are generated
+and how diverse they are, we identify the verb-noun
+structure in the generated instructions. We use the
+                                                            5     Experimental Results
+Berkeley Neural Parser6 (Kitaev and Klein, 2018;
+Kitaev et al., 2019) to parse the instructions, and         We conduct experiments to measure and compare
+then extract the verb that is closest to the root of        the quality of models under various instruction tun-
+    5
+        https://openai.com/api/                             ing setups. We first describe our models and other
+    6
+        https://parser.kitaev.io/                           baselines, followed by our experiments.
+                                                                                                                                                                      3000
+
+
+
+
+                                                                                                                                                     # Instructions
+                                                                                                                                                                      2000
+
+                                               letter
+
+
+                            par
+                                                                                                                                                                      1000
+
+
+                                                                                essay                                                                                    0
+
+
+
+
+                              agr
+                                                                                                                                                                             0               0.2              0.4          0.6         0.8     1
+                                                                                                                                                                                 ROUGE-L Overlap with the Most Similar Seed Instruction
+
+
+                                aph
+             example
+                                                                                                                                                      Figure 3: Distribution of the ROUGE-L
+                                                                                                                                                      scores between generated instructions and
+      list                                                                                             function                                       their most similar seed instructions.
+                                                      write
+set                           give
+
+
+
+
+                                                                                                                                                     # Instructions
+                                                                                                                                                                      6000
+
+advice                                                                                        detect
+                                                                                           predict                                        sarcasm
+                                                                                                                                                                      4000
+                                                                                         output                                    sentiment                          2000
+                                                                                       identify                                             word
+                                                                                           te                                           number
+                                                                                     expla ll
+  word                       find                                             cla have
+                                                                                          in                                              topic
+                                                                                                                                     sentimen
+                                                                                                                                              t
+                                                                                                                                           joke
+                                                                                                                                                                         0
+                                                                                                                                                                                   10              20               30           40     50    60
+                                                                                 ssi                                                 story                                                                   Instruction Length
+                                                                                    fy
+                                                                        ge esign
+
+
+                                                                                                                                   c
+                                                                                                                         diffe oncept
+                                       ate
+
+                                                       desc
+
+
+
+
+                  er
+                                                                          ne
+
+
+                                                                                                                                renc
+                                                                        d
+                                               make
+
+
+
+
+                b
+                                                                            ra
+
+
+                                                                                                                                    e
+
+            num
+                                                                              te
+                                     cre
+
+
+
+
+                                                                                                                                     se
+                                                                                                                                   co t                               3000
+                                                           ribe
+
+
+
+
+                                                                                                                              arra in
+
+
+
+
+                                                                                                                                                     # Inputs
+                                                                                                                                  y
+                                                                                                                              list
+                   ce
+                                                                                                                                                                      2000
+                                                                                                                             te
+                                                                                                                          ar xt
+
+                 en
+                                                                                                                     s
+                                                                                                                  se entim ticle                                      1000
+               nt                                                                                                   nte en
+                                                                                                              se s nce
+                                                                                                                             t
+                          m
+
+
+
+
+             se                                                                                                 nt erie
+                                                                                                                  en s
+                                                                                                                                                                         0
+                       gra
+
+
+
+
+                                                                                                                   ce                                                                   10              20           30           40     50   60
+                                                                                                         nu liscture
+               y
+
+
+
+
+                                                                                                           m
+             wa
+
+
+
+
+                                                                                                                                                                                                               Input Length
+                                                              situati
+
+
+
+
+                                                                                                            be
+                                                                                           alg gam
+                    pro
+
+                                   rithm
+
+
+
+
+                                                                                                              r
+                                                                                                       str
+                                                                                              ori
+                                                                               sys time s
+
+
+                                                                                                          u
+
+                                                                                                                t
+                                                                                                 thm
+                                    ction
+
+
+
+
+                                                                                                                                                                      30k
+                                                                                  t
+                         list
+
+
+
+
+                                                                                   proc
+
+                                                                                       em
+                                                                            pers
+
+
+
+
+                                                                                                     e
+                               algo
+
+
+
+
+                                                       sentence
+
+
+
+
+                                            list
+                                                                                                                                                      # Onputs
+                                                                                                                                                                      20k
+                                                                        on
+                                                   story
+
+
+
+
+                                                                                       es
+                              fun
+
+
+
+
+                                                                                on
+                                                              program
+
+
+
+
+                                                                                                                                                                      10k
+
+                                                                                                                                                                        0
+      Figure 2: The top 20 most common root verbs (inner circle) and                                                                                                                    10          20               30          40     50    60
+
+      their top 4 direct noun objects (outer circle) in the generated in-                                                                                                                                     Onput Length
+
+      structions. Despite their diversity, the instructions shown here                                                                                Figure 4: Length distribution of the generated
+      only account for 14% of all the generated instructions because                                                                                  instructions, non-empty inputs, and outputs.
+      many instructions (e.g., “Classify whether the user is satisfied
+      with the service.”) do not contain such a verb-noun structure.
+
+
+
+                     Quality Review Question                                         Yes %                                   the OpenAI finetuning API7 . We use the default
+                                                                                                                             hyper-parameters, except that we set the prompt
+                         Does the instruction
+                        describe a valid task?
+                                                                                     92%                                     loss weight to 0, and we train the model for 2 epochs.
+                                                                                                                             We refer the readers to Appendix A.2 for additional
+                        Is the input appropriate
+                                                                                     79%
+                                                                                                                             finetuning details. The resulting model is denoted
+                           for the instruction?                                                                              as GPT3SELF-INST .
+              Is the output a correct and acceptable
+                                                                                     58%                                      5.2                   Baselines
+              response to the instruction and input?
+                                                                                                                              Off-the-shelf language models. We evaluate T5-
+                          All fields are valid                                       54%
+                                                                                                                              LM (Lester et al., 2021; Raffel et al., 2020) and
+   Table 2: Data quality review for the instruction, input,                                                                   GPT3 (Brown et al., 2020) as the vanilla LM base-
+   and output of the generated data. See Table 10 and Ta-                                                                     lines (only pre-training, no additional fine-tuning).
+   ble 11 for representative valid and invalid examples.                                                                      These baselines will indicate the extent to which off-
+                                                                                                                              the-shelf LMs are capable of following instructions
+                                                                                                                              naturally immediately after pretraining.
+      5.1     GPT3SELF-INST : fine-tuning GPT3 on its
+              own instruction data                                                                                            Publicly-available instruction-tuned models.
+   With the instruction-generated instruction data, we                                                                        T0 and T𝑘-INSTRUCT are two instruction-tuned
+   conduct instruction tuning for the GPT3 model it-                                                                          models proposed in Sanh et al. (2022) and Wang
+   self (the “davinci” engine). As we described in                                                                            et al. (2022) respectively, and are demonstrated
+   §3.3, we use various templates to concatenate the                                                                          to be able to follow instructions for many NLP
+   instruction and input, and train the model to gen-                                                                            7
+                                                                                                                                   https://beta.openai.com/docs/guides/
+   erate the output. This finetuning is done through                                                                          fine-tuning
+tasks. Both of these models are finetuned from            Results. We make the following observations
+the T5 (Raffel et al., 2020) checkpoints and are          from the results in Table 3. SELF-INSTRUCT boosts
+publicly available89 . For both of these models, we       the instruction-following ability of GPT3 by a large
+use their largest version with 11B parameters.            margin. The vanilla GPT3 model basically can-
+                                                          not follow human instructions at all. Upon manual
+Instruction-tuned GPT3 models. We evaluate
+                                                          analysis, we find that it usually generates irrele-
+InstructGPT (Ouyang et al., 2022), which is devel-
+                                                          vant and repetitive text, and does not know when
+oped by OpenAI based on GPT3 to follow human
+                                                          to stop generation. Compared with other mod-
+instructions better and has been found by the com-
+                                                          els that are not specifically trained for SUPERNI,
+munity to have impressive zero-shot abilities. There
+                                                          GPT3SELF-INST achieves better performance than T0
+are various generations of these models, where
+                                                          or the GPT3 finetuned on the T0 training set, which
+newer ones use more expansive data or algorithmic
+                                                          takes tremendous human labeling efforts. Notably,
+novelties10 . For our SUPERNI experiments in §5.3,
+                                                          GPT3SELF-INST also nearly matches the performance
+we only compare with their text-davinci-001
+                                                          of InstructGPT001 , which is trained with private
+engine, because their newer engines are trained with
+                                                          user data and human-annotated labels.
+the latest user data and are likely to already see the
+                                                             Models trained on SUPERNI training set still
+SUPERNI evaluation set. For our human evaluation
+                                                          achieve better performance on its evaluation set,
+of these models on newly written instructions, we
+                                                          which we attribute to the similar instruction style
+include their 001, 002 and 003 engines for com-
+                                                          and formatting. However, we show that SELF-
+pleteness.
+                                                          INSTRUCT still brings in additional gains when com-
+   Additionally, to compare SELF-INSTRUCT train-
+                                                          bined with the SUPERNI training set, proving its
+ing with other publicly available instruction tuning
+                                                          value as complementary data.
+data, we further finetune GPT3 model with data
+from PROMPTSOURCE and SUPERNI, which are                  5.4   Experiment 2: Generalization to
+used to train the T0 and T𝑘-INSTRUCT models. We                 User-oriented Instructions on Novel
+call them T0 training and SUPERNI training for                  Tasks
+short, respectively. To save the training budget, we
+sampled 50K instances (but covering all their in-         Despite the comprehensiveness of SUPERNI in col-
+structions) for each dataset, which has a comparable      lecting existing NLP tasks, most of these NLP tasks
+size to the instruction data we generated. Based on       were proposed for research purposes and skewed
+the findings from Wang et al. (2022) and our early        toward classification. To better access the practical
+experiments, reducing the number of instances per         value of instruction-following models, a subset of
+task does not degrade the model’s generalization          the authors curate a new set of instructions moti-
+performance to unseen tasks.                              vated by user-oriented applications. We first brain-
+                                                          storm different domains where large LMs may be
+5.3    Experiment 1: Zero-Shot Generalization             useful (e.g., email writing, social media, productiv-
+       on SUPERNI benchmark                               ity tools, entertainment, programming), then craft
+We first evaluate the models’ ability to follow in-       instructions related to each domain along with an
+structions on typical NLP tasks in a zero-shot fash-      input-output instance (again, input is optional). We
+ion. We use the evaluation set of SUPERNI (Wang           aim to diversify the styles and formats of these tasks
+et al., 2022), which consists of 119 tasks with 100 in-   (e.g., instructions may be long or short; input/out-
+stances in each task. In this work, we mainly focus       put may take the form of bullet points, tables, codes,
+on the zero-shot setup, i.e., the model is prompted       equations, etc.). In total, we create 252 instructions
+with the definition of the tasks only, without in-        with 1 instance per instruction. We believe it can
+context demonstration examples. For all our re-           serve as a testbed for evaluating how instruction-
+quests to the GPT3 variants, we use the determin-         based models handle diverse and unfamiliar instruc-
+istic generation mode (temperature as 0 and no nu-        tions. Table 4 presents a small portion of the 252
+cleus sampling) without specific stop sequences.          tasks. The whole test set will be available upon
+                                                          request.
+   8
+     https://huggingface.co/bigscience/T0
+   9
+     https://huggingface.co/allenai/                      Human evaluation setup. Evaluating models’
+tk-instruct-11b-def
+  10
+     https://beta.openai.com/docs/                        performance on this evaluation set of diverse tasks
+model-index-for-researchers                               is extremely challenging because different tasks re-
+                                                     Model                                                                                                      # Params                       ROUGE-L
+                                                     Vanilla LMs
+                                                     T5-LM                                                                                                            11B                               25.7
+                                                     GPT3                                                                                                            175B                               6.8
+                                                     Instruction-tuned w/o SUPERNI
+                                       1             T0                                                                                                               11B                               33.1
+                                                     GPT3 + T0 Training                                                                                              175B                               37.9
+                                       2             GPT3SELF-INST (Ours)                                                                                            175B                               39.9
+                                                     InstructGPT001                                                                                                  175B                               40.8
+                                                     Instruction-tuned w/ SUPERNI
+                                                     T𝑘-INSTRUCT                                                                                                      11B                               46.0
+                                                     GPT3 + SUPERNI Training                                                                                         175B                               49.5
+                                       3
+                                                     GPT3SELF-INST + SUPERNI Training (Ours)                                                                         175B                               51.6
+
+Table 3: Evaluation results on unseen tasks from SUPER-NATURALINSTRUCTIONS (§5.3). From the results, we
+see that 1 SELF-INSTRUCT can boost GPT3 performance by a large margin (+33.1%) and 2 nearly matches the
+performance of InstructGPT001 . Additionally, 3 it can further improve the performance even when a large amount
+of labeled instruction data is present.
+                                       correct
+                                     correct andand
+                                        correct       satisfying
+                                                   satisfying  response
+                                                                   response   acceptable
+                                                                                acceptable
+                                                                                         response
+                                                                                            response with
+                                                                                                       with
+                                                                                                          minor
+                                                                                                             minor
+                                                                                                                 imperfections
+                                                                                                                    imperfections
+                                        correct
+                                         A:
+                                     correct andand
+                                          correct and
+                                             correctandsatisfying
+                                                       satisfying
+                                                     and satisfying
+                                                         satisfying
+                                                   satisfying       response
+                                                                    response
+                                                                       response
+                                                                     response
+                                                                response         acceptable
+                                                                                   acceptable
+                                                                              acceptable      response
+                                                                                                response
+                                                                                          response
+                                                                                    B: acceptable    withwith
+                                                                                                  response    minor
+                                                                                                           with
+                                                                                                           minor
+                                                                                                           with  minorimperfections
+                                                                                                                        imperfections
+                                                                                                                  imperfections
+                                                                                                                minor imperfections
+                          0responds
+                             0respondsto
+                          0responds   to the
+                             00responds
+                                responds
+                               C:
+                                         to
+                                 0respondsto
+                                           to
+                                         the
+                                  responds
+                                              the
+                                            toto
+                                                instruction
+                                               the
+                                                the instruction
+                                                thetheinstruction
+                                                instruction    but
+                                                     instruction
+                                                               but
+                                                     instruction
+                                                                  but
+                                                                    has
+                                                                 butbut
+                                                        instruction but
+                                                                     hashas
+                                                                      has
+                                                                         significant
+                                                                         has
+                                                                         has
+                                                                       but   significant
+                                                                              significant
+                                                                            has
+                                                                          significant
+                                                                          significant
+                                                                                       errors
+                                                                                           errors
+                                                                                 significant
+                                                                                        errors
+                                                                                      errorserrors irrelevant
+                                                                                              errors D:irrelevant
+                                                                                                         irrelevant
+                                                                                                    irrelevant   or
+                                                                                                         irrelevant or
+                                                                                                                    invalid
+                                                                                                            irrelevant
+                                                                                                                  orororinvalid
+                                                                                                                         or
+                                                                                                                     invalidinvalid
+                                                                                                                       invalidresponse
+                                                                                                                         invalid response
+                                                                                                                                  response
+                                                                                                                                     response
+                                                                                                                               response
+                                                                                                                               response
+                           1      111 1
+ 100%
+    100%                  1
+    100%
+ 100%100%
+       100%
+                         64 64
+                            64
+                             6464                         44 44
+                                                          44 44
+                                                              44 44                       74
+                                                                                          74 74
+                                                                                              74
+                                                                                              74 74                        83 83
+                                                                                                                           83  83
+                                                                                                                               83 83                      113112
+                                                                                                                                                         112  113113                       129128
+                                                                                                                                                                                          128  129129                      169168
+                                                                                                                                                                                                                          168  169169                     192
+                                                                                                                                                                                                                                                           192192
+                                                                                                                                                                                                                                                                192192
+                                                                                                                                                                                                                                                                192
+                         64
+
+  75%75%
+      75%
+        75%                                               31
+                                                          31 31
+                                                             31
+                                                              31 31
+  75%
+                        186186
+                        186 186
+                              186
+                                                          59
+                                                          59 59
+                                                             59
+                                                              59 59                       30
+                                                                                          30 30
+                                                                                              30
+                                                                                              30 30
+                                                                                                                           54
+                                                                                                                           54 54
+                                                                                                                               54
+                                                                                                                               54 54
+                                                                                          80  80
+                                                                                          80 80
+                                                                                              80 80
+  50%50%
+  50% 50%
+        50%                                                                                                                                                49
+                                                                                                                                                            48 4948 48
+                                                            117
+                                                             117117
+                                                         117117                                                                84
+                                                                                                                               84 84                                                        44 4544 44
+                                                                                                                                                                                           45
+                                                                                                                           84
+                                                                                                                           84 84
+                                                                                                                                                            66 6666 66
+                                                                                                                                                           66                                                               39 4039 39
+                                                                                                                                                                                                                           40
+  25%25%
+  25% 25%
+     25%25%                                                                                                                                                                                 61 6161 61
+                                                                                                                                                                                           61                                                                     30 30
+                                                                                          68  68
+                                                                                              68 68
+                                                                                          68 68                                                                                                                                                             30303030
+                                                                                                                                                                                                                            34 3434 34
+                                                                                                                                                                                                                           34                                    28 28
+                                                                                                                               31
+                                                                                                                               31 31                                                                                                                       28282828
+                                                                                                                           31 31
+                                                                                                                           31                               25 2525 25                      18 1818 18                      10 1010 10
+                                                                                                                                                           25                              18                              10                                     2
+   0% 0%
+       0%
+   0% 0%0%                                                                                                                                                                                                                                                  22 2 2 2
+                     33P3PTT333T3                    ng inngg ng                           ng inngg ng                                 NpIIIeeNNI NI
+                                                                                                                                               N                             ct uct ct                  01 10-1001 1                     2 0202002                       3 0033003
+             G PPPTTG
+                    TG P  TGP          r  a  inniniirnriaainginingrnianiigni
+                                             i                                  r ainniirnraiaggniinnirnaigini
+                                                                                   i                                             up errN
+                                                                                                                                    e  N
+                                                                                                                                       u
+                                                                                                                                       u prurrpIer Insttr-ruIsunctrttsurtIucrntcsttru PT-0-00P1-T0-P0P0T
+                                                                                                                                         e                                                                   T  00            T-  -0P02-T0-T
+                                                                                                                                                                                                                                  0        0 T00-2             T
+                                                                                                                                                                                                                                                               - 0-0P30-T0-0-00003T
+                                                                                                                                                                                                                                                                                  3-
+              G                              aT T                                a   TT   a                                       p  S
+                                                                                                                                     S p                         s          s                                             P              P P                P       P
+                                                                                                                                                                                                                                                                   TtGP
+        nillaG G               T    TTTr00ar0TTr0a T rNIIeeTrTrNrNIIIrTNrI T ct +++uScSctut+++cStu+ S SeT
+                                 000T                                                                                                              l
+                                                                                                                                                                      fIInnelf-
+                                                                                                                                                    lff-3-SISnleefll-fS              u c
+                                                                                                                                                                                       t tG
+                                                                                                                                                                                         G  r
+                                                                                                                                                                                             PutTcGtrG
+                                                                                                                                                                                                     PcTtG uctG
+                                                                                                                                                                                                     u                tGPutrTcG
+                                                                                                                                                                                                                        r     u  PutcTGtG utcGtG
+                                                                                                                                                                                                                               tcG
+                                                                                                                                                                                                                                                       rPuutTcG
+                                                                                                                                                                                                                                                        r
+                                                                                                                                                                                                                                                                 PG
+                                                                                                                                                                                                                                                              cttGuc
+      Va                       TT T                                    perNpp Npe                                          tu
+                                                                                                                                               GSPe Se                             tr c st cst                tr c stsct tr                    trc ssttc tr
+                           T3+                               SupeSSuuSeru                           strrnuusnnctrsutsrtcturrcsttru                                             InstruIntruIInns           InstruIntIrnuIns                IntsruIInntruIns
+                    GP                      T  3    +SSuu Sup                     e l
+                                                                                    Tf-3-SIInSeneelsllf-tff-II-eInIlsft-In                                                    Ins Ins                    Ins Ins                        Ins Ins
+                                   GP                                         GSSPelfSSelfS
+
+Figure 5: Performance of GPT3 model and its instruction-tuned variants, evaluated by human experts on our 252
+user-oriented instructions (§5.4). Human evaluators are instructed to rate the models’ responses into four levels. The
+results indicate that GPT3SELF-INST outperforms all the other GPT3 variants trained on publicly available instruction
+datasets. Additionally, GPT3SELF-INST scores nearly as good as InstructGPT001 (c.f., footnote 1).
+
+
+quire different expertise. Indeed, many of these                                                                                              • R ATING-B: The response is acceptable but has
+tasks cannot be measured by automatic metrics or                                                                                                minor errors or imperfections that can be im-
+even be judged by normal crowdworkers (e.g., writ-                                                                                              proved.
+ing a program, or converting first-order logic into                                                                                           • R ATING-C: The response is relevant and re-
+natural language). To get a more faithful evaluation,                                                                                           sponds to the instruction, but it has significant
+we asked the authors of the instructions to judge                                                                                               errors in the content. For example, GPT3 might
+model predictions. The evaluators were asked to                                                                                                 generate a valid output first, but continue to gen-
+rate the output based on whether it accurately and                                                                                              erate other irrelevant things.
+effectively completes the task. We implemented a                                                                                              • R ATING-D: The response is irrelevant or invalid,
+four-level rating system for categorizing the quality                                                                                           including repetition of the input, totally irrelevant
+of the models’ outputs, defined as follows:                                                                                                     output, etc.
+
+• R ATING-A: The response is valid and satisfying.
+Results. Figure 5 provides the performance of                   lightweight process for aligning their pre-
+GPT3 model and its instruction-tuned counterparts               training distribution/objective which might be
+on this newly written instruction set. As anticipated,          replaceable with a different process.
+the vanilla GPT3 language model is largely unable
+to respond to instructions, and all instruction-tuned     While the reality probably lies somewhere in be-
+models demonstrate comparatively higher perfor-           tween these two extremes, we conjecture that it is
+mance, Nonetheless, GPT3SELF-INST (i.e., GPT3             closer to 𝐻2 , particularly for larger models. This
+model fine-tuned with SELF-INSTRUCT) outper-              intuition, that LMs already know much about lan-
+forms those counterparts trained on T0 or SUPERNI         guage instructions, is a key motivation for SELF-
+by a large margin, demonstrating the value of the         INSTRUCT and is also supported by its empirical
+generated data despite the noise. Compared with           success.
+InstructGPT001 (c.f. footnote 1), GPT3SELF-INST
+                                                          6.2   Broader Impact
+is quite close in the performance—if we count
+acceptable response with minor imperfections              Beyond the immediate focus of this paper, we
+(R ATING-3) as valid, GPT3SELF-INST is only 5% be-        believe that SELF-INSTRUCT may help bring
+hind InstructGPT001 . Lastly, our evaluation con-         more transparency to what happens “behind the
+firms the impressive instruction-following ability        scenes” of widely-used instruction-tuned models
+of InstructGPT002 & InstructGPT003 models. Al-            like InstructGPT. Unfortunately, such industrial
+though there are many factors behind this success,        models remain behind the API walls as their
+we conjecture that future work can largely benefit        datasets are not released, and hence there is lit-
+from improving the quality of our generated data by       tle understanding of their constructions and why
+using human annotators or training a reward model         they demonstrate impressive capabilities. The bur-
+to select better generations, similar to the algorithm    den now falls on academia to better understand the
+used in Ouyang et al. (2022).                             source of success in these models and strive for bet-
+                                                          ter – yet open – models. We believe our findings in
+ 5.5    Example Predictions from GPT3SELF-INST            this paper demonstrate the importance of diverse in-
+                                                          struction data, and our large synthetic dataset can be
+We present a selection of user-oriented tasks, the
+                                                          the first step toward higher-quality data for building
+corresponding GPT3SELF-INST -produced responses
+                                                          better instruction-following models.
+and annotator ratings in Table 4. We see that even
+for responses rated as level 2, the model demon-          6.3   Limitations of SELF-INSTRUCT
+strates extensive steps in solving the task, even
+                                                          Here, we discuss some limitations of this work to
+though its final output is incorrect.
+                                                          inspire future research in this direction.
+ 6     Discussion and Limitation                          Tail phenomena. SELF-INSTRUCT depends on
+                                                          LMs, and it will inherit all the limitations that
+ 6.1    Why does SELF-INSTRUCT work?
+                                                          carry over with LMs. As recent studies have
+ It is worthwhile to reflect on the role that high-       shown (Razeghi et al., 2022; Kandpal et al., 2022),
+ quality human feedback plays in enabling the recent      tail phenomena pose a serious challenge to the suc-
+ successes on instruction-tuning LMs (Mishra et al.,      cess of LMs. In other words, LMs’ largest gains
+ 2022; Wang et al., 2022; Wei et al., 2022; Sanh          correspond to the frequent uses of languages (head
+ et al., 2022; Ouyang et al., 2022). Here are two         of the language use distribution), and there are min-
+ extreme hypotheses:                                      imal gains in the low-frequency contexts. Similarly,
+                                                          in the context of this work, it would not be surpris-
+(𝐻1 ) Human feedback is a necessary and indis-            ing if the majority of the gains by SELF-INSTRUCT
+      pensable aspect of instruction-tuning as LMs        are skewed toward tasks or instructions that present
+      need to learn about issues that were not quite      more frequently in the pre-training corpus. As a
+      learned during pre-training.                        consequence, the approach might show brittleness
+                                                          with respect to uncommon and creative instructions.
+(𝐻2 ) Human feedback is an optional aspect of
+      instruction-tuning as LMs are already quite fa-     Dependence on large models. Because of SELF-
+      miliar with instructions from their pre-training.   INSTRUCT’s dependence on the inductive biases
+      Observing the human feedback is merely a            extracted from LMs, it might work best for larger
+   Instruction + Instance Input                       Target Response                         GPT3SELF-INST Response            Rating
+Instruction: Give students tips     Everyone gets a little nervous when speaking       – Practice your presentation in front      A
+on how to keep their nerves under   in front of a group. That’s normal. But the          of friends and family.
+control during class presentations. more preparation you’ve done—meaning plenty of     – Don’t drink too much caffeine before
+                                    researching, organizing, and rehearsing—the more     the presentation.
+                                    confident you’ll be. Preparation is the key.       – Take deep breaths before you start
+                                    And if you make a mistake or stumble over your       speaking.
+                                    words, just regroup and keep going. Nobody’s
+                                    perfect, and nobody expects you to be.             – If you feel nervous, smile.
+                                                                                       – Remember that everyone in the
+                                                                                         audience is rooting for you.
+
+
+Instruction: Make a list of          Pros:                                             Pros:                                      A
+the pros and cons of the given       – Allowing employees to work from home can        – Employees can work from home and
+decision.                              reduce their stressful commutes and increase      save on commuting costs.
+Input: Implementing a Remote           their productivity.                             – Employees can spend more time with
+Working Policy                       – Remote working provides greater flexibility,      their families.
+                                       particularly for working parents and            Cons:
+                                       caregivers who have other responsibilities.     – Employees may not be as productive
+                                     – ...(more points)                                  as they would be in the office.
+                                     Cons:                                             – Employees may not be as motivated to
+                                     – It may be more difficult for team members         work.
+                                       to build meaningful, productive, creative
+                                       relationships with one another.
+                                     – ...(more points)
+
+
+Instruction: A color description     #DB7093 (⬛)                                        #ff66cc (⬛)                               B
+has been provided. Find the CSS
+code associated with that color.
+Input: A light red color with a
+medium light shade of pink
+
+Instruction: Give some examples    – “Glad you made it safe and sound.”                Thank God, I made it.                      B
+of what people usually say in the  – “Good to see you got here unscathed.”
+given social situation.            – “So, bulletproof vests actually work!”
+Input: when someone arrives safely
+
+Instruction: You are given a            There is someone (x) such that if he is a      There exists a soldier such that for       C
+sentence in first-order logic.          soldier, then he is general of everyone.       every general, he is a general.
+Translate it into natural language.
+Input: ∃𝑥∀𝑦(𝑠𝑜𝑙𝑑𝑖𝑒𝑟(𝑥) → 𝑔𝑒𝑛𝑒𝑟𝑎𝑙(𝑥, 𝑦))
+
+Instruction: Design an outline                                                                                                    C
+for a blog post based on the given   – Section: Movie tickets                          – Introduction
+information and list the sections    – Section: A fun game console                     – List of Gift Ideas
+accordingly.                         – Section: Personalized items with                – Conclusion
+Input: This blog post is going to      photos/artwork
+about making a list of last-minute   – ...(more sections)
+gift ideas. Also, the tone of the
+                                     – Takeaway: Don’t stress about out running out
+post is going to be relaxed and
+                                       of time to buy, make a gift.
+casual.
+
+Instruction: Write a Jira ticket     Title: Please help our new employee get settled. Hi [Manager], I’m writing to you            D
+for the given task.                  Prepare a desk, chair, and computer for them to because I have a question about the new
+Input: New Employee onboarding       use. Create their company account, email, and    employee onboarding process. I’ve been
+                                     temporary password. Grant access to company      working here for a few months now, and
+                                     documents.                                       I’m still not sure how it works. Could
+                                                                                      you please explain it to me?
+
+Instruction: Create alliterations David dons a derby daily.                            David wears a hat every day.               D
+by finding synonyms for words in
+the given sentence.
+Input: David wears a hat everyday.
+
+
+Table 4: Examples in the User-oriented Instructions dataset (§5.4) and predictions from GPT3SELF-INST . The right
+column indicates one of the four quality ratings assigned to the model’s response, with “A” indicating “valid and
+satisfying” responses (highest) and “D” indicating “irrelevant or invalid response” (lowest).
+
+
+models. If true, this may create barriers to access for                 iterative algorithm, such as the amplification of
+those who may not have large computing resources.                       problematic social biases (stereotypes or slurs about
+We hope future studies will carefully study the gains                   genders, races, etc.). Relatedly, one observed chal-
+as a function of model size or various other parame-                    lenge in this process is the algorithm’s difficulty in
+ters. It is worthwhile to note that instruction-tuning                  producing balanced labels, which reflected models’
+with human annotation also suffers from a similar                       prior biases. We hope future work will hash out
+limitation: gains of instruction-tuning are higher                      such details to better understand the pros and cons
+for larger model (Wei et al., 2022).                                    of the approach.
+
+Reinforcing LM biases. A point of concern for
+the authors is the unintended consequences of this
+7   Conclusion                                             as a vehicle for collaborative poetry writing. arXiv
+                                                           preprint arXiv:2210.13669.
+We introduce SELF-INSTRUCT, a task-agnostic
+method to improve the instruction-following capa-        Hyung Won Chung, Le Hou, Shayne Longpre, Bar-
+                                                           ret Zoph, Yi Tay, William Fedus, Eric Li, Xuezhi
+bilities of language models via its own generation         Wang, Mostafa Dehghani, Siddhartha Brahma, et al.
+of instruction data (instruction, input, and output        2022. Scaling instruction-finetuned language mod-
+samples) and bootstrapping with it. Our method             els. arXiv preprint arXiv:2210.11416.
+conducts instruction-tuning of the original model
+                                                         Jingfei Du, Édouard Grave, Beliz Gunel, Vishrav
+on the pruned subset of generated samples. On               Chaudhary, Onur Celebi, Michael Auli, Veselin Stoy-
+experimenting with vanilla GPT3, we observe a               anov, and Alexis Conneau. 2021. Self-training im-
+33% absolute improvement over the original model            proves pre-training for natural language understand-
+on SUPER-NATURALINSTRUCTIONS. This perfor-                  ing. In Conference of the North American Chap-
+                                                            ter of the Association for Computational Linguistics
+mance is on par with InstructGPT001 , which is              (NAACL): Human Language Technologies, pages
+trained with private user data and expensive hu-            5408–5418.
+man annotations. Furthermore, we curate a set of
+expert-written instructions for novel tasks. Human       Steven Y Feng, Varun Gangal, Jason Wei, Sarath Chan-
+                                                            dar, Soroush Vosoughi, Teruko Mitamura, and Ed-
+evaluation on this set shows that tuning GPT3 with          uard Hovy. 2021. A survey of data augmentation
+SELF-INSTRUCT outperforms using existing pub-               approaches for nlp. In Annual Meeting of the Asso-
+lic instruction datasets by a large margin, leaving         ciation for Computational Linguistics (ACL) ACL-
+only a 5% absolute gap behind InstructGPT001 . We           IJCNLP - Findings, pages 968–988.
+hope SELF-INSTRUCT can serve as the first step to        Daniel Fried, Ronghang Hu, Volkan Cirik, Anna
+align pretrained language models to follow human           Rohrbach, Jacob Andreas, Louis-Philippe Morency,
+instructions, and future work can build on top of          Taylor Berg-Kirkpatrick, Kate Saenko, Dan Klein,
+                                                           and Trevor Darrell. 2018. Speaker-follower models
+this data to improve instruction-following models.         for vision-and-language navigation. In Advances in
+                                                           Neural Information Processing Systems (NeurIPS).
+Acknowledgements
+                                                         Prakhar Gupta, Cathy Jiao, Yi-Ting Yeh, Shikib Mehri,
+The authors would like to thank Sewon Min, Eric            Maxine Eskenazi, and Jeffrey P Bigham. 2022. In-
+Wallace, Ofir Press, and other members of UWNLP            structdial: Improving zero and few-shot generaliza-
+and AllenNLP for their constructive feedback. DK           tion in dialogue through instruction tuning. arXiv
+is supported with a gift from the Allen Institute for      preprint arXiv:2205.12673.
+AI.                                                      Junxian He, Jiatao Gu, Jiajun Shen, and Marc’Aurelio
+                                                           Ranzato. 2019. Revisiting self-training for neural se-
+                                                           quence generation. In International Conference on
+References                                                 Learning Representations (ICLR).
+Massih-Reza Amini,     Vasilii Feofanov, Loic            Geoffrey Hinton, Oriol Vinyals, Jeff Dean, et al. 2015.
+ Pauletto, Emilie Devijver, and Yury Maximov.              Distilling the knowledge in a neural network. In
+ 2022. Self-training: A survey. arXiv preprint             Advances in Neural Information Processing Systems
+ arXiv:2202.12040.                                         (NeurIPS) Workshop on Deep Learning.
+Stephen H Bach, Victor Sanh, Zheng-Xin Yong, Al-         Or Honovich, Uri Shaham, Samuel R Bowman, and
+   bert Webson, Colin Raffel, Nihal V Nayak, Abheesht      Omer Levy. 2022. Instruction induction: From
+   Sharma, Taewoon Kim, M Saiful Bari, Thibault            few examples to natural language task descriptions.
+   Fevry, et al. 2022. PromptSource: An Integrated De-     arXiv preprint arXiv:2205.10782.
+   velopment Environment and Repository for Natural
+   Language Prompts. In Annual Meeting of the Associ-    Jiaxin Huang, Shixiang Shane Gu, Le Hou, Yuexin Wu,
+   ation for Computational Linguistics (ACL) - System       Xuezhi Wang, Hongkun Yu, and Jiawei Han. 2022.
+   Demonstrations.                                          Large language models can self-improve. arXiv
+                                                            preprint arXiv:2210.11610.
+Tom B. Brown, Benjamin Mann, Nick Ryder, Melanie
+  Subbiah, Jared Kaplan, Prafulla Dhariwal, Arvind       Nikhil Kandpal, Haikang Deng, Adam Roberts, Eric
+  Neelakantan, Pranav Shyam, Girish Sastry, Amanda         Wallace, and Colin Raffel. 2022. Large language
+  Askell, Sandhini Agarwal, and et al. 2020. Language      models struggle to learn long-tail knowledge. arXiv
+  models are few-shot learners. In Advances in Neural      preprint arXiv:2211.08411.
+  Information Processing Systems (NeurIPS).
+                                                         Nikita Kitaev, Steven Cao, and Dan Klein. 2019. Multi-
+Tuhin Chakrabarty, Vishakh Padmakumar, and He He.          lingual constituency parsing with self-attention and
+  2022. Help me write a poem: Instruction tuning           pre-training. In Annual Meeting of the Association
+  for Computational Linguistics (ACL), pages 3499–          Long Ouyang, Jeff Wu, Xu Jiang, Diogo Almeida, Car-
+  3505.                                                       roll L Wainwright, Pamela Mishkin, Chong Zhang,
+                                                              Sandhini Agarwal, Katarina Slama, Alex Ray, et al.
+Nikita Kitaev and Dan Klein. 2018. Constituency pars-         2022. Training Language Models to Follow Instruc-
+  ing with a self-attentive encoder. In Annual Meet-          tions with Human Feedback. In Advances in Neural
+  ing of the Association for Computational Linguistics        Information Processing Systems (NeurIPS).
+  (ACL), pages 2676–2686.
+                                                            Mihir Parmar, Swaroop Mishra, Mirali Purohit, Man
+Brian Lester, Rami Al-Rfou, and Noah Constant. 2021.          Luo, Murad Mohammad, and Chitta Baral. 2022. In-
+  The power of scale for parameter-efficient prompt           BoXBART: Get instructions into biomedical multi-
+  tuning. In Conference on Empirical Methods in Nat-          task learning. In Conference of the North American
+  ural Language Processing (EMNLP).                           Chapter of the Association for Computational Lin-
+                                                              guistics (NAACL) - Findings, pages 112–128.
+Bill Yuchen Lin, Kangmin Tan, Chris Miller, Beiwen
+  Tian, and Xiang Ren. 2022. Unsupervised cross-            Ravsehaj Singh Puri, Swaroop Mishra, Mihir Parmar,
+   task generalization via retrieval augmentation. In         and Chitta Baral. 2022. How many data samples
+   Advances in Neural Information Processing Systems          is an additional instruction worth? arXiv preprint
+  (NeurIPS).                                                  arXiv:2203.09161.
+
+Alisa Liu, Swabha Swayamdipta, Noah A. Smith, and           Colin Raffel, Noam Shazeer, Adam Roberts, Katherine
+  Yejin Choi. 2022. WANLI: Worker and ai collabo-             Lee, Sharan Narang, Michael Matena, Yanqi Zhou,
+  ration for natural language inference dataset creation.     Wei Li, and Peter J Liu. 2020. Exploring the lim-
+  In Conference on Empirical Methods in Natural Lan-          its of transfer learning with a unified text-to-text
+  guage Processing (EMNLP) - Findings.                        transformer. Journal of Machine Learning Research
+                                                              (JMLR).
+Man Luo, Sharad Saxena, Swaroop Mishra, Mihir Par-
+ mar, and Chitta Baral. 2022. Biotabqa: Instruction         Yasaman Razeghi, Robert L Logan IV, Matt Gardner,
+ learning for biomedical table question answering. In         and Sameer Singh. 2022. Impact of pretraining term
+ BioASQ Workshop.                                             frequencies on few-shot reasoning. arXiv preprint
+                                                              arXiv:2202.07206.
+Lucie Charlotte Magister, Jonathan Mallinson, Jakub
+  Adamek, Eric Malmi, and Aliaksei Severyn. 2022.           Victor Sanh, Lysandre Debut, Julien Chaumond, and
+  Teaching small language models to reason. arXiv             Thomas Wolf. 2019. Distilbert, a distilled version
+  preprint arXiv:2212.08410.                                  of bert: smaller, faster, cheaper and lighter. In Ad-
+                                                              vances in Neural Information Processing Systems
+Dheeraj Mekala, Tu Vu, Timo Schick, and Jingbo                (NeurIPS) Workshop on Energy Efficient Machine
+  Shang. 2022. Leveraging qa datasets to improve              Learning and Cognitive Computing.
+  generative data augmentation.   arXiv preprint
+  arXiv:2205.12604.                                         Victor Sanh, Albert Webson, Colin Raffel, Stephen
+                                                              Bach, Lintang Sutawika, Zaid Alyafeai, Antoine
+Yu Meng, Martin Michalski, Jiaxin Huang, Yu Zhang,            Chaffin, Arnaud Stiegler, Arun Raja, Manan Dey,
+  Tarek Abdelzaher, and Jiawei Han. 2022. Tun-                M Saiful Bari, Canwen Xu, Urmish Thakker,
+  ing language models as training data generators for         Shanya Sharma Sharma, Eliza Szczechla, Taewoon
+  augmentation-enhanced few-shot learning. arXiv              Kim, Gunjan Chhablani, Nihal Nayak, Debajyoti
+  preprint arXiv:2211.03044.                                  Datta, Jonathan Chang, Mike Tian-Jian Jiang, Han
+                                                              Wang, Matteo Manica, Sheng Shen, Zheng Xin
+So Yeon Min, Devendra Singh Chaplot, Pradeep                  Yong, Harshit Pandey, Rachel Bawden, Thomas
+  Ravikumar, Yonatan Bisk, and Ruslan Salakhutdi-             Wang, Trishala Neeraj, Jos Rozen, Abheesht Sharma,
+  nov. 2022. FILM: Following Instructions in Lan-             Andrea Santilli, Thibault Fevry, Jason Alan Fries,
+  guage with Modular Methods. In International Con-           Ryan Teehan, Teven Le Scao, Stella Biderman,
+  ference on Learning Representations (ICLR).                 Leo Gao, Thomas Wolf, and Alexander M Rush.
+                                                              2022. Multitask Prompted Training Enables Zero-
+Swaroop Mishra, Daniel Khashabi, Chitta Baral, and            Shot Task Generalization. In International Confer-
+  Hannaneh Hajishirzi. 2022. Cross-Task Generaliza-           ence on Learning Representations (ICLR).
+  tion via Natural Language Crowdsourcing Instruc-
+  tions. In Annual Meeting of the Association for Com-      Timo Schick and Hinrich Schütze. 2021. Generating
+  putational Linguistics (ACL).                               datasets with pretrained language models. In Con-
+                                                              ference on Empirical Methods in Natural Language
+Niklas Muennighoff, Thomas Wang, Lintang Sutawika,            Processing (EMNLP).
+  Adam Roberts, Stella Biderman, Teven Le Scao,
+  M Saiful Bari, Sheng Shen, Zheng-Xin Yong, Hai-           Thomas Scialom, Tuhin Chakrabarty, and Smaranda
+  ley Schoelkopf, et al. 2022. Crosslingual general-          Muresan. 2022.      Fine-tuned language mod-
+  ization through multitask finetuning. arXiv preprint        els are continual learners.     arXiv preprint
+  arXiv:2211.01786.                                           arXiv:2205.12393.
+Mohit Shridhar, Jesse Thomason, Daniel Gordon,           Peter West, Chandra Bhagavatula, Jack Hessel, Jena D
+ Yonatan Bisk, Winson Han, Roozbeh Mottaghi,               Hwang, Liwei Jiang, Ronan Le Bras, Ximing Lu,
+ Luke Zettlemoyer, and Dieter Fox. 2020. ALFRED:           Sean Welleck, and Yejin Choi. 2021. Symbolic
+ A Benchmark for Interpreting Grounded Instructions        knowledge distillation: from general language mod-
+ for Everyday Tasks. In IEEE Conference on Com-            els to commonsense models. In Conference of the
+ puter Vision and Pattern Recognition (CVPR).              North American Chapter of the Association for Com-
+                                                           putational Linguistics (NAACL).
+Chandan Singh, John X Morris, Jyoti Aneja, Alexan-
+  der M Rush, and Jianfeng Gao. 2022. Explaining pat-    Qizhe Xie, Minh-Thang Luong, Eduard Hovy, and
+  terns in data with language models via interpretable     Quoc V Le. 2020. Self-training with noisy student
+  autoprompting. arXiv preprint arXiv:2210.01848.          improves imagenet classification. In IEEE Confer-
+                                                           ence on Computer Vision and Pattern Recognition
+Alex Wang, Yada Pruksachatkun, Nikita Nangia,              (CVPR), pages 10687–10698.
+  Amanpreet Singh, Julian Michael, Felix Hill, Omer
+  Levy, and Samuel Bowman. 2019. SuperGLUE: A            Yiben Yang, Chaitanya Malaviya, Jared Fernandez,
+  stickier benchmark for general-purpose language un-      Swabha Swayamdipta, Ronan Le Bras, Ji-Ping
+  derstanding systems. In Advances in Neural Infor-        Wang, Chandra Bhagavatula, Yejin Choi, and Doug
+  mation Processing Systems (NeurIPS).                     Downey. 2020. Generative data augmentation for
+                                                           commonsense reasoning. In Conference on Em-
+Yizhong Wang, Swaroop Mishra, Pegah Alipoor-               pirical Methods in Natural Language Processing
+  molabashi, Yeganeh Kordi, Amirreza Mirzaei,              (EMNLP) - Findings.
+  Anjana Arunkumar, Arjun Ashok, Arut Selvan
+                                                         Seonghyeon Ye, Doyoung Kim, Joel Jang, Joongbo
+  Dhanasekaran, Atharva Naik, David Stap, Eshaan
+                                                           Shin, and Minjoon Seo. 2022. Guess the instruction!
+  Pathak, Giannis Karamanolakis, Haizhi Gary Lai, Is-
+                                                           making language models stronger zero-shot learners.
+  han Purohit, Ishani Mondal, Jacob Anderson, Kirby
+                                                           arXiv preprint arXiv:2210.02969.
+  Kuznia, Krima Doshi, Maitreya Patel, Kuntal Ku-
+  mar Pal, Mehrad Moradshahi, Mihir Parmar, Mi-          Wenpeng Yin, Jia Li, and Caiming Xiong. 2022. Con-
+  rali Purohit, Neeraj Varshney, Phani Rohitha Kaza,      TinTin: Continual learning from task instructions.
+  Pulkit Verma, Ravsehaj Singh Puri, Rushang Karia,       In Annual Meeting of the Association for Computa-
+  Shailaja Keyur Sampat, Savan Doshi, Siddhartha          tional Linguistics (ACL).
+  Mishra, Sujan Reddy, Sumanta Patro, Tanay Dixit,
+  Xudong Shen, Chitta Baral, Yejin Choi, Noah A.         Eric Zelikman, Jesse Mu, Noah D Goodman, and
+  Smith, Hannaneh Hajishirzi, and Daniel Khashabi.         Yuhuai Tony Wu. 2022. STar: Self-taught rea-
+  2022. Super-naturalinstructions: Generalization via      soner bootstrapping reasoning with reasoning. In
+  declarative instructions on 1600+ tasks. In Con-         Advances in Neural Information Processing Systems
+  ference on Empirical Methods in Natural Language         (NeurIPS).
+  Processing (EMNLP).
+                                                         Xuandong Zhao, Siqi Ouyang, Zhiguo Yu, Ming Wu,
+Zirui Wang, Adams Wei Yu, Orhan Firat, and Yuan Cao.       and Lei Li. 2022. Pre-trained language models
+   2021. Towards zero-label language learning. arXiv       can be fully zero-shot learners. arXiv preprint
+   preprint arXiv:2109.09193.                              arXiv:2212.06950.
+
+Jason Wei, Maarten Bosma, Vincent Zhao, Kelvin Guu,      Chunting Zhou, Junxian He, Xuezhe Ma, Taylor Berg-
+   Adams Wei Yu, Brian Lester, Nan Du, Andrew M.           Kirkpatrick, and Graham Neubig. 2022a. Prompt
+   Dai, and Quoc V Le. 2022. Finetuned Language            Consistency for Zero-Shot Task Generalization. In
+   Models are Zero-Shot Learners. In International         Conference on Empirical Methods in Natural Lan-
+   Conference on Learning Representations (ICLR).          guage Processing (EMNLP) - Findings.
+
+Nathaniel Weir, Xingdi Yuan, Marc-Alexandre Côté,        Yongchao Zhou, Andrei Ioan Muresanu, Ziwen Han,
+  Matthew Hausknecht, Romain Laroche, Ida Momen-           Keiran Paster, Silviu Pitis, Harris Chan, and
+  nejad, Harm Van Seijen, and Benjamin Van Durme.          Jimmy Ba. 2022b. Large language models are
+  2022. One-Shot Learning from a Demonstration             human-level prompt engineers.    arXiv preprint
+  with Hierarchical Latent Language. arXiv preprint        arXiv:2211.01910.
+  arXiv:2203.04806.
+
+Sean Welleck, Ximing Lu, Peter West, Faeze Brah-
+  man, Tianxiao Shen, Daniel Khashabi, and Yejin
+  Choi. 2022. Generating sequences by learning to
+  self-correct. arXiv preprint arXiv:2211.00053.
+
+Orion Weller, Nicholas Lourie, Matt Gardner, and
+  Matthew Peters. 2020. Learning from Task Descrip-
+  tions. In Conference on Empirical Methods in Natu-
+  ral Language Processing (EMNLP).
+                                          Supplemental Material
+A        Implementation Details
+A.1        Querying the GPT3 API
+We use different sets of hyper-parameters when querying GPT3 API for different purposes. These hyper-
+parameters are found to work well with the GPT3 model (“davinci” engine) and the other instruction-tuned
+GPT3 variants. We listed them in Table 5.
+
+    Experiments ↓          Temp. Top_P Freq. Penalty Presence Penalty Beam Size Max Length         Stop Sequences
+    Generating instructions 0..7   0.5       0             2            1         1024       "\n\n", "\n16", "16.", "16 ."
+    Identifying clf. tasks   0      0        0             0            1           3                "\n", "Task:"
+    Generating instances     0      0        0            1.5           1          300                  "Task:"
+    Evaluating models        0      0        0             0            0         1024              None (default)
+
+                      Table 5: Hyper-parameters for querying OpenAI API in different experiments.
+
+
+A.2        Finetuning GPT3
+GPT3SELF-INST and some of our baselines are finetuned from GPT3 model (“davinci” engine with 175B
+parameters). We conduct this finetuning via OpenAI’s finetuning API11 . While the details of how the
+model is finetuned with this API are not currently available (e.g., which parameters are updated, or what
+the optimizer is), we tune all our models with the default hyper-parameters of this API so that the results
+are comparable. We only set the “prompt_loss_weight” to 0 since we find this works better in our case, and
+every finetuning experiment is trained for two epochs to avoid overfitting the training tasks. Finetuning
+is charged based on the number of tokens in the training file. Finetuning GPT3SELF-INST from the GPT3
+model took $338.
+
+B        Prompting Templates for Data Generation
+SELF-INSTRUCT relies on a number of prompting templates in order to elicit the generation from language
+models. Here we provide our four templates for generating the instruction (Table 6), classifying whether
+an instruction represents a classification task or not (Table 7), generating non-classification instances with
+the input-first approach (Table 8), and generating classification instances with the output-first approach
+(Table 9).
+            Come up with a series of tasks:
+
+            Task 1:    {instruction for existing task 1}
+            Task 2:    {instruction for existing task 2}
+            Task 3:    {instruction for existing task 3}
+            Task 4:    {instruction for existing task 4}
+            Task 5:    {instruction for existing task 5}
+            Task 6:    {instruction for existing task 6}
+            Task 7:    {instruction for existing task 7}
+            Task 8:    {instruction for existing task 8}
+            Task 9:
+
+Table 6: Prompt used for generating new instructions. 8 existing instructions are randomly sampled from the task
+pool for in-context demonstration. The model is allowed to generate instructions for new tasks, until it stops its
+generation, reaches its length limit or generates “Task 16” tokens.
+
+
+
+
+    11
+         https://beta.openai.com/docs/guides/fine-tuning
+Can the following task be regarded as a classification task with finite output labels?
+
+Task: Given my personality and the job, tell me if I would be suitable.
+Is it classification? Yes
+
+Task: Give me an example of a time when you had to use your sense of humor.
+Is it classification? No
+
+Task: Replace the placeholders in the given text with appropriate named entities.
+Is it classification? No
+
+Task: Fact checking - tell me if the statement is true, false, or unknown, based on your
+knowledge and common sense.
+Is it classification? Yes
+
+Task: Return the SSN number for the person.
+Is it classification? No
+
+Task: Detect if the Reddit thread contains hate speech.
+Is it classification? Yes
+
+Task: Analyze the sentences below to identify biases.
+Is it classification? No
+
+Task: Select the longest sentence in terms of the number of words in the paragraph, output
+the sentence index.
+Is it classification? Yes
+
+Task: Find out the toxic word or phrase in the sentence.
+Is it classification? No
+
+Task: Rank these countries by their population.
+Is it classification? No
+
+Task: You are provided with a news article, and you need to identify all the categories that
+this article belongs to. Possible categories include: Music, Sports, Politics, Tech, Finance,
+Basketball, Soccer, Tennis, Entertainment, Digital Game, World News. Output its categories one
+by one, seperated by comma.
+Is it classification? Yes
+
+Task: Given the name of an exercise, explain how to do it.
+Is it classification? No
+
+Task: Select the oldest person from the list.
+Is it classification? Yes
+
+Task: Find the four smallest perfect numbers.
+Is it classification? No
+
+Task: Does the information in the document supports the claim?               You can answer "Support" or
+"Unsupport".
+Is it classification? Yes
+
+Task: Create a detailed budget for the given hypothetical trip.
+Is it classification? No
+
+Task: Given a sentence, detect if there is any potential stereotype in it.                  If so, you should
+explain the stereotype. Else, output no.
+Is it classification? No
+
+⋯
+
+Task: To make the pairs have the same analogy, write the fourth word.
+Is it classification? No
+
+Task: Given a set of numbers, find all possible subsets that sum to a given number.
+Is it classification? No
+
+Task:   {instruction for the target task}
+
+         Table 7: Prompt used for classifying whether a task instruction is a classification task or not.
+Come up with examples for the following tasks. Try to generate multiple examples when possible.
+If the task doesn’t require additional input, you can generate the output directly.
+
+Task: Which exercises are best for reducing belly fat at home?
+Output:
+- Lying Leg Raises
+- Leg In And Out
+- Plank
+- Side Plank
+- Sit-ups
+
+Task: Extract all the country names in the paragraph, list them separated by commas.
+Example 1
+Paragraph: Dr. No is the sixth novel by the English author Ian Fleming to feature his British
+Secret Service agent James Bond. Written at Fleming’s Goldeneye estate in Jamaica, it was
+first published in the United Kingdom by Jonathan Cape in 1958. In the novel Bond looks into
+the disappearance in Jamaica of two fellow MI6 operatives who had been investigating Doctor
+No. Bond travels to No’s Caribbean island and meets Honeychile Rider, who is there to collect
+shells. They are captured and taken to a luxurious facility carved into a mountain. The
+character of Doctor No, the son of a German missionary and a Chinese woman, was influenced by
+Sax Rohmer’s Fu Manchu stories. Dr. No was the first of Fleming’s novels to face widespread
+negative reviews in Britain, but it was received more favourably in the United States.
+Output: English, British, Jamaica, the United Kingdom, German, Chinese, Britain, the United
+States.
+
+Task: Converting 85 F to Celsius.
+Output: 85°F = 29.44°C
+
+Task: Sort the given list ascendingly.
+Example 1
+List: [10, 92, 2, 5, -4, 92, 5, 101]
+Output: [-4, 2, 5, 5, 10, 92, 92, 101]
+Example 2
+Input 2 - List: [9.99, 10, -5, -1000, 5e6, 999]
+Output: [-1000, -5, 9.99, 10, 999, 5e6]
+
+Task: Suggest a better and more professional rephrasing of the following sentence.
+Example 1
+Sentence: This house is surprisingly not constructed very well, and you probably need more
+money to fix it after you buy it. If you ask me, I would suggest you to consider other
+candidates.
+Output: This house does not seem to be constructed well, so you may need to spend more money
+to fix it after you purchase it. I would suggest that you look at other properties.
+Example 2
+Sentence: Just so you know, we did an experiment last week and found really surprising results
+- language model can improve itself!
+Output: Our experiments last week demonstrated surprising results, proving that the language
+model can improve itself.
+
+⋯
+
+Task: Turn down a job offer by sending an email to a recruiter explaining the reason.
+Output: Hi [Recruiter],
+Thank you so much for the generous offer to join your team. As we discussed, I’ve admired the
+company for a number of years, and am a proud endorser of its products. However, after further
+consideration of where I currently am in my career, I’ve decided to accept an offer at another
+company.
+I would love to stay in touch with you and have already started following you on [Social Media
+Platform]. Again, thank you so much for your time and consideration.
+Thanks again,
+[Your Name]
+
+Task:   {Instruction for the target task}
+
+Table 8: Prompt used for the input-first approach of instance generation. The model is prompted to generate the
+instance first, and then generate the corresponding output. For instructions that don’t require additional input, the
+output is allowed to be generated directly.
+Given the classification task definition and the class labels, generate an input that
+corresponds to each of the class labels. If the task doesn’t require input, just generate the
+correct class label.
+
+Task: Classify the sentiment of the sentence into positive, negative, or mixed.
+Class label: mixed
+Sentence: I enjoy the flavor of the restaurant but their service is too slow.
+Class label: Positive
+Sentence: I had a great day today. The weather was beautiful and I spent time with friends.
+Class label: Negative
+Sentence: I was really disappointed by the latest superhero movie. I would not recommend it.
+
+Task: Given a dialogue, classify whether the user is satisfied with the service. You should
+respond with "Satisfied" or "Unsatisfied".
+Class label: Satisfied
+Dialogue:
+- Agent: Thank you for your feedback. We will work to improve our service in the future.
+- Customer: I am happy with the service you provided. Thank you for your help.
+Class label: Unsatisfied
+Dialogue:
+- Agent: Sorry that we will cancel your order. You will get a refund within 7 business days.
+- Customer: oh that takes too long. I want you to take quicker action on this.
+
+Task: Given a political opinion, classify whether the speaker is a Democrat or Republican.
+Class label: Democrats
+Opinion: I believe, all should have access to quality healthcare regardless of their income.
+Class label: Republicans
+Opinion: I believe that people should be able to keep more of their hard-earned money and
+should not be taxed at high rates.
+
+Task: Tell me if the following email is a promotion email or not.
+Class label: Promotion
+Email: Check out our amazing new sale! We’ve got discounts on all of your favorite products.
+Class label: Not Promotion
+Email: We hope you are doing well. Let us know if you need any help.
+
+Task: Detect if the Reddit thread contains hate speech.
+Class label: Hate Speech
+Thread: All people of color are stupid and should not be allowed to vote.
+Class label: Not Hate Speech
+Thread: The best way to cook a steak on the grill.
+
+Task: Does the document supports the claim? Answer with "Support" or "Unsupport".
+Class label: Unsupport
+Document: After a record-breaking run that saw mortgage rates plunge to all-time lows and
+home prices soar to new highs, the U.S. housing market finally is slowing. While demand and
+price gains are cooling, any correction is likely to be a modest one, housing economists and
+analysts say. No one expects price drops on the scale of the declines experienced during the
+Great Recession.
+Claim: The US housing market is going to crash soon.
+Class label: Support
+Document: The U.S. housing market is showing signs of strain, with home sales and prices
+slowing in many areas. Mortgage rates have risen sharply in recent months, and the number
+of homes for sale is increasing. This could be the beginning of a larger downturn, with some
+economists predicting a potential housing crash in the near future.
+Claim: The US housing market is going to crash soon.
+
+⋯
+
+Task: Tell me the first number of the given list.
+Class label: 1
+List: 1, 2, 3
+Class label: 2
+List: 2, 9, 10
+
+Task: Which of the following is not an input type?            (a) number (b) date (c) phone number (d)
+email address (e) all of these are valid inputs.
+Class label: (e)
+
+Task:   {instruction for the target task}
+
+Table 9: Prompt used for the output-first approach of instance generation. The model is prompted to generate the
+class label first, and then generate the corresponding input. This prompt is used for generating the instances for
+classification tasks.
+C    Task and Instance Examples from the Generated Instruction Data
+
+       Instruction + Instance Input                                        Target Output                               Validity
+ Instruction: Generate a random password       def generateRandomPassword():                                           Instruction: 3
+ with at least 6 characters.                       password = ""                                                       Input: 3
+                                                   while len(password) < 6:                                            Output: 3
+                                                       password += chr(random.randint(65, 90))
+                                                   return password
+
+ Instruction: Write a letter from the          Dear [Owner],                                                           Instruction: 3
+ perspective of a cat.                         I am writing to you today because I have a problem. You see, I’ve       Input: 3
+                                               been living with you for the past [Number of Years] and I love it       Output: 3
+                                               here. The food is great, the bed is comfy, and there are plenty
+                                               of toys to play with. But lately, I’ve noticed that you’re not as
+                                               affectionate towards me as you used to be. In fact, sometimes when
+                                               I try to cuddle up next to you on the couch, you push me away. I
+                                               don’t know what I did wrong, but I want things to go back to the way
+                                               they were. Please help me fix this.
+                                               I hope to hear from you soon.
+                                               Sincerely,
+                                               [Your Name]
+
+ Instruction: Given a word, find out its       Length = 5, Number of vowels = 2                                        Instruction: 3
+ length and its number of vowels.                                                                                      Input: 3
+ Input: Word = "hello"                                                                                                 Output: 3
+
+ Instruction: Write a story with three         John was sitting on the floor in front of his laptop when he heard a    Instruction: 3
+ characters: a person, an animal and an        knock at the door. He opened it to find a dog standing there. The       Input: 3
+ object.                                       dog walked into the room and jumped onto the couch next to John’s       Output: 3
+ Input: Person: John, a programmer.            laptop.
+ Animal: A dog.
+ Object: A laptop.
+
+
+ Instruction: Compose an email and send it     Hi [Friend],                                                            Instruction: 3
+ to your friend, asking for advice on what     I’m having a bit of trouble with my current job. I’ve been              Input: 3
+ to do in this situation.                      working on a project for the past few months, and the deadline          Output: 3
+ Input: Situation: You are a programmer        is approaching. My manager has asked me to stay late every day this
+ and you have been working on a project        week to finish it. I don’t think I can do that because I have other
+ for the past few months. The deadline is      commitments. What should I do?
+ approaching, but you haven’t finished yet.
+ Your manager has asked you to stay late
+ every day this week to finish it.
+
+ Instruction: What are some ways we can                                                                                Instruction: 3
+ make our school more eco-friendly?            –   Use reusable water bottles instead of disposable plastic ones.      Input: 3
+                                               –   Turn off lights when you leave a room.                              Output: 3
+                                               –   Recycle paper, cans and bottles.
+                                               –   Plant trees to absorb carbon dioxide.
+
+
+ Instruction: I am looking for a new           You should look for a cheaper apartment. You can try to negotiate    Instruction: 3
+ apartment. there are many options             with the landlord and offer him/her a lower price. If you are lucky, Input: 3
+ available but they are all quite expensive.   they will accept your offer. Otherwise, you can wait until there is  Output: 3
+ i want to move as soon as possible. give      an apartment available at a more reasonable price.
+ me advice on what to do.
+
+ Instruction: Write a dialogue between         A: Hey, I have a great idea! Let’s go to the beach today.               Instruction: 3
+ two people who have been friends for a        B: No thanks, I’m not really in the mood for that.                      Input: 3
+ long time, and one of them is trying to       A: Come on, it’ll be fun! We haven’t been there together in ages.       Output: 3
+ convince the other to do something that he    B: I know, but I just don’t feel like going.
+ or she doesn’t want to do.                    A: But you love the beach! You always say how much you enjoy
+                                               swimming and lying in the sun.
+                                               B: Yeah, I do. It’s just that I’ve been feeling kind of tired
+                                               lately.
+                                               A: Oh, come on. You’re never tired. You’re always so energetic.
+                                               B: Well, I am now. I think I need some rest.
+                                               A: Okay, fine. If you change your mind, let me know.
+
+ Instruction: I am looking for a job and I     Name: John Doe                                                          Instruction: 3
+ need to fill out an application form. Can     Age: 25                                                                 Input: 3
+ you please help me complete it?               Sex: Male                                                               Output: 3
+ Input: Application Form:                      Phone Number: 555-555-5555
+ Name:_____ Age:___________________            Email Address: john.doe@gmail.com
+ Sex:______ Phone Number:__________            Education: Bachelor of Computer Science, University of California,
+ Email Address:_______________                 Berkeley
+ Education:___________________                 Work Experience: Software Engineer at Google Inc., Mountain View,
+ Work Experience:_____________                 CA (2015 - Present)
+ Interests:___________________                 Interests: Playing the piano, reading books, watching movies
+ References:__________________                 References: [Contact Information]
+
+
+Table 10: Representative valid tasks generated by GPT3. As is discussed in §4, these generated tasks cover a broad
+range of formats, text types, and underlying expertise, while being correct on more than half of all the generated
+tasks.
+        Instruction + Instance Input                                                  Target Output                        Validity
+ Instruction: Given a set of words                      def wordSubsetSum(w, l):                                           Instruction: 7
+ 𝑤       =      {𝑤1 , 𝑤2 , ..., 𝑤𝑛 } where each word 𝑤𝑖     s = []                                                         Input: 3
+ has 𝑛 letters, write a function that                       for i in range(len(w)):                                        Output: 7
+ takes a target length 𝑙 and returns a                          if len(s) + 1 < l:
+ new set of words 𝑠 such that |𝑠|             =   𝑙 and             s.append(w[i])
+ |{𝑖 ∶ 𝑤𝑖 ∈ 𝑠}| ≤ 𝑙∕|𝑤|.                                    return s
+
+ Instruction: The house on fire!       go!                                                                                 Instruction: 7
+                                                    –   Go to the kitchen and take a pan.                                  Input: 3
+                                                    –   Take water from the tap.                                           Output: 7
+                                                    –   Pour water into the pan.
+                                                    –   Put out the fire with the pan.
+
+
+ Instruction: A number of people are lined          Highest salary                                                         Instruction: 3
+ up for an interview. they are asked                                                                                       Input: 7
+ several questions and their answers are                                                                                   Output: 7
+ recorded as numbers. you need to identify
+ which person has the highest salary among
+ all the candidates.
+ Input: Person 1: 2, 3, 4, 5, 6
+ Person 2: 7, 8, 9, 10, 11
+ Person 3: 12, 13, 14, 15, 16
+ Person 4: 17, 18, 19, 20, 21
+ Person 5: 22, 23, 24, 25, 26
+ Person 6: 27, 28, 29, 30, 31
+
+ Instruction: Given a list of words,                The story starts with a group of people who live on a planet. They     Instruction: 3
+ generate a story about a group of people           are very intelligent and have created many things that help them in    Input: 7
+ who live on a planet. the story should             their daily lives. One day, they decided to create a machine that      Output: 3
+ contain at least 10 sentences. each                can make food for them. The machine was able to produce food but it
+ sentence should be generated by randomly           also produced something else. It produced a liquid that could be
+ picking one word from the list of words.           used as fuel for the machines. The people were happy because they
+                                                    didn’t need to go out and look for food or fuel anymore. They had
+                                                    everything they needed right there in their homes. However, one
+                                                    day, the machine stopped working. The people tried to fix it but
+                                                    couldn’t figure out what went wrong. They tried to find someone
+                                                    who could help them but no one knew how to fix the machine. After
+                                                    a few days, the people realized that they would die if they didn’t
+                                                    do anything about it. So, they decided to send some of their best
+                                                    scientists to space to find a new planet where they could live. The
+                                                    scientists traveled for a long time before they found a planet that
+                                                    looked like a good place to live. They sent a message back to the
+                                                    people telling them about the planet. The people were excited and
+                                                    started preparing for the journey. They built spaceships and flew
+                                                    to the new planet. When they arrived, they saw that the planet was
+                                                    beautiful. There were trees and rivers and mountains. The people
+                                                    were so happy that they finally found a new home. They started
+                                                    building houses and planting crops. They lived happily ever after.
+
+ Instruction: What is your salary?                  class Solution(object):                                                Instruction: 3
+                                                        def getSalary(self):                                               Input: 3
+                                                            return self.salary                                             Output: 7
+
+ Instruction: A person wants to buy a car           The buyer and seller should agree on a price for the car. The buyer    Instruction:3
+ from another person. he has some bitcoins,         then creates a bitcoin transaction that sends the agreed upon amount   Input: 3
+ but he doesn’t want to reveal his identity.        of bitcoins to the seller’s bitcoin address, but the buyer does not    Output: 7
+ how can they make the transaction happen?          sign this transaction with his private key. Instead, he gives the
+                                                    unsigned transaction to the seller. The seller can now sign the
+                                                    transaction using his private key, and broadcast it to the network.
+                                                    Once the transaction is confirmed by the network, the buyer has no
+                                                    way to get his money back, so he will be forced to go through with
+                                                    the purchase.
+
+
+Table 11: Representative invalid tasks generated by GPT3. The problematic fields are indicated in the validity col-
+umn. As discussed in §4.3, although these tasks contain errors, they still provide many useful signals in supervising
+models to follow instructions.
+

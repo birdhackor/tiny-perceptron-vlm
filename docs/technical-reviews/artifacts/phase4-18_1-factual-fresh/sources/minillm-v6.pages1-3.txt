@@ -1,0 +1,205 @@
+                                               MiniLLM: On-Policy Distillation of Large Language
+                                                                  Models
+
+
+                                                                                   Yuxian Gu1,2∗, Li Dong2 , Furu Wei2 , Minlie Huang1†
+                                                                                           1
+                                                                                             The CoAI Group, Tsinghua University
+                                                                                                    2
+                                                                                                      Microsoft Research
+                                                                              guyx21@mails.tsinghua.edu.cn {lidong1,fuwei}@microsoft.com
+arXiv:2306.08543v6 [cs.CL] 31 Jan 2026
+
+
+
+
+                                                                                                aihuang@tsinghua.edu.cn
+
+
+
+                                                                                                             Abstract
+                                                                         Knowledge Distillation (KD) is a promising technique for reducing the high com-
+                                                                         putational demand of large language models (LLMs). However, previous KD
+                                                                         methods are primarily applied to white-box classification models or training small
+                                                                         models to imitate black-box model APIs like ChatGPT. How to effectively dis-
+                                                                         till the knowledge of white-box LLMs into small models is still under-explored,
+                                                                         which becomes more important with the prosperity of open-source LLMs. In this
+                                                                         work, we propose a KD approach that distills LLMs into smaller language mod-
+                                                                         els. We first replace the forward Kullback-Leibler divergence (KLD) objective in
+                                                                         the standard KD approaches with reverse KLD, which is more suitable for KD
+                                                                         on generative language models, to prevent the student model from overestimating
+                                                                         the low-probability regions of the teacher distribution. Then, we derive an effec-
+                                                                         tive on-policy optimization approach to learn this objective. The student models
+                                                                         are named M INI LLM. Extensive experiments in the instruction-following set-
+                                                                         ting show that M INI LLM generates more precise responses with higher overall
+                                                                         quality, lower exposure bias, better calibration, and higher long-text generation
+                                                                         performance than the baselines. Our method is scalable for different model fami-
+                                                                         lies with 120M to 13B parameters. Our code, data, and model checkpoints can be
+                                                                         found in https://github.com/microsoft/LMOps/tree/main/minillm.
+
+
+                                                                                Teacher: GPT-2-1.5B 60              Teacher: GPT-J 6B   65              Teacher: OPT 13B
+                                                              50
+                                         Average GPT4 Score
+
+
+
+
+                                                                                                                                        60
+                                                              45                                    55
+                                                                                                                                        55
+                                                              40                                    50                                  50
+                                                                                         MiniLLM                             MiniLLM                            MiniLLM
+                                                              35                         SeqKD      45                       SeqKD      45                      SeqKD
+                                                                  100M       200M      400M 700M             1B       1.5B 2B 2.5B           1.5B         3B         6B
+                                                                         # of student parameters           # of student parameters             # of student parameters
+
+
+                                         Figure 1: The comparison of M INI LLM with the sequence-level KD (SeqKD; KR16, TGZ+ 23,
+                                         CLL+ 23, PLH+ 23, GWS+ 23, ZLX+ 23) in terms of the average GPT-4 feedback score on our eval-
+                                         uation sets. Left: GPT-2-1.5B as the teacher model and GPT-2 125M, 340M, 760M as the student
+                                         models. Middle: GPT-J 6B as the teacher model and GPT-2 760M, 1.5B, GPT-Neo 2.7B as the
+                                         student models. Right: OPT 13B as the teacher and OPT 1.3B, 2.7B, 6.7B as the student models.
+                                                          ∗
+                                                                  Contribution during an internship at Microsoft Research.
+                                                              †
+                                                                  Corresponding author.
+1   Introduction
+
+With the rapid development of large language models (LLMs; BMR+ 20, HZD+ 21, BHA+ 21,
+CND+ 22, Ope23), a common technique to reduce their high computational resource demand is
+knowledge distillation (KD; HVD15), where we train a small student model with supervision from
+a large teacher model. Two categories of KD are commonly applied: black-box KD, where only
+the teacher-generated texts are accessible, and white-box KD, where the teacher model’s output dis-
+tribution or intermediate hidden states are also available [JBMD21]. Recently, black-box KD has
+shown promising results in fine-tuning small models on the prompt-response pairs generated by
+LLM APIs [TGZ+ 23, CLL+ 23, WWZ+ 23, PLH+ 23]. With the emergence of more open-source
+LLMs [ZRG+ 22, TLI+ 23], white-box KD becomes more valuable for both research communities
+and industry sectors because student models receive better signals from the output distribution and
+hidden states of teacher models, thereby potentially resulting in higher performance. However,
+white-box KD approaches are mostly studied for small (< 1B parameters) language understanding
+models [SDCW19, WWD+ 20], while white-box KD for LLMs is yet to be explored.
+In this work, we investigate white-box KD of LLMs where the output distribution of the teacher
+model is available. We argue that the standard KD objectives [KR16, SST+ 20, CLL+ 23, TGZ+ 23]
+are sub-optimal for LLMs that perform tasks in a generative manner. Given the teacher distri-
+bution p(y|x) and the student distribution qθ (y|x) parameterized by θ, standard KD objectives
+(including several variants for sequence-level models) essentially minimize the approximated for-
+ward Kullback-Leibler divergence (KLD) between the teacher and the student distribution, termed
+as KL[p||qθ ], which forces qθ to cover all modes of p. For text classification tasks, KL[p||qθ ] works
+well because the output space usually consists of a finite number of classes such that both p(y|x) and
+qθ (y|x) have few modes. However, for open-ended text generation tasks, which is usually the case
+of LLM applications, the output spaces are much more complex and p(y|x) can contain many more
+modes than what qθ (y|x) can express due to the limited model capacity. Minimizing forward KLD
+causes qθ to assign unreasonably high probabilities to the void regions of p [MG19] and produces
+very unlikely samples under p during free-run generation [Hus15].
+To alleviate this problem, we propose to minimize re-                   Target Distribution
+verse KLD, KL[qθ ||p], widely used in computer vi-              0.4     Forward KLD
+sion [LPSK23] and reinforcement learning [CPO 19].    +                 Reverse KLD (ours)
+Compared to KL[p||qθ ], minimizing KL[qθ ||p] causes qθ         0.2
+to seek the major modes of p, and assign low probabil-          0.0
+ities to p’s void regions [M+ 05], as illustrated in Figure          0.0 2.5 5.0 7.5 10.0 12.5
+2 and discussed in Section 2.1. In text generation, this
+                                                             Figure 2: The toy experiment. We fit
+means that the student avoids learning too many long-
+                                                             a Gaussian mixture distribution with a
+tail variants [HBD+ 20] in the teacher’s distribution to fo-
+                                                             single Gaussian distribution using for-
+cuses on the generation correctness, which is critical in
+                                                             ward KLD and reverse KLD.
+practical scenarios that require truthfulness and reliabil-
+         +
+ity [JLF 23]. To optimize minθ KL[qθ ||p], as shown in Section 2.2, we derive its gradient with
+Policy Gradient [SMSM99] and adopt an on-policy training approach. To further stabilize and ac-
+celerate training, we propose (1) single-step decomposition to reduce variance, (2) teacher-mixed
+sampling to alleviate reward hacking, and (3) length normalization to eliminate the length bias.
+Finally, we introduce the overall KD algorithm in Section 2.3. Our student models are named
+M INI LLM, indicating our method is suitable for compressing large (generative) language models.
+We apply our method to various generative language models [RWC+ 19, ZRG+ 22, TLI+ 23] with
+sizes ranging from 120M to 13B in the instruction-following setting [SWR+ 22, WBZ+ 22] that
+covers a large range of NLP tasks. We use 5 datasets with Rouge-L [Lin04], the GPT-4 feedback,
+and human judgment for evaluation. Experiments show that M INI LLM consistently outperforms
+standard KD baselines on all the datasets and scales up well from 120M to 13B models (see Figure
+1). More analysis shows that M INI LLM yields lower exposure bias, better calibration, and higher
+long response generation performance, with neglectable loss of diversity.
+
+
+2   Method
+We consider conditional text generation where the model produces a response y = {yt }Tt=1 condi-
+tioning on a prompt x sampled from the distribution px , which is typically how LLMs perform tasks.
+
+
+                                                  2
+                                   𝒚∼𝑝                                                             𝑝
+                      Teacher                                                         Teacher
+
+                                   𝑞!            Forward KLD                                      𝒚 ∼ 𝑞!               Reverse KLD
+           Prompt 𝒙    Student                                             Prompt 𝒙    Student
+                                                ℒ 𝜃 = KL[𝑝| 𝑞!                                                        ℒ 𝜃 = KL[𝑞! | 𝑝
+                                                                                                  On-Policy Distillation
+                                        ∇ℒ(𝜃)                                                          ∇ℒ(𝜃) (Section 2.2)
+                                                       a
+                      Sequence-Level KD                                                   MiniLLM (Ours)
+
+Figure 3: Comparison between sequence-level KD (left) and M INI LLM (right). Sequence-level
+KD forces the student to memorize all samples generated by the teacher model, while M INI LLM
+improves its generated texts with the teacher model’s feedback.
+
+We formulate KD as an optimization problem to minimize the difference between a fixed teacher
+model distribution p(y|x) and a student model distribution qθ (y|x) parameterized by θ. The stan-
+dard KD methods approximately3 minimize the forward KLD: KL[p||qθ ] = Ex∼px ,y∼p′ log qp(y|x)  θ (y|x)
+                                                                                                       ,
+where p′ can be real data distribution (word-level KD) or teacher distribution p (sequence-level KD).
+Though widely used, KL[p||qθ ] tends to overestimate the void regions of p in text generation tasks
+when qθ is insufficiently expressive [JKH+ 23]. KD for LLMs fits the case because LLMs perform
+tasks in a generative manner, such that the low-capacity student models cannot perfectly imitate the
+complex text generation distribution of the teacher models or humans.
+
+2.1       M INI LLM: Knowledge Distillation with Reverse KLD
+
+We consider minimizing the reverse KLD between the student and teacher model distributions as
+the learning objective for M INI LLM:
+                                 θ = arg min L(θ) = arg min KL[qθ ||p]
+                                          θ              θ
+                                                            
+                                                                                                 p(y|x)
+                                                                                                                                       (1)
+                                                  = arg min −       E                     log               .
+                                                                   θ         x∼px ,y∼qθ          qθ (y|x)
+Minimizing reverse KLD has been shown to cause the mode-seeking behavior in generative mod-
+eling [Hus15, NCT16, CDP+ 18, LPSK23], where qθ assigns high probabilities to p’s large modes
+and ignore the small ones (illustrated in a toy experiment in Figure 2). In this work, we first study
+this property for KD of LLMs in text generation. Minimizing forward KLD causes qθ to place large
+probability masses on the zero-probability regions of p, corresponding to the generation of low-
+quality text in practice, while reverse KLD focuses on p’s major modes, which is crucial to ensure
+the correctness and faithfulness of text generation. As illustrated in Figure 3, unlike sequence-level
+KD that minimizes forward KLD [KR16, TGZ+ 23], M INI LLM that minimizes reverse KLD does
+not force qθ to fit all y sampled from the teacher distribution p. Instead, it encourages the student
+to generate samples preferred by the teacher within its own capacities, which is more possible to
+achieve. Interestingly, we also find another perspective of understanding M INI LLM motivated by
+Inverse Reinforcement Learning [ZMB+ 08]. We present the related derivation in Appendix A.1.
+
+2.2       On-Policy Distillation
+Gradient Derivation We notice that the gradient of the objective function L(θ) in Equation (1)
+can be derived using the Policy Gradient Theorem [Wil92, HTAL17] for on-policy optimization:
+                                                                   T
+                                                                   X
+                             ∇L(θ) = −                 E             (Rt − 1)∇ log qθ (yt |y<t , x),                                    (2)
+                                                x∼px ,y∼qθ (·|x)
+                                                                   t=1
+                          PT          p(y ′ |y ′ ,x)                                  p(y ′ |y ′ ,x)
+where T = |y| and Rt = t′ =t log qθ (yt ′ |y<t ′ ,x) is the accumulation of rt′ = log qθ (yt ′ |y<t ′ ,x) that
+                                          t   <t                                            t    <t
+measures the quality of each step’s generation. Intuitively, the generated texts are supposed to have
+high probabilities under the teacher distribution by increasing p(yt′ |y<t′ , x), but simultaneously
+stay diverse by lowering qθ (yt′ |y<t′ , x). The expectation in Eq. 2 is computed by Monte-Carlo
+sampling. Full derivation can be found in Appendix A.2. However, policy gradient suffers from high
+variance and reward hacking [SHKK22], despite some subsequent solutions [SWD+ 17]. Besides,
+we notice that Rt favors short sentences, which causes the student model to output empty responses.
+Therefore, we propose three strategies to mitigate these problems.
+      3
+     We say “approximately” because for word-level KD, y is sampled from the real distribution, not the teacher
+distribution. For a strong enough teacher model, we can consider the two distributions approximately the same.
+
+
+                                                                       3
+
