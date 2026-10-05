@@ -1,0 +1,161 @@
+
+Original onnx-calibrate.py lines 415-433
+    def collect_data(self, data_reader: CalibrationDataReader):
+        while True:
+            inputs = data_reader.get_next()
+            if not inputs:
+                break
+            self.intermediate_outputs.append(self.infer_session.run(None, inputs))
+            if (
+                self.max_intermediate_outputs is not None
+                and len(self.intermediate_outputs) == self.max_intermediate_outputs
+            ):
+                self.clear_collected_data()
+
+        if len(self.intermediate_outputs) == 0 and self.calibrate_tensors_range is None:
+            raise ValueError("No data is collected.")
+
+        t = self.compute_data()
+        if not isinstance(t, TensorsData):
+            raise TypeError(f"compute_data must return a TensorsData not {type(t)}.")
+        self.clear_collected_data()
+
+Original onnx-calibrate.py lines 691-722
+class PercentileCalibrater(HistogramCalibrater):
+    def __init__(
+        self,
+        model_path: str | Path,
+        op_types_to_calibrate: Sequence[str] | None = None,
+        augmented_model_path="augmented_model.onnx",
+        use_external_data_format=False,
+        method="percentile",
+        symmetric=False,
+        num_bins=2048,
+        percentile=99.999,
+    ):
+        """
+        :param model_path: ONNX model to calibrate. It is a model path
+        :param op_types_to_calibrate: operator types to calibrate. By default, calibrate all the float32/float16 tensors.
+        :param augmented_model_path: save augmented model to this path.
+        :param use_external_data_format: use external data format to store model which size is >= 2Gb
+        :param method: A string. One of ['entropy', 'percentile', 'distribution'].
+        :param symmetric: make range of tensor symmetric (central point is 0).
+        :param num_quantized_bins: number of quantized bins. Default 128.
+        :param percentile: A float number between [0, 100]. Default 99.99.
+        """
+        super().__init__(
+            model_path,
+            op_types_to_calibrate,
+            augmented_model_path,
+            use_external_data_format,
+            method=method,
+            symmetric=symmetric,
+            num_bins=num_bins,
+            percentile=percentile,
+        )
+
+Original onnx-calibrate.py lines 818-874
+    def collect_absolute_value(self, name_to_arr):
+        """
+        Collect histogram on absolute value
+        """
+        for tensor, data_arr in name_to_arr.items():
+            if isinstance(data_arr, list):
+                for arr in data_arr:
+                    assert isinstance(arr, np.ndarray), f"Unexpected type {type(arr)} for tensor={tensor!r}"
+                dtypes = {a.dtype for a in data_arr}
+                assert len(dtypes) == 1, (
+                    f"The calibration expects only one element type but got {dtypes} for tensor={tensor!r}"
+                )
+                data_arr_np = np.asarray(data_arr)
+            elif not isinstance(data_arr, np.ndarray):
+                raise ValueError(f"Unexpected type {type(data_arr)} for tensor={tensor!r}")
+            else:
+                data_arr_np = data_arr
+            data_arr_np = data_arr_np.flatten()
+            if data_arr_np.size > 0:
+                min_value = np.nanmin(data_arr_np)
+                max_value = np.nanmax(data_arr_np)
+            else:
+                min_value = np.array(0, dtype=data_arr_np.dtype)
+                max_value = np.array(0, dtype=data_arr_np.dtype)
+
+            data_arr_np = np.absolute(data_arr_np)  # only consider absolute value
+
+            if tensor not in self.histogram_dict:
+                # first time it uses num_bins to compute histogram.
+                hist, hist_edges = np.histogram(data_arr_np, bins=self.num_bins)
+                hist_edges = hist_edges.astype(data_arr_np.dtype)
+                assert data_arr_np.dtype != np.float64, (
+                    "only float32 or float16 is supported, every constant must be explicitly typed"
+                )
+                self.histogram_dict[tensor] = (hist, hist_edges, min_value, max_value)
+            else:
+                old_histogram = self.histogram_dict[tensor]
+                old_min = old_histogram[2]
+                old_max = old_histogram[3]
+                assert hasattr(old_min, "dtype"), f"old_min should be a numpy array but is {type(old_min)}"
+                assert hasattr(old_max, "dtype"), f"old_min should be a numpy array but is {type(old_max)}"
+                old_hist = old_histogram[0]
+                old_hist_edges = old_histogram[1]
+                temp_amax = np.nanmax(data_arr_np)
+                if temp_amax > old_hist_edges[-1]:
+                    # increase the number of bins
+                    width = old_hist_edges[1] - old_hist_edges[0]
+                    # NOTE: np.arange may create an extra bin after the one containing temp_amax
+                    new_bin_edges = np.arange(old_hist_edges[-1] + width, temp_amax + width, width)
+                    old_hist_edges = np.hstack((old_hist_edges, new_bin_edges))
+                hist, hist_edges = np.histogram(data_arr_np, bins=old_hist_edges)
+                hist_edges = hist_edges.astype(data_arr_np.dtype)
+                hist[: len(old_hist)] += old_hist
+                assert data_arr_np.dtype != np.float64, (
+                    "only float32 or float16 is supported, every constant must be explicitly typed"
+                )
+                self.histogram_dict[tensor] = (hist, hist_edges, min(old_min, min_value), max(old_max, max_value))
+
+Original onnx-calibrate.py lines 954-998
+    def compute_percentile(self):
+        if self.percentile < 0 or self.percentile > 100:
+            raise ValueError("Invalid percentile. Must be in range 0 <= percentile <= 100.")
+
+        histogram_dict = self.histogram_dict
+        percentile = self.percentile
+
+        thresholds_dict = {}  # per tensor thresholds
+
+        print(f"Number of tensors : {len(histogram_dict)}")
+        print(f"Number of histogram bins : {self.num_bins}")
+        print(f"Percentile : ({100.0 - percentile},{percentile})")
+
+        for tensor, histogram in histogram_dict.items():
+            hist = histogram[0]
+            hist_edges = histogram[1]
+            total = hist.sum()
+            cdf = np.cumsum(hist / total)
+            if self.symmetric:
+                idx_right = np.searchsorted(cdf, percentile / 100.0)
+
+                thresholds_dict[tensor] = (
+                    -np.array(hist_edges[idx_right], dtype=hist_edges.dtype),
+                    np.array(hist_edges[idx_right], dtype=hist_edges.dtype),
+                )
+            else:
+                percent_to_cut_one_side = (100.0 - percentile) / 200.0
+                idx_right = np.searchsorted(cdf, 1.0 - percent_to_cut_one_side)
+                idx_left = np.searchsorted(cdf, percent_to_cut_one_side)
+                thresholds_dict[tensor] = (
+                    np.array(hist_edges[idx_left], dtype=hist_edges.dtype),
+                    np.array(hist_edges[idx_right], dtype=hist_edges.dtype),
+                )
+            min_value = histogram[2]
+            max_value = histogram[3]
+            if thresholds_dict[tensor][0] < min_value:
+                thresholds_dict[tensor] = (min_value, thresholds_dict[tensor][1])
+            if thresholds_dict[tensor][1] > max_value:
+                thresholds_dict[tensor] = (thresholds_dict[tensor][0], max_value)
+            thresholds_dict[tensor] = (*thresholds_dict[tensor], *hist[:2])
+            # Plot histogram for debug only
+            if os.environ.get("QUANTIZATION_DEBUG", "0") in (1, "1"):
+                apply_plot(hist, hist_edges)
+
+        return thresholds_dict

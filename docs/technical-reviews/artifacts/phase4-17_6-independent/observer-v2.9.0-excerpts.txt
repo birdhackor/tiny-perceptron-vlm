@@ -1,0 +1,153 @@
+SOURCE: https://raw.githubusercontent.com/pytorch/pytorch/v2.9.0/torch/ao/quantization/observer.py
+VERSION: v2.9.0
+ORIGINAL_SHA256: 35f395820ebf0d52642421bd14e5f6c1c032e589bba99fd43c86f7b29f8edbdb
+
+LOCATOR: UniformQuantizationObserverBase._calculate_qparams, original lines 344-422
+344:     def _calculate_qparams(
+345:         self, min_val: torch.Tensor, max_val: torch.Tensor
+346:     ) -> tuple[torch.Tensor, torch.Tensor]:
+347:         r"""Calculates the quantization parameters, given min and max
+348:         value tensors. Works for both per tensor and per channel cases
+349: 
+350:         Args:
+351:             min_val: Minimum values per channel
+352:             max_val: Maximum values per channel
+353: 
+354:         Returns:
+355:             scales: Scales tensor of shape (#channels,)
+356:             zero_points: Zero points tensor of shape (#channels,)
+357:         """
+358:         # Functionally equivalent to 'determine_qparams' in utils.py. Observers must be torchscriptable however and qscheme
+359:         # as far as I can tell is not allowed to passed as a parameter in torchscript functions. This makes refactoring observer
+360:         # to use this utility a massive pain and very gross. For now Im opting just to duplicate as this code
+361:         # seems unlikely to change (last update over 1 year ago) and when torchscript is fully deprecated we can refactor.
+362:         # TODO(jakeszwe, jerryzh168)
+363:         if not check_min_max_valid(min_val, max_val):
+364:             return torch.tensor([1.0], device=min_val.device.type), torch.tensor(
+365:                 [0], device=min_val.device.type
+366:             )
+367: 
+368:         quant_min, quant_max = self.quant_min, self.quant_max
+369:         min_val_neg = torch.min(min_val, torch.zeros_like(min_val))
+370:         max_val_pos = torch.max(max_val, torch.zeros_like(max_val))
+371: 
+372:         device = min_val_neg.device
+373:         scale = torch.ones(min_val_neg.size(), dtype=torch.float32, device=device)
+374:         zero_point = torch.zeros(min_val_neg.size(), dtype=torch.int64, device=device)
+375: 
+376:         if (
+377:             self.qscheme == torch.per_tensor_symmetric
+378:             or self.qscheme == torch.per_channel_symmetric
+379:         ):
+380:             max_val_pos = torch.max(-min_val_neg, max_val_pos)
+381:             scale = max_val_pos / (float(quant_max - quant_min) / 2)
+382:             scale = torch.max(scale, self.eps)
+383:             if self.dtype in [torch.quint8, torch.uint8]:
+384:                 if self.has_customized_qrange:
+385:                     # When customized quantization range is used, down-rounded midpoint of the range is chosen.
+386:                     zero_point = zero_point.new_full(
+387:                         zero_point.size(), (quant_min + quant_max) // 2
+388:                     )
+389:                 else:
+390:                     zero_point = zero_point.new_full(zero_point.size(), 128)
+391:             elif self.dtype in [torch.uint16]:
+392:                 zero_point = zero_point.new_full(zero_point.size(), 2**15)
+393:         elif self.qscheme == torch.per_channel_affine_float_qparams:
+394:             scale = (max_val - min_val) / float(quant_max - quant_min)
+395:             scale = torch.where(scale > self.eps, scale, torch.ones_like(scale))
+396:             # We use the quantize function
+397:             # xq = Round(Xf * inv_scale + zero_point),
+398:             # setting zero_point to (-1 * min *inv_scale) we get
+399:             # Xq = Round((Xf - min) * inv_scale)
+400:             zero_point = -1 * min_val / scale
+401:         else:
+402:             scale = (max_val_pos - min_val_neg) / float(quant_max - quant_min)
+403:             scale = torch.max(scale, self.eps)
+404:             zero_point = quant_min - torch.round(min_val_neg / scale).to(torch.int)
+405:             zero_point = torch.clamp(zero_point, quant_min, quant_max)
+406: 
+407:         # For scalar values, cast them to Tensors of size 1 to keep the shape
+408:         # consistent with default values in FakeQuantize.
+409:         if len(scale.shape) == 0:
+410:             # TODO: switch to scale.item() after adding JIT support
+411:             scale = torch.tensor([float(scale)], dtype=scale.dtype, device=device)
+412:         if len(zero_point.shape) == 0:
+413:             # TODO: switch to zero_point.item() after adding JIT support
+414:             zero_point = torch.tensor(
+415:                 [int(zero_point)], dtype=zero_point.dtype, device=device
+416:             )
+417:             if self.qscheme == torch.per_channel_affine_float_qparams:
+418:                 zero_point = torch.tensor(
+419:                     [float(zero_point)], dtype=zero_point.dtype, device=device
+420:                 )
+421: 
+422:         return scale, zero_point
+
+LOCATOR: MinMaxObserver documentation, original lines 436-497
+436:     r"""Observer module for computing the quantization parameters based on the
+437:     running min and max values.
+438: 
+439:     This observer uses the tensor min/max statistics to compute the quantization
+440:     parameters. The module records the running minimum and maximum of incoming
+441:     tensors, and uses this statistic to compute the quantization parameters.
+442: 
+443:     Args:
+444:         dtype: dtype argument to the `quantize` node needed to implement the
+445:                reference model spec.
+446:         qscheme: Quantization scheme to be used
+447:         reduce_range: Reduces the range of the quantized data type by 1 bit
+448:         quant_min: Minimum quantization value. If unspecified, it will follow the 8-bit setup.
+449:         quant_max: Maximum quantization value. If unspecified, it will follow the 8-bit setup.
+450:         eps: Epsilon value for float32, Defaults to `torch.finfo(torch.float32).eps`.
+451: 
+452:     Given running min/max as :math:`x_\text{min}` and :math:`x_\text{max}`,
+453:     scale :math:`s` and zero point :math:`z` are computed as:
+454: 
+455:     The running minimum/maximum :math:`x_\text{min/max}` is computed as:
+456: 
+457:     .. math::
+458: 
+459:         \begin{array}{ll}
+460:         x_\text{min} &= \begin{cases}
+461:             \min(X) & \text{if~}x_\text{min} = \text{None} \\
+462:             \min\left(x_\text{min}, \min(X)\right) & \text{otherwise}
+463:         \end{cases}\\
+464:         x_\text{max} &= \begin{cases}
+465:             \max(X) & \text{if~}x_\text{max} = \text{None} \\
+466:             \max\left(x_\text{max}, \max(X)\right) & \text{otherwise}
+467:         \end{cases}\\
+468:         \end{array}
+469: 
+470:     where :math:`X` is the observed tensor.
+471: 
+472:     The scale :math:`s` and zero point :math:`z` are then computed as:
+473: 
+474:     .. math::
+475: 
+476:         \begin{aligned}
+477:             \text{if Symmetric:}&\\
+478:             &s = 2 \max(|x_\text{min}|, x_\text{max}) /
+479:                 \left( Q_\text{max} - Q_\text{min} \right) \\
+480:             &z = \begin{cases}
+481:                 0 & \text{if dtype is qint8} \\
+482:                 128 & \text{otherwise}
+483:             \end{cases}\\
+484:             \text{Otherwise:}&\\
+485:                 &s = \left( x_\text{max} - x_\text{min}  \right ) /
+486:                     \left( Q_\text{max} - Q_\text{min} \right ) \\
+487:                 &z = Q_\text{min} - \text{round}(x_\text{min} / s)
+488:         \end{aligned}
+489: 
+490:     where :math:`Q_\text{min}` and :math:`Q_\text{max}` are the minimum and
+491:     maximum of the quantized data type.
+492: 
+493:     .. warning:: :attr:`dtype` can only take ``torch.qint8`` or ``torch.quint8``.
+494: 
+495:     .. note:: If the running minimum equals to the running maximum, the scale
+496:               and zero_point are set to 1.0 and 0.
+497:     """
+
+LOCATOR: MinMaxObserver.calculate_qparams, original lines 567-569
+567:     def calculate_qparams(self):  # type: ignore[override]
+568:         r"""Calculates the quantization parameters."""
+569:         return self._calculate_qparams(self.min_val, self.max_val)
