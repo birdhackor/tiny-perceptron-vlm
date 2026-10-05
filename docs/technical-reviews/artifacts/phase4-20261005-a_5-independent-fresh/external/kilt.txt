@@ -1,0 +1,1296 @@
+                                                 KILT: a Benchmark for Knowledge Intensive Language Tasks
+
+                                                  Fabio Petroni1 Aleksandra Piktus1 Angela Fan1,3 Patrick Lewis1,2
+                                         Majid Yazdani1 Nicola De Cao6 James Thorne4 Yacine Jernite5 Vladimir Karpukhin1
+                                             Jean Maillard1 Vassilis Plachouras1 Tim Rocktäschel1,2 Sebastian Riedel1,2
+                                                      1
+                                                        Facebook AI Research 2 University College London 3 LORIA
+                                                   4
+                                                     University of Cambridge 5 HuggingFace 6 University of Amsterdam
+
+
+                                                              Abstract                           in open-domain question answering (Chen et al.,
+                                                                                                 2017) models need to find answers within a large
+                                            Challenging problems such as open-domain
+                                            question answering, fact checking, slot filling
+                                                                                                 corpus of text. Fact checking a claim (Thorne et al.,
+                                            and entity linking require access to large, exter-   2018a) requires models to find evidence, often on
+arXiv:2009.02252v2 [cs.CL] 9 Apr 2021
+
+
+
+
+                                            nal knowledge sources. While some models             the web. In knowledgeable open dialogue (Dinan
+                                            do well on individual tasks, developing gen-         et al., 2019), models need access to knowledge
+                                            eral models is difficult as each task might re-      from large corpora to sustain informed conversa-
+                                            quire computationally expensive indexing of          tions.
+                                            custom knowledge sources, in addition to ded-
+                                            icated infrastructure. To catalyze research
+                                                                                                    In general, solving knowledge-intensive tasks
+                                            on models that condition on specific informa-        requires–even for humans–access to a large body
+                                            tion in large textual resources, we present a        of information. Like in Information Retrieval (IR)
+                                            benchmark for knowledge-intensive language           this involves satisfying an information need lever-
+                                            tasks (KILT). All tasks in KILT are grounded         aging large collections of text (Manning et al.,
+                                            in the same snapshot of Wikipedia, reduc-            2008). However, while IR focuses of finding rel-
+                                            ing engineering turnaround through the re-           evant material (usually documents), the tasks we
+                                            use of components, as well as accelerating
+                                                                                                 consider focus on more fine-grained behavior, such
+                                            research into task-agnostic memory architec-
+                                            tures. We test both task-specific and gen-           as producing specific answers to queries. For such
+                                            eral baselines, evaluating downstream perfor-        knowledge-intensive tasks, general infrastructure
+                                            mance in addition to the ability of the mod-         and architectures across tasks have yet to emerge,
+                                            els to provide provenance. We find that              and fundamental research questions remain open.
+                                            a shared dense vector index coupled with             For example, while it was long assumed that non-
+                                            a seq2seq model is a strong baseline, out-           parametric and explicit memory accessed through
+                                            performing more tailor-made approaches for
+                                                                                                 retrieval is strictly required for competitive re-
+                                            fact checking, open-domain question answer-
+                                            ing and dialogue, and yielding competitive re-
+                                                                                                 sults (Chen et al., 2017), recent large pre-trained
+                                            sults on entity linking and slot filling, by gen-    sequence-to-sequence models such as T5 (Raffel
+                                            erating disambiguated text. KILT data and            et al., 2019a) and BART (Lewis et al., 2019) store
+                                            code are available at https://github.com/            all knowledge in their parameters while performing
+                                            facebookresearch/KILT.1                              remarkably well (Petroni et al., 2019). Likewise,
+                                                                                                 while the classical approach of information extrac-
+                                        1   Introduction                                         tion for populating a Knowledge Base (KB, Riedel
+                                        There has been substantial progress on natural lan-      et al., 2013; Surdeanu and Ji, 2014) seems out-
+                                        guage processing tasks where the inputs are short        of-fashion, recent results show that they remain
+                                        textual contexts such as a sentences, paragraphs,        contenders (Fan et al., 2019a; Xiong et al., 2019).
+                                        or perhaps a handful of documents. Critically, we           While there are numerous datasets for
+                                        have seen the emergence of general-purpose archi-        knowledge-intensive tasks (e.g. Thorne et al.,
+                                        tectures and pre-trained models that can be applied      2018a; Dinan et al., 2019; Kwiatkowski et al.,
+                                        to a wide range of such tasks (Devlin et al., 2019).     2019, to name just a few), it is difficult to
+                                        However, for many real world problems, process-          answer the above questions generally across
+                                        ing at this local level is insufficient. For example,    them. Each dataset comes in a different format,
+                                          1
+                                            and at https://huggingface.co/datasets?              is pre-processed with different assumptions, and
+                                        search=kilt                                              requires different loaders, evaluations, and analysis
+Figure 1: Common KILT interface for knowledge intensive language tasks: each instance consists of
+input and output with a provenance (text span) from the common KILT knowledge source. Source:
+https://en.wikipedia.org/wiki/{Star_Trek,Three_Men_and_a_Baby,Treklanta}
+
+
+tools. Critically, they all use different knowledge     the test set for all datasets considered.2 An im-
+sources, from different versions of Wikipedia to        portant aim of KILT is to cover many different
+entirely different corpora. This makes task-to-task     ways of seeking knowledge. For this reason, we
+comparisons difficult and substantially increases       select tasks that provide a variety of ways to for-
+computational overhead.         For example, one        mulate both the input query (e.g., a claim to verify,
+cannot easily assess whether the same knowledge         a text chunk to annotate, a structured query, a nat-
+representation can be re-used if each dataset is tied   ural question or a conversation) and the expected
+to a different source. Moreover, if one decides         output (e.g., discrete, extractive, or abstractive).
+to work with different sources across different         Moreover, while some tasks are factoid in nature
+tasks, many approaches require re-indexing and          (e.g., slot filling), others require using background
+re-encoding large numbers of documents. If a            knowledge to answer more complex questions (e.g,
+language model is pre-trained on one snapshot of        ELI5) or to sustain a conversation (e.g,. Wizard of
+Wikipedia to capture its knowledge, tasks that use      Wikipedia). The format of the KILT benchmark is
+other snapshots might require re-training.              model-agnostic, so any system capable of produc-
+                                                        ing a textual output given a textual input is eligible
+   To facilitate research on models that must ac-       to participate. KILT is an in-KB resource (Petroni
+cess specific information in a knowledge source,        et al., 2015), i.e., the evidence required to answer
+we introduce KILT, a benchmark and library for          each of the ~3.2M instances in KILT is present
+Knowledge Intensive Language Tasks. KILT aims           somewhere in the knowledge source. Hence there
+to lower the entry barrier for such research by for-    are no unanswerable instances in KILT. Although
+mulating several knowledge-intensive NLP tasks          recognizing unanswerable instances is important,
+with respect to a common interface and the same         we believe the in-KB setting already poses an hard
+unified knowledge source—a single Wikipedia
+snapshot. The KILT benchmark consists of eleven             2
+                                                              A brand new portion of the Natural Question (NQ) dataset,
+datasets spanning five distinct tasks, and includes     originally held out, is used as the KILT test set for NQ.
+challenge to current state-of-the-art techniques, and   2       Knowledge Source
+thus leave unanswerable instances as future work.
+   KILT enables researchers to develop general-         A main feature of the KILT benchmark is the use of
+purpose models and evaluate them across multiple        a unified knowledge source that contains all infor-
+domains, testing hypotheses around task-agnostic        mation necessary for all tasks. Defining a unified
+memory and knowledge representations without            knowledge source is a challenging problem — al-
+indexing different large-scale textual corpora or       though all tasks use Wikipedia, they consider differ-
+writing new IO routines. Furthermore, the KILT          ent snapshots. As Wikipedia pages are constantly
+library provides general building blocks to ease re-    modified, added, and removed, the knowledge can
+search on knowledge intensive NLP. We provide           differ drastically from snapshot to snapshot. Con-
+various state-of-the-art information retrieval sys-     cretely, the KILT knowledge source is based on
+tems (both neural and non-neural) coupled with          the 2019/08/01 Wikipedia snapshot and contains
+different models that read text in the knowledge        5.9M articles. We describe how each dataset is
+source and make predictions for different tasks.        represented in KILT, and our mapping strategy for
+                                                        aligning data to our chosen snapshot. Additional
+   We evaluate several state-of-the-art models
+                                                        details are in the appendix.
+that represent diverse approaches to knowledge-
+intensive NLP, and find that a hybrid approach com-     Mapping Datasets to a Fixed Snapshot The
+bining a neural retriever with a pretrained sequence-   main challenge in defining a unified knowledge
+to-sequence model outperforms most task-specific        source is ensuring the knowledge for all task ex-
+solutions when trained end-to-end. We additionally      amples is available. We assume tasks provide an
+evaluate whether systems can provide evidence for       input (e.g. a question in question answering, or
+their predictions. With this aim, we augment ev-        a conversation in dialogue) needed to produce an
+ery instance in KILT with provenance information        output (e.g. an answer or a subsequent utterance).
+in the form of textual spans in specific Wikipedia      In addition, tasks provide provenance, defined as
+pages to corroborate the output. We additionally        a set of textual spans in Wikipedia that contain
+perform an annotation campaign via Amazon Me-           evidence for producing an output given a specific
+chanical Turk to increase the provenance coverage.      input. These provenance spans range from single
+Lastly, in addition to evaluating downstream per-       entities, short answers, sentences, paragraphs, to
+formance with popular metrics we formulate novel        whole articles. The idea of our mapping strategy
+KILT variants for those that award points only if       is to identify provenance spans in the KILT knowl-
+systems find provenance Wikipedia pages for the         edge source—if we find all the provenance spans
+output given the input. The poor absolute perfor-       for an input-output pair, the knowledge needed to
+mance of our baselines for those metrics indicates      produce the output is available in our snapshot. The
+the need for focused research on systems able to        provenance can be a span of any size, from a single
+explain their decisions.                                token to a paragraph to an entire document.
+   In summary, we contribute:                              Concretely, the mapping strategy operates as fol-
+  1. a publicly-available benchmark of knowledge-       lows.3 First, we try to match Wikipedia pages in
+     intensive tasks aligned to a single Wikipedia      each dataset to our snapshot, relying on Wikipedia
+     snapshot, to spur the development of general-      URL redirections for pages that changed title.
+     purpose models and enable their comparison;        Second, we look for the provenance span in the
+  2. an open-source library to facilitate the devel-    matched page. We scan the whole page and return
+     opment of new architectures for knowledge-         the span with the highest BLEU (Papineni et al.,
+     intensive tasks;                                   2002) with the given provenance span.4 Third, we
+  3. a provenance indication for all instances in       replace the original provenance in a task’s input-
+     KILT, made more comprehensive with an an-          output pair with the span from the KILT knowledge
+     notation campaign, which allows to jointly         source, and we report the BLEU score between the
+     assess output accuracy and ability to provide      two. Finally, we remove from the dev and test sets
+     supporting evidence in the knowledge source;       all outputs for which the BLEU score is lower than
+                                                        a threshold for at least one provenance span (we
+  4. a comparative performance of various model-
+     ing approaches, showing promising results for          3
+                                                                Scripts for the mapping algorithm available on GitHub.
+                                                            4
+     general baselines across all tasks.                        We return the shortest span if there’s a tie in BLEU score.
+use 0.5 as threshold) — this is meant to ensure         consider the claim as input and the classification
+high quality mappings in the evaluation sets — dis-     label as output. Each label is accompanied by a
+carding on average 18% of test and dev data (for        set of provenance spans that corroborate the clas-
+all tasks except entity linking). We keep all input-    sification label. We model multiple equally-valid
+output pairs in the train sets (see Figure 5 in the     provenance sets per label.
+appendix for more details).                                FEVER (Thorne et al., 2018a) is a large dataset
+                                                        for claim veracity that requires retrieving sentence-
+3     Tasks                                             level evidence to support if a claim is supported or
+                                                        refuted. Additional details are in the appendix.
+We consider five tasks that use Wikipedia as a
+knowledge source for KILT: fact checking, open
+                                                        3.2      Entity Linking
+domain question answering, slot filling, entity link-
+ing, and dialogue. The diversity of these tasks         Entity Linking (EL) assigns a unique Wikipedia
+challenge models to represent knowledge flexibly.       page to entities mentioned in text. Each KILT
+Some tasks require a discrete prediction (e.g., an      record for EL has text in the input (max 256
+entity), others, such as extractive question answer-    tokens) where a single entity mention is tagged
+ing, can copy the output directly from a Wikipedia      with two special tokens (i.e., [START_ENT] and
+page, while still other tasks must synthesize mul-      [END_ENT]—see Figure 1 for an example). The
+tiple pieces of knowledge in an abstractive way to      output is the title of the Wikipedia page for the en-
+produce an output. KILT also provides a variety of      tity mention plus provenance pointing to the entire
+ways to seek knowledge, from a claim to verify to a     page (through a unique identifier). Since Wikipedia
+text chunk to annotate, from a structured or natural    associates unambiguous titles to entities6 , finding
+question to a conversation (see Table 1 for details).   the correct output is enough to link entity mention
+We are able to include the test set for all datasets    and Wikipedia page. The provenance mimics the
+in KILT, either because the test set is public, or      canonical approach to EL, that is to produce an
+because we were able to obtain the test set from        identifier for each mention (Wu et al., 2019). To
+the authors of the original dataset. These test sets    map the provenance (whole Wikipedia page), we
+are not publicly released, but are used for the KILT    simply match Wikipedia pages specified in vari-
+challenge on EvalAI (Yadav et al., 2019) where          ous datasets to the KILT knowledge source. We
+participants can upload their models’ predictions       consider three popular EL datasets in KILT, two
+and be listed on the public leaderboard.5               of which do not contain a train set but should be
+   To facilitate experimentation, we define a con-      assessed in a zero-shot fashion. Note that, in ad-
+sistent interface for all datasets in the KILT Bench-   dition to the AY2 train set, the whole knowledge
+mark. Each dataset is represented in JSON Line          source can be used as training data by exploiting
+format , where each record contains three fields: id,   hyperlinks. To facilitate experimentation, we re-
+input, output. The input is a natural language string   lease such data in KILT format (9M train instances),
+and the output a non-empty list of equally-valid        following the splits of Wu et al. (2019).
+outputs (e.g. if multiple answers to a question are        AIDA CoNLL-YAGO (Hoffart et al., 2011b)
+valid in a question answering dataset). Each output     supplements the CoNLL 2003 dataset (Sang and
+is a string and it is accompanied by a non-empty list   De Meulder, 2003) with Wikipedia URL annota-
+of complementary provenance spans (all should be        tions for all entities using the YAGO2 system (Hof-
+used to acquire the knowledge needed to provide a       fart et al., 2011a). The original data is split into
+valid output). Figure 1 displays an example for all     three parts: train, testa, testb. Following Hoffart
+considered tasks (Figure 3 in the appendix contains     et al. (2011b) we consider testa as dev and testb as
+further details on the common interface).               test.
+                                                           WNED-WIKI (Guo and Barbosa, 2018) is a
+3.1    Fact Checking                                    dataset automatically created by sampling docu-
+Fact checking verifies a claim against a collection     ment from the 2013/06/06 Wikipedia dump, and
+of evidence. It requires deep knowledge about the       balancing the difficulty of linking each mention
+claim and reasoning over multiple documents. We         (using a baseline as proxy). We randomly split the
+                                                        dataset into dev and test.
+  5
+    available at https://evalai.cloudcv.org/
+                                                           6
+web/challenges/challenge-page/689.                             Wikipedia uses explicit text in titles to disambiguate.
+   Label           Dataset                  Reference                Task            Input Format   Output Format
+    FEV      FEVER                  Thorne et al. (2018a)      Fact Checking            Claim      Classification
+    AY2      AIDA CoNLL-YAGO        Hoffart et al. (2011b)     Entity Linking        Text Chunk        Entity
+  WnWi       WNED-WIKI              Guo and Barbosa (2018)     Entity Linking        Text Chunk        Entity
+  WnCw       WNED-CWEB              Guo and Barbosa (2018)     Entity Linking        Text Chunk        Entity
+  T-REx      T-REx                  Elsahar et al. (2018)       Slot Filling          Structured       Entity
+   zsRE      Zero Shot RE           Levy et al. (2017)          Slot Filling          Structured       Entity
+     NQ      Natural Questions      Kwiatkowski et al. (2019) Open Domain QA          Question       Extractive
+   HoPo      HotpotQA               Yang et al. (2018)        Open Domain QA          Question    Short Abstractive
+   TQA       TriviaQA               Joshi et al. (2017)       Open Domain QA          Question       Extractive
+   ELI5      ELI5                   Fan et al. (2019b)        Open Domain QA          Question    Long Abstractive
+   WoW       Wizard of Wikipedia    Dinan et al. (2019)          Dialogue            Conversation Long Abstractive
+
+                                   Table 1: Datasets and tasks considered in KILT.
+
+
+  WNED-CWEB (Guo and Barbosa, 2018) is a                    answer. Standard tasks such as SQuAD (Rajpurkar
+dataset created with the same strategy as WNED-             et al., 2016) provide an evidence document, but in
+WIKI, but sampling from the ClueWeb 2012 cor-               open domain tasks, models must reason over an
+pora annotated with the FACC1 system.7 Similarly,           entire knowledge source (such as Wikipedia). We
+we randomly split into dev and test.                        consider the question as input and the answer as
+                                                            output with dataset-specific provenance.
+3.3     Slot Filling
+                                                               Natural Questions (Kwiatkowski et al., 2019)
+The goal of the Slot Filling (SF) is to collect in-         is a corpus of real questions issued to the Google
+formation on certain relations (or slots) of entities       search engine. Each question comes with an ac-
+(e.g., subject entity Albert Einstein and relation          companied Wikipedia page with an annotated long
+educated_at) from large collections of natural lan-         answer (a paragraph) and a short answer (one or
+guage texts. A potential application is structured          more entities). We consider the open-version of the
+Knowledge Base Population (KBP Surdeanu and                 dataset and use both long and short answers spans
+Ji, 2014). SF requires (1) disambiguation of the            as provenance. We collaborated with the authors of
+input entity and (2) acquiring relational knowledge         Natural Questions to access a held out, unpublished
+for that entity. For KILT, we model the input as            portion of the original dataset to form a new test
+a structured string subject entity [SEP] relation,          set for KILT. By construction each QA pair is asso-
+the output as a list of equally-valid object-entities,      ciated with a single Wikipedia page, although other
+each one accompanied with provenance where the              pages might contain enough evidence to answer the
+subject-relation-object fact manifests.                     question. To increase the provenance coverage we
+   Zero Shot RE (Levy et al., 2017) is a dataset de-        perform an Amazon Mechanical Turk campaign
+signed to translate relation extraction into a reading      for the dev and test sets and increase the average
+comprehension problem. We consider the open-                number of provenance pages per question from 1
+domain version of this dataset and align the in-            to 1.57 (details in section 4).
+put/output with the KILT interface. Additional
+                                                               HotpotQA (Yang et al., 2018) requires multi-
+details are in the appendix.
+                                                            hop reasoning over multiple Wikipedia pages to
+   T-REx (Elsahar et al., 2018) provides a large-           answer each question. For each question-answer
+scale collection of facts aligned to sentences in           pair, a set of supporting sentences are provided,
+Wikipedia abstracts through distant supervision.            and we consider these as provenance. We focus on
+We consider each sentence as provenance and for-            the fullwiki setting, where systems are required to
+mulate the input as above (details in the appendix).        retrieve and reason over the whole Wikipedia.
+3.4     Open Domain Question Answering                         TriviaQA (Joshi et al., 2017) is a collection of
+                                                            question-answer-evidence triples. Evidence docu-
+Open domain Question Answering (Chen et al.,
+                                                            ments are automatically gathered from Wikipedia
+2017) is the task of producing the correct answer
+                                                            or the Web. We consider only the Wikipedia case.
+for a question, without a predefined location for the
+                                                            We use the answer span as provenance and consider
+   7
+       http://lemurproject.org/clueweb12                    the full version of the dev and test set.
+   ELI5 (Fan et al., 2019b)8 is a collection of                   swered given the KILT Wikipedia snapshot.10 If
+question-answer-evidence triples where the ques-                  no passage is selected by an annotator we ask to
+tions are complex, and the answers are long, ex-                  provide either another one from Wikipedia or an
+planatory, and free-form. For dev and test, we col-               explanation. We collect three annotations for each
+lect annotations using Amazon Mechanical Turk,                    passage, and insert the passage as new provenance
+asking evaluators to select which supporting docu-                for the question if at least two annotators found
+ments from Wikipedia can be used to answer the                    enough evidence to answer in it. The average inter-
+question. We treat these as gold provenance anno-                 annotator agreement is 0.3 and 0.1 Cohen’s kappa
+tations for evaluation (details in section 4).                    for NQ and ELI5 respectively. Note that ELI5 ques-
+                                                                  tions are in general more complex than NQ ones,
+3.5      Dialogue                                                 the required answer is not an extracted span from
+                                                                  a page but a free-form explanation that not always
+Chitchat dialogue is the task of developing an en-
+                                                                  can be grounded in Wikipedia.
+gaging chatbot that can discuss a wide array of
+                                                                     To make ELI5 data more robust we computed the
+topics with a user, which often relies on topical,
+                                                                  overlap between provenance passages and answers
+factual knowledge. For example, it would be dif-
+                                                                  for each instance using ROUGE-L and manually
+ficult to have a conversation about “grayhounds”
+                                                                  annotate instances with low overlap (ROUGE-L <
+without any information about that dog breed. We
+                                                                  0.15). Overall, we were able to collect provenance
+consider the conversation history as input and the
+                                                                  information for 1507 dev instances (3000 anno-
+next utterance as output.
+                                                                  tated) and 600 test instances (2000 annotated) for
+   Wizard of Wikipedia (Dinan et al., 2019) is a
+                                                                  ELI5, with an average of 1.18 Wikipedia pages as
+large dataset of conversation grounded with knowl-
+                                                                  provenance per instance. For NQ, we filter out on
+edge retrieved from Wikipedia. One speaker in the
+                                                                  average 8% of data (258 dev and 110 test instances)
+conversation must ground their utterances in a spe-
+                                                                  and include on average 1.57 Wikipedia pages as
+cific knowledge sentence, chosen from a Wikipedia
+                                                                  provenance per instance. Additional details in the
+page. The chosen sentence forms the provenance
+                                                                  Appendix, table 6.
+for KILT.
+                                                                  5        Evaluation Metrics
+4       Provenance Annotation Campaign
+                                                                  Various tasks in the KILT Benchmark need to be
+We perform an Amazon Mechanical Turk cam-                         evaluated differently, which can make task-wide
+paign on the NQ and ELI5 datasets for the dev                     comparison challenging. Further, there are multi-
+and test splits. While for the NQ our aim is to in-               ple aspects of each system that we want to assess,
+crease the provenance coverage (i.e., we already                  namely (1) downstream results, (2) performance in
+have a provenance page for each qa pair) for ELI5                 retrieving relevant evidence to corroborate a predic-
+we want to collect provenance information from                    tion and (3) a combination of the two. We report
+scratch. For each question we ask annotators to                   different metrics to capture these aspects.11
+indicate if four pre-determined passages contain
+                                                                  Downstream performance. We consider differ-
+enough evidence to answer the question and addi-
+                                                                  ent metrics to capture the uniqueness of the differ-
+tionally highlight a salient span in them. We select
+                                                                  ent tasks in KILT and mimic the typical way to
+the passages to annotate using our baseline retrieval
+                                                                  assess performance for each dataset. We use Accu-
+models, namely Tf-idf, DPR, RAG and BLINK +
+                                                                  racy for tasks that require a discrete output (e.g.,
+flair (details in the Appendix).9 We only consider
+                                                                  an entity); Exact Match (EM) for tasks with ex-
+passages with some tokens overlap with the gold
+                                                                  tractive (i.e., Natural Questions, TriviaQA) or short
+answers (at least 10%).
+                                                                  abstractive output format (i.e., HotpotQA); finally,
+   For NQ, we additionally include gold passages                  for tasks with long abstractive output format, we
+among those to annotate, with the twofold objec-                  use ROUGE-L (Lin, 2004) for ELI5 and F1-score
+tive of controlling the quality of the annotation                 for Wizard of Wikipedia. For EM and F1-score
+process and filter out questions that can’t be an-                we follow standard post-processing to lowercase,
+    8                                                                 10
+     https://yjernite.github.io/lfqa.html                              we present passages in random order to the annotator to
+    9                                                             exclude biases.
+     for Tf-idf and BLINK + flair we consider the first passage
+                                                                    11
+in the retrieved page                                                  evaluation scripts available in GitHub.
+  Model                                      #Parameters          KILT scores. We propose a KILT version for
+                                                                  downstream metrics that, inspired by the FEVER-
+  Trans MemNet (Dinan et al., 2019)      15.5M
+  BERT (base) (Devlin et al., 2019)      110M                     score (Thorne et al., 2018a), takes into account the
+  NSMN (Nie et al., 2019)            199M +93M nt                 provenance supporting the output. For each data-
+  T5 (base) (Raffel et al., 2019b)       220M                     point, we only award Accuracy, EM, ROUGE-L,
+  DPR (Karpukhin et al., 2020)       220M +15B idx                and F1 points to KILT-AC, KILT-EM, KILT-RL and
+  BERT (large) (Devlin et al., 2019)     340M
+  BART (large) (Lewis et al., 2019)      406M
+                                                                  KILT-F1 respectively, if the R-precision is 1. This
+  RAG (Lewis et al., 2020b)          626M +15B idx                is equivalent to awarding points if the system finds
+  BLINK (Wu et al., 2019)             680M +6B idx                (and ranks at the top) a complete set of provenance
+                                                                  Wikipedia pages for at least one ground truth out-
+Table 2: Baselines considered and total number of their           put given the input. We choose this metric to em-
+trainable parameters. Non trainable (nt) parameters and           phasize that systems must be able to explain their
+index (idx) sizes are also reported.                              output with proper evidence, not simply answer.
+
+                                                                  6   Baselines
+strip articles, punctuation, and duplicate whites-
+pace from gold and predicted output (Rajpurkar                    The KILT tasks provide a dual challenge of retriev-
+et al., 2016). Note that Accuracy is equivalent to                ing information and conditioning upon that to cre-
+strict exact match, without post-processing. We                   ate an output. Various directions could be applied
+report additional metrics for some datasets in the                to these. For example, the Wikipedia knowledge
+appendix (Table 7-17).                                            could be represented explicitly, as natural language
+                                                                  or in a structured form, or represented implicitly,
+Retrieval. We adopt a page-level formulation                      as knowledge stored in model parameters. Models
+and measure the ability of a model to provide a                   could be discriminative, extractive, where a spe-
+set of Wikipedia pages as evidence for a predic-                  cific span is selected as output, or generative, where
+tion.12 For most datasets in KILT a single page                   the model writes an output. We consider retrieval,
+is enough to provide complete evidence, with the                  task-specific, and general baselines for KILT (see
+exception of FEVER (~12% which requires more                      Table 2). Additional details are in the appendix.
+than one page) and HotpotQA (two pages are al-
+ways required). We consider the following retrieval               7   Results
+metrics in KILT:
+                                                                  We summarize the main results in three tables:
+   R-precision, calculated as Rr , where R is the
+                                                                  downstream performance in Table 3, retrieval in
+number of Wikipedia pages inside each prove-
+                                                                  Table 4 and KILT scores in Table 5. Additional
+nance set and r is the number of relevant pages
+                                                                  results, as well as comparisons with recent works
+among the top-R retrieved pages. For most of the
+                                                                  reported numbers, can be found in the appendix.
+datasets R = 1 and this formulation is equivalent
+                                                                  It’s possible to get the performance of a system for
+to Precision@1. Concretely, R-precision=1 if all
+                                                                  the KILT test sets by uploading its predictions to
+Wikipedia pages in a provenance set are ranked at
+                                                                  our EvalAI challenge.5
+the top. We report the maximum value among all
+                                                                     When considering downstream performance (Ta-
+provenance sets for any given input.
+                                                                  ble 3), although pre-trained sequence-to-sequence
+   Recall@k, calculated as wn , where n is the num-               models can embed knowledge implicitly in their
+ber of distinct provenance sets for a given input
+                                                                  parameters to some extent (Petroni et al., 2019;
+and w is the number of complete provenance sets
+                                                                  Roberts et al., 2020), they clearly lag behind mod-
+among the top-k retrieved pages. For datasets
+                                                                  els with explicit knowledge access in almost all
+that require more than one page of evidence (e.g.,
+                                                                  datasets. The BART+DPR baseline that incorpo-
+FEVER and HotpotQA), we use the lowest ranked
+                                                                  rates an explicit retrieval step in addition to the
+page in each provenance set to determine its posi-
+                                                                  generative pretraining, works well. It outperforms
+tion and remove the other pages in the set from the
+                                                                  some of the task-specific solutions, and gets close
+rank. For both metrics, we report the mean over all
+                                                                  to others. Performance are even stronger when the
+test datapoints.
+                                                                  retriever and reader components are trained end-to-
+  12
+     our evaluation scripts allow to evaluate retrieval perfor-   end, as in the case of RAG. We find this a promising
+mance at a more fine-grained level (e.g., paragraph).             direction for knowledge intensive tasks.
+                      Fact Check.      Entity Linking Slot Filling                     Open Domain QA            Dial.
+       model                FEV     AY2 WnWi WnCw T-REx zsRE                    NQ      HoPo TQA ELI5            WoW
+                                              Accuracy                             Exact Match          RL        F1
+       NSMN                 66.1     -         -        -         -       -     -           -       -        -       -
+       BERT + DPR          69.68     -         -        -         -    6.93 38.64       11.29   70.38        -       -
+  ts
+
+
+
+
+       BLINK                   - 81.54     80.24    68.77         -       -     -           -       -        -       -
+       Trans MemNet            -     -         -        -         -       -     -           -       -        -    11.5
+       BART (large)        78.93 77.55     45.91    49.16    45.06     9.14 21.75       15.37 32.39 20.55        12.96
+  im
+
+
+
+
+       T5 (base)            76.3 74.05     47.13    49.29    43.56     9.02 19.6        12.64 18.11 19.08        13.49
+       BART + DPR          86.74 75.49      45.2    46.87    59.16 30.43 41.27          25.18 58.55 17.41        15.55
+  ex
+
+
+
+
+       RAG                 86.31 72.62     48.07    47.61     59.2 44.74 44.39          26.97 71.27 14.05        13.22
+
+Table 3: Downstream performance on the test data. Baselines are grouped by task-specific (ts) and general with
+implicit (im) or explicit (ex) knowledge access. Task-specific solutions cannot be generally applied to all datasets
+in KILT, hence there are empty cells in the top part of the table. We report the typical metric to assess performance
+for each dataset, specified in the first row.
+
+                   Fact Check.         Entity Linking Slot Filling                     Open Domain QA            Dial.
+  model                  FEV        AY2 WnWi WnCw T-REx zsRE                    NQ      HoPo TQA ELI5            WoW
+                                                                 R-Precision
+  DPR + BERT               72.93     -        -         -        -    40.11    60.66    25.04  43.4     -            -
+  DPR                      55.33  1.81      0.3      0.51    13.26    28.96    54.29    25.04 44.49 10.67        25.48
+  Multi-task DPR           74.48 26.48     4.91      1.86    69.46    80.91    59.42    42.92 61.49 15.5         41.07
+  Tf-idf                   50.85  3.74     0.24      2.09    44.74    60.83    28.12    34.14 46.37 13.67        49.01
+  RAG                      61.94 72.62    48.07     47.61    28.68    53.73    59.49    30.59 48.68  11.0        57.78
+  BLINK + flair            63.71 81.54    80.24     68.77    59.56    78.78    24.52    46.12 65.58   9.5        38.21
+
+Table 4: Page-level R-Precision on test data. For DPR, we additionally report the performance after the BERT-
+based classifier (for FE) or reader (for NQ,HP,TR) re-ranked relevant pages (i.e., DPR + BERT). R-Precision is
+equivalent to Precision@1 for all datasets except FEV and HoPo that require multi-hop.
+
+
+   By formulating Entity Linking within KILT, we            KILT training data (Multi-task DPR) led to strong
+can evaluate the ability of seq2seq models at this          performance gains on all datasets compared with
+task. They perform surprisingly well, even with-            the original model (DPR), that considers only NQ
+out any explicit access to knowledge (i.e., BART            and TQA as training data (Karpukhin et al., 2020).
+and T5). These solutions are able to link entity            This suggests synergies between KILT datasets that
+mentions by either leaving them untouched (if they          are beneficial in terms of model performance.
+match the correct Wikipedia title), completely alter-
+ing mention text (e.g., “European Cup” → “UEFA
+Champions League”), or adding disambiguation                   Finally, the KILT scores formulation allows us
+tokens (e.g., “Galatasaray” → “Galatasaray S.K.             to systematically assesses the performance for out-
+(football)”). We report an example in Figure 4.             put and provenance jointly (Table 5). We don’t
+   When considering retrieval alone (Table 4) there         report results for BART and T5 since answers are
+is no clear winner—entity-centric tasks (Entity             generated solely from the input with no explicit
+Linking and Slot Filling) clearly benefit from entity-      retrieval and there is no straightforward way to ac-
+based retrieval, while DPR works better for NQ,             cess provenance for each prediction. The relative
+FEV and ELI5, that require more fine grained pas-           performance of the other baselines with respect to
+sages supervision. We believe that combining all            KILT scores is consistent with downstream results.
+these ingredients (i.e., dense representations, fine        However, the generally low absolute numbers leave
+grained supervision, entity awareness) will be nec-         a large room for improvement for systems able to
+essary for general task-agnostic memories. More-            provide the correct output but also successfully jus-
+over, jointly training a single DPR model on all            tify their decision.
+                      Fact Check.      Entity Linking       Slot Filling          Open Domain QA         Dial.
+          model             FEV     AY2 WnWi WnCw         T-REx zsRE        NQ     HoPo TQA ELI5         WoW
+                                             KILT-AC                              KILT-EM        -RL      -F1
+          NSMN             41.88     -        -       -          -      -     -        -     -       -       -
+          BERT + DPR       58.58     -        -       -          -   4.47 31.99     0.74 34.48       -       -
+    ts
+
+
+
+
+          BLINK                - 81.54    80.24   68.77          -      -     -        -     -       -       -
+          Trans MemNet         -     -        -       -          -      -     -        -     -       -    2.23
+          BART + DPR       47.68 75.49     45.2   46.87    11.12 18.91 30.06        1.96  31.4     1.9    4.52
+    ex
+
+
+
+
+          RAG              53.45 72.62    48.07   47.61    23.12 36.83 32.69        3.21 38.13    1.69     9.1
+
+Table 5: KILT scores on the test data. We do not report KILT scores for baselines with implicit knowledge access
+since no provenance information is returned by them. We report the KILT version of donwstream metrics, specified
+in the first row (to save space we abbreviate KILT-RL and KILT-F1). KILT scores are computed by awarding points
+only if provenance pages are found (i.e., R-Precision = 1).
+
+
+8        Discussion                                       2018), TriviaQA-web (Joshi et al., 2017), Quasar-
+                                                          T (Dhingra et al., 2017), WebQuestions (Berant
+There are custom solutions that can easily simplify       et al., 2013) and ComplexWebQuestions (Talmor
+the slot filling task. For instance, subject entities     and Berant, 2018)—in KILT we exclusively con-
+can be used for lookups by title in Wikipedia to          sider publicly available Wikipedia-based datasets
+retrieve knowledge (this heuristic will always work       in order to merge and unify the knowledge source.
+for zsRE), and structured human-curated resources
+(such as Wikidata13 ) could be used to get all an-        10     Conclusion
+swers right. Nevertheless, we are interested in test-
+ing if a general model can extract attributes about       We introduce KILT, a benchmark for assessing
+specific entities from a large body of text.              models that need to condition on specific knowl-
+   The provenance to justify each system prediction       edge in a defined snapshot of Wikipedia to solve
+can come from anywhere, including a different             tasks spanning five domains. The goal is to cat-
+system, and this is difficult to detect. Moreover         alyze and facilitate research towards general and
+our provenance might not be exhaustive—given              explainable models equipped with task-agnostic
+the redundancy of information in Wikipedia there          representations of knowledge. Our experiments
+could be other pages with the knowledge needed to         show promising results for a general solution com-
+solve a KILT instance. We conduct an annotation           bining dense retrieval and seq2seq generations, al-
+campaign to mitigate the problem.                         though there is large room for improvements. In
+                                                          particular, we find that provenance of current mod-
+9        Related Work                                     els is generally low.
+Several natural language benchmarks have been in-
+                                                          11     Acknowledgment
+troduced to track and support NLP progress, includ-
+ing natural language understanding (Wang et al.,          The authors would like to greatly thank the team be-
+2018, 2019), multitask question answering (Mc-            hind Natural Questions14 for the held out data, that
+Cann et al., 2018), reading comprehension (Dua            defines our NQ test set; FEVER15 , HotpotQA16
+et al., 2019), question understanding (Wolfson            and TriviaQA17 teams for sharing official test data
+et al., 2020), and dialogue (Shuster et al., 2019).       for the KILT leaderboard; Luke Zettlemoyer and
+We focus on multi-domain tasks that need to seek          Scott Wen-tau Yih for helpful discussions; Rishabh
+knowledge in a large body of documents to produce         Jain for the help in setting up the EvalAI challenge.
+an output. Although there exist several tasks and re-
+sources that define large-scale external knowledge          14
+                                                               https://ai.google.com/research/
+sources—including the TAC-KBP challenges (Mc-             NaturalQuestions
+Namee and Dang, 2009; Ji et al., 2010; Surdeanu,            15
+                                                               https://fever.ai
+                                                            16
+2013; Surdeanu and Ji, 2014), ARC (Clark et al.,               https://hotpotqa.github.io
+                                                            17
+                                                               https://nlp.cs.washington.edu/
+    13
+         https://www.wikidata.org                         triviaqa
+References                                                 Processing and the 9th International Joint Confer-
+                                                           ence on Natural Language Processing (EMNLP-
+Alan Akbik, Tanja Bergmann, Duncan Blythe, Kashif          IJCNLP), pages 4186–4196, Hong Kong, China. As-
+  Rasul, Stefan Schweter, and Roland Vollgraf. 2019.       sociation for Computational Linguistics.
+  Flair: An easy-to-use framework for state-of-the-art
+  nlp. In Proceedings of the 2019 Conference of the      Angela Fan, Yacine Jernite, Ethan Perez, David Grang-
+  North American Chapter of the Association for Com-       ier, Jason Weston, and Michael Auli. 2019b. ELI5:
+  putational Linguistics (Demonstrations), pages 54–       long form question answering. In Proceedings of
+  59.                                                      the 57th Conference of the Association for Compu-
+                                                           tational Linguistics, ACL 2019, Florence, Italy, July
+Jonathan Berant, Andrew Chou, Roy Frostig, and Percy       28- August 2, 2019, Volume 1: Long Papers, pages
+  Liang. 2013. Semantic parsing on freebase from           3558–3567. Association for Computational Linguis-
+  question-answer pairs. In Proceedings of the 2013        tics.
+  conference on empirical methods in natural lan-
+  guage processing, pages 1533–1544.                     Paolo Ferragina and Ugo Scaiella. 2011. Fast and ac-
+                                                           curate annotation of short texts with wikipedia pages.
+Danqi Chen, Adam Fisch, Jason Weston, and Antoine          IEEE software, 29(1):70–75.
+  Bordes. 2017. Reading wikipedia to answer open-
+  domain questions. ACL.                                 Zhaochen Guo and Denilson Barbosa. 2018. Robust
+                                                           named entity disambiguation with random walks.
+Peter Clark, Isaac Cowhey, Oren Etzioni, Tushar Khot,      Semantic Web, 9(4):459–479.
+  Ashish Sabharwal, Carissa Schoenick, and Oyvind        Kelvin Guu, Kenton Lee, Zora Tung, Panupong Pasu-
+  Tafjord. 2018. Think you have solved question an-        pat, and Ming-Wei Chang. 2020. Realm: Retrieval-
+  swering? try arc, the ai2 reasoning challenge. arXiv     augmented language model pre-training.
+  preprint arXiv:1803.05457.
+                                                         Johannes Hoffart, Fabian M Suchanek, Klaus
+Jacob Devlin, Ming-Wei Chang, Kenton Lee, and              Berberich, Edwin Lewis-Kelham, Gerard De Melo,
+   Kristina Toutanova. 2019. BERT: Pre-training of         and Gerhard Weikum. 2011a. Yago2: exploring and
+   deep bidirectional transformers for language under-     querying world knowledge in time, space, context,
+   standing. In Proceedings of the 2019 Conference         and many languages. In Proceedings of the 20th
+   of the North American Chapter of the Association        international conference companion on World wide
+   for Computational Linguistics: Human Language           web, pages 229–232.
+  Technologies, Volume 1 (Long and Short Papers),
+   pages 4171–4186, Minneapolis, Minnesota. Associ-      Johannes Hoffart, Mohamed Amir Yosef, Ilaria Bor-
+   ation for Computational Linguistics.                    dino, Hagen Fürstenau, Manfred Pinkal, Marc Span-
+                                                           iol, Bilyana Taneva, Stefan Thater, and Gerhard
+Bhuwan Dhingra, Kathryn Mazaitis, and William W            Weikum. 2011b. Robust disambiguation of named
+  Cohen. 2017. Quasar: Datasets for question an-           entities in text. In Proceedings of the Conference on
+  swering by search and reading. arXiv preprint            Empirical Methods in Natural Language Processing,
+  arXiv:1707.03904.                                        pages 782–792. Association for Computational Lin-
+                                                           guistics.
+Emily Dinan, Stephen Roller, Kurt Shuster, Angela
+  Fan, Michael Auli, and Jason Weston. 2019. Wizard      Heng Ji, Ralph Grishman, Hoa Trang Dang, Kira Grif-
+  of wikipedia: Knowledge-powered conversational           fitt, and Joe Ellis. 2010. Overview of the tac 2010
+  agents. Proceedings of the International Conference      knowledge base population track. In Third text anal-
+  on Learning Representations (ICLR).                      ysis conference (TAC 2010), volume 3, pages 3–3.
+                                                         Mandar Joshi, Eunsol Choi, Daniel Weld, and Luke
+Dheeru Dua, Ananth Gottumukkala, Alon Talmor,
+                                                          Zettlemoyer. 2017. TriviaQA: A large scale dis-
+  Sameer Singh, and Matt Gardner. 2019. Orb: An
+                                                          tantly supervised challenge dataset for reading com-
+  open reading benchmark for comprehensive evalu-
+                                                          prehension. In Proceedings of the 55th Annual Meet-
+  ation of machine reading comprehension. arXiv
+                                                          ing of the Association for Computational Linguistics
+  preprint arXiv:1912.12598.
+                                                          (Volume 1: Long Papers), pages 1601–1611, Van-
+                                                          couver, Canada. Association for Computational Lin-
+Hady Elsahar, Pavlos Vougiouklis, Arslen Remaci,          guistics.
+  Christophe Gravier, Jonathon Hare, Elena Simperl,
+  and Frederique Laforest. 2018. T-rex: A large scale    Vladimir Karpukhin, Barlas Oğuz, Sewon Min, Ledell
+  alignment of natural language with knowledge base        Wu, Sergey Edunov, Danqi Chen, and Wen-
+  triples. LREC.                                           tau Yih. 2020.      Dense passage retrieval for
+                                                           open-domain question answering. arXiv preprint
+Angela Fan, Claire Gardent, Chloé Braud, and An-           arXiv:2004.04906.
+  toine Bordes. 2019a. Using local knowledge graph
+  construction to scale Seq2Seq models to multi-         Tom Kwiatkowski, Jennimaria Palomaki, Olivia Red-
+  document inputs. In Proceedings of the 2019 Con-         field, Michael Collins, Ankur Parikh, Chris Alberti,
+  ference on Empirical Methods in Natural Language         Danielle Epstein, Illia Polosukhin, Jacob Devlin,
+  Kenton Lee, et al. 2019. Natural questions: a bench-     the AAAI Conference on Artificial Intelligence, vol-
+  mark for question answering research. Transactions       ume 33, pages 6859–6866.
+  of the Association for Computational Linguistics,
+  7:453–466.                                             Myle Ott, Sergey Edunov, Alexei Baevski, Angela
+                                                          Fan, Sam Gross, Nathan Ng, David Grangier, and
+Kenton Lee, Ming-Wei Chang, and Kristina Toutanova.       Michael Auli. 2019. fairseq: A fast, extensible
+  2019.     Latent retrieval for weakly supervised        toolkit for sequence modeling. In Proceedings of
+  open domain question answering. arXiv preprint          the 2019 Conference of the North American Chap-
+  arXiv:1906.00300.                                       ter of the Association for Computational Linguistics
+                                                          (Demonstrations), pages 48–53.
+Omer Levy, Minjoon Seo, Eunsol Choi, and Luke
+ Zettlemoyer. 2017. Zero-shot relation extraction via    Kishore Papineni, Salim Roukos, Todd Ward, and Wei-
+ reading comprehension. CoNLL.                             Jing Zhu. 2002. Bleu: a method for automatic eval-
+                                                           uation of machine translation. In Proceedings of
+Mike Lewis, Marjan Ghazvininejad, Gargi Ghosh, Ar-         the 40th annual meeting on association for compu-
+  men Aghajanyan, Sida Wang, and Luke Zettle-              tational linguistics, pages 311–318. Association for
+  moyer. 2020a. Pre-training via paraphrasing. arXiv       Computational Linguistics.
+  preprint arXiv:2006.15020.
+                                                         Fabio Petroni, Luciano del Corro, and Rainer Gemulla.
+Mike Lewis, Yinhan Liu, Naman Goyal, Mar-                  2015. Core: Context-aware open relation extraction
+  jan Ghazvininejad, Abdelrahman Mohamed, Omer             with factorization machines. In EMNLP. Assoc. for
+  Levy, Ves Stoyanov, and Luke Zettlemoyer. 2019.          Computational Linguistics.
+  Bart: Denoising sequence-to-sequence pre-training
+  for natural language generation, translation, and      Fabio Petroni, Patrick Lewis, Aleksandra Piktus, Tim
+  comprehension. ArXiv, abs/1910.13461.                    Rocktäschel, Yuxiang Wu, Alexander H Miller, and
+                                                           Sebastian Riedel. 2020. How context affects lan-
+Patrick Lewis, Ethan Perez, Aleksandara Piktus,            guage models’ factual predictions. AKBC.
+  Fabio Petroni, Vladimir Karpukhin, Naman Goyal,
+  Heinrich Küttler, Mike Lewis, Wen tau Yih,             Fabio Petroni, Tim Rocktäschel, Patrick Lewis, Anton
+  Tim Rocktäschel, Sebastian Riedel, and Douwe             Bakhtin, Yuxiang Wu, Alexander H Miller, and Se-
+  Kiela. 2020b. Retrieval-augmented generation for         bastian Riedel. 2019. Language models as knowl-
+  knowledge-intensive nlp tasks.                           edge bases? EMNLP.
+
+Chin-Yew Lin. 2004. Rouge: A package for automatic       Colin Raffel, Noam Shazeer, Adam Roberts, Katherine
+  evaluation of summaries. In Text summarization           Lee, Sharan Narang, Michael Matena, Yanqi Zhou,
+  branches out, pages 74–81.                               Wei Li, and Peter J. Liu. 2019a. Exploring the limits
+                                                           of transfer learning with a unified text-to-text trans-
+Yinhan Liu, Myle Ott, Naman Goyal, Jingfei Du, Man-        former. arXiv e-prints.
+  dar Joshi, Danqi Chen, Omer Levy, Mike Lewis,
+  Luke Zettlemoyer, and Veselin Stoyanov. 2019.          Colin Raffel, Noam Shazeer, Adam Roberts, Katherine
+  Roberta: A robustly optimized bert pretraining ap-       Lee, Sharan Narang, Michael Matena, Yanqi Zhou,
+  proach. arXiv preprint arXiv:1907.11692.                 Wei Li, and Peter J Liu. 2019b. Exploring the limits
+                                                           of transfer learning with a unified text-to-text trans-
+Christopher D Manning, Hinrich Schütze, and Prab-          former. arXiv preprint arXiv:1910.10683.
+  hakar Raghavan. 2008. Introduction to information
+  retrieval. Cambridge university press.                 Pranav Rajpurkar, Jian Zhang, Konstantin Lopyrev, and
+                                                           Percy Liang. 2016. Squad: 100,000+ questions for
+Bryan McCann, Nitish Shirish Keskar, Caiming Xiong,        machine comprehension of text. EMNLP.
+  and Richard Socher. 2018. The natural language de-
+  cathlon: Multitask learning as question answering.     Sebastian Riedel, Limin Yao, Andrew McCallum, and
+  arXiv preprint arXiv:1806.08730.                         Benjamin M Marlin. 2013. Relation extraction with
+                                                           matrix factorization and universal schemas. In Pro-
+Paul McNamee and Hoa Trang Dang. 2009. Overview            ceedings of the 2013 Conference of the North Amer-
+  of the tac 2009 knowledge base population track. In      ican Chapter of the Association for Computational
+  Text Analysis Conference (TAC), volume 17, pages         Linguistics: Human Language Technologies, pages
+  111–113. National Institute of Standards and Tech-       74–84.
+  nology (NIST) Gaithersburg, Maryland . . . .
+                                                         Adam Roberts, Colin Raffel, and Noam Shazeer. 2020.
+Alexander H Miller, Will Feng, Adam Fisch, Jiasen Lu,      How much knowledge can you pack into the pa-
+  Dhruv Batra, Antoine Bordes, Devi Parikh, and Ja-        rameters of a language model?     arXiv preprint
+  son Weston. 2017. Parlai: A dialog research soft-        arXiv:2002.08910.
+  ware platform. arXiv preprint arXiv:1705.06476.
+                                                         Erik F Sang and Fien De Meulder. 2003. Intro-
+Yixin Nie, Haonan Chen, and Mohit Bansal. 2019.             duction to the conll-2003 shared task: Language-
+  Combining fact extraction and verification with neu-      independent named entity recognition.      arXiv
+  ral semantic matching networks. In Proceedings of         preprint cs/0306050.
+Kurt Shuster, Da Ju, Stephen Roller, Emily Dinan,         Ledell Wu, Fabio Petroni, Martin Josifoski, Sebastian
+  Y-Lan Boureau, and Jason Weston. 2019. The                Riedel, and Luke Zettlemoyer. 2019. Zero-shot
+  dialogue dodecathlon: Open-domain knowledge               entity linking with dense entity retrieval. arXiv
+  and image grounded conversational agents. arXiv           preprint arXiv:1911.03814.
+  preprint arXiv:1911.03768.
+                                                          Wenhan Xiong, Jingfei Du, William Yang Wang, and
+Mihai Surdeanu. 2013. Overview of the tac2013              Veselin Stoyanov. 2019. Pretrained encyclopedia:
+  knowledge base population evaluation: English slot       Weakly supervised knowledge-pretrained language
+  filling and temporal slot filling. In TAC.                model. arXiv preprint arXiv:1912.09637.
+Mihai Surdeanu and Heng Ji. 2014. Overview of the         Deshraj Yadav, Rishabh Jain, Harsh Agrawal, Prithvi-
+  english slot filling track at the tac2014 knowledge       jit Chattopadhyay, Taranjeet Singh, Akash Jain,
+  base population evaluation. In Proc. Text Analysis        Shiv Baran Singh, Stefan Lee, and Dhruv Batra.
+  Conference (TAC2014).                                     2019. Evalai: Towards better evaluation systems for
+                                                            ai agents. arXiv preprint arXiv:1902.03570.
+Alon Talmor and Jonathan Berant. 2018. The web as
+  a knowledge-base for answering complex questions.       Zhilin Yang, Peng Qi, Saizheng Zhang, Yoshua Bengio,
+  Proceedings of the 2018 Conference of the North           William Cohen, Ruslan Salakhutdinov, and Christo-
+  American Chapter of the Association for Computa-          pher D. Manning. 2018. HotpotQA: A dataset for
+  tional Linguistics: Human Language Technologies,          diverse, explainable multi-hop question answering.
+  Volume 1 (Long Papers), pages 641–651.                    Proceedings of the 2018 Conference on Empirical
+James Thorne and Andreas Vlachos. 2020. Avoiding            Methods in Natural Language Processing, pages
+  catastrophic forgetting in mitigating model biases in     2369–2380.
+  sentence-pair classification with elastic weight con-
+  solidation. arXiv preprint arXiv:2004.14366.
+James Thorne,        Andreas Vlachos,         Christos
+  Christodoulopoulos, and Arpit Mittal. 2018a.
+  FEVER: a large-scale dataset for fact extraction and
+  verification. In NAACL-HLT.
+James Thorne, Andreas Vlachos, Oana Cocarascu,
+  Christos Christodoulopoulos, and Arpit Mittal.
+  2018b. The fact extraction and verification (fever)
+  shared task. EMNLP.
+James Thorne, Andreas Vlachos, Oana Cocarascu,
+  Christos Christodoulopoulos, and Arpit Mittal. 2019.
+  The fever2. 0 shared task. In Proceedings of the Sec-
+  ond Workshop on Fact Extraction and VERification
+  (FEVER), pages 1–6.
+Alex Wang, Yada Pruksachatkun, Nikita Nangia,
+  Amanpreet Singh, Julian Michael, Felix Hill, Omer
+  Levy, and Samuel Bowman. 2019. Superglue: A
+  stickier benchmark for general-purpose language un-
+  derstanding systems. In Advances in Neural Infor-
+  mation Processing Systems, pages 3261–3275.
+Alex Wang, Amanpreet Singh, Julian Michael, Felix
+  Hill, Omer Levy, and Samuel R Bowman. 2018.
+  Glue: A multi-task benchmark and analysis platform
+  for natural language understanding. arXiv preprint
+  arXiv:1804.07461.
+Thomas Wolf, L Debut, V Sanh, J Chaumond, C De-
+  langue, A Moi, P Cistac, T Rault, R Louf, M Fun-
+  towicz, et al. 2019. Huggingface’s transformers:
+  State-of-the-art natural language processing. ArXiv,
+  abs/1910.03771.
+Tomer Wolfson, Mor Geva, Ankit Gupta, Matt Gard-
+  ner, Yoav Goldberg, Daniel Deutch, and Jonathan
+  Berant. 2020. Break it down: A question under-
+  standing benchmark. Transactions of the Associa-
+  tion for Computational Linguistics, 8:183–198.
+A    Appendix                                              84 relations), dev (12 relations) and test (24 rela-
+                                                           tions)—systems are tested on relations never seen
+Wikipedia Representation We represent the                  during training; (iv) use the subject entity as the
+KILT knowledge source as a collection of JSON              query against Wikipedia titles for the first step of
+records, one per Wikipedia page. Each record is            the mapping strategy, and (v) include all template
+assigned: (i) a unique Wikipedia id; (ii) a unique         questions in a meta field.
+Wikipedia title; (iii) a text field containing a list of      For T-REx, We filter out facts with more than
+strings, one for each paragraph, bulleted list item,       20 provenances, relations with less than 1000 facts,
+and section header (for which we preserve the hier-        and merge all the facts for the same subject-relation
+archical structure); (iv) a list of anchors elements,      pair (i.e., for 1-N and M-N relations there could
+one for each hyperlink in the original page text,          be multiple valid answers), resulting in 113 rela-
+with span reference in the text field and page linked;     tions and 2.3M facts. We include object aliases as
+(v) a list of categories; (vi) a url redirecting to the    equally valid answers and report in a meta field sub-
+original html for the page, with timestamp of the          ject aliases as well as all surface mentions for the
+last page revision before the considered snapshot.         subject, relation and object. We randomly select 5k
+                                                           facts for both dev and test set.
+Datasets Mapping Details In FEVER, often                      To define an open-version of the Natural Ques-
+multiple pieces of knowledge must be combined              tions dataset we follow Lee et al. (2019) and (1)
+to produce an output. For example, 30% of claims           keep only questions with short answers and (2)
+have more than one equally-valid provenance and            discard all answers with more than five tokens.
+16% require the combination of multiple evidence              To find answers in TriviaQA, the original work
+spans. The second iteration (FEVER2.0, Thorne              used distant supervision: (1) find Wikipedia entities
+et al., 2019) introduces a collection of adversar-         in the question with the TAGME entity linked (Fer-
+ial instances. For KILT, we merge the two ver-             ragina and Scaiella, 2011); (2) search for the an-
+sions of FEVER into a single resource and con-             swer (and all Wikipedia aliases) in the correspond-
+sider only supported refuted claims. We exclude all        ing page; (3) if the answer is found, add the page
+claims classified as not having enough information         in the evidence documents. Therefore, the docu-
+since these instances have no evidence to assess the       ments are not guaranteed to contain evidence for
+claim and cannot be mapped to the KILT knowl-              the question-answer pair (but the authors estimate
+edge source. Therefore we cannot asses whether             that they do 79.7% of the time).
+such label is still appropriated given our snapshot.          In ELI5 Evidence documents are automatically
+Moreover, we design KILT as an in-KB resource              gathered, and we focus on the case where evidence
+where each instance can be answered and corrobo-           documents are extracted from Wikipedia. However,
+rated by information in the knowledge source.              as the original work first collected question-answer
+   In the Zero Shot RE dataset a set crowd-sourced         pairs from the subreddit Explain Like I’m Five, the
+template questions are defined for each relation —         documents are not guaranteed to contain evidence.
+for example, What is Albert Einstein’s alma mater?.           For Wizard of Wikipedia we discard cases where
+Each datapoint reports a Wikipedia sentence ex-            the dataset does not contain provenance. More-
+pressing the fact that we take as provenance. Some         over, we consider a full open-domain setting where
+examples in the dataset are negative, obtained by          no topic is provided for the conversation and the
+matching a valid question and a random sentence,           model must search over all of Wikipedia for knowl-
+that likely does not contain the answer. To consider       edge at each dialogue turn (rather than the provided
+an open-domain version of this dataset and align           knowledge candidates for each turn in the original
+the input/output with the KILT interface we refor-         dataset). We use the unseen split for dev and test.
+matted this dataset, as follows: (i) exclude neaga-
+tive pairs - since we consider the whole knowledge         Performance Impact Of The Mapping Strategy
+source (as opposite to a single sentence) as text          We want to assess if the performance we obtain
+all questions can be answered; (ii) group template         after mapping each dataset to a unified Wikipedia
+questions by the subject-relation pair, and create a       snapshot are in line with what reported in previous
+single datapoint for each (input as above); (iii) ran-     work. Thorne and Vlachos (2020) report a 2-way
+domly split the set of relations, in line with the         accuracy of 79.09 for the FEVER dev set when
+original dataset, into three disjoint sets train (with     considering purely claims in input to a RoBERTa-
+                             1x107
+                                                                                    resentations; (iii) A combination of BLINK (Wu
+number of Wikipedia pages
+
+                             1x106                                                  et al., 2019) and flair (Akbik et al., 2019)—retrieval
+                            100000                                                  solution that ranks pages according to entities in
+                            10000                                                   the input.
+                             1000                                                       The DrQA Document Retriever combines bi-
+                                 100
+                                                                                    gram hashing and TF-IDF matching to return rel-
+                                                                                    evant Wikipedia pages given an input. DPR splits
+                                 10
+                                       1   2   3     4     5      6     7   8   9   each Wikipedia page into disjoint 100-word pas-
+                                                   number of datasets
+                                                                                    sages21 and encodes passages and inputs with a
+Figure 2: Number of pages vs number of dataset                                      BERT-based bi-encoder to perform dense Maxi-
+with knowledge in a page. 1,642,311 pages contains                                  mum Inner Product Search. The BLINK entity
+knowledge needed for KILT (~28% of the knowledge                                    linking system uses a BERT-based bi-encoder to
+source).
+                                                                                    encode each Wikipedia page as well as each input,
+                                                                                    where a single entity mention is tagged. Final re-
+based classifier (Liu et al., 2019). Our dev set in-                                sults are refined with a BERT-based cross-encoder.
+cludes also the adversarial examples of FEVER 2.0,                                  To use BLINK for retrieval, we look for entity men-
+nevertheless the performance of BART are in line                                    tions in each input with flair, then use BLINK to
+(80.67 dev, 78.93 test). Karpukhin et al. (2020) re-                                return a ranked list of Wikipedia pages for each
+port 41.5 for EM on the open domain version of the                                  entity mention. When multiple entities are iden-
+NQ dev set18 . With our setting, DPR achieves an                                    tified in the input, we merge results and sort by
+on-par performance on the dev set, with a 42.58 EM                                  score. The input string might not contain tags. For
+(50.43 F1-score). Results on our brand new NQ test                                  all systems, we use the index created on the KILT
+set are 3/4 points lower for EM and F1-score than                                   knowledge source.
+dev results. We don’t evaluate multi-hop specific                                       We also experiment with multi-tasking, by
+baselines on KILT but the current best F1-score for                                 jointly training a single DPR model on all KILT
+HotpotQA is 75.43 according to the official lead-                                   training data. We use uniform sampling to balance
+earboard19 , that is quite far from what achieved by                                the datasets. In particular, the Multi-task variant of
+our general solutions. BLINK results are in line                                    DPR is a single dense passage retriever, trained
+with what reported in the GitHub repository20 for                                   jointly on the union of TQA, NQ, HoPo, FEV,
+all three entity linking datasets. The Tranformer                                   zsRE, AY2, T-REx and WoW. In order to avoid
+MemNet of Dinan et al. (2019) achieves a F1-score                                   large datasets, such as T-REx, from having an over-
+of 14.3 on the original version of the WW dataset                                   size effect, we resample all datasets uniformly, such
+while 11.5 in our setting, probably because in KILT                                 that every training epoch contains 150k samples
+we consider an harder open-domain setting.                                          from each task. Batches are formed from a sin-
+                                                                                    gle dataset at a time, iterating through the various
+Retrieval Baselines The ability to retrieve rele-                                   datasets in a round-robin fashion.
+vant documents from Wikipedia given an input is
+                                                                                    Task-specific Baselines Approaches to the KILT
+an important aspect we assess in KILT. A system
+                                                                                    Benchmark should be able to generalize to many
+should select only the relevant knowledge needed
+                                                                                    different tasks, as developing model architectures
+for the task, without redundant or excess informa-
+                                                                                    that can represent knowledge generally is a valu-
+tion. A way to surface such knowledge is using
+                                                                                    able direction. However, several tasks may benefit
+a dedicated retrieval system. We consider three
+                                                                                    from dedicated architectures designed for them.
+off-the-shelf retrievers and investigate drastically
+                                                                                       For fact checking, we consider NSMN (Nie et al.,
+different retrieval paradigms: (i) Tf-idf with the
+                                                                                    2019), the highest scoring system from the FEVER
+DrQA Document Retriever (Chen et al., 2017)—-
+                                                                                    shared task (Thorne et al., 2018b). We use the
+traditional page-level sparse vector space retrieval
+                                                                                    public model22 pre-trained on FEVER, and con-
+model; (ii) DPR (Karpukhin et al., 2020)—a mod-
+                                                                                    sider not enough information predictions as false.
+ern passage-level retrieval solution using dense rep-
+                                                                                      21
+                                                                                         22,220,793 passages in the KILT knowledge source. Fol-
+                            18
+     Reported as test results in (Karpukhin et al., 2020)                           lowing Karpukhin et al. (2020) we don’t consider Wikipedia
+  19
+     https://hotpotqa.github.io                                                     bulleted lists in the text.
+  20                                                                                  22
+     https://github.com/facebookresearch/                                                available at https://github.com/easonnie/
+BLINK                                                                               combine-FEVER-NSMN
+Moreover, we develop a fact checking baseline that       for BART and Huggingface’s Transformer (Wolf
+combines a BERT-base classifier with passages re-        et al., 2019) for T5.
+turned from DPR where the claim and retrieved                A natural way to boost performance is to in-
+passage are input. The classifier is trained to label    corporate an explicit knowledge mechanism. For
+the claim-passage pair as supported or refuted with      our BART+DPR baseline, we follow Petroni et al.
+an additional neutral class for negative-sampled         (2020) to retrieve and prepend the top-3 passages
+unrelated passages. Unrelated passages are sam-          from DPR for each input sample and use context-
+pled from two sources: (1) DPR-retrieved passages        enhanced training data to fine-tune a BART model.
+from pages that are not in the list of pages in the      We use the DPR rank when reporting provenance
+instance’s provenance and (2) passages sampled           for all except entity linking tasks. For entity link-
+uniformly at random from pages in the instance’s         ing, we report the Wikipedia id of the page whose
+provenance. At inference, we classify the first sen-     title exactly matches the predicted string.
+tence of the Wikipedia pages retrieved by the top-           Recently, state-of-the-art results on a wide range
+100 DPR passages against the claim. Using pages          of NLP tasks have been achieved by combining a
+labelled as supported or refuted, we label the claim     trainable retrieval step with language modeling or
+through majority voting. For claim provenance, we        generation (Guu et al., 2020; Lewis et al., 2020a).
+re-rank passages by probability according to this        We experiment with fine-tuning RAG (Lewis et al.,
+label.                                                   2020b) on KILT tasks, establishing a strong base-
+   For Open Domain QA and Slot Filling, we               line on all of them. RAG combines a DPR retriever
+use DPR combined with the pre-trained BERT-              with a BART generator, however, unlike in the case
+based extractive reading comprehension model             of our previous baseline, RAG back-propagates to
+of Karpukhin et al. (2020). We use the model pre-        the retriever’s input encoder, learning to adapt the
+trained on TriviaQA for HotpotQA and the model           input embedding to retrieve more relevant results.
+pre-trained on Natural Questions for Zero Shot RE.       At every generation step we retrieve top-5 passages
+We reduce the slot filling problem to question an-       and use them as provenance.
+swering, by using the specified template questions.
+We consider a single random template question per
+subject-relation during inference.
+   For Entity Linking, we consider BLINK.
+   For Dialogue, we consider the Generative Trans-
+former MemNet (Dinan et al., 2019) that encodes
+the dialogue history and knowledge to generates
+the next utterance. We use the pre-trained version
+available in ParlAI (Miller et al., 2017). Finally,
+to test the performance of combining BART and
+DPR on FEVER, we develop a classifier that uses
+these—full description in the appendix.
+
+General Baselines A main motivation of the
+KILT Benchmark is to enable a unified approach
+towards a wide range of knowledge-intensive tasks.
+We analyze existing general architectures that can
+be used as a baseline for multiple tasks in KILT.
+   Large pre-trained sequence-to-sequence models
+such as BART (Lewis et al., 2019) and T5 (Raffel
+et al., 2019a) implicitly store a surprising amount of
+knowledge in their parameters (Petroni et al., 2019).
+We treat all KILT tasks as generative, relying on
+the knowledge accumulated by the model while
+pre-training, with no retrieval (similarly to Roberts
+et al. (2020)). We finetune pre-trained variants on
+all KILT tasks, using fairseq (Ott et al., 2019)
+                               Average     Average      Average     Average
+     Dataset                                                                                                  Train      Dev      Test
+               Multi-hop      Provenance  Provenance  Provenance    Answers
+     Label                                                                                                    Size       Size     Size
+                              Size (APS) Number (APN) Pages (APP) Number (AAN)
+       FEV           x             1.12               1.35                1.13                 1             104,966    10,444   10,100
+       AY2                           1                  1                  1                   1              18,395    4,784    4,463
+     WnWi                            1                  1                  1                   1                 -      3,396    3,376
+     WnCw                            1                  1                  1                   1                 -      5,599    5,543
+     T-REx                           1                1.68                1.26               5.29           2,284,168   5,000    5,000
+      zsRE                           1                  1                  1                   1             147,909    3,724    4,966
+        NQ                           1                3.22                1.57               2.08             87,372    2,837    1,444
+      HoPo           x              2.4                 1                   2                  1              88,869     5,600    5,569
+      TQA                            1                3.39                1.68               28.67            61,844    5,359    6,586
+      ELI5                           1                1.21                1.18               4.69            272,634    1,507      600
+      WoW                            1                  1                  1                   1              94,577    3,058    2,944
+                                                    Total                                                   3,160,734   51,464   50,736
+
+Table 6: Datasets statistics. APS refers to the average number of textual spans in each provenance set—for most of
+the datasets a single span is sufficient to provide enough evidence while FEV and HoPo might require more (hence
+they require multi-hop reasoning). APN indicates the average number of equally valid provenance sets for each
+instance while APP the average number of Wikipedia pages overall in the provenance (note that multiple spans
+might refer to the same Wikipedia page). Finally AAN reports the average number of equally valid gold answers
+per instance. We additionally report the size of the train, dev and test split for each dataset.
+
+
+
+
+ 1    { ’ i d ’ : # o r i g i n a l data p o i n t i d i f a v a i l a b l e o t h e r w i s e unique i d
+ 2      ’ i n p u t ’ : # q u e s t i o n / c l a i m / sentence / e t c
+ 3      ’ o u t p u t ’ : [ # each element might c o n t a i n an answer , a provenance o r both
+ 4            {
+ 5            ’ answer ’ : # answer i n t e x t u a l form
+ 6            ’ provenance ’ : [
+ 7                    # evidence s e t f o r t h e answer from t h e KILT knowledge source
+ 8                    {
+ 9                          ’ w i k i p e d i a _ i d ’ : # * mandatory *
+10                          ’ title ’:
+11                          ’ section ’ :
+12                          ’ start_paragraph_id ’ :
+13                          ’ start_character ’ :
+14                          ’ end_paragraph_id ’ :
+15                          ’ end_character ’ :
+16                          ’ b l e u _ s c o r e ’ : # w r t o r i g i n a l evidence
+17                          ’ meta ’ : # d a t a s e t / t a s k s p e c i f i c
+18                    }
+19                    ]
+20                }
+21            ]
+22      ’ meta ’ : # d a t a s e t / t a s k s p e c i f i c
+23      }
+
+
+Figure 3: KILT datasets’ interface. Each dataset is represented as a JSON Line file. The Figure shows the pseudo-
+JSON structure for each record in the files.
+model        R-Precision   Recall@5       Accuracy   KILT-AC
+                           test
+BART                 0.0            0.0      78.93        0.0
+T5                   0.0            0.0       76.3        0.0
+NSMN               49.24          70.16       66.1      41.88
+BART + DPR         55.33          74.29      86.74      47.68
+RAG                61.94          75.55      86.31      53.45
+BERT + DPR         72.93          73.52      69.68      58.58
+                           dev
+BART                 0.0            0.0      80.67        0.0
+BART + DPR         55.46          73.84      88.11      48.25
+RAG                 63.5           76.1       87.7      55.47
+
+                    Table 7: FEVER
+
+
+
+model        R-Precision   Recall@5       Accuracy   KILT-AC
+                           test
+RAG                72.62          72.62      72.62      72.62
+T5                 74.05          74.05      74.05      74.05
+BART + DPR         75.49          75.49      75.49      75.49
+BART               77.55          77.55      77.55      77.55
+BLINK              81.54          94.73      81.54      81.54
+                           dev
+RAG                 77.4          77.47       77.4       77.4
+T5                 81.84          81.84      81.84      81.84
+BART               86.62          86.62      86.62      86.62
+
+              Table 8: AIDA CoNLL-YAGO
+
+
+
+model        R-Precision   Recall@5       Accuracy   KILT-AC
+                           test
+BART + DPR          45.2           45.2       45.2       45.2
+BART               45.91          45.91      45.91      45.91
+T5                 47.13          47.13      47.13      47.13
+RAG                48.07          48.07      48.07      48.07
+BLINK              80.24          91.47      80.24      80.24
+                           dev
+BART + DPR         44.96          44.96      44.96      44.96
+T5                 47.35          47.35      47.35      47.35
+BART               47.91          47.91      47.91      47.91
+RAG                 49.0           49.0       49.0       49.0
+
+                 Table 9: WNED-WIKI
+        model            R-Precision      Recall@5        Accuracy    KILT-AC
+                                        test
+        BART + DPR              46.87           46.87        46.87       46.87
+        RAG                     47.61           47.61        47.61       47.61
+        BART                    49.16           49.16        49.16       49.16
+        T5                      49.29           49.29        49.29       49.29
+        BLINK                   68.77           81.78        68.77       68.77
+                                        dev
+        BART + DPR               45.7            45.7         45.7        45.7
+        T5                      46.58           46.58        46.58       46.58
+        RAG                      46.7            46.7         46.7        46.7
+        BART                    48.01           48.01        48.01       48.01
+
+                              Table 10: WNED-CWEB
+
+
+
+model           R-Precision   Recall@5         Accuracy       F1     KILT-AC     KILT-F1
+                                        test
+BART                    0.0         0.0           45.06     49.24         0.0        0.0
+T5                      0.0         0.0           43.56     50.61         0.0        0.0
+BART + DPR            13.26       17.04           59.16     62.76       11.12      11.41
+RAG                   28.68       33.04            59.2     62.96       23.12      23.94
+                                        dev
+BART                    0.0         0.0           43.84     48.25         0.0        0.0
+T5                      0.0         0.0           47.24     51.73         0.0        0.0
+BART + DPR            13.62       16.93            56.7     60.19       11.56      11.87
+RAG                   29.26       33.69           61.48     65.03        25.4      26.22
+
+                                 Table 11: T-REx
+
+
+
+model           R-Precision   Recall@5         Accuracy       F1     KILT-AC     KILT-F1
+                                        test
+BART                    0.0         0.0            9.14     12.21         0.0        0.0
+T5                      0.0         0.0            9.02     13.52         0.0        0.0
+BERT + DPR            40.11       40.11            6.93     37.28        4.47      27.09
+BART + DPR             28.9       39.21           30.43     34.47       18.91      20.32
+RAG                   53.73       59.52           44.74     49.95       36.83      39.91
+                                        dev
+BART                    0.0         0.0            3.03     12.61         0.0        0.0
+T5                      0.0         0.0            1.58      10.8         0.0        0.0
+BART + DPR             45.6       58.49           34.96     44.79       29.08      32.85
+RAG                   65.36       73.07           47.42     57.98       42.64      48.35
+
+                              Table 12: Zero Shot RE
+model        R-Precision   Recall@5       EM         F1   KILT-EM    KILT-F1
+                                  test
+BART                 0.0         0.0     21.75   28.69         0.0       0.0
+T5                   0.0         0.0      19.6   27.73         0.0       0.0
+BART + DPR         54.29       65.52     41.27   49.54       30.06     34.72
+BERT + DPR         60.66       46.79     38.64   47.09       31.99     37.58
+RAG                59.49       67.06     44.39   52.35       32.69     37.91
+                                  dev
+BART                 0.0         0.0     26.15   32.06         0.0       0.0
+T5                   0.0         0.0      25.2   31.88         0.0       0.0
+BART + DPR         54.25       64.99     45.05   52.98       31.62     35.84
+BERT + DPR         60.03       45.06     42.58   50.43       35.32     39.84
+RAG                60.31       65.47     48.78    56.1       36.31     40.64
+
+                       Table 13: Natural Questions
+
+model        R-Precision   Recall@5       EM         F1   KILT-EM    KILT-F1
+                                  test
+BART                 0.0         0.0     15.37   21.97         0.0       0.0
+T5                   0.0         0.0     12.64   19.57         0.0       0.0
+BERT + DPR         25.04        10.4     11.29   17.35        0.74      1.26
+BART + DPR         25.04        10.4     25.18   34.07        1.96      2.53
+RAG                30.59       12.59     26.97   36.03        3.21       4.1
+                                  dev
+BART                 0.0         0.0     16.86   23.81         0.0       0.0
+T5                   0.0         0.0     12.66   19.74         0.0       0.0
+BERT + DPR         24.62        10.7     10.82   16.96        0.96      1.34
+BART + DPR         24.62        10.7     25.75    35.2        1.96      2.46
+RAG                30.76       12.29     27.68   37.37        3.14      3.87
+
+                           Table 14: HotpotQA
+
+model        R-Precision   Recall@5       EM         F1   KILT-EM    KILT-F1
+                                  test
+BART                 0.0         0.0     32.39   39.85         0.0       0.0
+T5                   0.0         0.0     18.11   27.83         0.0       0.0
+BART + DPR         44.49       56.99     58.55   67.79        31.4     35.34
+BERT + DPR          43.4       31.45     70.38   74.41       34.48     36.28
+RAG                48.68       57.13     71.27   75.88       38.13     40.15
+                                  dev
+BART                 0.0         0.0     32.54   39.58         0.0       0.0
+T5                   0.0         0.0     25.79   33.72         0.0       0.0
+BERT + DPR         40.87       29.96     70.24   74.21        32.9     34.48
+BART + DPR         45.36       56.72     59.28   68.31       32.56     36.36
+RAG                49.26       56.93     61.73   67.12       36.13     38.71
+
+                           Table 15: TriviaQA
+model         R-Precision   Recall@5       Rouge-L        F1    KILT-RL    KILT-F1
+                                    test
+T5                    0.0         0.0        19.08       16.1       0.0        0.0
+BART                  0.0         0.0        20.55      19.23       0.0        0.0
+RAG                  11.0       22.92        14.05      14.51      1.69       1.79
+BART + DPR          10.67       26.92        17.41      17.88       1.9       2.01
+                                    dev
+T5                    0.0         0.0        21.02      18.36       0.0        0.0
+BART                  0.0         0.0        22.69      22.19       0.0        0.0
+RAG                 16.39       27.27        16.11      17.24      2.65       2.88
+BART + DPR          16.32       21.11        18.53      18.75      2.87       2.89
+
+                               Table 16: ELI5
+
+
+
+
+model         R-Precision   Recall@5       Rouge-L        F1    KILT-RL    KILT-F1
+                                    test
+BART                  0.0         0.0        11.84      12.96        0.0       0.0
+T5                    0.0         0.0        12.58      13.49        0.0       0.0
+TransMemNet         18.38       18.38         9.92       11.5       1.83      2.23
+BART + DPR          25.48        55.1        13.56      15.55       3.88      4.52
+RAG                 57.78       74.63        11.83      13.22       8.04       9.1
+                                    dev
+BART                  0.0         0.0        12.05      13.35        0.0       0.0
+T5                    0.0         0.0         12.8      13.28        0.0       0.0
+BART + DPR            0.0         0.0        13.23      15.03        0.0       0.0
+RAG                 46.73       66.61        12.03      13.42       7.01      7.69
+
+                        Table 17: Wizard of Wikipedia
+ 1   input : ’SOCCER − UNCAPPED PLAYERS CALLED TO FACE MACEDONIA . ’ [ SE0 ] ’BUCHAREST ’ [ EE0 ] ’ 1996−12−06 ’ [ SE1 ] &
+           ’ Romania ’ [ EE1 ] ’ t r a i n e r ’ [ SE2 ] ’ Anghel Iordanescu ’ [ EE2 ] ’ c a l l e d up t h r e e uncapped p l a y e r s on F r i d a y &
+             i n h i s squad t o f a c e ’ [ SE3 ] ’ Macedonia ’ [ EE3 ] ’ n e x t week i n a ’ [ SE4 ] ’ World Cup ’ [ EE4 ] ’ q u a l i f i e r . &
+          M i d f i e l d e r V a l e n t i n S t e f a n and s t r i k e r ’ [ SE5 ] ’ V i o r e l I o n ’ [ EE5 ] ’ o f O t e l u l G a l a t i and defender ’ [ &
+          SE6 ] ’ L i v i u C i o b o t a r i u ’ [ EE6 ] ’ o f N a t i o n a l Bucharest are t h e newcomers f o r t h e ’ [ SE7 ] ’ European ’ [ EE7 ] &
+           ’ group e i g h t c l a s h i n ’ [ SE8 ] ’ Macedonia ’ [ EE8 ] ’ on December 14 . Iordanescu s a i d he had p i c k e d &
+          them because o f t h e i r good performances i n t h e domestic championship i n which N a t i o n a l Bucharest &
+          are t o p and O t e l u l G a l a t i t h i r d . " I t h i n k i t s f a i r t o g i v e them a chance , " he t o l d r e p o r t e r s &
+             . League t i t l e − h o l d e r s Steaua Bucharest , who f i n i s h e d bottom o f t h e i r Champions League group &
+          i n t h e ’ [ SE9 ] ’ European Cup ’ [ EE9 ] ’ , have o n l y two p l a y e r s i n t h e squad . A t t a c k i n g m i d f i e l d e r ’ [ &
+          SE10 ] ’ A d r i a n I l i e ’ [ EE10 ] ’ , who r e c e n t l y moved from Steaua t o T u r k i s h c l u b ’ [ SE11 ] ’ G a l a t a s a r a y ’ [ &
+          EE11 ] ’ , i s r u l e d o u t a f t e r two y e l l o w −card o f f e n c e s . Squad : Goalkeepers − ’ [ SE12 ] ’ Bogdan &
+          S t e l e a ’ [ EE12 ] ’ , ’ [ SE13 ] ’ F l o r i n Prunea ’ [ EE13 ] ’ . Defenders − ’ [ SE14 ] ’ Dan Petrescu ’ [ EE14 ] ’ , ’ [ SE15 ] ’ &
+          D a n i e l Prodan ’ [ EE15 ] ’ , Anton Dobos , Cornel Papura , ’ [ SE16 ] ’ L i v i u C i o b o t a r i u ’ [ EE16 ] ’ , T i b o r &
+          Selymess , ’ [ SE17 ] ’ I u l i a n F i l i p e s c u ’ [ EE17 ] ’ .          M i d f i e l d e r s − ’ [ SE18 ] ’ Gheorghe Hagi ’ [ EE18 ] ’ , ’ [ SE19 ] &
+           ’ Gheorghe Popescu ’ [ EE19 ] ’ , ’ [ SE20 ] ’ C o n s t a n t i n Galca ’ [ EE20 ] ’ , V a l e n t i n S t e f a n , ’ [ SE21 ] ’ Basarab &
+          Panduru ’ [ EE21 ] ’ , ’ [ SE22 ] ’ D o r i n e l Munteanu ’ [ EE22 ] ’ , O v i d i u S t i n g a . Forwards − Ioan V l a d o i u , ’ [ &
+          SE23 ] ’ Gheorghe Craioveanu ’ [ EE23 ] ’ , ’ [ SE24 ] ’ I o n e l Danciulescu ’ [ EE24 ] ’ , ’ [ SE25 ] ’ V i o r e l I o n ’ [ EE25 ] ’ . &
+               REUTER ’
+ 2
+ 3   BART p r e d i c t i o n s :
+ 4   v E0 : ’ Bucharest ’ −> h t t p s : / / en . w i k i p e d i a . org / w i k i / Bucharest
+ 5   x E1 : ’ Romania ’ ( g o l d : ’ Romania n a t i o n a l f o o t b a l l team ’ )
+ 6   x E2 : ’ Anghel Iordanescu ’ ( g o l d : ’ Anghel Iordanescu ’ )
+ 7   v E3 : ’ North Macedonia n a t i o n a l f o o t b a l l team ’ −> h t t p s : / / en . w i k i p e d i a . org / w i k i / &
+           North_Macedonia_national_football_team
+ 8   x E4 : ’ 1998 FIFA World Cup ’ ( g o l d : ’ FIFA World Cup ’ )
+ 9   v E5 : ’ V i o r e l I o n ’ −> h t t p s : / / en . w i k i p e d i a . org / w i k i / V i o r e l _ I o n
+10   v E6 : ’ L i v i u C i o b o t a r i u ’ −> h t t p s : / / en . w i k i p e d i a . org / w i k i / L i v i u _ C i o b o t a r i u
+11   v E7 : ’ Europe ’ −> h t t p s : / / en . w i k i p e d i a . org / w i k i / Europe
+12   v E8 : ’ North Macedonia ’ −> h t t p s : / / en . w i k i p e d i a . org / w i k i / North_Macedonia
+13   v E9 : ’UEFA Champions League ’ −> h t t p s : / / en . w i k i p e d i a . org / w i k i / UEFA_Champions_League
+14   v E10 : ’ A d r i a n I l i e ’ −> h t t p s : / / en . w i k i p e d i a . org / w i k i / A d r i a n _ I l i e
+15   v E11 : ’ G a l a t a s a r a y S . K . ( f o o t b a l l ) ’ −> h t t p s : / / en . w i k i p e d i a . org / w i k i / Galatasaray_S . K . _ ( f o o t b a l l )
+16   v E12 : ’ Bogdan S t e l e a ’ −> h t t p s : / / en . w i k i p e d i a . org / w i k i / Bogdan_Stelea
+17   v E13 : ’ F l o r i n Prunea ’ −> h t t p s : / / en . w i k i p e d i a . org / w i k i / F l o r i n _ P r u n e a
+18   v E14 : ’ Dan Petrescu ’ −> h t t p s : / / en . w i k i p e d i a . org / w i k i / Dan_Petrescu
+19   v E15 : ’ D a n i e l Prodan ’ −> h t t p s : / / en . w i k i p e d i a . org / w i k i / Daniel_Prodan
+20   v E16 : ’ L i v i u C i o b o t a r i u ’ −> h t t p s : / / en . w i k i p e d i a . org / w i k i / L i v i u _ C i o b o t a r i u
+21   v E17 : ’ I u l i a n F i l i p e s c u ’ −> h t t p s : / / en . w i k i p e d i a . org / w i k i / I u l i a n _ F i l i p e s c u
+22   v E18 : ’ Gheorghe Hagi ’ −> h t t p s : / / en . w i k i p e d i a . org / w i k i / Gheorghe_Hagi
+23   v E19 : ’ Gheorghe Popescu ’ −> h t t p s : / / en . w i k i p e d i a . org / w i k i / Gheorghe_Popescu
+24   x E20 : ’ C o n s t a n t i n o s Galca ’ ( g o l d : ’ C o n s t a n t i n Galca ’ )
+25   v E21 : ’ Basarab Panduru ’ −> h t t p s : / / en . w i k i p e d i a . org / w i k i / Basarab_Panduru
+26   v E22 : ’ D o r i n e l Munteanu ’ −> h t t p s : / / en . w i k i p e d i a . org / w i k i / Dorinel_Munteanu
+27   v E23 : ’ Gheorghe Craioveanu ’ −> h t t p s : / / en . w i k i p e d i a . org / w i k i / Gheorghe_Craioveanu
+28   x E24 : ’ I o n Danciulescu ’ ( g o l d : ’ I o n e l Danciulescu ’ )
+29   v E25 : ’ V i o r e l I o n ’ −> h t t p s : / / en . w i k i p e d i a . org / w i k i / V i o r e l _ I o n
+30
+31   F1−score = 87.52
+32   KILT −F1− score = 21/26 = 80.77
+33   EM = 21/26 = 80.77
+34   KILT −EM− score = 21/26 = 80.77
+
+
+Figure 4: Entity linking BART predictions, schematic of 25 input-output pairs condensed, in each one a single
+entity in tagged.
+                              45000                                                                    90000
+ number of provenance spans
+
+
+
+
+                                                                          number of provenance spans
+                              40000                                                                    80000
+                              35000                                                                    70000
+                              30000                                                                    60000
+                              25000                                                                    50000
+                              20000                                                                    40000
+                              15000                                                                    30000
+                              10000                                                                    20000
+                               5000                                                                    10000
+                                  0                                                                        0
+                                       0   0.2   0.4     0.6   0.8   1                                           0   0.2   0.4     0.6   0.8   1
+                                                 BLEU score                                                                BLEU score
+
+(a) FEVER, dev data discarded 26.03% (3675), test data                   (b) Natural Questions, dev data discarded 16.12% (595), test
+discarded 27.7% (3869).                                                  data discarded 15.59% (287).
+
+
+                              120000                                                                   1.6x106
+number of provenance spans
+
+
+
+
+                                                                         number of provenance spans
+
+
+
+
+                              100000                                                                   1.4x106
+                                                                                                       1.2x106
+                              80000
+                                                                                                        1x106
+                              60000                                                                    800000
+
+                              40000                                                                    600000
+                                                                                                       400000
+                              20000
+                                                                                                       200000
+                                  0                                                                         0
+                                       0   0.2   0.4     0.6   0.8   1                                           0   0.2   0.4     0.6   0.8   1
+                                                 BLEU score                                                                BLEU score
+
+(c) HotpotQA, dev data discarded 22.76% (1650), test data                (d) TriviaQA, dev data discarded 15.06% (950), test data
+discarded 23.43% (1704).                                                 discarded 14.41% (1109).
+
+
+                              140000                                                                   60000
+                                                                          number of provenance spans
+number of provenance spans
+
+
+
+
+                              120000                                                                   50000
+                              100000
+                                                                                                       40000
+                              80000
+                                                                                                       30000
+                              60000
+                                                                                                       20000
+                              40000
+                              20000                                                                    10000
+
+                                  0                                                                        0
+                                       0   0.2   0.4     0.6   0.8   1                                           0   0.2   0.4     0.6   0.8   1
+                                                 BLEU score                                                                BLEU score
+
+(e) Zero Shot RE, dev data discarded 15.42% (679), test data             (f) Wizard of Wikipedia, dev data discarded 12.06% (469),
+discarded 13.38% (767).                                                  test data discarded 11.39% (427).
+
+Figure 5: BLEU score distribution in train data per provenance. For TriviaQA, we try to map all object aliases for
+the answer. FEVER has the oldest Wikipedia snapshot. We discards on average 17.9% dev and 17.65% test data.
+For TriviaQA there are a large number of 0 scores because we try to map all aliases for the answer and most of the
+aliases are not found in a Wikipedia page. Note that we consider a QA pair valid if we match at least one alias.
+
