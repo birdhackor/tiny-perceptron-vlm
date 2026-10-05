@@ -2,7 +2,11 @@
 
 易讀性先用 `incremental_reader.py` 的 `start`／`next` 指令逐段揭露正文；先保存當前五項讀者理解與疑問，下一次才提供後文，程式另成一個單元。當場記錄保存在 `docs/reader-reviews/traces/`，工具只核對順序與欄位，不寫摘要、不判通過，也不能阻止共用檔案系統被提前查看。讀者須遵守不看未揭露全文的規則；不符合時另派未讀過的審閱者。它與下述供技術審閱使用的全文提取工具分開。
 
-這個工具只提取原始 UTF-8 小節、程式區塊與 SVG 指紋；加 `--execute` 才在新的 CPU 程序執行本節 Python。它不產生審閱報告或通過判定。審閱者仍須自行閱讀文本、圖、原始論文與實測證據，依 [技術審閱規約](../technical-review-guide.md)判斷主張。
+單節讀者使用 [工作說明](readability-reader-instructions.md)。協調者以 `coordinator_progress.py` 記錄實際派工與收回結果；`dispatch` 只寫進度，不會建立代理，因此仍須有實際 `spawn_agent` 回覆的身分與派工紀錄。`collect` 核對目前正文、導言、圖與完整 trace，原讀者複查還須產生新的 trace；工具不修改讀者的摘要、問題、指紋或判定。
+
+`.venv/bin/python docs/review-tools/coordinator_progress.py summary` 只讀取進度。整輪完成後，仍要執行正文審閱 checker 與下述身分核對；進度表不能代替它們。
+
+技術審閱用的 `section_facts.py` 只提取原始 UTF-8 小節、程式區塊與 SVG 指紋；加 `--execute` 才在新的 CPU 程序執行本節 Python。它不產生審閱報告或通過判定。審閱者仍須自行閱讀文本、圖、原始論文與實測證據，依 [技術審閱規約](../technical-review-guide.md)判斷主張。
 
 在專案根目錄執行：
 

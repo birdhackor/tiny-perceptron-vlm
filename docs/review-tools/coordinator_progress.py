@@ -21,7 +21,7 @@ inventory = reader.inventory()
 if args.action == "dispatch":
     for lesson in args.ids:
         r = p["records"][lesson]
-        task = p["coordinator_task"] + "/reader_" + lesson.replace(".", "_")
+        task = p["coordinator_task"] + "/reader_" + lesson.replace(".", "_").lower()
         r["dispatches"].append(
             {
                 "reviewer_task": task,
@@ -135,7 +135,11 @@ for r in p["records"].values():
 if args.action == "pending":
     print(
         json.dumps(
-            [{"id": k, "source": r["source"]} for k, r in p["records"].items() if r["status"] == "pending"][:10],
+            [
+                {"id": k, "source": p["records"][k]["source"]}
+                for k in p.get("readability_dispatch_order", p["records"])
+                if p["records"][k]["status"] == "pending"
+            ][:10],
             ensure_ascii=False,
         )
     )
