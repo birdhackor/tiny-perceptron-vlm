@@ -1,0 +1,16 @@
+import datetime, hashlib, json, sys
+from pathlib import Path
+root = Path('/workspace/tiny-perceptron-vlm')
+base = root/'docs/course-revision-20261005/continuity'
+pages = {p['page_id']:p for p in json.loads((base/'inventory.json').read_text())['pages']}
+data = json.load(sys.stdin)
+p = pages[data['page_id']]
+data['recorded_at'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+data['reviewer_task'] = '/root/continuity_17_19'
+data['source_sha256'] = p['source_sha256']
+data['figures_sha256'] = p['figures_sha256']
+data['source_snapshot'] = p['snapshot']
+assert hashlib.sha256((root/p['snapshot']).read_bytes()).hexdigest() == p['source_sha256']
+with (base/'traces/17_19.jsonl').open('a') as f:
+    f.write(json.dumps(data, ensure_ascii=False)+'\n')
+print(data['recorded_at'], data['page_id'], data.get('unit','page'), 'recorded')
