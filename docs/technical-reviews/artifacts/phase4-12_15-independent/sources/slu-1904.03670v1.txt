@@ -1,0 +1,404 @@
+                                           Speech Model Pre-training for End-to-End Spoken Language Understanding
+                                                                            Loren Lugosch1 , Mirco Ravanelli1 , Patrick Ignoto2 ,
+                                                                                 Vikrant Singh Tomar2 , Yoshua Bengio1,3
+                                                                                   1
+                                                                                       Université de Montréal / Mila, 2 Fluent.ai
+                                                                                                    3
+                                                                                                      CIFAR Fellow
+                                                                      {lugoschl, mirco.ravanelli, yoshua.bengio}@mila.quebec
+                                                                                {patrick.ignoto, vikrant}@fluent.ai
+
+
+                                                                    Abstract                                                            Conventional SLU
+
+                                          Whereas conventional spoken language understanding (SLU)               Speech                      Text                                  Intent
+
+                                          systems map speech to text, and then text to intent, end-to-                                                                     {
+                                                                                                                                           TURN THE                         action: “activate”,
+                                          end SLU systems map speech directly to intent through a single                         ASR        KITCHEN        NLU              object: “lights”,
+arXiv:1904.03670v1 [eess.AS] 7 Apr 2019
+
+
+
+
+                                                                                                                                                                            location: “kitchen”
+                                                                                                                                           LIGHTS ON
+                                          trainable model. Achieving high accuracy with these end-to-                                                                      }
+
+
+                                          end models without a large amount of training data is difficult.
+                                          We propose a method to reduce the data requirements of end-                        Speech      End-to-end SLU           Intent
+                                          to-end SLU in which the model is first pre-trained to predict                                                    {
+                                          words and phonemes, thus learning good features for SLU. We                                                       action: “activate”,
+                                                                                                                                             SLU            object: “lights”,
+                                                                                                                                                            location: “kitchen”
+                                          introduce a new SLU dataset, Fluent Speech Commands, and                                                         }
+
+                                          show that our method improves performance both when the full
+                                          dataset is used for training and when only a small subset is used.
+                                                                                                               Figure 1: Conventional ASR → NLU system for SLU versus
+                                          We also describe preliminary experiments to gauge the model’s
+                                                                                                               end-to-end SLU.
+                                          ability to generalize to new phrases not heard during training.
+                                          Index Terms: speech recognition, spoken language under-
+                                          standing, end-to-end models, transfer learning
+                                                                                                               the input signal [10–14]. Speech is natural to represent in a hier-
+                                                                                                               archical way: waveform → phonemes → morphemes → words
+                                                               1. Introduction                                 → concepts → meaning. However, because speech signals are
+                                          Spoken language understanding (SLU) systems infer the                high-dimensional and highly variable even for a single speaker,
+                                          meaning or intent of a spoken utterance [1]. This is crucial for     training deep models and learning these hierarchical represen-
+                                          voice user interfaces, in which the speaker’s utterance needs        tations without a large amount of training data is difficult.
+                                          to be converted into an action or query. For example, for a               The computer vision [15, 16], natural language process-
+                                          voice-controlled coffee machine, an utterance like “make me a        ing [17–21], and ASR [22, 23] communities have attacked the
+                                          large coffee with two milks and a sugar, please” might have an       problem of limited supervised training data with great success
+                                          intent representation like {drink: "coffee", size:                   by pre-training deep models on related tasks for which there
+                                          "large", additions: [{type: "milk",                                  is more training data. Following their lead, we propose an ef-
+                                          count: 2}, {type: "sugar", count: 1}]}.                              ficient ASR-based pre-training methodology in this paper and
+                                               The conventional SLU pipeline is composed of two mod-           show that it may be used to improve the performance of end-to-
+                                          ules: an automatic speech recognition (ASR) module that maps         end SLU models, especially when the amount of training data
+                                          the speech to a text transcript, and a natural language under-       is very small.
+                                          standing (NLU) module that maps the text transcript to the                Our contributions are as follows:
+                                          speaker’s intent [2–4]. An alternative approach that is begin-            • We introduce a dataset for realistic SLU experiments.
+                                          ning to gain popularity is end-to-end SLU [5–9]. In end-to-end
+                                                                                                                    • We use this dataset to demonstrate effective speech
+                                          SLU, a single trainable model maps the speech audio directly
+                                                                                                                      model pre-training techniques for low-resource SLU.
+                                          to the speaker’s intent without explicitly producing a text tran-
+                                          script (Fig. 1). Unlike the conventional SLU pipeline, end-to-            • We make our code1 and data2 publicly available for re-
+                                          end SLU:                                                                    searchers to replicate and build on our work.
+                                              • directly optimizes the metric of interest (intent recogni-
+                                                tion accuracy),                                                                       2. Related work
+                                              • does not waste modeling effort on estimating the text,         Three key papers describing end-to-end SLU were written by
+                                                thus yielding a more compact model and avoiding an             Qian et al. [5], Serdyuk et al. [6], and Chen et al. [7]. Serdyuk
+                                                error-prone intermediate step involving search algo-           et al. in [6] use no pre-training whatsoever. Qian et al. in [5] use
+                                                rithms, language models, finite state transducers, etc.,       an auto-encoder to initialize the SLU model. Chen et al. [7] pre-
+                                              • and enables harnessing aspects of the utterance that may       train the first stage of an SLU model to recognize graphemes;
+                                                be relevant for inferring the intent, but are not present in   the softmax outputs of the first stage are then fed to a classifier
+                                                the text transcript, such as prosody.                          second stage. The model proposed in this paper is similar to
+                                              End-to-end models have been made possible by deep learn-            1 github.com/lorenlugosch/pretrain speech model
+
+                                          ing, which automatically learns hierarchical representations of         2 fluent.ai/research/fluent-speech-commands/
+theirs, but removes the restriction of the softmax bottleneck and     Table 1: Information about the Fluent Speech Commands
+uses alternative training targets, as we will describe later.         dataset.
+     More recently, Haghani et al. in [8] compare four types
+of sequence-to-sequence models for SLU, including a direct                 Split    # of speakers      # of utterances     # hours
+model (end-to-end with no pre-training) and a multi-task model             Train                 77             23,132         14.7
+(uses a shared encoder whose output is ingested by a separate              Valid                 10              3,118          1.9
+ASR decoder and SLU decoder). The model proposed here is                   Test                  10              3,793          2.4
+somewhat similar to their multi-task model, although we do not
+use or require the ASR targets during SLU training.                        Total                 97             30,043         19.0
+     The work listed above deals with very high resource SLU—
+in [8], for instance, the Google Home [24] dataset consists of 24
+million labeled utterances. In contrast, Renkens et al. in [9] con-   3.2. Data collection
+sider the problem of end-to-end SLU with limited training data,
+and find that capsule networks [25], compared to conventional         The data was collected using crowdsourcing. Each speaker
+neural network models, are more easily capable of learning end-       was recorded saying each wording for each intent twice. The
+to-end SLU from scratch. However, they do not consider the            phrases to record were presented in a random order. Participants
+effect of pre-training on other speech data.                          consented to data being released and provided demographic
+     This previous work has all been conducted on datasets that       information about themselves. The demographic information
+are closed-source or too small to test hypotheses about the           about these anonymized speakers (age range, gender, speaking
+amount of data required to generalize well. The lack of a good        ability, etc.) is included along with the dataset.
+open-source dataset for end-to-end SLU experiments makes it                The data was validated by a separate set of crowdsourcers.
+difficult for most people to perform high-quality, reproducible       All audios deemed by the crowdsourcers to be unintelligible or
+research on this topic. We therefore created a new SLU dataset,       contain the wrong phrase were removed. The total number of
+the “Fluent Speech Commands” dataset, which Fluent.ai re-             speakers, utterances, and hours of audio remaining is shown in
+leases along with this paper.                                         Table 1.
+
+                         3. Dataset                                   3.3. Dataset splits
+
+This section describes the structure and creation of Fluent           The utterances are randomly divided into train, valid, and test
+Speech Commands.                                                      splits in such a way that no speaker appears in more than one
+                                                                      split. Each split contains all possible wordings for each intent,
+                                                                      though our code has the option to include data for only certain
+3.1. Audio and labels
+                                                                      wordings for different sets, to test the model’s ability to rec-
+The dataset is composed of 16 kHz single-channel .wav audio           ognize wordings not heard during training. The dataset has a
+files. Each audio file contains a recording of a single command       .csv file for each split that lists the speaker ID, file path, tran-
+that one might use for a smart home or virtual assistant, like        scription, and slots for all the .wav files in that split.
+“put on the music” or “turn up the heat in the kitchen”.
+     Each audio is labeled with three slots: action, object, and      3.4. Related datasets
+location. A slot takes on one of multiple values: for instance,
+                                                                      Here we review some related public datasets and show the gap
+the “location” slot can take on the values “none”, “kitchen”,
+                                                                      that Fluent Speech Commands fills.
+“bedroom”, or “washroom”. We refer to the combination of
+slot values as the intent of the utterance. The dataset has 31             The Google Speech Commands dataset [27] (to which the
+unique intents in total. We do not distinguish between domain,        name “Fluent Speech Commands” is an homage) is a free
+intent, and slot prediction, as is sometimes done in SLU [26].        dataset of 30 single-word spoken commands (“yes”, “no”,
+                                                                      “stop”, “go”, etc.). This dataset is suitable for keyword spot-
+     The dataset can be used as a multi-label classification task,
+                                                                      ting experiments, but not for SLU.
+where the goal is to predict the action, object, and location la-
+bels. Since the slots are not actually independent of each other,          ATIS is an SLU dataset consisting of utterances related to
+a more careful approach would model the relationship between          travel planning3 . This dataset can only be obtained expensively
+slots, e.g. using an autoregressive model, as in [8]. We use the      from the Linguistic Data Consortium.
+simpler multi-label classification approach in this paper, so as to        The Snips NLU Benchmark [3] has a rich set of virtual as-
+avoid the issues sometimes encountered training autoregressive        sistant commands, but contains only text, with no audio, and
+models and instead focus on questions related to generalization       hence is not suitable for end-to-end SLU experiments.
+using a simpler model. Alternately, the 31 distinct intents can            The Grabo, Domotica, and Patcor datasets are three related
+be “flattened” and used as 31 distinct labels for a single-label      datasets of spoken commands for robot control and card games
+classification task.                                                  developed by KU Leuven4 and used in [9]. These datasets are
+     For each intent, there are multiple possible wordings: for       free, but have only a small number of speakers and phrases.
+example, the intent {action: "activate", object:                           In contrast to these datasets, Fluent Speech Commands is
+"lights", location: "none"} can be expressed as                       simultaneously audio-based, reasonably large, and free, and
+“turn on the lights”, “switch the lights on”, “lights on”, etc..      contains several multiple-word commands corresponding to
+These phrases were decided upon before data collection by ask-        each of the intents.
+ing employees at Fluent.ai, including both native and non-native
+English speakers, for various ways in which they might express           3 https://catalog.ldc.upenn.edu/LDC94S19
+
+a particular intent. There are 248 different phrases in total.           4 https://www.esat.kuleuven.be/psi/spraak/downloads/
+                                                                                      puted using a linear classifier:
+                                                       {
+                                                        action : “activate”,
+
+                                                                                                   lphoneme = W phoneme hphoneme + bphoneme .
+                                                        object : “lights”,
+
+                                                       }
+                                                        location : “kitchen”                                                                              (1)
+
+                                                                                           The phoneme module is implemented using a SincNet layer
+                                    IT WAS THE
+                       Word         BEST OF                                           [37, 38], which processes the raw input waveform, followed by
+                                    TIMES IT WAS
+                       classifier   THE WORST OF                                      multiple convolutional layers and recurrent layers with pooling
+                                    TIMES
+                                                                                      and dropout. More detailed hyperparameters can be found in
+                       Phoneme      IH T W AA Z
+                       classifier   DH AH B EH S                                      our code.
+                                    T AH V T AY
+                                    M Z IH T W
+                                    AA Z DH AH W
+                                    ER S T AH V                                       4.3. Word module
+                                    T AY M Z
+
+                                                                                      The second module takes as input hphoneme and outputs hword .
+ “It was the best of times, it                                                        Similar to the phoneme-level module, it uses recurrent layers
+  was the worst of times...”                       “Turn the kitchen lights on”       with dropout and pooling, and is pre-trained to predict words
+                                                                                      using another linear classifier:
+Figure 2: The lower layers of the model are pre-trained using
+ASR targets (words and phonemes). The word and phoneme                                                   lword = W word hword + bword .                   (2)
+classifiers are discarded, and the features  from the pre-trained
+                                      Conventional SLU
+part of the model (blue) are used as the input to the subsequent                             Notice that the input to this module is hphoneme , not lphoneme ,
+module (white),Speech
+                  which is trained using SLU
+                                           Texttargets.                                and likewise the output to the next stage is hword , not lword . There
+                                                                                  Intent
+
+                                          TURN THE
+                                                                         {             are two good reasons for forwarding h instead of l. The first
+                                                                           action: “activate”,
+                                ASR        KITCHEN       NLU                           is that we don’t want to remove a degree of freedom from the
+                                                                           object: “lights”,
+                                                                           location: “kitchen”
+                                          LIGHTS ON                      }
+                                                                                       model: the size of l is fixed by the number of targets, and this
+       4. Model and Pre-training Strategy                                              would in turn fix the size of the next layer of the model. The
+The model proposed in this      paper, shown
+                            Speech             in Fig.
+                                        End-to-end SLU 2, is aIntent
+                                                                 deep                  second reason is that computing lword requires multiplying and
+neural network consisting of a stack of modules, {where the                            storing a large (≈ 2.5 million parameters) weight matrix, and
+first modules are pre-trained to predict phonemes
+                                             SLU
+                                                         action: “activate”,
+                                                        and   words.
+                                                         object: “lights”,             by   discarding this matrix after pre-training, we save on memory
+                                                         location: “kitchen”
+The word and phoneme classifiers are discarded, and} the entire                        and computation.
+model is then trained end-to-end on the supervised SLU task. In
+what follows, we justify these design decisions and give more                          4.4. Intent module
+details about the model hyperparameters.
+                                                                                       The third module, which is not pre-trained, maps hword to the
+                                                                                       predicted intent. Depending on the structure of the intent repre-
+4.1. Which ASR targets to use?                                                         sentation, the intent module might take on various forms. Since
+ASR models are trained using a variety of targets, including                           in this work we use a fixed three-slot intent representation, we
+phonemes, graphemes, wordpieces, or more recently whole                                implement this module using a recurrent layer, followed by
+words [28–30]. We choose whole words as the pre-training tar-                          max-pooling to squash the sequence of outputs from the recur-
+gets, since this is what a typical NLU module would expect as                          rent layer into a single vector of logits corresponding to the dif-
+input. A typical ASR dataset contains too many unique words                            ferent slot values, similar to [6].
+(LibriSpeech [31] has more than 200,000) to assign an output
+to each one; we only assign a label to the 10,000 most common                          4.5. Unfreezing schedule
+words. This leaves much of the pre-training data without any                           Although the pre-trained model works well as a frozen feature
+labels, which wastes data. By using phonemes as intermedi-                             extractor, it may be preferable to “unfreeze” its weights and
+ate pre-training targets [20, 32, 33], we are able to pre-train on                     finetune them for the SLU task with backpropagation. Simi-
+speech segments with no word label. Additionally, we find that                         lar to ULMFiT [18], we find that gradually unfreezing the pre-
+using phonemes as intermediate targets speeds up word-level                            trained layers works better than unfreezing them all at once.
+pre-training [34, 35].                                                                 We unfreeze one layer each epoch, and stop at a pre-determined
+     We use the Montreal Forced Aligner [36] to obtain word-                           layer, which is a hyperparameter.
+and phoneme-level alignments for LibriSpeech, and we pre-
+train the model on the entire 960 hours of training data using                                                5. Experiments
+these alignments 5,6 . Using force-aligned labels has the addi-
+tional benefit of enabling pre-training using short, random crops                      Here we report results for three experiments on Fluent Speech
+rather than entire utterances, which reduces the computation                           Commands: using the full dataset, using a subset of the dataset,
+and memory required to pre-train the model.                                            and using a subset of wordings.
+
+4.2. Phoneme module                                                                   5.1. Full dataset
+
+The first module takes as input the audio signal x and out-                           We first trained models given the entire SLU training set. The
+puts hphoneme , a sequence of hidden representations that are pre-                    models used one of: 1) no pre-training (randomly initialized),
+trained to predict phonemes. The phoneme-level logits are com-                        2) pre-training with no unfreezing, 3) gradually unfreezing only
+                                                                                      the word layers, or 4) gradually unfreezing both the word layers
+  5 Our alignments can be downloaded from                                             and phoneme layers. What we report here as “accuracy” refers
+https://zenodo.org/record/2619474#.XKDP2VNKg1g                                        to the accuracy of all slots for an utterance taken together—that
+  6 We use textgrid.py to process the alignments.                                     is, if the predicted intent differs from the true intent in even one
+https://github.com/kylebgorman/textgrid                                               slot, the prediction is deemed incorrect.
+                    1                                                                       1
+
+                  0.8                                                                      0.8
+   Accuracy
+
+
+
+
+                                                                                Accuracy
+                  0.6                                                                      0.6
+
+                  0.4                             No pre-training                          0.4                         No pre-training
+                                                   No unfreezing                                                        No unfreezing
+                  0.2                           Unfreeze word layers                       0.2                       Unfreeze word layers
+                                                 Unfreeze all layers                                                  Unfreeze all layers
+                    0                                                                       0
+                        0         5           10         15        20                            0      20      40       60        80      100
+                                      Training time (epochs)                                              Training time (epochs)
+
+                                 (a) Full dataset.                                                   (b) 10% of the dataset.
+
+              Figure 3: Accuracy on the validation set over time for models trained on (a) the full SLU dataset or (b) 10% of the dataset.
+
+
+Table 2: Accuracy on the test set for different models, given the              correspond to turning on the lights, it will incorrectly guess that
+full training dataset or a 10% subset of the training data.                    “switch off the lights” corresponds to turning on the lights; if the
+                                                                               model infers that the presence of the word “off” corresponds to
+ Model                            Accuracy (full)      Accuracy (10%)          turning off the lights, it will generalize to the new phrase. The
+                                                                               randomly initialized model was unable to fit this tiny training
+ No pre-training                             96.6%               88.9%
+                                                                               set, even with a very low learning rate and no regularization.
+ No unfreezing                               98.8%               97.9%
+                                                                               The pre-trained models were able to generalize to the new word-
+ Unfreeze word layers                        98.7%               97.9%
+                                                                               ing (with 97% accuracy on the validation set, which contains
+ Unfreeze all layers                         97.2%               95.8%
+                                                                               more examples of the new phrase than of the training phrases).
+                                                                                    However, there are many situations in which our model
+                                                                               does not correctly generalize. For example, if the model is
+     The validation accuracy of these models over time is shown                trained only with examples containing “bedroom” and “wash-
+in Fig. 3a. The best results are obtained when only the word lay-              room”, but then tested on an example containing “bathroom”, it
+ers of the pre-trained model are unfrozen. This may be because                 will guess the intent corresponding to “bedroom” because “bed-
+the model begins to forget the more general phonetic knowledge                 room” sounds more similar to “bathroom” than to “washroom”,
+acquired during pre-training. For the test set, the frozen model               even though “washroom” is the correct meaning. In text-based
+and partially unfrozen model perform roughly equally well (Ta-                 NLU, this scenario can be handled using word embeddings,
+ble 2, “full” column), possibly because the test set is “easier”               which represent words in such a way that words with similar
+than the validation set. In all cases, the pre-trained models out-             meanings have similar vector representations [2, 39]. It may
+perform the randomly initialized model.                                        be possible to teach the pre-trained part of the model to output
+                                                                               “embedding-like” word representations so that the intent mod-
+5.2. Partial dataset                                                           ule can recognize the meaning of phrases with synonyms.
+To simulate a smaller dataset, we randomly selected 10% of the
+training set, and used this instead of the entire training set. Fig.                                   6. Conclusion
+3b shows the validation accuracy (on the entire validation set,
+                                                                               In this paper, we proposed a pre-training methodology for end-
+not a subset) over time. A similar trend is observed as for the en-
+                                                                               to-end SLU models, introduced the Fluent Speech Commands
+tire dataset: unfreezing the word layers works best. The gap in
+                                                                               dataset, and used this dataset to show that our pre-training tech-
+final test accuracy between the randomly initialized model and
+                                                                               niques improve performance both for large and small SLU train-
+the pre-trained models increases (Table 2, “10%” column); the
+                                                                               ing sets. In the future, we plan to continue using Fluent Speech
+final test accuracy for the pre-trained models drops only slightly,
+                                                                               Commands to explore the limitations of end-to-end SLU, like
+further highlighting the advantage of our proposed method.
+                                                                               new wordings and synonyms not observed in the SLU dataset,
+                                                                               to see if these limitations can be overcome.
+5.3. Generalizing to new wordings
+What happens if new wordings appear in the test data that never                                  7. Acknowledgements
+appear in the training data? This is an important question, since
+it is generally impractical to try to imagine every possible word-             We would like to acknowledge the following for research fund-
+ing for a particular intent while gathering training data.                     ing and computing support: NSERC, Calcul Québec, Compute
+      To test this, we trained models on three specific phrases,               Canada, the Canada Research Chairs, and CIFAR.
+“turn on the lights”, “turn off the lights”, and “switch on the                    Thanks to Dima Serdyuk and Kyle Kastner at Mila, and
+lights” (273 utterances total), and tested on those same phrases,              Farzaneh Fard, Luis Rodriguez Ruiz, Sam Myer, Mohamed
+as well as a new phrase: “switch off the lights”. If the model                 Mhiri, and Arash Rad at Fluent.ai for helpful discussions with
+incorrectly infers that utterances that contain “switch” always                us about this work.
+                        8. References                                     [24] B. Li, T. N. Sainath, A. Narayanan, J. Caroselli, M. Bacchiani,
+                                                                               A. Misra, I. Shafran, H. Sak, G. Pundak, K. K. Chin et al., “Acous-
+ [1] G. Tur and R. D. Mori, Spoken Language Understanding: Systems             tic Modeling for Google Home,” Interspeech, 2017.
+     for Extracting Semantic Information from Speech. Wiley, 2011.
+                                                                          [25] S. Sabour, N. Frosst, and G. E. Hinton, “Dynamic routing between
+ [2] G. Mesnil, Y. Dauphin, K. Yao, Y. Bengio, L. Deng, D. Hakkani-
+                                                                               capsules,” NeurIPS, 2017.
+     tur, and X. He, “Using Recurrent Neural Networks for Slot Filling
+     in Spoken Language Understanding,” IEEE/ACM Transactions on          [26] Y.-Y. Wang, L. Deng, and A. Acero, “Spoken language under-
+     Audio, Speech, and Language Processing, 2015.                             standing,” IEEE Signal Processing Magazine, vol. 22, no. 5, pp.
+                                                                               16–31, 2005.
+ [3] A. Coucke, A. Caulier, A. Ball, C. L. Dec, and T. Bluche,
+     “Snips Voice Platform: an embedded Spoken Language Un-               [27] P. Warden, “Speech Commands: A Dataset for Limited-
+     derstanding system for private-by-design voice interfaces,”               Vocabulary Speech Recognition,” arXiv:1804.03209v1, 2018.
+     arXiv:1805.10190v3, 2018.                                            [28] H. Soltau, H. Liao, and H. Sak, “Neural Speech Recognizer:
+ [4] A. L. Gorin, G. Riccardi, and J. H. Wright, “How may I help               Acoustic-to-Word LSTM Model for Large Vocabulary Speech
+     you?” Speech Communication, vol. 23, no. 1-2, pp. 113–127,                Recognition,” arxiv:1610.09975, 2016.
+     1997.
+                                                                          [29] K. Audhkhasi, B. Ramabhadran, G. Saon, M. Picheny, and D. Na-
+ [5] Y. Qian, R. Ubale, V. Ramanarayanan, and P. Lange, “Exploring             hamoo, “Direct Acoustics-to-Word Models for English Conversa-
+     ASR-free end-to-end modeling to improve spoken language un-               tional Speech Recognition,” Interspeech, 2017.
+     derstanding in a cloud-based dialog system,” ASRU, 2017.
+                                                                          [30] K. Audhkhasi, B. Kingsbury, B. Ramabhadran, G. Saon, and
+ [6] D. Serdyuk, Y. Wang, C. Fuegen, A. Kumar, B. Liu, and                     M. Picheny, “Building competitive direct acoustics-to-word mod-
+     Y. Bengio, “Towards end-to-end spoken language understanding,”            els for english conversational speech recognition,” ICASSP, 2018.
+     ICASSP, 2018.
+                                                                          [31] V. Panayotov, G. Chen, D. Povey, and S. Khudanpur, “Lib-
+ [7] Y.-P. Chen, R. Price, and S. Bangalore, “Spoken language under-           riSpeech: An ASR corpus based on public domain audio books,”
+     standing without speech recognition,” ICASSP, 2018.                       ICASSP, 2015.
+ [8] P. Haghani, A. Narayanan, M. Bacchiani, G. Chuang, N. Gaur,          [32] S. Fernández, A. Graves, and J. Schmidhuber, “Sequence La-
+     P. Moreno, R. Prabhavalkar, Z. Qu, and A. Waters, “From Audio             belling in Structured Domains with Hierarchical Recurrent Neural
+     to Semantics: Approaches to end-to-end spoken language under-             Networks,” IJCAI, 2007.
+     standing,” arXiv:1809.09190, 2018.
+                                                                          [33] R. Caruana, “Multitask learning,” Machine learning, vol. 28,
+ [9] V. Renkens and H. Van hamme, “Capsule Networks for Low Re-                no. 1, pp. 41–75, 1997.
+     source Spoken Language Understanding,” Interspeech, 2018.
+                                                                          [34] T.-S. Nguyen, S. Stueker, and A. Waibel, “Using multi-task learn-
+[10] I. Goodfellow, Y. Bengio, and A. Courville, Deep Learning. MIT            ing to improve the performance of acoustic-to-word and conven-
+     Press, 2016.                                                              tional hybrid models,” arXiv:1902.01951, 2019.
+[11] Y. LeCun, L. Bottou, Y. Bengio, and P. Haffner, “Gradient-based
+                                                                          [35] R. Sanabria and F. Metze, “Hierarchical multitask learning with
+     learning applied to document recognition,” Proceedings of the
+                                                                               CTC,” SLT, 2018.
+     IEEE, vol. 86, no. 11, pp. 2278–2324, 1998.
+                                                                          [36] M. McAuliffe, M. Socolof, S. Mihuc, M. Wagner, and M. Son-
+[12] A. Krizhevsky, I. Sutskever, and G. E. Hinton, “ImageNet Clas-
+                                                                               deregger, “Montreal Forced Aligner: Trainable text-speech align-
+     sification with Deep Convolutional Neural Networks,” NeurIPS,
+                                                                               ment using Kaldi,” Interspeech, 2017.
+     2012.
+[13] A. Graves and N. Jaitly, “Towards End-to-End Speech Recogni-         [37] M. Ravanelli and Y. Bengio, “Speaker recognition from raw wave-
+     tion with Recurrent Neural Networks,” ICML, 2014.                         form with SincNet,” SLT, 2018.
+
+[14] D. Amodei, R. Anubhai, E. Battenberg, C. Case, J. Casper,            [38] ——, “Interpretable convolutional filters with SincNet,” NeurIPS
+     B. Catanzaro, J. Chen, M. Chrzanowski, A. Coates, G. Diamos               Workshop on Interpretability and Robustness for Audio, Speech
+     et al., “Deep Speech 2: End-to-End Speech Recognition in En-              and Language (IRASL), 2018.
+     glish and Mandarin,” ICML, 2015.                                     [39] T. Mikolov, K. Chen, G. Corrado, and J. Dean, “Efficient esti-
+[15] J. Yosinski, J. Clune, Y. Bengio, and H. Lipson, “How transferable        mation of word representations in vector space,” arXiv preprint
+     are features in deep neural networks?” NeurIPS, 2014.                     arXiv:1301.3781, 2013.
+[16] K. Simonyan and A. Zisserman, “Very deep convolutional net-
+     works for large-scale image recognition,” ICLR, 2015.
+[17] A. M. Dai and Q. V. Le, “Semi-supervised sequence learning,”
+     NeurIPS, 2015.
+[18] J. Howard and S. Ruder, “Universal language model fine-tuning
+     for text classification,” ACL, 2018.
+[19] A. Radford and T. Salimans, “Improving Language Understand-
+     ing by Generative Pre-Training,” Technical report, OpenAI, 2018.
+[20] V. Sanh, T. Wolf, and S. Ruder, “A hierarchical multi-task ap-
+     proach for learning embeddings from semantic tasks,” AAAI,
+     2019.
+[21] J. Devlin, M.-W. Chang, K. Lee, and K. Toutanova, “BERT: Pre-
+     training of deep bidirectional Transformers for language under-
+     standing,” arXiv preprint arXiv:1810.04805, 2018.
+[22] G. Dahl, D. Yu, L. Deng, and A. Acero, “Context-dependent pre-
+     trained deep neural networks for large vocabulary speech recog-
+     nition,” IEEE Transactions on Audio, Speech, and Language Pro-
+     cessing, vol. 20, no. 1, pp. 30–42, 2012.
+[23] J. Kunze, L. Kirsch, I. Kurenkov, A. Krug, J. Johannsmeier, and
+     S. Stober, “Transfer Learning for Speech Recognition on a Bud-
+     get,” ACL, 2017.
+

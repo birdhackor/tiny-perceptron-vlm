@@ -1,0 +1,9 @@
+import torch
+from tiny_perceptron.multimodal import mel_filter_bank
+
+bank = mel_filter_bank(bands=16)
+power = torch.ones(201, 3)
+mel_power = bank @ power
+print("權重表", tuple(bank.shape))
+print("合成後", tuple(mel_power.shape))
+print("權重非負", bool((bank >= 0).all()))

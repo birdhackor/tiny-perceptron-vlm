@@ -1,0 +1,17 @@
+import torch
+from tiny_perceptron.data import ByteTokenizer
+from tiny_perceptron.model import TinyLM, ModelConfig, masked_loss
+from tiny_perceptron.multimodal import MultiModalLM, tone
+
+torch.manual_seed(0)
+tok = ByteTokenizer()
+model = MultiModalLM(TinyLM(ModelConfig(width=8)))
+prefix = [tok.bos_id, tok.user_id, tok.audio_id, tok.eos_id, tok.assistant_id]
+answer = tok.encode("high") + [tok.eos_id]
+ids = torch.tensor(prefix + answer)
+labels = torch.tensor([-100] * len(prefix) + answer)
+out = model(ids, labels, waveform=tone(440))
+loss = masked_loss(out["logits"], out["labels"])
+loss.backward()
+print("分數形狀", tuple(out["logits"].shape))
+print("聲音接頭收到梯度", model.audio_projector.weight.grad.norm().item() > 0)

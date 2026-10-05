@@ -1,0 +1,26 @@
+def tone(frequency=440.0, seconds=0.1, sample_rate=16000):
+    times = torch.arange(round(seconds * sample_rate)) / sample_rate
+    return 0.5 * torch.sin(2 * math.pi * frequency * times)
+
+
+def mel_filter_bank(sample_rate=16000, n_fft=400, bands=16, device=None):
+    """三角濾波器：先在 mel 軸等距，再換回 Hz 頻率軸。"""
+    if bands < 1 or sample_rate < 1:
+        raise ValueError("bands/sample_rate 必須為正")
+    max_mel = 2595 * math.log10(1 + (sample_rate / 2) / 700)
+    mels = torch.linspace(0, max_mel, bands + 2, device=device)
+    hz = 700 * (10 ** (mels / 2595) - 1)
+    frequencies = torch.linspace(0, sample_rate / 2, n_fft // 2 + 1, device=device)
+    left = (frequencies[None] - hz[:-2, None]) / (hz[1:-1] - hz[:-2])[:, None]
+    right = (hz[2:, None] - frequencies[None]) / (hz[2:] - hz[1:-1])[:, None]
+    return torch.minimum(left, right).clamp(min=0)
+
+
+def log_mel(waveform, sample_rate=16000, n_fft=400, hop_length=160, bands=16):
+    if waveform.shape[-1] <= n_fft // 2:
+        waveform = F.pad(waveform, (0, n_fft // 2 + 1 - waveform.shape[-1]))
+    window = torch.hann_window(n_fft, device=waveform.device, dtype=waveform.dtype)
+    spectrum = torch.stft(waveform, n_fft, hop_length, window=window, return_complex=True)
+    power = spectrum.abs().square()
+    bank = mel_filter_bank(sample_rate, n_fft, bands, waveform.device).to(power.dtype)
+    return (bank @ power).clamp(min=1e-8).log()

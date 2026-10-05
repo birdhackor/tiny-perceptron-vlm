@@ -1,0 +1,7 @@
+frequencies = [200, 220, 440, 660]
+truth = ["high" if f > 300 else "low" for f in frequencies]
+no_audio = ["high"] * len(frequencies)
+accuracy = sum(a == b for a, b in zip(truth, no_audio)) / len(truth)
+print("頻率", frequencies)
+print("標準答案", truth)
+print("不聽聲音的固定猜測", accuracy)
