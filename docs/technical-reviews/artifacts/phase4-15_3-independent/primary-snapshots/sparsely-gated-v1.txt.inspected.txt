@@ -1,0 +1,137 @@
+
+ORIGINAL sparsely-gated-v1.txt L1-L22
+                                         Under review as a conference paper at ICLR 2017
+
+
+
+
+                                         O UTRAGEOUSLY L ARGE N EURAL N ETWORKS :
+                                         T HE S PARSELY-G ATED M IXTURE - OF -E XPERTS L AYER
+
+                                             Noam Shazeer1 , Azalia Mirhoseini∗†1 , Krzysztof Maziarz∗2 , Andy Davis1 , Quoc Le1 , Geoffrey
+                                                                               Hinton1 and Jeff Dean1
+                                                         1
+                                                             Google Brain, {noam,azalia,andydavis,qvl,geoffhinton,jeff}@google.com
+                                                              2
+                                                                Jagiellonian University, Cracow, krzysztof.maziarz@student.uj.edu.pl
+arXiv:1701.06538v1 [cs.LG] 23 Jan 2017
+
+
+
+
+                                                                                         A BSTRACT
+
+                                                      The capacity of a neural network to absorb information is limited by its number of
+
+ORIGINAL sparsely-gated-v1.txt L154-L224
+realize sparse gating and demonstrate its use as a practical way to massively increase model capacity.
+
+2     T HE S TRUCTURE OF THE M IXTURE - OF -E XPERTS LAYER
+The Mixture-of-Experts (MoE) layer consists of a set of n “expert networks" E1 , · · · , En , and a
+“gating network" G whose output is a sparse n-dimensional vector. Figure 1 shows an overview
+of the MoE module. The experts are themselves neural networks, each with their own parameters.
+Although in principle we only require that the experts accept the same sized inputs and produce the
+same-sized outputs, in our initial investigations in this paper, we restrict ourselves to the case where
+the models are feed-forward networks with identical architectures, but with separate parameters.
+Let us denote by G(x) and Ei (x) the output of the gating network and the output of the i-th expert
+network for a given input x. The output y of the MoE module can be written as follows:
+
+                                              n
+                                              X
+                                         y=         G(x)i Ei (x)                                    (1)
+                                              i=1
+
+We save computation based on the sparsity of the output of G(x). Wherever G(x)i = 0, we need not
+compute Ei (x). In our experiments, we have up to thousands of experts, but only need to evaluate
+a handful of them for every example. If the number of experts is very large, we can reduce the
+branching factor by using a two-level hierarchical MoE. In a hierarchical MoE, a primary gating
+network chooses a sparse weighted combination of “experts", each of which is itself a secondary
+mixture-of-experts with its own gating network. In the following we focus on ordinary MoEs. We
+provide more details on hierarchical MoEs in Appendix B.
+Our implementation is related to other models of conditional computation. A MoE whose experts are
+simple weight matrices is similar to the parameterized weight matrix proposed in (Cho & Bengio,
+2014). A MoE whose experts have one hidden layer is similar to the block-wise dropout described
+in (Bengio et al., 2015), where the dropped-out layer is sandwiched between fully-activated layers.
+
+
+                                                     3
+Under review as a conference paper at ICLR 2017
+
+
+
+
+2.1   G ATING N ETWORK
+
+Softmax Gating: A simple choice of non-sparse gating function (Jordan & Jacobs, 1994) is to
+multiply the input by a trainable weight matrix Wg and then apply the Sof tmax function.
+
+                                   Gσ (x) = Sof tmax(x · Wg )                                     (2)
+
+Noisy Top-K Gating: We add two components to the Softmax gating network: sparsity and noise.
+Before taking the softmax function, we add tunable Gaussian noise, then keep only the top k values,
+setting the rest to −∞ (which causes the corresponding gate values to equal 0). The sparsity serves
+to save computation, as described above. While this form of sparsity creates some theoretically
+scary discontinuities in the output of gating function, we have not yet observed this to be a problem
+in practice. The noise term helps with load balancing, as will be discussed in Appendix A. The
+amount of noise per component is controlled by a second trainable weight matrix Wnoise .
+
+                            G(x) = Sof tmax(KeepT opK(H(x), k))                                   (3)
+
+
+              H(x)i = (x · Wg )i + StandardN ormal() · Sof tplus((x · Wnoise )i )                 (4)
+
+                                        
+                                            vi if vi is in the top k elements of v.
+                 KeepT opK(v, k)i =                                                               (5)
+                                            −∞ otherwise.
+
+Training the Gating Network We train the gating network by simple back-propagation, along
+with the rest of the model. If we choose k > 1, the gate values for the top k experts have nonzero
+derivatives with respect to the weights of the gating network. This type of occasionally-sensitive
+behavior is described in (Bengio et al., 2013) with respect to noisy rectifiers. Gradients also back-
+propagate through the gating network to its inputs. Our method differs here from (Bengio et al.,
+2015) who use boolean gates and a REINFORCE-style approach to train the gating network.
+
+3     A DDRESSING P ERFORMANCE C HALLENGES
+3.1   T HE S HRINKING BATCH P ROBLEM
+
+ORIGINAL sparsely-gated-v1.txt L293-L332
+4     BALANCING E XPERT U TILIZATION
+We have observed that the gating network tends to converge to a state where it always produces
+large weights for the same few experts. This imbalance is self-reinforcing, as the favored experts
+are trained more rapidly and thus are selected even more by the gating network. Eigen et al. (2013)
+describe the same phenomenon, and use a hard constraint at the beginning of training to avoid this
+local minimum. Bengio et al. (2015) include a soft constraint on the batch-wise average of each
+gate.1
+We take a soft constraint approach. We define the importance of an expert relative to a batch of
+training examples to be the batchwise sum of the gate values for that expert. We define an additional
+loss Limportance , which is added to the overall loss function for the model. This loss is equal to
+the square of the coefficient of variation of the set of importance values, multiplied by a hand-tuned
+scaling factor wimportance . This additional loss encourages all experts to have equal importance.
+                                                               X
+                                       Importance(X) =               G(x)                                     (6)
+                                                               x∈X
+
+
+                       Limportance (X) = wimportance · CV (Importance(X))2                                    (7)
+   1
+     Bengio et al. (2015) also include two additional losses. One controls per-example sparsity, which we do
+not need since it is enforced by the fixed value of k. A third loss encourages diversity of gate values. In our
+experiments, we find that the gate values naturally diversify as the experts specialize (in a virtuous cycle), and
+we do not need to enforce diversity of gate values.
+
+
+                                                        5
+Under review as a conference paper at ICLR 2017
+
+
+
+
+While this loss function can ensure equal importance, experts may still receive very different num-
+bers of examples. For example, one expert may receive a few examples with large weights, and
+another may receive many examples with small weights. This can cause memory and performance
+problems on distributed hardware. To solve this problem, we introduce a second loss function,
+Lload , which ensures balanced loads. Appendix A contains the definition of this function, along
+with experimental results.
+
+5     E XPERIMENTS

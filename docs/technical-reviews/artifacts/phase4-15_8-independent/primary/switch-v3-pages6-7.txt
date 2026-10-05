@@ -1,0 +1,154 @@
+Fedus, Zoph and Shazeer
+
+study the top-k decision and found that higher k-values in lower layers in the model were
+important for models with many routing layers. Contrary to these ideas, we instead use
+a simplified strategy where we route to only a single expert. We show this simplification
+preserves model quality, reduces routing computation and performs better. This k = 1
+routing strategy is later referred to as a Switch layer. Note that for both MoE and Switch
+Routing, the gate value pi (x) in Equation 2 permits differentiability of the router.
+The benefits for the Switch layer are three-fold: (1) The router computation is reduced
+as we are only routing a token to a single expert. (2) The batch size (expert capacity) of
+each expert can be at least halved since each token is only being routed to a single expert.3
+(3) The routing implementation is simplified and communication costs are reduced. Figure
+3 shows an example of routing with different expert capacity factors.
+Terminology
+Experts: Split across devices,
+each having their own unique
+parameters. Perform standard feedforward computation.
+
+(Capacity Factor: 1.0)
+Expert 1
+
+Expert 2
+
+Expert 3
+
+Device 0
+
+Device 1
+
+Device 2
+
+(Capacity Factor: 1.5)
+Expert 1
+Device 0
+
+Expert 2
+
+Expert 3
+
+Device 1
+
+Device 2
+
+Expert Capacity: Batch size of
+each expert. Calculated as
+(tokens_per_batch / num_experts) *
+capacity_factor
+
+Across Device
+Communication
+
+Capacity Factor: Used when
+calculating expert capacity. Expert
+capacity allows more buffer to help
+mitigate token overﬂow during
+routing.
+
+Device 0
+
+Device 0
+
+Tokens
+
+Tokens
+
+Figure 3: Illustration of token routing dynamics. Each expert processes a fixed batch-size
+of tokens modulated by the capacity factor. Each token is routed to the expert
+with the highest router probability, but each expert has a fixed batch size of
+(total tokens / num experts) × capacity factor. If the tokens are unevenly dispatched then certain experts will overflow (denoted by dotted red lines), resulting
+in these tokens not being processed by this layer. A larger capacity factor alleviates this overflow issue, but also increases computation and communication costs
+(depicted by padded white/empty slots).
+
+2.2 Efficient Sparse Routing
+We use Mesh-Tensorflow (MTF) (Shazeer et al., 2018) which is a library, with similar semantics and API to Tensorflow (Abadi et al., 2016) that facilitates efficient distributed data and
+model parallel architectures. It does so by abstracting the physical set of cores to a logical
+mesh of processors. Tensors and computations may then be sharded per named dimensions,
+facilitating easy partitioning of models across dimensions. We design our model with TPUs
+in mind, which require statically declared sizes. Below we describe our distributed Switch
+Transformer implementation.
+3. See Section 2.2 for a technical description.
+
+6
+
+Switch Transformers
+
+Distributed Switch Implementation. All of our tensor shapes are statically determined at compilation time, but our computation is dynamic due to the routing decisions at
+training and inference. Because of this, one important technical consideration is how to set
+the expert capacity. The expert capacity—the number of tokens each expert computes—is
+set by evenly dividing the number of tokens in the batch across the number of experts, and
+then further expanding by a capacity factor,
+
+
+tokens per batch
+expert capacity =
+× capacity factor.
+(3)
+number of experts
+A capacity factor greater than 1.0 creates additional buffer to accommodate for when tokens are not perfectly balanced across experts. If too many tokens are routed to an expert
+(referred to later as dropped tokens), computation is skipped and the token representation is passed directly to the next layer through the residual connection. Increasing the
+expert capacity is not without drawbacks, however, since high values will result in wasted
+computation and memory. This trade-off is explained in Figure 3. Empirically we find ensuring lower rates of dropped tokens are important for the scaling of sparse expert-models.
+Throughout our experiments we didn’t notice any dependency on the number of experts
+for the number of tokens dropped (typically < 1%). Using the auxiliary load balancing loss
+(next section) with a high enough coefficient ensured good load balancing. We study the
+impact that these design decisions have on model quality and speed in Table 1.
+A Differentiable Load Balancing Loss. To encourage a balanced load across experts
+we add an auxiliary loss (Shazeer et al., 2017, 2018; Lepikhin et al., 2020). As in Shazeer
+et al. (2018); Lepikhin et al. (2020), Switch Transformers simplifies the original design in
+Shazeer et al. (2017) which had separate load-balancing and importance-weighting losses.
+For each Switch layer, this auxiliary loss is added to the total model loss during training.
+Given N experts indexed by i = 1 to N and a batch B with T tokens, the auxiliary loss is
+computed as the scaled dot-product between vectors f and P ,
+loss = α · N ·
+
+N
+X
+
+fi · Pi
+
+(4)
+
+i=1
+
+where fi is the fraction of tokens dispatched to expert i,
+fi =
+
+1 X
+1{argmax p(x) = i}
+T
+
+(5)
+
+x∈B
+
+and Pi is the fraction of the router probability allocated for expert i, 2
+Pi =
+
+1 X
+pi (x).
+T
+
+(6)
+
+x∈B
+
+Since we seek uniform routing of the batch of tokens across the N experts, we desire both
+vectors to have values of 1/N . The auxiliary loss of Equation 4 encourages uniform routing
+since it is minimized under a uniform distribution. The objective can also be differentiated as
+2. A potential source of confusion: pi (x) is the probability of routing token x to expert i. Pi is the
+probability fraction to expert i across all tokens in the batch B.
+
+7
+
+

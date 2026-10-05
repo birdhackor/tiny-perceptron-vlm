@@ -1,0 +1,70 @@
+LOCATOR inputs/recorded-revision/scripts/course_experiments/architecture.py:331-346
+def _parameter_budget(model):
+    total = sum(p.numel() for p in model.parameters())
+    expert_parameters = router_parameters = 0
+    for block in model.blocks:
+        if isinstance(block.ffn, MoEFFN):
+            expert_parameters += sum(p.numel() for p in block.ffn.experts.parameters())
+            router_parameters += sum(p.numel() for p in block.ffn.router.parameters())
+    active = total - expert_parameters
+    if model.config.experts:
+        active += expert_parameters * model.config.top_k // model.config.experts
+    return {
+        "total_parameters": total,
+        "active_parameter_proxy_per_token": active,
+        "expert_parameters": expert_parameters,
+        "router_parameters": router_parameters,
+    }
+
+
+LOCATOR inputs/recorded-revision/scripts/course_experiments/architecture.py:428-477
+def run_moe(ctx):
+    started = time.perf_counter()
+    data = _text_dataset(ctx)
+    initial = new_lm(ctx, heads=4)
+    moe, _ = _clone_config(initial, ctx, experts=4, top_k=2)
+    budget = _parameter_budget(moe)
+    top1, _ = _clone_config(initial, ctx, experts=4, top_k=1)
+    targets = {
+        "dense_active_top1": _parameter_budget(top1)["active_parameter_proxy_per_token"],
+        "dense_active_top2": budget["active_parameter_proxy_per_token"],
+        "dense_total": budget["total_parameters"],
+    }
+    plans = []
+    for name, target in targets.items():
+        width, difference = _matched_width(initial.config, target)
+        plans.append(
+            (
+                name,
+                {"width": width},
+                0.0,
+                {
+                    "target_parameters": target,
+                    "actual_minus_target": difference,
+                    "initialization_note": "固定seed；width不同時共有表形狀不同，不能共享完整初始化",
+                },
+            )
+        )
+    for k in (1, 2):
+        for weight in (0.0, 0.01):
+            plans.append((f"top{k}_aux{weight:g}", {"experts": 4, "top_k": k}, weight, {}))
+    examples = text_examples(data["validation"], max_length=initial.config.max_length)
+    results = {}
+    steps = _steps(ctx, 180)
+    for name, changes, weight, comparison in plans:
+        model, shared = _clone_config(initial, ctx, **changes)
+        before = _router_gradients(model, examples, ctx)
+        training = _train(model, data["train"], ctx, name=name, steps=steps, auxiliary=weight, deadline=started + 515)
+        results[name] = {
+            "model": _description(model),
+            "budget": _parameter_budget(model),
+            "comparison": comparison,
+            "copied_initial_tables": shared,
+            "training": training,
+            "heldout": _heldout(model, data),
+            "router_gradients_before": before,
+            "router_gradients_after": _router_gradients(model, examples, ctx),
+            "validation_routing": _routing(model, examples, ctx),
+        }
+        if name == "top2_aux0.01":
+            (ctx.output / "model.pt").write_bytes((ctx.output / f"{name}.pt").read_bytes())

@@ -1,0 +1,69 @@
+--- pdftotext -layout lines 1-20 ---
+                                                     M EGA B LOCKS : E FFICIENT S PARSE T RAINING WITH M IXTURE - OF -E XPERTS
+
+
+                                                                     Trevor Gale 1 Deepak Narayanan 2 Cliff Young 3 Matei Zaharia 1
+
+
+                                                                                                   A BSTRACT
+                                                 We present MegaBlocks, a system for efficient Mixture-of-Experts (MoE) training on GPUs. Our system is
+                                                 motivated by the limitations of current frameworks, which restrict the dynamic routing in MoE layers to satisfy
+arXiv:2211.15841v1 [cs.LG] 29 Nov 2022
+
+
+
+
+                                                 the constraints of existing software and hardware. These formulations force a tradeoff between model quality and
+                                                 hardware efficiency, as users must choose between dropping tokens from the computation or wasting computation
+                                                 and memory on padding. To address these limitations, we reformulate MoE computation in terms of block-sparse
+                                                 operations and develop new block-sparse GPU kernels that efficiently handle the dynamism present in MoEs. Our
+                                                 approach never drops tokens and maps efficiently to modern hardware, enabling end-to-end training speedups
+                                                 of up to 40% over MoEs trained with the state-of-the-art Tutel library and 2.4× over DNNs trained with the
+--- pdftotext -layout lines 145-170 ---
+            blocked-CSR-COO encoding and transpose indices, to
+            enable efficient matrix products with sparse inputs and                                         2.1              Routing
+            outputs in transposed or non-transposed order.
+                                                                                                            The first stage of an MoE layer is the router, which is respon-
+We have implemented these techniques in a system called                                                     sible for determining the assignment of tokens to experts. In
+MegaBlocks, which builds on the state-of-the-art Megatron-                                                  addition to expert assignments, MoE routers also produce
+LM library for training Transformer models (Shoeybi et al.,                                                 probabilities for each assignment that reflect the confidence
+2019). We evaluate our system through both microbench-                                                      of the mapping. These weights are encoded as a matrix of
+marks and end-to-end training of Transformer language                                                       scores for each token-expert pair, which are used to linearly
+models.                                                                                                     combine the top k expert outputs for each token (see §2.4).
+                                                                                                            The most common style of MoE routing is the learned router
+2              BACKGROUND : M O E L AYERS                                                                   proposed by Shazeer et al. (2017). In this router, the tokens
+MoE layers are made up of many experts, which are them-                                                     are projected from hidden size elements to num experts
+selves small neural networks. Each token1 is dynamically                                                    scores by multiplying with a weight matrix that is learned
+routed to a subset of the experts for computation based on                                                  jointly with the other model parameters. The scores are
+scores computed by a router. The experts are commonly                                                       normalized with a softmax and the routing decisions are
+defined to be small multi-layer perceptrons (MLPs). It is                                                   made by greedily selecting the top k scoring experts for
+typical for tokens to be sent to a small number of experts,                                                 each token.
+often between 1 and 4 (Fedus et al., 2022).
+                                                                                                            2.2              Permutation
+MoE layers are often interleaved with other DNN layers and
+are most commonly used to replace the feed-forward net-                                                     State-of-the-art MoE implementations aim to compute all
+                                                                                                            expert layers in parallel in order to make effective use of the
+           1
+     For natural language, data is commonly called tokens. For                                              parallelism available on GPUs and TPUs (Lepikhin et al.,
+vision, the data is typically pixels or patches (Dosovitskiy et al.,
+--- pdftotext -layout lines 208-227 ---
+multiplication, which computes a set of matrix products of                                        In addition to enabling batched computation of the expert
+the same shape (see Figure 3A). However, mapping MoE                                              layers, these constraints allow all tensor shapes to be known
+computation to this primitive is non-trivial. In order to re-                                     statically, which is required by TPUs and XLA.
+spect the shape constraints of batched matrix multiplication,
+the experts must be constrained to have weight matrices of                                        2.3   Computation
+the same shape and the number of tokens assigned to each
+expert must be equal. The latter constraint is particularly                                       Once the data has been permuted, the experts can be com-
+problematic because the learned routing algorithm described                                       puted in parallel. For models where the experts are MLPs,
+above provides no guarantees of a load balanced assignment                                        this entails computing each layer for all experts using
+of tokens to experts.                                                                             batched matrix multiplication. For convolutional experts,
+                                                                                                  the layers can be computed with grouped convolutions.
+In order to satisfy this constraint, prior work has defined a
+fixed expert capacity, which is the number of tokens that                                         2.4   Un-permutation
+each expert can be assigned (Lepikhin et al. (2020); Fedus
+et al. (2022)). If the number of tokens assigned to an expert                                     After the experts are computed, the resulting feature vectors
+exceeds its capacity, the extra tokens are dropped. That is                                       are un-permuted such that their ordering matches that of the
+to say, they are not passed to any expert for computation                                         input to the layer. The last step in MoE computation is to
+and the model relies on a residual connection to reintroduce                                      scale the output tokens by the scores with which they were
+the dropped tokens’ representation after the MoE layer. If                                        assigned to their respective experts. When tokens are routed
+an expert layer is not assigned enough tokens to fill its                                         to more than one expert, these weighted results are summed

@@ -1,0 +1,22 @@
+<!doctype html><html lang="zh-Hant"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>15.4 frozen review rendering</title><style>
+body{font-family:"Noto Sans CJK TC","Noto Sans CJK SC",sans-serif;font-size:18px;line-height:1.6;margin:24px auto;max-width:920px;padding:0 22px;color:#181818;background:white}h2{font-size:1.55em;line-height:1.35}pre{overflow:auto;background:#f4f6f7;border:1px solid #dde1e3;border-radius:6px;padding:14px;font-size:15px;line-height:1.4}code{font-family:monospace}p code{font-size:.9em;background:#f4f6f7;padding:0 .18em}details{border:1px solid #cbd0d4;padding:12px}summary{font-weight:bold}a{color:#174ea6}@media(max-width:500px){body{font-size:16px;margin:14px auto;padding:0 16px}pre{font-size:12px}}
+</style><h2>15.4 能只啟動少數 experts 嗎？</h2>
+<p>如果有八位expert，讓每位都算完再混合，儲存和計算都比Dense增加。我們真正希望的是保留多套規則，但每個token只花其中少數幾套的計算成本。<a href="15.md#15.3">router</a>依token特徵算出各expert分數，softmax轉成比例。現在只保留比例最大的k位，這叫top-k routing。先用 <code>[0.1,0.7,0.2]</code> 選出兩位，再確認沒有把第三位也算完；這兩步一起成立，才有少算的機會。</p>
+<p>例如三位的比例是 <code>[0.1,0.7,0.2]</code>。top-2選第1位和第2位（索引從0開始），對應比例0.7與0.2；top-1只選第1位。另一個token比例 <code>[0.6,0.3,0.1]</code>則top-2選第0與第1位。不同token可以走不同路，因此儲存的三套權重不代表每個token都執行三套。k是每個token要選幾位，不是整個batch（一起處理的一批輸入）只選幾位。</p>
+<pre><code class="language-python">import torch
+
+prob = torch.tensor([[0.1, 0.7, 0.2], [0.6, 0.3, 0.1]])
+for k in (2, 1):
+    weights, chosen = prob.topk(k, dim=-1)
+    print(&quot;k&quot;, k, &quot;expert索引&quot;, chosen.tolist())
+    print(&quot;原比例&quot;, weights.tolist())
+    print(&quot;保留比例總和&quot;, weights.sum(-1).tolist())
+</code></pre>
+<p>輸入兩列代表兩個token，三欄代表三位expert。<code>topk</code>沿最後一軸挑最大的k項，回傳值與原欄索引；它不計算expert、也不重新正規化比例。k=2時索引為 <code>[[1,2],[0,1]]</code>，保留總和約0.9與0.9；k=1時為 <code>[[1],[0]]</code>，總和約0.7與0.6。注意 <code>tolist()</code>可能顯示0.699999等尾數，這是二進位浮點表示造成的，應看接近的數字。</p>
+<p>被選中的比例總和小於一，是因為未選的部分被拿掉了。下一節會決定如何合併與是否再除以保留總和。這裡先把兩件事分開：chosen是整數索引，決定要執行哪位；weights是連續數值，決定輸出乘多少。梯度描述微調數字對誤差的影響，詳見<a href="../first-steps.md#W.6">W.6</a>。索引在微小改動下通常不變，跨過排名邊界時又突然跳到另一位，因此不能像一般連續運算那樣對「選誰」直接求梯度。保留的比例在選擇未換人的範圍內，仍隨分數連續改變，所以誤差能沿比例的微小變化回到router，告訴它怎樣調整分數。</p>
+<p>要讓稀疏路由真的省計算，實作必須先選擇，再只執行被選的expert。若先算三位輸出、最後只取兩位，輸出形式雖然像top-2，三位的計算成本卻已花掉。訓練與效能比較都應檢查實際執行路徑，而不是只看結果裡有幾個非零係數。</p>
+<p>練習把第一列改成 <code>[0.1,0.2,0.7]</code>，先預測top-2索引變成 <code>[2,1]</code>，數值仍是 <code>[0.7,0.2]</code>，再重跑核對。再把k改成3，確認所有比例保留、總和回到一。若遇到相同分數，不要假設各裝置一定選同一個索引順序；在比較實驗中應避免未說明的平手情況。</p>
+<details open="open">
+<summary>選讀：來源、量測條件與原始實報</summary>
+<p>把這個選擇規則放進<a href="15.md#15.13">正式MoE短訓與驗證</a>的兩層模型後，我們另記錄完整驗證集的分派統計；這個模型每層有四位expert，條件與結果可由該節連到正式報告。不同長度的故事同批計算時，需要先補成相同長度；PAD就是為補齊而放入的佔位符號。這裡的「有效輸入位置」指排除這些補齊佔位後、實際參與分派統計的位置，共39,256個。top-1每層統計39,256筆分派，top-2則78,512筆；一個token經過兩位expert會被數兩次。因此比較「某位占多少」時，分母應是有效輸入數×k，不能都除以token數，也不能把兩層的工作誤當同一層。報告保留每層四位的完整次數，讓分母與分派份額都能核對。</p>
+</details></html>

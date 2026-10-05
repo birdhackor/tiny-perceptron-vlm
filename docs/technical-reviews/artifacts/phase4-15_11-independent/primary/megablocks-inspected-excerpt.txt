@@ -1,0 +1,163 @@
+Original PDF https://arxiv.org/pdf/2211.15841v1; pdftotext -layout newline-counted lines1-53
+                                                     M EGA B LOCKS : E FFICIENT S PARSE T RAINING WITH M IXTURE - OF -E XPERTS
+
+
+                                                                     Trevor Gale 1 Deepak Narayanan 2 Cliff Young 3 Matei Zaharia 1
+
+
+                                                                                                   A BSTRACT
+                                                 We present MegaBlocks, a system for efficient Mixture-of-Experts (MoE) training on GPUs. Our system is
+                                                 motivated by the limitations of current frameworks, which restrict the dynamic routing in MoE layers to satisfy
+arXiv:2211.15841v1 [cs.LG] 29 Nov 2022
+
+
+
+
+                                                 the constraints of existing software and hardware. These formulations force a tradeoff between model quality and
+                                                 hardware efficiency, as users must choose between dropping tokens from the computation or wasting computation
+                                                 and memory on padding. To address these limitations, we reformulate MoE computation in terms of block-sparse
+                                                 operations and develop new block-sparse GPU kernels that efficiently handle the dynamism present in MoEs. Our
+                                                 approach never drops tokens and maps efficiently to modern hardware, enabling end-to-end training speedups
+                                                 of up to 40% over MoEs trained with the state-of-the-art Tutel library and 2.4× over DNNs trained with the
+                                                 highly-optimized Megatron-LM framework.
+
+                                         1       I NTRODUCTION                                             gains have translated to new levels of scale for model train-
+                                                                                                           ing, pushing model sizes past 1 trillion parameters (Artetxe
+                                         Exploiting sparsity in the weights, activations and input data    et al., 2021; Du et al., 2021; Fedus et al., 2022).
+                                         of deep neural networks (DNNs) is an effective technique
+                                         for reducing the amount of computation that is needed to          The challenge in computing MoEs efficiently is handling
+                                         achieve a given model quality (Han et al., 2015; Gale et al.,     the dynamic routing and load-imbalanced computation that
+                                         2019). The past decade has seen significant progress in           are fundamental to these architectures. However, existing
+                                         algorithms and high-performance software to make sparsity         hardware and software for deep learning make it difficult
+                                         practically useful (Gray et al., 2017; Narang et al., 2017;       to meet this challenge. For example, TPUs and their XLA
+                                         Kalchbrenner et al., 2018; Elsen et al., 2020; Gale et al.,       compiler require all tensor shapes to be known statically
+                                         2020). One area that remains a challenge for sparsity is          and often struggle with fine-grained operations like scatters
+                                         model training on accelerators. DNNs are most commonly            and gathers (Fedus et al., 2022). These constraints make it
+                                         trained on hardware accelerators like GPUs (NVIDIA, 2020)         difficult to implement MoEs directly on TPUs. While GPUs
+                                         and TPUs (Jouppi et al., 2017), which exploit the regularity      are more flexible, the sparse computation in MoEs does not
+                                         of dense computation to deliver high performance. Con-            map cleanly to the software primitives supported in major
+                                         sequently, fine-grained sparse computation is less efficient      frameworks and libraries.
+                                         on these processors. To enable efficient computation on ac-       State-of-the-art frameworks for MoE training sidestep these
+                                         celerators, structure can be enforced on the sparse matrices      challenges by placing rigid constraints on MoE routing. In
+                                         (Narang et al., 2017; Gray et al., 2017; Yao et al., 2019).       order to remove the dynamism from the computation, the
+                                         An emerging class of models with underlying structured            set of tokens mapped to each expert are trimmed or padded
+                                         sparsity is Mixture-of-Experts (MoEs) (Shazeer et al., 2017).     to a user-specified size (Lepikhin et al., 2020; Fedus et al.,
+                                         Each layer in an MoE is a collection of experts, which are        2022; Hwang et al., 2022). This procrustean formulation
+                                         themselves small DNNs. As data is passed through the MoE          introduces a tradeoff between model quality and hardware
+                                         layers, each token is dynamically routed to a subset of the       efficiency, as users must decide whether to drop tokens or
+                                         experts for computation. By exploiting this sparse computa-       waste computation and memory on padding. This decision is
+                                         tion, MoEs have reduced training times by as much as 4× for       often made through hyperparameter tuning, which increases
+                                         applications in natural language processing and computer          the complexity of using MoEs.
+                                         vision (Artetxe et al., 2021; Riquelme et al., 2021). These       To address these challenges, we develop an approach for
+                                             1
+                                              Stanford University, Stanford, California, USA 2 Microsoft   MoE routing and computation based on sparse primitives.
+                                         Research, Redmond, Washington, USA 3 Google Research, Moun-       Our approach never drops tokens and maps efficiently to
+
+Original PDF https://arxiv.org/pdf/2211.15841v1; pdftotext -layout newline-counted lines195-226
+                   2.25                                                                                XL           2048          24           1316        8684
+                          Transformer-Large
+                   2.20 1.0                    1.5                     2.0                  max
+                                                     Capacity Factor
+Figure 2. MoEs Trained on The Pile with Different Capacity                                        balancing losses, which incentivize the router to produce a
+Factors. The loss reached by the MoE models decreases signifi-                                    balanced assignment (Shazeer et al., 2017; Lepikhin et al.,
+cantly as expert capacity is increased, but at the cost of additional                             2020; Fedus et al., 2022). These losses additionally help to
+computation. The lowest loss is achieved by the “max” capacity                                    ensure that all experts see a similar number of tokens during
+factor model, which avoids dropping tokens through the dynamic                                    training. This is thought to be important to avoid degenerate
+capacity factor mechanism proposed by Hwang et al. (2022).                                        states where some experts are assigned zero tokens and stop
+                                                                                                  receiving gradient updates (Zhou et al., 2022).
+multiplication, which computes a set of matrix products of                                        In addition to enabling batched computation of the expert
+the same shape (see Figure 3A). However, mapping MoE                                              layers, these constraints allow all tensor shapes to be known
+computation to this primitive is non-trivial. In order to re-                                     statically, which is required by TPUs and XLA.
+spect the shape constraints of batched matrix multiplication,
+the experts must be constrained to have weight matrices of                                        2.3   Computation
+the same shape and the number of tokens assigned to each
+expert must be equal. The latter constraint is particularly                                       Once the data has been permuted, the experts can be com-
+problematic because the learned routing algorithm described                                       puted in parallel. For models where the experts are MLPs,
+above provides no guarantees of a load balanced assignment                                        this entails computing each layer for all experts using
+of tokens to experts.                                                                             batched matrix multiplication. For convolutional experts,
+                                                                                                  the layers can be computed with grouped convolutions.
+In order to satisfy this constraint, prior work has defined a
+fixed expert capacity, which is the number of tokens that                                         2.4   Un-permutation
+each expert can be assigned (Lepikhin et al. (2020); Fedus
+et al. (2022)). If the number of tokens assigned to an expert                                     After the experts are computed, the resulting feature vectors
+exceeds its capacity, the extra tokens are dropped. That is                                       are un-permuted such that their ordering matches that of the
+to say, they are not passed to any expert for computation                                         input to the layer. The last step in MoE computation is to
+and the model relies on a residual connection to reintroduce                                      scale the output tokens by the scores with which they were
+the dropped tokens’ representation after the MoE layer. If                                        assigned to their respective experts. When tokens are routed
+an expert layer is not assigned enough tokens to fill its                                         to more than one expert, these weighted results are summed
+capacity, its set of tokens is padded to fill the remaining                                       to produce the final layer output for each token.
+
+Original PDF https://arxiv.org/pdf/2211.15841v1; pdftotext -layout newline-counted lines374-445
+With sufficiently large blocks, block-sparse matrix multipli-     performance. §5.1.3 describes our hybrid blocked-CSR-
+cation is capable of reaching high fractions of peak through-     COO sparse matrix format, which enables efficient matrix
+put on modern GPUs (Gray et al., 2017; NVIDIA, 2021).             products with sparse input and output operands. §5.1.4
+The coarse-grained sparsity in MoEs lends itself to this re-      introduces transpose indices as a mechanism for efficient
+quirement - in Transformer models using MoE FFN layers,           iteration over block-sparse matrices in transposed order.
+the number of columns in the blocks shown in Figure 3B            Lastly, §5.2 discusses efficient routing and permutation for
+corresponds to ffn hidden size, which is commonly between         dMoEs.
+1024 and 8192 (Vaswani et al., 2017; Radford et al., 2019;        Preliminaries: Matrix Multiplication on GPUs. Matrix
+Brown et al., 2020). The number of rows in these blocks           multiplication kernels on GPUs exploit tiling, where the out-
+corresponds to the number of tokens assigned to each expert,      put matrix is broken up into statically sized two-dimensional
+which is expected to be equal to the number of tokens di-         blocks of values (NVIDIA, 2022c). The computation of
+                                  MegaBlocks: Efficient Sparse Training with Mixture-of-Experts
+
+these tiles can be parallelized, and the individual tiles can be                  BCSR           +BCOO         +Transposed Iteration
+                                                                            (A)                          (B)
+sized to tradeoff arithmetic intensity and parallelism. The                       Block-Sparse Matrix                     Block Data
+group of threads assigned to a tile is called a threadblock.
+                                                                                  A                            A    B            C           D     E
+                                                                                                                    Column Indices
+5.1       Efficient Block-Sparse Kernels for MoEs                                            B
+                                                                                                                     0 2 0 3 2
+                                                                                                                      Row Offsets
+To train MoEs with block-sparse kernels we need primitives
+                                                                                                                   0 1 2 2 2 4 5
+for the forward and backward passes. Consider an MoE                                                                  Row Indices
+FFN layer where each expert is a 2-layer MLP. For this                                                               0 1 4 4 5
+configuration, the forward pass requires an SDD operation                         C                D                Column Offsets
+followed by a DSD (Figure 6). For the backward pass, we                                                              0 2 2 4 5
+                                                                                             E
+compute SDDT and DST D for the second layer data gradient                                                          Transpose Indices
+                                                                                                                     0 2 1 4 3
+and weight gradient, respectively, followed by DSDT and                                                             (A)    (C)   (B)   (E)   (D)
+
+DDT S for the first layer data gradient and weight gradient,
+respectively.                                                         Figure 5. Block-Sparse Matrix Format used in MegaBlocks.
+                                                                      Pane (B) shows the encoding for the sparse matrix in pane (A).
+5.1.1      Existing Block-Sparse Primitives                           Indices and offsets in our encoding are block-wise. We use blocked
+                                                                      compressed sparse row (BCSR) as our primary sparse matrix for-
+We considered two existing libraries for block-sparse matrix
+                                                                      mat. We additionally store the row indices of each nonzero block
+multiplication on GPUs: NVIDIA cuSPARSE (NVIDIA,                      (§5.1.3) and a secondary index of transpose indices (§5.1.4).
+2022b) and Triton Blocksparse (Tillet et al., 2019). cuS-
+PARSE supports the blocked-ELL sparse matrix format for
+DSD. However, as of CUDA 11.8 this operation does not
+support transposition of the sparse matrix input. cuSPARSE            keep matrix multiplication units busy. Large blocks are also
+also provides no SDD primitive with a blocked-ELL matrix.             desirable to amortize the cost of storing and operating on
+In addition to these limitations, the blocked-ELL format              sparse matrix metadata, since metadata like column indices
+requires that all rows in the sparse matrix have the same             only need to be kept for each block of nonzeros.
+number of nonzeros, which would defeat our goal of sup-               To select our target block size, we studied the performance
+porting load imbalanced matrices. Blocksparse supports                of dense matrix multiplication kernels from NVIDIA CUT-
+SDD, DSD, and DDS as well as all combinations of trans-               LASS (NVIDIA, 2022c) with different tile dimensions. We
+posed and non-transposed inputs. However, these primitives            benchmarked mixed-precision (FP16 + FP32 accumulation)
+assume that the topology of the sparse matrices does not              matrix multiplication on square matrices with power of two
+change between invocations3 . The library API takes a bit-            side lengths from 512 to 16384 and every set of tile di-
+mask describing the sparse operand and then pre-computes              mensions supported in CUTLASS. For rectangular tiles,
+look-up tables and block groupings to accelerate computa-             we show only the configurations where the first tile dimen-
+tion. For our use case, the sparse matrix topology varies             sion is larger as we found these to slightly outperform the
+across every iteration of training and every MoE layer in the         alternative ordering for these problems. We ran all bench-
+model. In order to use Blocksparse, we would have to pay              marks on an A100 SXM4 80GB GPU with CUDA 11.5 and
+the cost of these preprocessing steps repeatedly.                     CUTLASS 2.5. These benchmarks are shown in Figure 4.
+Based on this analysis, we opted to write our own block-              Across these benchmarks, we observed that 128x128 tiles
+sparse primitives in order to tailor them to the dynamism             consistently perform on-par or better than other configura-
+of MoE expert computation. We implemented SDD, DSD,                   tions. Anecdotally, we observe that this same configura-
+and DDS operations targeting NVIDIA GPUs. Our kernels                 tion is commonly selected by NVIDIA cuBLAS (NVIDIA,
+support all combinations of transposed and non-transposed             2022a) for the dense Transformer models we studied. Based
+inputs. The remainder of this section details the design and          on this analysis, we opted to use 128x128 block sparsity.
+implementation of our kernels.                                        While the tile dimensions of a block-sparse matrix multipli-
+                                                                      cation and the block size in the sparse matrix do not need
+5.1.2      Selecting Block Size for MoEs                              to be equal, we found that for 128x128 blocks the high-
+In order to efficiently use modern GPUs, we want to use               est performing tile dimensions in our workloads were also
+sparse blocks that have sufficient arithmetic intensity to            128x128.
+      3                                                               To implement our kernels, we extended CUTLASS
+

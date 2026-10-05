@@ -1,0 +1,102 @@
+LOCATOR primary/mixtral-2401.04088v1.txt:65-140
+2         Architectural details
+Mixtral is based on a transformer architecture [31] and uses the same
+                                                                                    Parameter            Value
+modifications as described in [18], with the notable exceptions that Mix-
+tral supports a fully dense context length of 32k tokens, and the feed-             dim                   4096
+forward blocks are replaced by Mixture-of-Expert layers (Section 2.1).              n_layers                32
+The model architecture parameters are summarized in Table 1.                        head_dim               128
+                                                                                    hidden_dim           14336
+                                                                                    n_heads                 32
+2.1        Sparse Mixture of Experts                                                n_kv_heads               8
+We present a brief overview of the Mixture of Experts layer (Figure 1).             context_len          32768
+For a more in-depth overview, see [12]. The output of the MoE module                vocab_size           32000
+for a given input x is determined by the weighted sum of the outputs                num_experts              8
+of the expert networks, where the weights are given by the gating                   top_k_experts            2
+network’s output. i.e. given n expert networks {E0 , Ei , ..., En−1 }, the Table 1: Model architecture.
+output of the expert layer is given by:
+                                         n−1
+                                          X
+                                             G(x)i · Ei (x).
+                                              i=0
+
+Here, G(x)i denotes the n-dimensional output of the gating network for the i-th expert, and Ei (x)
+is the output of the i-th expert network. If the gating vector is sparse, we can avoid computing
+the outputs of experts whose gates are zero. There are multiple alternative ways of implementing
+G(x) [6, 15, 35], but a simple and performant one is implemented by taking the softmax over the
+Top-K logits of a linear layer [28]. We use
+                                 G(x) := Softmax(TopK(x · Wg )),
+where (TopK(ℓ))i := ℓi if ℓi is among the top-K coordinates of logits ℓ ∈ Rn and (TopK(ℓ))i := −∞
+otherwise. The value of K – the number of experts used per token – is a hyper-parameter that modu-
+lates the amount of compute used to process each token. If one increases n while keeping K fixed, one
+      1
+          https://mistral.ai/news/mixtral-of-experts/
+
+
+                                                        2
+can increase the model’s parameter count while keeping its computational cost effectively constant.
+This motivates a distinction between the model’s total parameter count (commonly referenced as the
+sparse parameter count), which grows with n, and the number of parameters used for processing an
+individual token (called the active parameter count), which grows with K up to n.
+MoE layers can be run efficiently on single GPUs with high performance specialized kernels. For
+example, Megablocks [13] casts the feed-forward network (FFN) operations of the MoE layer as large
+sparse matrix multiplications, significantly enhancing the execution speed and naturally handling
+cases where different experts get a variable number of tokens assigned to them. Moreover, the
+MoE layer can be distributed to multiple GPUs through standard Model Parallelism techniques, and
+through a particular kind of partitioning strategy called Expert Parallelism (EP) [28]. During the MoE
+layer’s execution, tokens meant to be processed by a specific expert are routed to the corresponding
+GPU for processing, and the expert’s output is returned to the original token location. Note that EP
+introduces challenges in load balancing, as it is essential to distribute the workload evenly across the
+GPUs to prevent overloading individual GPUs or hitting computational bottlenecks.
+In a Transformer model, the MoE layer is applied independently per token and replaces the
+feed-forward (FFN) sub-block of the transformer block. For Mixtral we use the same SwiGLU
+architecture as the expert function Ei (x) and set K = 2. This means each token is routed to two
+SwiGLU sub-blocks with different sets of weights. Taking this all together, the output y for an input
+token x is computed as:
+                                 n−1
+                                 X
+                           y=          Softmax(Top2(x · Wg ))i · SwiGLUi (x).
+                                 i=0
+
+This formulation is similar to the GShard architecture [21], with the exceptions that we replace all
+FFN sub-blocks by MoE layers while GShard replaces every other block, and that GShard uses a
+more elaborate gating strategy for the second expert assigned to each token.
+
+3    Results
+We compare Mixtral to Llama, and re-run all benchmarks with our own evaluation pipeline for fair
+comparison. We measure performance on a wide variety of tasks categorized as follow:
+
+• Commonsense Reasoning (0-shot): Hellaswag [32], Winogrande [26], PIQA [3], SIQA [27],
+  OpenbookQA [22], ARC-Easy, ARC-Challenge [8], CommonsenseQA [30]
+• World Knowledge (5-shot): NaturalQuestions [20], TriviaQA [19]
+• Reading Comprehension (0-shot): BoolQ [7], QuAC [5]
+• Math: GSM8K [9] (8-shot) with maj@8 and MATH [17] (4-shot) with maj@4
+• Code: Humaneval [4] (0-shot) and MBPP [1] (3-shot)
+• Popular aggregated results: MMLU [16] (5-shot), BBH [29] (3-shot), and AGI Eval [34]
+  (3-5-shot, English multiple-choice questions only)
+
+
+LOCATOR primary/mixtral-2401.04088v1.txt:307-330
+      3
+          https://huggingface.co/spaces/lmsys/chatbot-arena-leaderboard
+
+
+                                                    6
+   5                   Routing analysis
+  In this section, we perform a small analysis on the expert selection by the router. In particular,
+  we are interested to see if during training some experts specialized to some specific domains (e.g.
+  mathematics, biology, philosophy, etc.).
+  To investigate this, we measure the distribution of selected experts on different subsets of The Pile
+  validation dataset [14]. Results are presented in Figure 7, for layers 0, 15, and 31 (layers 0 and 31
+  respectively being the first and the last layers of the model). Surprisingly, we do not observe obvious
+  patterns in the assignment of experts based on the topic. For instance, at all layers, the distribution of
+  expert assignment is very similar for ArXiv papers (written in Latex), for biology (PubMed Abstracts),
+  and for Philosophy (PhilPapers) documents.
+   Only for DM Mathematics we note a marginally different distribution of experts. This divergence is
+   likely a consequence of the dataset’s synthetic nature and its limited coverage of the natural language
+   spectrum, and is particularly noticeable at the first and last layers, where the hidden states are very
+   correlated to the input and output embeddings respectively.
+  This suggests that the router does exhibit some structured syntactic behavior. Figure 8 shows
+  examples of text from different domains (Python code, mathematics, and English), where each token
+  is highlighted with a background color corresponding to its selected expert. The figure shows that
+  words such as ‘self’ in Python and ‘Question’ in English often get routed through the same expert

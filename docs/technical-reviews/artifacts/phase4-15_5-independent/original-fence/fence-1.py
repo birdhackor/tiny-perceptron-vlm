@@ -1,0 +1,8 @@
+import torch
+
+weights = torch.tensor([0.7, 0.2])
+outputs = torch.tensor([[1.0, 0.0], [0.0, 2.0]])
+normalized = weights / weights.sum()
+print("直接合併", (weights @ outputs).round(decimals=4).tolist())
+print("重算比例", normalized.round(decimals=4).tolist())
+print("正規化合併", (normalized @ outputs).round(decimals=4).tolist())

@@ -1,0 +1,19 @@
+class DenseFFN(nn.Module):
+    def __init__(self, width, hidden=None, activation="gelu"):
+        super().__init__()
+        hidden = hidden or width * 4
+        self.up, self.down = nn.Linear(width, hidden), nn.Linear(hidden, width)
+        self.activation = activation
+        if activation not in ("gelu", "relu2", "swiglu"):
+            raise ValueError("activation 必須是 gelu/relu2/swiglu")
+        self.gate = nn.Linear(width, hidden) if activation == "swiglu" else None
+
+    def forward(self, x):
+        h = self.up(x)
+        if self.activation == "gelu":
+            h = F.gelu(h)
+        elif self.activation == "relu2":
+            h = F.relu(h).square()
+        else:
+            h = F.silu(self.gate(x)) * h
+        return self.down(h)

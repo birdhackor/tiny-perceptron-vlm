@@ -1,0 +1,33 @@
+<!doctype html><html lang="zh-Hant"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>15.8 frozen section review</title><style>body{font:18px/1.7 sans-serif;margin:24px auto;padding:0 20px;max-width:980px;color:#202124;background:white}pre{font:14px/1.5 monospace;padding:12px;background:#f2f4f7;overflow:auto}code{background:#f2f4f7}h2{font-size:28px}details{border:1px solid #ccc;padding:12px}a{color:#145caa}@media(max-width:500px){body{font-size:16px;margin:12px auto;padding:0 12px}h2{font-size:23px}pre{font-size:12px}}</style><body><h2>15.8 為什麼 token 都跑去同一位 expert？</h2>
+<p>準備三位expert，並不保證它們都得到工作。router如果一開始稍微偏向第一位，就可能讓它接到更多token、得到更多學習機會；其他兩位很少更新，表現差距又讓router繼續偏向第一位。這種只使用少數甚至一位expert的狀態叫routing collapse（路由塌縮）。要診斷它，不能只看模型宣告有幾位expert，還要數實際選擇。</p>
+<p>為了看清<a href="15.md#15.4">比例與排名</a>的差別，固定使用top-1，讓十二個token都有相同分數 <code>[8,0,0]</code>。我們預期十二筆都去第一位，再把優勢縮到0.1，看排名是否真的分散。這是刻意製造的偏斜，不靠某次隨機訓練碰巧發生。softmax後第一位的比例約0.9993，其餘各0.0003；十二筆選擇都會落在索引0，實際工作數為 <code>[12,0,0]</code>。</p>
+<pre><code class="language-python">import torch
+
+for advantage in (8.0, 0.1):
+    scores = torch.tensor([[advantage, 0.0, 0.0]]).repeat(12, 1)
+    prob = scores.softmax(-1)
+    chosen = prob.topk(1, dim=-1).indices
+    counts = torch.bincount(chosen.flatten(), minlength=3)
+    print(&quot;分數優勢&quot;, advantage)
+    print(&quot;平均比例&quot;, prob.mean(0).round(decimals=4).tolist())
+    print(&quot;工作次數&quot;, counts.tolist())
+</code></pre>
+<p><code>repeat(12,1)</code>把一列分數重複十二次。<code>flatten</code>將十二列一欄的索引攤成清單，<code>bincount</code>數每個非負整數出現幾次；<code>minlength=3</code>保留未被選中的expert欄位，不讓它們從報告消失。優勢8時平均比例約 <code>[0.9993,0.0003,0.0003]</code>，工作次數為 <code>[12,0,0]</code>。</p>
+<p>第二輪把優勢降到0.1，平均比例變成約 <code>[0.3559,0.3220,0.3220]</code>，看起來已接近均勻；工作次數卻仍是 <code>[12,0,0]</code>。原因是top-1只看排名，第一位每次還是最大。這個對照非常重要：平均router機率與實際負載是不同統計。負載可用各位被選次數除以總選擇次數，這裡依然是 <code>[1,0,0]</code>，不是上面的三項機率。</p>
+<p>均勻負載也不等於品質最好；某些輸入確實可能更適合某位expert。但如果所有種類的token長期集中在同一位，其他參數沒有發揮作用，系統還可能因單位工作過多而塞住。因此應同時記錄不同時間、不同資料類型的選擇分布和任務誤差。這個受控反例只證明偏斜如何形成與如何辨識，沒有宣稱真實訓練一定會塌縮。</p>
+<p>練習只把第二個expert的分數也設成0.2，也就是每列 <code>[0.1,0.2,0]</code>。先預測十二筆改送索引1，而非自動平均分給三位，再執行核對。接著用兩組不同分數各重複六列，你應能用bincount看見 <code>[6,6,0]</code>。分散工作需要不同輸入產生不同排名，不能只讓每一列的比例更平坦。</p>
+<details open="open">
+<summary>選讀：實際分派次數與負載熵的算法</summary>
+<p>下面的實測會提到「輔助項」：它是訓練時額外加入、用來鼓勵router較均衡分派工作的誤差。「輔助係數」決定把這個額外項乘上多少，再加到文字預測誤差上；係數0表示這次沒有把它加入訓練目標。完整公式留到下一節<a href="15.md#15.9">15.9</a>。</p>
+<p>實測top-1、輔助係數0的第二層，四位在全部有效驗證輸入上收到 <code>[8536,25630,4875,215]</code> 筆，占39,256筆的 <code>[21.74%,65.29%,12.42%,0.55%]</code>，完整比較見<a href="15.md#15.13">15.13</a>。這是偏斜使用，卻還不是全部工作都去一位。可再用「負載熵」把份額的分散程度概括成一個數字：每位的份額f各算 <code>-f*log(f)</code>，再把各項相加。這裡log是自然對數，問「約2.718的數e取幾次方會得到f」，Python用 <code>math.log(f)</code>計算。份額為0的項直接記0，不呼叫 <code>log(0)</code>；份額越接近0，這一項的貢獻也越接近0。</p>
+<p>例如四位均勻時各占0.25，<code>log(0.25)</code>約-1.3863，各項為 <code>-0.25×(-1.3863)=0.3466</code>，四項合計約1.3863，也就是 <code>log(4)</code>。用熵除以這個均勻值，便把均勻負載記成1。若份額為 <code>[1,0,0,0]</code>，第一項因 <code>log(1)=0</code>而為0，其餘按零份額規則也為0，合計與正規化結果都是0。這兩端分別表示全去一位與整體份額均勻。</p>
+<p>下面用實際次數重算，避免只拿四捨五入的百分比代入。<code>fractions</code>把各次數除以總次數，得到份額；<code>terms</code>逐項計算上述貢獻，<code>if f &gt; 0 else 0.0</code>處理零份額；最後相加並除以四位均勻時的熵，印出0.64755。</p>
+<pre><code class="language-python">import math
+
+counts = [8536, 25630, 4875, 215]
+fractions = [count / sum(counts) for count in counts]
+terms = [-f * math.log(f) if f &gt; 0 else 0.0 for f in fractions]
+print(round(sum(terms) / math.log(len(counts)), 5))
+</code></pre>
+<p>這個熵彙整整份驗證集，不保證每一批、每一類文字都均勻；不同批各自集中到不同expert，也可能加總成高熵。報告因此保留各位次數、平均機率與逐批輔助項的加權平均值。這個平均先把每批的輔助項乘上該批有效輸入數，全部相加後再除以有效輸入總數；有效輸入較多的批次占比較大。閱讀結果時應一起看這些統計。加上輔助目標後會怎樣，接著看<a href="15.md#15.9">15.9</a>。</p>
+</details></body></html>
