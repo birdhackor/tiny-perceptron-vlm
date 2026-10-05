@@ -17,6 +17,13 @@
 
 本輪派工另使用 [單節正確性工作說明](factual-reviewer-instructions.md)：全部易讀性修正完成後才啟動，使用不同的新審閱者；明確區分原碼執行、既有結果核對與尚未實作的成品計畫，不為文字修訂重跑 GPU 訓練。
 
+`audit_factual_round.py`在正確性輪另外核對本輪派工宣告、收件報告指紋、不同審閱身分、目前導言與持久證據版本，以及未回改的舊報告備份。預設要求全部小節通過；`--current-passes-only`只回報`passed_partial`，供中途保存使用。它不產生或修改審閱判定，也不能證明實際派工、閱讀來源或主張真偽。
+
+```bash
+# 全部新正確性審閱、修正及原審閱者複查完成後
+.venv/bin/python docs/review-tools/audit_factual_round.py --output docs/course-revision-20261005/factual-round-audit.json
+```
+
 在專案根目錄執行：
 
 ```bash
