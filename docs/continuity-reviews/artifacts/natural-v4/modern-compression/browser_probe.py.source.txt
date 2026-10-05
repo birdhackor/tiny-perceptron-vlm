@@ -1,0 +1,130 @@
+import json
+from pathlib import Path
+
+from playwright.sync_api import sync_playwright
+
+
+BASE = 'http://127.0.0.1:8788/'
+DEST = Path('docs/continuity-reviews/artifacts/natural-v4/modern-compression')
+steps = []
+
+
+def record(page, action, source=None, link=None, include_body=True):
+    body = page.locator('article').inner_text()
+    if 'training.html#' in page.url:
+        anchor = page.url.split('#', 1)[1]
+        body = page.locator(f'[id="{anchor}"]').evaluate('''(heading) => {
+            let out = heading.innerText;
+            let next = heading.nextElementSibling;
+            while (next && next.tagName !== heading.tagName) {
+                out += '\\n\\n' + next.innerText;
+                next = next.nextElementSibling;
+            }
+            return out;
+        }''')
+    item = {
+        'action': action,
+        'from_url': source,
+        'clicked_link': link,
+        'url': page.url,
+        'title': page.title(),
+        'article_headings': page.locator('article h1, article h2, article h3').all_text_contents(),
+        'article_body': body if include_body else body[:2500],
+        'rendered_cpu_result_labels': body.count('實際執行結果 · CPU'),
+        'image_states': page.locator('article img').evaluate_all(
+            '(els) => els.map(e => ({src:e.getAttribute("src"), complete:e.complete, '
+            'naturalWidth:e.naturalWidth, naturalHeight:e.naturalHeight}))'
+        ),
+    }
+    if '#' in page.url:
+        anchor = page.url.split('#', 1)[1]
+        target = page.locator(f'[id="{anchor}"]')
+        item['anchor_count'] = target.count()
+        if target.count():
+            item['anchor_heading'] = target.inner_text()
+            item['anchor_rect'] = target.bounding_box()
+    steps.append(item)
+    return item
+
+
+def go(page, route):
+    response = page.goto(BASE + route, wait_until='networkidle')
+    item = record(page, 'goto')
+    item['http_status'] = response.status if response else None
+
+
+def click(page, selector, suffix):
+    source = page.url
+    loc = page.locator(selector)
+    matching = loc.evaluate_all(
+        '(els) => els.map(e => ({text:e.innerText, href:e.getAttribute("href")}))'
+    )
+    link = next(x for x in matching if x['href'].endswith(suffix))
+    page.locator(f'{selector}[href="{link["href"]}"]').first.click()
+    page.wait_for_load_state('networkidle')
+    return record(page, 'click', source, link)
+
+
+with sync_playwright() as p:
+    browser = p.chromium.launch(executable_path='/usr/bin/chromium', args=['--no-sandbox'])
+    page = browser.new_page(viewport={'width':1360, 'height':980}, device_scale_factor=1)
+
+    go(page, '13.17.html')
+    click(page, '.md-footer a', 'chapter-14.html')
+    page.screenshot(path=str(DEST / 'browser-boundary-13-to-14.png'))
+    click(page, 'article a', '4.5.html')
+    go(page, 'chapter-14.html')
+    click(page, '.md-footer a', '14.1.html')
+    click(page, 'article a', '3.2.html')
+    go(page, '14.1.html')
+    click(page, 'article a', 'training.html#T.8')
+    page.screenshot(path=str(DEST / 'browser-training-T8.png'))
+
+    for last, intro, first in [
+        ('14.6.html', 'chapter-15.html', '15.1.html'),
+        ('15.13.html', 'chapter-16.html', '16.1.html'),
+        ('16.11.html', 'chapter-17.html', '17.1.html'),
+        ('17.15.html', 'chapter-18.html', '18.1.html'),
+        ('18.14.html', 'chapter-19.html', '19.1.html'),
+    ]:
+        go(page, last)
+        click(page, '.md-footer a', intro)
+        click(page, '.md-footer a', first)
+
+    go(page, '16.4.html')
+    click(page, 'article a', 'training.html#T.4')
+    page.screenshot(path=str(DEST / 'browser-training-T4.png'))
+    go(page, '17.9.html')
+    click(page, 'article a', 'training.html#T.4')
+    go(page, '17.14.html')
+    click(page, 'article a', 'training.html#T.4')
+    go(page, '18.1.html')
+    click(page, 'article a', 'training.html#T.4')
+    go(page, '18.1.html')
+    click(page, 'article a', 'training.html#T.8')
+
+    for route in ['15.7.html', '16.3.html', '17.8.html', '17.14.html', '18.8.html', '18.13.html']:
+        go(page, route)
+        if route == '18.13.html':
+            page.locator('article img').first.scroll_into_view_if_needed()
+            page.screenshot(path=str(DEST / 'browser-modal-alignment.png'))
+
+    go(page, 'course.html')
+    for suffix in ['4.5.html', '14.1.html', '15.1.html', '5.9.html', '16.1.html', '17.1.html', '18.1.html']:
+        click(page, 'article a', suffix)
+        go(page, 'course.html')
+    browser.close()
+
+(DEST / 'browser-navigation-raw.json').write_text(json.dumps(steps, ensure_ascii=False, indent=2) + '\n')
+print(json.dumps({
+    'steps': len(steps),
+    'urls': sorted({x['url'] for x in steps}),
+    'failed_images': [
+        {'url':x['url'], 'image':im} for x in steps for im in x['image_states']
+        if not im['complete'] or im['naturalWidth'] == 0
+    ],
+    'anchor_receipts': [
+        {k:x.get(k) for k in ['url','anchor_count','anchor_heading','anchor_rect']}
+        for x in steps if '#' in x['url']
+    ],
+}, ensure_ascii=False, indent=2))

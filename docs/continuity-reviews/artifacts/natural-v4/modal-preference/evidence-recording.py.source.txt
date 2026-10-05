@@ -1,0 +1,140 @@
+from pathlib import Path
+import hashlib
+import json
+import re
+import shutil
+import urllib.request
+
+ROOT = Path('/workspace/tiny-perceptron-vlm')
+TMP = ROOT / 'outputs/natural-v4/continuity-research/modal-preference'
+OUT = ROOT / 'docs/continuity-reviews/artifacts/natural-v4/modal-preference'
+BASE = 'http://127.0.0.1:8788/'
+
+def sha(data):
+    return hashlib.sha256(data).hexdigest()
+
+def write(name, data):
+    (OUT / name).write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n')
+
+notes = {
+    'multimodal_swap_image': 'Question remains fixed while image and correct label change; different logits alone cannot establish semantic use. A fixed circle answer illustrates the failure clearly.',
+    'multimodal_wave_cycle': 'One illustrative cycle has amplitude ±0.5 and quarter-cycle extrema. The horizontal axis is progress through a cycle, not seconds; frequency and amplitude stay distinct.',
+    'multimodal_audio_axes': 'Waveform axes are seconds and amplitude; spectrogram axes are time-frame centers and frequency. The highlighted 440 Hz band is labelled illustrative rather than an actual measured spectrum. Window 400 and hop 160 at 16 kHz correspond to .025 and .010 seconds.',
+    'multimodal_overlapping_bands': 'Middle-bin power 2 contributes .5×2=1 to both bands; totals 5 and 2 follow [1,.5,0] and [0,.5,1]. Overlap is represented as weighted addition, not duplicated full energy or nearest-bin classification.',
+    'fsdd_speaker_holdout': 'Jackson training 20, Nicolas validation 5/20, Theo test 3/20 and EOS 20/20 are separated. The illustration states its small custom split is not official benchmark accuracy. 4591→9182 samples preserves .573875 s; upsampling does not recover frequencies above the source 4 kHz limit.',
+    'vqa_text_retention': 'VQA counts 3/12,12/12,9/12,9/12 and old-text counts 5/10,2/10,1/10,4/10 match the chapter. Exact answers, EOS, single seed, and unequal replay exposure are visibly scoped; high new-task accuracy can coexist with old-task loss.',
+    'multimodal_expand_image': 'One placeholder becomes three visual features, targets at new features remain -100, full target sequence is then shifted once. Assistant input predicts answer 73; the answer is not predicted at its own input position.',
+    'vision_shape_pair': 'Original and swapped-shape sets each score 3/6 through constant circle guesses, while both ends correct is 0/6. The paired comparison prevents reading unchanged aggregate accuracy as shape understanding.',
+    'patchify': '16×16 RGB with side-4 patches becomes 16 ordered cards, each 3×4×4=48 pixel values. Ordered patch positions are distinct from per-patch feature width.',
+    'multimodal_preference_pair': 'Under the same only-number 2+2 prompt, 4 passes arithmetic and format while an explanation passes arithmetic but fails format. Preference follows this prompt and may change under an explanation request.',
+    'multimodal_dpo_direction': 'At equal relative margins, loss is about .6931, gradients -.05 and +.05 with step .1 move scores -4→-3.995 and -3→-3.005. The chosen answer still has lower absolute probability although its relative margin improves by .01.',
+    'posttrain_stages': 'Generic next-item text training provides retained weights that can be copied into distinct task branches. The arrows identify a possible continuation, while the caption requires fresh-task verification rather than guaranteeing abilities.',
+    'posttrain_signals': 'Demonstration→SFT, answer comparison→DPO, and score after action→PPO are separated by the available supervisory signal. Human feedback and program verification have distinct labels; the diagram does not prescribe a mandatory algorithm sequence.',
+    'ppo_roles': 'Reward model first learns comparisons and freezes during policy updating; critic learns observed returns; old log probability stays fixed within a batch; reference stays fixed throughout the posttraining stage. Their roles and freezing times are distinct.',
+    'ppo_clip': 'Positive-advantage objective flattens above ratio 1.2, negative-advantage objective flattens below .8. The caption correctly says this old sample stops providing extra encouragement, not that probability or the whole optimizer is hard-bounded.',
+    'ppo_dpo_routes': 'Both routes copy the same SFT card policy and use common independent acceptance questions. PPO separately uses scorer, value estimate, and reference; DPO directly updates from paired probabilities. Equal steps do not imply equal compute.',
+    'architecture_policy_update': 'Selected answer 4 has reward 1, baseline .5 and advantage .5. Gradient [.25,-.25] produces logits [-.025,.025], then probabilities [.487503,.512497], so a positive update need not make one-step certainty.',
+    'foundations_answer_alignment': 'Complete chat is shifted once; assistant at position 4 predicts answer A, position 5 predicts EOS. Grey -100 rows remain readable context but contribute no direct loss.',
+    'foundations_causal': 'Rows are query positions and columns are readable key positions. Equal scores yield 1, halves, thirds, quarters only on the lower triangle; grey forbidden cells have zero reading weight.',
+    'foundations_prediction_positions': 'Each of three input positions predicts a next-item distribution from its own prefix. Generation selects from the last-position distribution, appends the new ID, and only then predicts again.',
+    'foundations_tensor_axes': '[2,3] means two people by three exams; averaging dim=1 gives [70,90], dim=0 gives [70,80,90]. The diagram separates axes and reduction results clearly.',
+    'rope': 'A paired Q/K feature rotates together without changing lengths or relative 45-degree angle, preserving the dot product. Caption identifies one illustrative pair and different speeds for other pairs.',
+    'rotation_components': 'Length-one arrows at 45° and 135° have coordinates [+.7071,+.7071] and [-.7071,+.7071]. Horizontal cosine and vertical sine explain the signs; dotted radius and four-decimal rounding are explicit.',
+    'practical_stroke': 'One bright column among eight is averaged to .125, illustrating lost fine detail. It is labelled enlarged conceptual information-loss illustration, not an actual Chinese recognition test.',
+    'practical_order': 'Swapping red and blue within the same averaging cell preserves proportions and the average summary while reversing left/right relation. The 32×32/8×8 program scale is distinguished from the enlarged illustration.',
+    'natural-v4-asr-two-routes': 'Gold source transcript and actual recording→ASR transcript feed the same chat weights/history/photo. Full response comparison isolates transcription from chat failures; gold text is a diagnostic route, not the real audio route.',
+    'natural-v4-training-cat': 'Actual training photograph shows two cats near screens; it provides natural-media contrast to synthetic shapes. Rendering preserves the embedded photo and title, without crop or editing. Source metadata attribution is copied exactly and repeated in NOTICE.txt.',
+    'natural_photo_evidence': 'Same person and bicycle objects appear in riding versus standing scenes. Activities and relations differ; caption identifies a constructed concept illustration rather than natural-photo capability measurement.',
+    'natural_reading_order': 'Milk then bread versus reversed lines has identical character inventory but different reading order. Multi-column and vertical layouts need declared annotation rules; character counts alone do not preserve layout.',
+    'natural_shared_chat': 'Typed question and actual ASR transcript share history and a single image-text base with optional course fine-tuning. Pixels enter separately. Generated output is text and the diagram explicitly excludes speech synthesis.',
+}
+
+view_order = [
+    'multimodal_swap_image', 'multimodal_wave_cycle', 'multimodal_audio_axes', 'multimodal_overlapping_bands', 'fsdd_speaker_holdout',
+    'vqa_text_retention', 'multimodal_expand_image', 'vision_shape_pair', 'patchify', 'multimodal_preference_pair',
+    'multimodal_dpo_direction', 'posttrain_stages', 'posttrain_signals', 'ppo_roles', 'ppo_clip',
+    'ppo_dpo_routes', 'architecture_policy_update', 'foundations_answer_alignment', 'foundations_causal', 'foundations_prediction_positions',
+    'foundations_tensor_axes', 'rope', 'rotation_components', 'practical_stroke', 'practical_order',
+    'natural-v4-asr-two-routes', 'natural-v4-training-cat', 'natural_photo_evidence', 'natural_reading_order', 'natural_shared_chat',
+]
+figures = []
+for i, name in enumerate(view_order, 1):
+    source = ROOT / 'course/figures' / (name + '.svg')
+    original = OUT / 'svg-originals' / source.name
+    render = OUT / 'figure-renders' / (name + '.png')
+    raw = source.read_bytes()
+    assert raw == original.read_bytes(), (source, 'original changed')
+    served = urllib.request.urlopen(BASE + 'figures/' + source.name).read()
+    assert raw == served, (source, 'served source changed')
+    assert render.is_file()
+    figures.append({'view_order': i, 'source': str(source.relative_to(ROOT)), 'source_sha256': sha(raw), 'original': str(original.relative_to(ROOT)), 'preview_url': BASE + 'figures/' + source.name, 'served_sha256': sha(served), 'render': str(render.relative_to(ROOT)), 'render_sha256': sha(render.read_bytes()), 'personally_viewed': True, 'view_method': 'functions tools.view_image returned the locally browser-rendered PNG; image forwarded for personal visual inspection', 'own_semantic_note': notes[name]})
+assert set(json.loads((TMP / 'figures.json').read_text())) == {f['source'] for f in figures}
+write('figure-view-receipts.json', {'render_provenance': 'All 30 renders completed in preserved browser-second-attempt.py.source.txt/stdout; that attempt then failed on a navigation expectation. SVGs were wrapped in img elements after the original direct-SVG screenshot font timeout. Source/served/original byte equality rechecked here after all personal views.', 'figures': figures})
+
+scopes = json.loads((TMP / 'scopes.json').read_text())
+coverage = []
+for file, sections in scopes.items():
+    raw = (ROOT / file).read_bytes()
+    content = raw.decode()
+    matches = list(re.finditer(r'^## ([A-Z]?\d*\.[0-9]+|[A-Z]\.[0-9]+)\b[^\n]*', content, re.M))
+    selected = []
+    for i, match in enumerate(matches):
+        identifier = match.group(1)
+        if sections is None or identifier in sections:
+            stop = matches[i+1].start() if i+1 < len(matches) else len(content)
+            selected.append({'section': identifier, 'heading': match.group(0), 'sha256': sha(content[match.start():stop].encode())})
+    assert sections is None or set(sections) == {s['section'] for s in selected}, (file, sections, selected)
+    intro_read = file in ['course/chapters/11.md','course/chapters/12.md','course/chapters/13.md','course/chapters/10.md','course/chapters/14.md','course/chapters/20.md']
+    coverage.append({'path': file, 'current_wholefile_sha256': sha(raw), 'scope': 'complete assigned file, including intro, all sections/code/tables/formulas/exercises' if sections is None else 'complete listed prerequisite or boundary sections; no claim of reading unlisted sections', 'introduction_read': intro_read, 'introduction_sha256': sha(content[:matches[0].start()].encode()) if intro_read and matches else None, 'complete_sections_read': selected})
+
+write('reading-coverage.json', {
+    'reviewer_task': '/root/v4_review_coordinator/continuity_v4_modal_preference',
+    'source_version_at_routing': '25ca4bf5f8f8dc0a9e88aa6cd70caeb4c2f419e8',
+    'freshness': 'Only neutral reader contract and own scope bytes were consulted. No previous reports, author notes, expected conclusions, phase closure, or coordinator judgment were consulted. No own prior report existed.',
+    'reading_method': 'Actual raw source reading. Truncated tool outputs were backfilled by narrower reads until all assigned bodies and all listed sections were covered; hashes only record the bytes of those reads.',
+    'actual_reading_phases': [
+        'Initial 11 opening and ending inspection; before completing 11, read 10.10 and complete 10.11 ending. Completed 11 in narrowed consecutive chunks, including missing 11.9–11.11 passage.',
+        'Read complete 12 in three chunks, then complete 13 in three chunks; all exercises and tables included.',
+        'Read 14 introduction/full 14.1, then 20 introduction/full 20.1 and full promised 20.9–20.13.',
+        'Backtracked for necessary context: 10.1–10.9 in narrowed reads, W.1–W.4, 7.12/7.15–7.18, 20.3/20.4/20.8, 19.8/19.11, 5.4/5.5/5.17, 4.5/4.6, 8.1/8.3/8.5 and training T.4/T.8.',
+        'Read 1.7/1.8/1.11/1.12/1.14, 3.1/3.6, 4.1, 6.7, C.7, 8.12, 9.1/9.3/9.6 and 3.2 for tensor, probability, gradient, sampling and relative-position prerequisites.',
+        'Backfilled full 10.9, 7.1/7.3/7.4/7.5/7.9/7.10/7.11, W.5/W.6, remaining T.4 and full T.6/T.7, and full 19.11. Final listed scope was read in full, rather than relying on excerpts.',
+        'Inspected selected implementation helpers, then rendered and personally viewed all 30 assigned/prerequisite SVGs; followed meaningful browser links and personally inspected visible executed outputs.',
+    ],
+    'coverage': coverage,
+    'implementation_inspection': [
+        {'path': 'tiny_perceptron/alignment.py', 'scope': 'complete file', 'sha256': sha((ROOT/'tiny_perceptron/alignment.py').read_bytes())},
+        {'path': 'tiny_perceptron/posttraining.py', 'scope': 'complete file', 'sha256': sha((ROOT/'tiny_perceptron/posttraining.py').read_bytes())},
+        {'path': 'tiny_perceptron/multimodal.py', 'scope': 'lines 1–185, ending excerpt truncated around scene circle construction; no complete-file claim', 'sha256': sha((ROOT/'tiny_perceptron/multimodal.py').read_bytes())},
+        {'path': 'tiny_perceptron/model.py', 'scope': 'lines 1–70; ModelConfig, Block, TinyLM opening only', 'sha256': sha((ROOT/'tiny_perceptron/model.py').read_bytes())},
+    ],
+    'limits': 'Continuity review for a mathematically prepared beginner, not a repeat factual audit or full-site audit. Read only the listed complete prerequisite sections; did not recursively read every link in those sections. No dataset/model downloads, training, GPU use, or teaching-kernel rerun. Existing root-built preview CPU widgets were observed as such.',
+})
+
+write('navigation-semantic-notes.json', {
+    'preview': BASE,
+    'own_assessment': [
+        'Actual footer next clicks at 10.11→11, 11.16→12, 12.14→13 and 13.17→14 first reach the chapter introduction, then the next numbered section. The introduction carries the promised transition: image plumbing→semantic evidence, reused interface→audio feature construction, optional text preference route, and small architecture changes requiring separate quality checks.',
+        '7.16→T.4 lands at visible heading 把文字訓練和對話練習分開看. It explicitly distinguishes next-item text supervision from assistant-answer SFT and direct SFT from continuation of trained text weights. The working T.4 anchor and descriptive title let the reader find that operational content despite no visible T.4 prefix on the heading.',
+        '14.1→T.8 lands at visible heading 架構比較一次只換一個條件. Its data generation, baseline/RMS/MoE commands, independent split evaluation, parameter/time limits and explicit unequal-compute caution match the promised architecture comparison. The working T.8 anchor and visible title are adequate; the link does not promise that a one-variable numerical demo establishes language quality.',
+        '11.5→T.6 reaches encoder acceptance then projector training, preserving the prerequisite that two tiny holdout encoder examples pass before proceeding. The toy partial snippet and generic train.py partial mode are distinguished in the chapter/guide, avoiding a false equivalence of trainable parameter masks.',
+        '11.14/11.15/11.16 and 12.13/12.14 links reach actual natural-media scene criteria, OCR exactness/CER, reading order, ASR-vs-chat diagnosis, and configuration delivery sections in 20.1/20.9–20.13. Those target bodies keep pretrained base, optional LoRA, separate ASR and manually supplied illustrative examples distinct from the tiny synthetic encoders.',
+        '13.17→19.8 actually shows an optional DPO continuation branch from joint weights and explains why every posttraining algorithm is not mandatory. It does not silently treat finite-card PPO as generated-token training of the final model.',
+        '13.2→7.3 and 12.9→10.7 reach the actual answer-mask and single-shift modality-expansion explanations. The output positions and -100 meanings match their later reuse.',
+        'Observed existing executed outputs: 11.5 projector136/partial976/all8296 correspond to the local width8 one-block mask demo; 12.9 logits (1,19,264) with audio-projector gradient True establish shape and gradient plumbing only; 13.15 ratio1, policy changed, scorer/reference gradients False, [1,4] inputs/logits are finite-card PPO plumbing. None is treated as generated-answer or natural-media success.',
+    ],
+    'personal_screen_views': ['navigation/link-2.png','navigation/link-3.png','navigation/link-10.png','navigation/output-11.5.png','navigation/output-12.9.png','navigation/output-13.15.png'],
+    'failure_history': [
+        {'attempt': 'Default Playwright browser launch', 'result': 'Missing bundled chromium_headless_shell executable; used the already installed /usr/bin/chromium with no install.'},
+        {'attempt': 'browser-first-attempt', 'result': 'Direct SVG screenshot timed out waiting for fonts. Exact script/command/stdout/stderr preserved. Changed to img-wrapped rendering of the same local-preview SVG.'},
+        {'attempt': 'browser-second-attempt', 'result': 'Rendered all 30 SVGs successfully, then failed because harness expected footer next to skip chapter introduction. Actual route correctly reaches chapter intro; original failed script/logs preserved.'},
+        {'attempt': 'navigation-attempt', 'result': 'Completed 22 correct navigation clicks; failed on harness selector .admonition for outputs. Actual executed widgets use div.output. Exact script/command/stdout/stderr preserved; output-review uses observed DOM and completed three output pages.'},
+    ],
+    'limits': 'Meaningful bridge/prerequisite/output browser inspection, not a check of every page, all kernels or site-wide output freshness. No browser screenshot failure was treated as a pedagogical source issue.',
+})
+
+(OUT / 'NOTICE.txt').write_text('DOCCI photograph attribution for svg-originals/natural-v4-training-cat.svg and its browser-rendered figure-renders/natural-v4-training-cat.png:\nImage creator: Jason Baldridge and family. Licensor: Google LLC. Source ID: train_01827.\nSource: https://storage.googleapis.com/docci/thumbnails/train_01827.jpg?generation=1713028329088595\nLicense: CC BY 4.0, https://creativecommons.org/licenses/by/4.0/\nOriginal image SHA-256: afdc346a49f81a1c92437de89b241f114aa0d2e815a089e10727b4abe6c8829b\nSource SVG metadata is preserved in the exact original. Original JPEG bytes were embedded without pixel edit or crop; SVG adds a title and scales display. This review adds an ordinary Chromium raster rendering of the complete SVG, with no additional content edit or crop.\n')
+for src, dst in [('output_review.py','output-review.py.source.txt'),('output.stdout.txt','output-review.stdout.txt'),('output.stderr.txt','output-review.stderr.txt')]:
+    shutil.copyfile(TMP/src, OUT/dst)
+(OUT/'output-review.command.txt').write_text('python -u outputs/natural-v4/continuity-research/modal-preference/output_review.py > outputs/natural-v4/continuity-research/modal-preference/output.stdout.txt 2> outputs/natural-v4/continuity-research/modal-preference/output.stderr.txt\nexit_code=0\n')
+print('Evidence complete:', len(figures), 'personally viewed figures;', len(coverage), 'read document scopes')

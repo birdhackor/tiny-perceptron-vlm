@@ -1,0 +1,97 @@
+import hashlib
+import json
+import platform
+import sys
+from importlib.metadata import version
+from pathlib import Path
+from urllib.parse import unquote
+
+from playwright.sync_api import sync_playwright
+
+
+DEST = Path('docs/continuity-reviews/artifacts/natural-v4/modern-compression/recheck-round-2')
+DEST.mkdir(parents=True, exist_ok=True)
+states = []
+
+
+def record(page, action, source=None, link=None):
+    item = {
+        'action': action,
+        'from_url': source,
+        'clicked_link': link,
+        'url': page.url,
+        'decoded_url': unquote(page.url),
+        'title': page.title(),
+        'article_headings': page.locator('article h1,article h2,article h3').all_text_contents(),
+        'visible_toc': page.locator('.md-sidebar--secondary').inner_text(),
+    }
+    if '#' in page.url:
+        anchor = unquote(page.url.split('#', 1)[1])
+        target = page.locator(f'article [id="{anchor}"]')
+        item['anchor'] = anchor
+        item['target_count'] = target.count()
+        if target.count():
+            item['target_heading'] = target.inner_text()
+            item['target_tag'] = target.evaluate('(e)=>e.tagName')
+            item['target_rect'] = target.bounding_box()
+            item['target_section_body'] = target.evaluate('''(heading)=>{
+                let out=heading.innerText;
+                let next=heading.nextElementSibling;
+                let level=Number(heading.tagName.slice(1));
+                while(next){
+                    if(/^H[1-6]$/.test(next.tagName) && Number(next.tagName.slice(1))<=level) break;
+                    out+='\\n\\n'+next.innerText;
+                    next=next.nextElementSibling;
+                }
+                return out;
+            }''')
+    else:
+        item['article_body'] = page.locator('article').inner_text()
+    states.append(item)
+    return item
+
+
+def click(page, link):
+    source = page.url
+    clicked = {'text':link.inner_text(), 'href':link.get_attribute('href')}
+    link.click()
+    page.wait_for_load_state('networkidle')
+    return record(page, 'click', source, clicked)
+
+
+with sync_playwright() as p:
+    browser = p.chromium.launch(executable_path='/usr/bin/chromium', args=['--no-sandbox'])
+    page = browser.new_page(viewport={'width':1360,'height':980}, device_scale_factor=1)
+    response = page.goto('http://127.0.0.1:8789/16.1.html', wait_until='networkidle')
+    record(page, 'goto')['http_status'] = response.status if response else None
+    result = click(page, page.locator('article a').filter(has_text='T.8的效率量測方法'))
+    page.screenshot(path=str(DEST / 'method-link-landing.png'))
+    toc_link = page.locator('.md-sidebar--secondary a').filter(has_text='選讀：效率實驗的量測條件')
+    result['method_toc_link'] = {'count':toc_link.count(),'text':toc_link.inner_text(),'href':toc_link.get_attribute('href')}
+    click(page, page.locator('article [id="選讀效率實驗的量測條件"]').locator('xpath=following-sibling::p[1]').locator('a').filter(has_text='本節入口'))
+    click(page, page.locator('.md-sidebar--secondary a').filter(has_text='選讀：效率實驗的量測條件'))
+    browser.close()
+
+(DEST / 'browser-current-raw.json').write_text(json.dumps(states, ensure_ascii=False, indent=2)+'\n')
+env = {
+    'python': sys.version,
+    'executable': sys.executable,
+    'platform': platform.platform(),
+    'playwright': version('playwright'),
+    'browser_executable': '/usr/bin/chromium',
+    'browser_executable_sha256': hashlib.sha256(Path('/usr/bin/chromium').read_bytes()).hexdigest(),
+    'launch_args': ['--no-sandbox'],
+    'preview': 'http://127.0.0.1:8789/',
+    'purpose': 'Browser navigation inspection, not a numerical CPU or GPU rerun.',
+}
+(DEST / 'browser-environment.json').write_text(json.dumps(env, indent=2)+'\n')
+print(json.dumps({
+    'steps':len(states),
+    'method_destination':result['decoded_url'],
+    'target_heading':result.get('target_heading'),
+    'target_tag':result.get('target_tag'),
+    'target_rect':result.get('target_rect'),
+    'method_toc_link':result['method_toc_link'],
+    'context_click_destination':states[2]['decoded_url'],
+    'toc_click_destination':states[3]['decoded_url'],
+}, ensure_ascii=False, indent=2))

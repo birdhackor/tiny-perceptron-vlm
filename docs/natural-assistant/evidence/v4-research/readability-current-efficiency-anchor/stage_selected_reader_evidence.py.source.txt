@@ -1,0 +1,33 @@
+"""Stage only inventoried byte-exact small reader proof, never raw workspaces."""
+import hashlib
+import json
+import subprocess
+import argparse
+from datetime import UTC, datetime
+from pathlib import Path
+
+root=Path.cwd()
+parser=argparse.ArgumentParser()
+parser.add_argument('--receipt',default='reader-selective-stage-001.json')
+parser.add_argument('--manifest', type=Path, default=root/'outputs/natural-v4/review-plan/review-report-referenced-small-paths.json')
+args=parser.parse_args()
+receipt_path=root/'outputs/natural-v4/review-plan'/args.receipt
+assert not receipt_path.exists(), 'Preserve earlier actual staging receipts; choose a new receipt name.'
+manifest_path=args.manifest
+m=json.loads(manifest_path.read_bytes())
+rows=m['report_referenced_small_paths']+m['actual_owned_current_reports']
+expected={r['path']:r for r in rows}
+notice='docs/reader-reviews/artifacts/natural-v4-supplemental/NOTICE.txt'
+p=root/notice
+expected[notice]={'path':notice,'bytes':p.stat().st_size,'sha256':hashlib.sha256(p.read_bytes()).hexdigest()}
+for name,r in expected.items():
+ p=root/name
+ assert p.is_file() and p.stat().st_size==r['bytes'] and hashlib.sha256(p.read_bytes()).hexdigest()==r['sha256'],name
+ assert not any(part.lower() in {'workspace','__pycache__','venv','node_modules'} for part in Path(name).parts),name
+ assert p.suffix not in {'.pt','.parquet','.wav','.jpg','.gz','.pdf','.html'},name
+paths=sorted(expected)
+proc=subprocess.run(['git','add','--pathspec-from-file=-','--pathspec-file-nul'],input=('\0'.join(paths)+'\0').encode(),cwd=root,capture_output=True)
+assert proc.returncode==0,proc.stderr.decode()
+receipt={'record_kind':'actual_selective_staging_not_review','created_at':datetime.now(UTC).isoformat(),'manifest_sha256':hashlib.sha256(manifest_path.read_bytes()).hexdigest(),'paths':list(expected.values()),'path_count':len(paths),'selected_file_bytes':sum(r['bytes'] for r in expected.values()),'source_scope':'Actual small owner proof plus current canonical reader reports. Raw workspaces/media/models/third-party papers are excluded. Active follow-up evidence will be separately inventoried and staged after completion.','git_add_exit_code':proc.returncode}
+receipt_path.write_text(json.dumps(receipt,ensure_ascii=False,indent=2)+'\n')
+print(json.dumps({k:receipt[k] for k in ('path_count','selected_file_bytes','git_add_exit_code')}))

@@ -1,0 +1,77 @@
+import json
+import platform
+from pathlib import Path
+from playwright.sync_api import sync_playwright
+
+out = Path('docs/continuity-reviews/artifacts/natural-v4/natural-public')
+base = 'http://127.0.0.1:8788/'
+records = []
+errors = []
+with sync_playwright() as p:
+    browser = p.chromium.launch(executable_path='/usr/bin/chromium', args=['--no-sandbox'], headless=True)
+    page = browser.new_page(viewport={'width': 1440, 'height': 1000}, device_scale_factor=1)
+    page.on('pageerror', lambda error: errors.append(str(error)))
+    def capture(name, screenshot=True, focus=None):
+        article = page.locator('article').first
+        if focus:
+            article.get_by_text(focus, exact=False).first.scroll_into_view_if_needed()
+        else:
+            article.locator('h1').first.scroll_into_view_if_needed()
+        text = article.inner_text()
+        record = {
+            'name': name, 'url': page.url, 'title': page.title(),
+            'headings': article.locator('h1,h2,h3').all_text_contents(),
+            'visible_article_text': text,
+            'links': article.locator('a[href]').evaluate_all('els => els.map(e => ({text:e.textContent.trim(),href:e.href}))'),
+            'images': article.locator('img').evaluate_all('els => els.map(e=>({src:e.src,alt:e.alt,complete:e.complete,width:e.naturalWidth,height:e.naturalHeight}))'),
+        }
+        if screenshot:
+            path = out / (name + '.png')
+            page.screenshot(path=str(path))
+            record['screenshot'] = str(path)
+        records.append(record)
+        print(name, page.url, record['headings'], 'article_chars', len(text))
+        return record
+    response = page.goto(base, wait_until='networkidle')
+    capture('entry')
+    page.locator('article').get_by_role('link', name='第 20 章：做一位能看圖、讀字與聽問題的助理', exact=True).click()
+    page.wait_for_load_state('networkidle')
+    capture('chapter20-entry', False)
+    page.locator('article').get_by_role('link', name='20.2 不重新訓練，怎麼先開啟成品？', exact=False).first.click()
+    page.wait_for_load_state('networkidle')
+    lesson2 = page.url
+    capture('lesson20-2')
+    page.locator('article').get_by_role('link', name='學生操作指引', exact=True).first.click()
+    page.wait_for_load_state('networkidle')
+    capture('student-local')
+    page.locator('article').get_by_role('link', name='資料說明', exact=True).click()
+    page.wait_for_load_state('networkidle')
+    capture('data-local')
+    page.locator('article').get_by_role('link', name='訓練指引', exact=True).last.click()
+    page.wait_for_load_state('networkidle')
+    capture('training-local', focus='先驗證用途，再選定自己的版本')
+    page.locator('article').get_by_role('link', name='20.13', exact=True).last.click()
+    page.wait_for_load_state('networkidle')
+    capture('capability-card', focus='用途')
+    for route, name, focus in [
+        ('19.12.html','previous-ending','第20章'),
+        ('11.14.html','picture-bridge',None),
+        ('11.15.html','stroke-bridge',None),
+        ('11.16.html','ocr-bridge',None),
+        ('12.13.html','speech-bridge',None),
+        ('12.14.html','shared-chat-bridge',None),
+        ('20.6.html','lora-visible-output','可更新數字'),
+        ('20.7.html','answer-mask-visible-output','計分目標ID'),
+        ('20.12.html','asr-visible-output','CER百分比'),
+        ('training.html#T.4','training-t4',None),
+        ('training.html#T.8','training-t8',None),
+    ]:
+        page.goto(base+route, wait_until='networkidle')
+        if name.startswith('training-t'):
+            anchor = name[-2:].upper().replace('T','T.')
+            page.locator('[id="'+anchor+'"]').scroll_into_view_if_needed()
+            capture(name, True, focus='把文字訓練和對話練習分開看' if name.endswith('t4') else '架構比較一次只換一個條件')
+        else:
+            capture(name, name in ('picture-bridge','shared-chat-bridge','lora-visible-output','answer-mask-visible-output'), focus)
+    (out/'browser-navigation.json').write_text(json.dumps({'base':base,'browser_version':browser.version,'platform':platform.platform(),'launch':{'executable_path':'/usr/bin/chromium','args':['--no-sandbox'],'headless':True},'viewport':{'width':1440,'height':1000},'page_errors':errors,'records':records},ensure_ascii=False,indent=2)+'\n')
+    browser.close()

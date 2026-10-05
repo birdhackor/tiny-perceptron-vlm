@@ -1,0 +1,3 @@
+# Actual native checks of the current book
+
+Build synchronization, 292 reader reviews, 292 factual reviews, original independent-owner identities and introduction fields, Ruff lint/format, and the locked dependency configuration all returned native exit zero. Exact Git INDEX reference checks covered 5,618 registered numbered factual paths, 530 whole-file factual references and all 1,174 staged paths at that capture. Previous receipts are preserved, not rewritten. These checks verify implementation and preservation; they do not replace genuine source-based reviewer decisions, manual reading-time estimates, final browser inspection or public deployment.

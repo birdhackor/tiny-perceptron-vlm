@@ -1,0 +1,37 @@
+import sys,json,hashlib,shutil
+from pathlib import Path
+from datetime import datetime,timezone
+from playwright.sync_api import sync_playwright
+out=Path('outputs/natural-v4/continuity-research/training-dialogue')
+public=Path('docs/continuity-reviews/artifacts/natural-v4/training-dialogue')
+receipts=out/'browser-receipts.jsonl'
+with sync_playwright() as p:
+ b=p.chromium.launch(headless=True,executable_path='/usr/bin/chromium',args=['--no-sandbox'])
+ page=b.new_page(viewport={'width':1280,'height':1000})
+ page.goto('http://127.0.0.1:8788/'+sys.argv[1],wait_until='networkidle')
+ for i in range(int(sys.argv[2])):
+  name=page.url.split('/')[-1]
+  article=page.locator('article')
+  text=article.inner_text()
+  links=page.locator('article a, footer a').evaluate_all('(es)=>es.map(e=>({text:e.textContent.trim(),href:e.href}))')
+  record={'timestamp_utc':datetime.now(timezone.utc).isoformat(),'url':page.url,'title':page.title(),'text':text,'links':links,'images':[]}
+  for img in article.locator('img').all():
+   src=img.get_attribute('src')
+   if not src or not src.endswith('.svg'): continue
+   stem=src.rsplit('/',1)[-1]
+   local=Path('course/figures')/stem
+   svg=public/stem
+   shutil.copyfile(local,svg)
+   png=public/(stem+'.browser.png')
+   img.scroll_into_view_if_needed()
+   img.screenshot(path=str(png))
+   record['images'].append({'source':str(local),'src':src,'source_sha256':hashlib.sha256(local.read_bytes()).hexdigest(),'render':str(png),'render_sha256':hashlib.sha256(png.read_bytes()).hexdigest()})
+  (out/(name+'.browser.json')).write_text(json.dumps(record,ensure_ascii=False,indent=2))
+  with receipts.open('a') as f:f.write(json.dumps({k:v for k,v in record.items() if k!='text'},ensure_ascii=False)+'\n')
+  print('\nPAGE',name,'\n'+text,flush=True)
+  nav=page.locator('a.md-footer__link--next')
+  print('NEXT',nav.get_attribute('href'),flush=True)
+  if i+1<int(sys.argv[2]):
+   nav.click()
+   page.wait_for_load_state('networkidle')
+ b.close()

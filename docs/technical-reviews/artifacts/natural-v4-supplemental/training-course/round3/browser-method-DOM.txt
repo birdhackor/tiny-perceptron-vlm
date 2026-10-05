@@ -1,0 +1,16 @@
+選讀：效率實驗的量測條件¶
+固定配方採L4、PyTorch 2.14.1+cu126、FP32，關閉TF32。TF32是支援的GPU處理FP32矩陣乘法時可用的一種模式：資料仍以FP32儲存，乘法卻可使用較少的精細位數，再以FP32累加；它會改變計算精度，也可能影響速度，因此本輪明記關閉，固定這個計算條件。前置是T.4的直接屬性SFT模型與45／5／10題家族切分；原模型最後檢查答對5／10，不能因它可載入就當成全對。這次把模型改為四個Query頭，MHA與一個KV頭的組別各短續訓100次，再從MHA副本比較不同更新方式。形狀改動與留出結果在16.4，重跑入口在本節入口。
+這份報告中的六支主要訓練——MHA與GQA注意力頭數比較、一般更新與梯度累積、反向重算及SDPA注意力API——各自重設PyTorch管理tensor記憶體的CUDA配置器峰值，保存開始前已配置、該段峰值與新增量。短文件裝填的padded與packed兩支更新沒有保存這三個記憶體欄位，因此這份報告不能拿它們比較逐支線峰值。
+上述記憶體數字只計PyTorch在目前訓練程序中交給tensor使用的GPU空間。driver是GPU驅動程式，也就是讓作業系統與GPU溝通的軟體；它本身的用量不在這個數字中。PyTorch留著準備再用、當時沒有交給tensor的空間，稱為未使用的reserved空間，也不在其中。本輪另用Inductor這個PyTorch編譯工具，把運算轉成可執行的程式；這項工作由另一個獨立程序執行，該程序的用量沒有算進上述訓練峰值。
+後面以MiB列量，1 MiB是2²⁰ bytes。這個範圍可對照2.14的max_memory_allocated文件，不能把外層最後一次reset後的數字稱為整組實驗峰值。完整數字與原始採樣在efficiency實報。
+推論先暖機三次，在計時兩側等待GPU工作完成，量九次取中位數；訓練則略過前三步後取更新中位數。兩種工作範圍分開保存，不混成一個速度數字。
+另有一份獨立Flash補驗：固定Q/K/V形狀[2,4,512,32]，用FP16與BF16，強制只開CUDA Flash後端。兩種精度都由profiler確認真正的CUDA前向與反傳kernel，並核對輸出與三份梯度的有限值及執行前固定的容差。這份實驗沒有訓練模型；它回答「此形狀是否真的使用Flash、數值是否接近、成本是多少」，不替代上面的整模型品質比較。
+.venv/bin/python -m scripts.course_experiments.run --experiment flash_probe --device cuda
+
+它不依賴SFT權重或資料包，但需要相容CUDA環境；CPU不會驗證Flash，也不會偷偷改走其他後端。輸出目錄outputs/course-experiments/course-v1/flash_probe/內的fixture.pt只是固定Q/K/V與反傳輸入，並非訓練權重，不能交給一般模型推論入口。result.json保留兩種精度、容差、profiler運算子／kernel、九次同步計時、最高配置與環境。數值對照的計算方式及誤差見16.8，記憶體圖與範圍見16.9。
+本次使用L4、PyTorch 2.14.1+cu126、CUDA 12.6與driver 580.95.05，程式版本為382604d17d91cfe9e0a58a7de997486e3a0ccafa。每條路線先暖機三次，再量九次取中位數。FP16向前加反傳為手寫1.689毫秒、Flash0.503毫秒；BF16為1.502、0.458毫秒。相同65MiB已配置基線上，兩種精度的手寫／Flash新增峰值都是32.75／2.032MiB；總峰值則為97.75／67.032MiB，不能把新增配置比值當成整張GPU省下的比例。這是一次程序內的固定注意力核心量測，沒有loss、更新器或整模型訓練速度。全部原始數字與環境在Flash補驗實報。
+精度比較也從同一份sft/model.pt與dataset.json重新開始，保留原本單頭設定，沒有接在efficiency的四頭模型之後：
+.venv/bin/python -m scripts.course_experiments.run --experiment precision --device cuda
+
+outputs/course-experiments/course-v1/precision/中的fp32.pt、bf16.pt、fp16.pt各完成200次嘗試；本輪成功更新都是200、跳過都是0。自動混合精度（Automatic Mixed Precision，AMP）依算子使用BF16／FP16，保存的權重與Adam狀態仍是FP32；model.pt固定複製FP32，不以驗證成績挑選。原始單頭SFT起點最後檢查5/10，本輪三支分別7/10、6/10、4/10；訓練與推論都沒有測到AMP加速。數值、有限值核對及峰值量測範圍見16.7與precision實報。不能只看檔名較低位元或程式跑完，就宣稱更省記憶體、品質保持或每次都成功更新。
+練習先寫一個假設，例如「只換正規化，留出代價會改善嗎？」列出保持固定的資料、步數與種子，跑完後同時保存品質與成本。這樣結果不論好壞，都能回答原來的問題。

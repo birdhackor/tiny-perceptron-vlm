@@ -1,0 +1,45 @@
+import json,hashlib,math
+from pathlib import Path
+from playwright.sync_api import sync_playwright
+p=Path('docs/reader-reviews/artifacts/natural-v4-supplemental/training-course');q=p/'round4';base='http://127.0.0.1:8784/';build=Path('outputs/site-reader-executed-v4-entry-links');H=lambda b:hashlib.sha256(b).hexdigest()
+r={'reviewer_task':'/root/v4_review_coordinator/reader_whole_training_course','round':4,'real_browser':'existing .venv Playwright Chromium','executable_path':'/usr/bin/chromium','base':base,'reported_literal_source_revision':'f43b393431d4908f0ea38a2375f8cae9c4320d12 (coordinator provided, no Git inspected)','training':{},'toc_clicks':[],'prerequisites':[],'guides':[],'navigation':[],'official_link':{}}
+def save(): (q/'browser-receipt.json').write_text(json.dumps(r,ensure_ascii=False,indent=2)+'\n')
+def preserve(response,name):
+ missing=response is None
+ if missing:response=page.goto(page.url,wait_until='networkidle')
+ raw=response.body();(q/(name+'.http-response.html')).write_bytes(raw);local=(build/(name+'.html')).read_bytes();assert raw==local
+ return {'HTTP_capture_kind':'same destination browser goto after actual click supplied no main response' if missing else 'actual main browser navigation response','status':response.status,'URL':response.url,'HTTP_bytes':len(raw),'HTTP_sha256':H(raw),'HTTP_snapshot':name+'.http-response.html','local_build':str(build/(name+'.html')),'local_sha256':H(local),'exact_local_build_byte_match':True}
+with sync_playwright() as w:
+ b=w.chromium.launch(executable_path='/usr/bin/chromium',headless=True,args=['--no-sandbox']);page=b.new_page(viewport={'width':1440,'height':2700},device_scale_factor=1,ignore_https_errors=False)
+ response=page.goto(base+'training.html#T.8',wait_until='networkidle');a=page.locator('article');v=a.inner_text();old=(p/'round3/training.rendered-visible-article.txt').read_text();(q/'training.rendered-visible-article.txt').write_text(v);(q/'training.rendered-dom.html').write_text(page.content());r['training']={'HTTP':preserve(response,'training'),'actual_URL':page.url,'h1':a.locator('h1').all_inner_texts(),'full_visible_text_sha256':H(v.encode()),'full_visible_text_exact_own_round3':v==old,'paragraphs':a.locator('p').count(),'tables':a.locator('table').count(),'code_blocks':a.locator('pre').count(),'SVG_count':a.locator('img[src$=".svg"]').count(),'output_widget_count':a.locator('[class*="output"]').count(),'T8_screens':[]};t8=v.split('架構比較一次只換一個條件¶',1)[1].split('真的縮小保存格式，再量品質¶',1)[0];(q/'T8.rendered-visible-complete.txt').write_text('架構比較一次只換一個條件¶'+t8)
+ start=a.locator('[id="T.8"]').bounding_box();end=a.locator('[id="T.9"]').bounding_box();top=start['y']+page.evaluate('window.scrollY');length=end['y']-start['y'];bounds=a.bounding_box()
+ for n,offset in enumerate(range(0,math.ceil(length),2400),1):
+  page.evaluate('(y)=>window.scrollTo(0,y)',top+offset-96);page.wait_for_timeout(100);fn=f'T8-tile-{n:02}.png';page.screenshot(path=str(q/fn),clip={'x':bounds['x'],'y':96,'width':bounds['width'],'height':2600});r['training']['T8_screens'].append({'order':n,'offset':offset,'screenshot':fn})
+ page.set_viewport_size({'width':1440,'height':1100})
+ for i in range(1,12):
+  link=page.locator(f'a[href$="#T.{i}"]').filter(visible=True).first;label=link.inner_text();href=link.get_attribute('href');link.click();page.wait_for_timeout(80);r['toc_clicks'].append({'visible_label':label,'href':href,'destination':page.url,'heading':a.locator(f'[id="T.{i}"]').inner_text(),'id':f'T.{i}'})
+ page.locator('a[href$="#T.8"]').filter(visible=True).first.click();page.wait_for_timeout(100);page.screenshot(path=str(q/'T8-heading-TOC.png'));save()
+ for name,label in [('4.5','4.5的初始層'),('15.13','15.13的公平比較')]:
+  page.goto(base+'training.html#T.8',wait_until='networkidle');link=page.locator('article a').filter(has_text=label).first;link.scroll_into_view_if_needed();actual=link.inner_text();href=link.get_attribute('href')
+  with page.expect_navigation(wait_until='networkidle') as result:link.click()
+  response=result.value;visible=page.locator('article').inner_text();(q/(name+'.rendered-visible-article.txt')).write_text(visible);page.screenshot(path=str(q/(name+'.png')),full_page=True);r['prerequisites'].append({'visible_label':actual,'href':href,'destination':page.url,'h1':page.locator('article h1').all_inner_texts(),'HTTP':preserve(response,name),'full_article_visible_sha256':H(visible.encode()),'output_widgets':page.locator('article [class*="output"]').evaluate_all('(els)=>els.map(e=>({class:e.className,text:e.innerText}))'),'screenshot':name+'.png'});save()
+ page.goto(base+'training.html#T.8',wait_until='networkidle');link=page.locator('article a').filter(has_text='2.14的max_memory_allocated文件').first;link.scroll_into_view_if_needed();r['official_link']={'from':page.url,'visible_label':link.inner_text(),'href':link.get_attribute('href'),'target':link.get_attribute('target')};page.screenshot(path=str(q/'T8-official-link-origin.png'));save()
+ try:
+  with page.expect_navigation(wait_until='domcontentloaded',timeout=30000) as result:link.click()
+  response=result.value;page.wait_for_timeout(1000);r['official_link'].update({'actual_destination':page.url,'navigation_status':response.status if response else None,'h1':page.locator('h1').all_inner_texts(),'title':page.title()});raw=response.body() if response else page.content().encode();(q/'official-max-memory-allocated.http-response.html').write_bytes(raw);r['official_link']['response_sha256']=H(raw);r['official_link']['response_bytes']=len(raw);h1=page.locator('h1').first;container=h1.locator('..');text=container.inner_text();(q/'official-max-memory-allocated.rendered-visible-article.txt').write_text(text);(q/'official-max-memory-allocated.rendered-dom.html').write_text(page.content());page.screenshot(path=str(q/'official-max-memory-allocated.png'),full_page=True);r['official_link'].update({'visible_scope':'entire rendered parent section containing official h1; all paragraph/signature/parameters/return/note within it','full_visible_text_sha256':H(text.encode()),'screenshot':'official-max-memory-allocated.png','success':True})
+ except Exception as e:
+  r['official_link'].update({'actual_destination':page.url,'success':False,'actual_browser_error':str(e)});page.screenshot(path=str(q/'official-max-memory-allocated-failure.png'))
+ save()
+ for name,label in [('natural-v4-student','操作指引'),('natural-v4-data','資料與來源'),('natural-v4-training','自行重訓')]:
+  page.goto(base+'training.html',wait_until='networkidle');page.get_by_role('navigation',name='標籤頁').get_by_role('link',name='教材',exact=True).click();page.wait_for_load_state('networkidle');page.locator('label[for="__nav_3_20"]').filter(has_text='第 20 章').first.click();link=page.locator('nav a[href$="'+name+'.html"]').filter(visible=True).first;link.scroll_into_view_if_needed();actual=link.inner_text();href=link.get_attribute('href')
+  with page.expect_navigation(wait_until='networkidle') as result:link.click()
+  response=result.value;visible=page.locator('article').inner_text();opening=visible.split('1.')[0];prior=next(e for e in json.loads((p/'round3/browser-receipt.json').read_text())['guides'] if e['visible_label']==label);fn=name+'.landing.png';page.screenshot(path=str(q/fn));(q/(name+'.landing-visible-opening.txt')).write_text(opening);r['guides'].append({'visible_label':actual,'href':href,'destination':page.url,'h1':page.locator('article h1').all_inner_texts(),'opening':opening,'opening_exact_own_round3':opening==prior['opening'],'HTTP':preserve(response,name),'screenshot':fn,'scope':'landing opening only; no fullguide claim'});save()
+ page.goto(base+'training.html',wait_until='networkidle');link=page.get_by_role('navigation',name='標籤頁').get_by_role('link',name='開始閱讀',exact=True)
+ with page.expect_navigation(wait_until='networkidle') as result:link.click()
+ r['navigation'].append({'label':'開始閱讀','destination':page.url,'h1':page.locator('article h1').all_inner_texts(),'HTTP':preserve(result.value,'course')});link=page.locator('nav a[href$="training.html"]').filter(visible=True).first;actual=link.inner_text();link.click();page.wait_for_load_state('networkidle');r['navigation'].append({'label':actual,'destination':page.url,'h1':page.locator('article h1').all_inner_texts()});save()
+ for css,name in [('.md-footer__link--prev','glossary'),('.md-footer__link--next','chapter-01')]:
+  page.goto(base+'training.html',wait_until='networkidle');link=page.locator(css);link.scroll_into_view_if_needed();actual=link.inner_text();href=link.get_attribute('href')
+  with page.expect_navigation(wait_until='networkidle') as result:link.click()
+  r['navigation'].append({'label':actual,'href':href,'destination':page.url,'h1':page.locator('article h1').all_inner_texts(),'HTTP':preserve(result.value,name)});save()
+ b.close()
+save();print(json.dumps({'training':r['training'],'official_link':r['official_link'],'TOC':len(r['toc_clicks']),'prerequisites':len(r['prerequisites']),'guides':len(r['guides']),'navigation':len(r['navigation'])},ensure_ascii=False,indent=2))

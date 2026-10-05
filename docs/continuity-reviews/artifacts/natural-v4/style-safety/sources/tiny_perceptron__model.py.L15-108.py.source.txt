@@ -1,0 +1,94 @@
+class ModelConfig:
+    vocab_size: int = 264
+    width: int = 32
+    layers: int = 1
+    heads: int = 1
+    max_length: int = 128
+    norm: str = "layer"
+    activation: str = "gelu"
+    rotary: bool = False
+    tied: bool = False
+    kv_heads: int | None = None
+    backend: str = "manual"
+    experts: int = 0
+    top_k: int = 2
+
+
+class Block(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        norm = nn.LayerNorm if config.norm == "layer" else RMSNorm
+        self.norm1, self.norm2 = norm(config.width), norm(config.width)
+        self.attention = CausalAttention(config.width, config.heads, config.kv_heads, config.backend, config.rotary)
+        self.ffn = (
+            MoEFFN(config.width, config.experts, config.top_k)
+            if config.experts
+            else DenseFFN(config.width, activation=config.activation)
+        )
+
+    def forward(self, x, valid=None, positions=None, segments=None, cache=None):
+        attended, new_cache = self.attention(self.norm1(x), valid, positions, segments, cache)
+        x = x + attended
+        h = self.ffn(self.norm2(x))
+        auxiliary = x.new_zeros(())
+        if isinstance(h, tuple):
+            h, auxiliary, _ = h
+        return x + h, new_cache, auxiliary
+
+
+class TinyLM(nn.Module):
+    def __init__(self, config=None):
+        super().__init__()
+        self.config = config or ModelConfig()
+        c = self.config
+        if c.norm not in ("layer", "rms") or c.layers < 1 or c.max_length < 1:
+            raise ValueError("無效的 norm/layers/max_length 設定")
+        self.embedding = nn.Embedding(c.vocab_size, c.width)
+        self.position = None if c.rotary else nn.Embedding(c.max_length, c.width)
+        self.blocks = nn.ModuleList([Block(c) for _ in range(c.layers)])
+        self.final_norm = nn.LayerNorm(c.width) if c.norm == "layer" else RMSNorm(c.width)
+        self.output = nn.Linear(c.width, c.vocab_size, bias=False)
+        if c.tied:
+            self.output.weight = self.embedding.weight
+
+    def forward(self, ids=None, *, embeddings=None, valid=None, positions=None, segments=None, cache=None):
+        if (ids is None) == (embeddings is None):
+            raise ValueError("必須恰好提供 ids 或 embeddings 其中之一")
+        x = self.embedding(ids) if embeddings is None else embeddings
+        b, t, _ = x.shape
+        offset = 0 if cache is None else cache[0][0].shape[2]
+        if offset + t > self.config.max_length:
+            raise ValueError("序列超過 max_length；增加配置或明確截斷，不能默默重用位置")
+        if positions is None:
+            positions = torch.arange(offset, offset + t, device=x.device)
+        if self.position is not None:
+            x = x + self.position(positions)
+        caches, auxiliary = [], x.new_zeros(())
+        for i, block in enumerate(self.blocks):
+            x, state, aux = block(x, valid, positions, segments, None if cache is None else cache[i])
+            caches.append(state)
+            auxiliary = auxiliary + aux
+        logits = self.output(self.final_norm(x))
+        return {"logits": logits, "cache": caches, "auxiliary": auxiliary}
+
+    def description(self):
+        return {"config": asdict(self.config), "parameters": sum(p.numel() for p in self.parameters())}
+
+
+def loss_sum(logits, labels):
+    """先求和再數有效 token，才能正確合併長短不同的 micro-batch。"""
+    count = (labels != IGNORE).sum()
+    if count.item() == 0:
+        raise ValueError("所有 labels 都被忽略：没有可學習的答案")
+    loss = F.cross_entropy(
+        logits.reshape(-1, logits.shape[-1]), labels.reshape(-1), ignore_index=IGNORE, reduction="sum"
+    )
+    return loss, count
+
+
+def masked_loss(logits, labels):
+    total, count = loss_sum(logits, labels)
+    return total / count
+
+
+@torch.no_grad()

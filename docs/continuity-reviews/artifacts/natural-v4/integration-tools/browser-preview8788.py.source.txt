@@ -1,0 +1,114 @@
+from pathlib import Path
+import hashlib
+import json
+from playwright.sync_api import sync_playwright
+
+BASE = 'http://127.0.0.1:8788/'
+OUT = Path('docs/continuity-reviews/artifacts/natural-v4/integration-tools')
+receipts = []
+
+def capture(page, label, excerpt=False, screenshot=None):
+    article = page.locator('article')
+    text = article.inner_text()
+    record = {
+        'label': label, 'url': page.url, 'title': page.title(),
+        'visible_heading': article.locator('h1').inner_text(),
+        'article_text_sha256': hashlib.sha256(text.encode()).hexdigest(),
+        'previous_next': page.locator('.md-footer__link').evaluate_all(
+            'as => as.map(a=>({text:a.innerText.trim(),href:a.href}))'),
+    }
+    if excerpt:
+        record['visible_excerpt'] = text[:2300]
+    if screenshot:
+        page.screenshot(path=str(OUT / screenshot), full_page=False)
+        record['screenshot'] = str(OUT / screenshot)
+    receipts.append(record)
+    (OUT / 'browser-path-receipt.json').write_text(json.dumps(receipts, ensure_ascii=False, indent=2) + '\n')
+    print(label, page.url, record['visible_heading'], flush=True)
+
+def click(page, locator, label, **kwargs):
+    before = page.url
+    link = locator.first
+    link_text = link.inner_text().strip()
+    href = link.get_attribute('href')
+    link.click()
+    page.wait_for_load_state('networkidle')
+    capture(page, label, **kwargs)
+    receipts[-1]['clicked_from'] = before
+    receipts[-1]['clicked_text'] = link_text
+    receipts[-1]['clicked_href'] = href
+
+def section_anchor(page, anchor, label, screenshot):
+    element = page.locator('[id="' + anchor + '"]')
+    heading = element.inner_text()
+    following = element.evaluate('el => {let s="";for(let n=el.nextElementSibling;n && n.tagName!=="H2";n=n.nextElementSibling){s+=n.innerText+"\\n";}return s;}')
+    record = receipts[-1]
+    record['anchor_id'] = anchor
+    record['anchor_exists'] = element.count() == 1
+    record['anchor_visible_heading'] = heading
+    record['section_visible_excerpt'] = following[:3500]
+    record['target_top_px_after_click'] = element.evaluate('el=>el.getBoundingClientRect().top')
+    page.screenshot(path=str(OUT / screenshot), full_page=False)
+    record['screenshot'] = str(OUT / screenshot)
+
+with sync_playwright() as p:
+    browser = p.chromium.launch(executable_path='/usr/bin/chromium', args=['--no-sandbox'])
+    page = browser.new_page(viewport={'width': 1440, 'height': 1080})
+    response = page.goto(BASE + '18.14.html', wait_until='networkidle')
+    capture(page, 'preceding-ending', excerpt=True)
+    receipts[-1]['http_status'] = response.status
+    click(page, page.locator('.md-footer__link--next'), 'chapter19-introduction', excerpt=True)
+    click(page, page.locator('article a[href$="/19.1.html"]'), '19.1')
+    for number in range(2, 13):
+        click(page, page.locator('.md-footer__link--next'), f'19.{number}',
+              excerpt=number in [4, 11, 12], screenshot='chapter19-state.png' if number == 11 else None)
+    click(page, page.locator('.md-footer__link--next'), 'chapter20-introduction', excerpt=True)
+    click(page, page.locator('article a[href$="/20.1.html"]'), '20.1-context', excerpt=True, screenshot='chapter20-boundary.png')
+    page.locator('label[for="__nav_3_21"]').first.click()
+    click(page, page.locator('a[href$="/chapter-0A.html"]'), 'appendixA-introduction', excerpt=True)
+    click(page, page.locator('article a[href$="/A.1.html"]'), 'A.1')
+    for number in range(2, 8):
+        click(page, page.locator('.md-footer__link--next'), f'A.{number}')
+    click(page, page.locator('.md-footer__link--next'), 'appendixB-introduction', excerpt=True)
+    click(page, page.locator('article a[href$="/B.1.html"]'), 'B.1')
+    for number in range(2, 9):
+        click(page, page.locator('.md-footer__link--next'), f'B.{number}')
+    click(page, page.locator('.md-footer__link--next'), 'appendixC-introduction', excerpt=True)
+    click(page, page.locator('article a[href$="/C.1.html"]'), 'C.1')
+    for number in range(2, 8):
+        click(page, page.locator('.md-footer__link--next'), f'C.{number}')
+    click(page, page.locator('article a[href$="/training.html#T.1"]'), 'C7-data-prerequisite', excerpt=True)
+    section_anchor(page, 'T.1', 'T.1', 'training-data-prerequisite.png')
+    click(page, page.locator('article a').filter(has_text='固定資料包說明'), 'T1-fixed-assets', excerpt=True)
+    receipts[-1]['git_lfs_install_visible'] = '需安裝 Git LFS' in page.locator('article').inner_text()
+    receipts[-1]['git_lfs_install_command_visible'] = 'git lfs install --local' in page.locator('article').inner_text()
+
+    for origin, target, label, shot in [
+        ('5.7.html', 'T.4', 'resume-to-text-and-sft', 'training-T4.png'),
+        ('15.13.html', 'T.8', 'fair-comparison-to-architecture', 'training-T8.png'),
+        ('18.1.html', 'T.10', 'teacher-to-distillation', 'training-T10.png'),
+    ]:
+        page.goto(BASE + origin, wait_until='networkidle')
+        capture(page, label + '-origin')
+        click(page, page.locator('article a[href$="/training.html#' + target + '"]'), label)
+        section_anchor(page, target, label, shot)
+
+    page.goto(BASE + 'training.html', wait_until='networkidle')
+    capture(page, 'training-guide-introduction', excerpt=True)
+    receipts[-1]['all_training_headings'] = page.locator('article h2').all_inner_texts()
+    click(page, page.locator('article a[href$="/7.11.html"]'), 'T4-pretrained-continuation', excerpt=True)
+    page.goto(BASE + '16.1.html', wait_until='networkidle')
+    capture(page, 'efficiency-measurement-origin')
+    click(page, page.locator('article a').filter(has_text='T.8的效率量測方法'), 'efficiency-measurement-link')
+    if page.locator('[id="efficiency-measurement"]').count():
+        section_anchor(page, 'efficiency-measurement', 'efficiency-measurement', 'training-efficiency-measurement.png')
+    page.goto(BASE + '19.11.html', wait_until='networkidle')
+    capture(page, 'chapter19-state-targets')
+    receipts[-1]['important_external_targets'] = page.locator('article a').evaluate_all(
+        'as => as.map(a=>({text:a.innerText,href:a.href})).filter(a=>/公開清單|Hugging Face|訓練器原始碼/.test(a.text))')
+    click(page, page.locator('article a[href$="/5.7.html"]'), 'chapter19-checkpoint-prerequisite', excerpt=True)
+    page.goto(BASE + '19.12.html', wait_until='networkidle')
+    click(page, page.locator('article a[href$="/20.1.html"]'), 'chapter19-body-to-natural-context', excerpt=True)
+    browser.close()
+
+(OUT / 'browser-path-receipt.json').write_text(json.dumps(receipts, ensure_ascii=False, indent=2) + '\n')

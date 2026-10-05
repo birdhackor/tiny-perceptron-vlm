@@ -1,0 +1,87 @@
+from pathlib import Path
+import hashlib
+import json
+import re
+import shutil
+import urllib.request
+from playwright.sync_api import sync_playwright
+
+ROOT = Path('/workspace/tiny-perceptron-vlm')
+TMP = ROOT / 'outputs/natural-v4/continuity-research/modal-preference'
+OUT = ROOT / 'docs/continuity-reviews/artifacts/natural-v4/modal-preference'
+BASE = 'http://127.0.0.1:8788/'
+OUT.mkdir(parents=True, exist_ok=True)
+(OUT / 'svg-originals').mkdir(exist_ok=True)
+(OUT / 'figure-renders').mkdir(exist_ok=True)
+(OUT / 'navigation').mkdir(exist_ok=True)
+receipts = {'renderer': '/usr/bin/chromium via Python Playwright', 'figures': [], 'navigation': [], 'outputs': []}
+
+def sha(data):
+    return hashlib.sha256(data).hexdigest()
+
+with sync_playwright() as pw:
+    browser = pw.chromium.launch(executable_path='/usr/bin/chromium', headless=True, args=['--no-sandbox'])
+    page = browser.new_page(viewport={'width': 1280, 'height': 900}, device_scale_factor=1)
+    for fn in json.loads((TMP / 'figures.json').read_text()):
+        source = ROOT / fn
+        raw = source.read_bytes()
+        url = BASE + 'figures/' + source.name
+        served = urllib.request.urlopen(url).read()
+        assert served == raw, (fn, 'preview/source mismatch')
+        shutil.copyfile(source, OUT / 'svg-originals' / source.name)
+        match = re.search(rb'viewBox="([^"]+)"', raw)
+        dims = [float(n) for n in match.group(1).split()] if match else [0, 0, 1000, 650]
+        width, height = int(dims[2]), int(dims[3])
+        page.set_viewport_size({'width': width, 'height': height})
+        response = page.goto(url, wait_until='networkidle')
+        assert response.status == 200
+        image = OUT / 'figure-renders' / (source.stem + '.png')
+        page.screenshot(path=str(image), full_page=True)
+        receipts['figures'].append({'source': fn, 'source_sha256': sha(raw), 'preview_url': url, 'served_sha256': sha(served), 'original': str((OUT / 'svg-originals' / source.name).relative_to(ROOT)), 'render': str(image.relative_to(ROOT)), 'render_sha256': sha(image.read_bytes()), 'viewport': [width, height]})
+        print('Rendered', fn)
+    page.set_viewport_size({'width': 1280, 'height': 900})
+    for start, expected in [('10.11.html', '11.1.html'), ('11.16.html', '12.1.html'), ('12.14.html', '13.1.html'), ('13.17.html', '14.1.html')]:
+        page.goto(BASE + start, wait_until='domcontentloaded')
+        link = page.locator('a.md-footer__link--next')
+        label, href = link.inner_text(), link.get_attribute('href')
+        link.click()
+        page.wait_for_load_state('domcontentloaded')
+        assert page.url == BASE + expected
+        shot = OUT / 'navigation' / (start[:-5] + '-next.png')
+        page.screenshot(path=str(shot))
+        receipts['navigation'].append({'kind': 'chapter_boundary_next_click', 'from': BASE + start, 'visible_link': label, 'href': href, 'destination': page.url, 'heading': page.locator('article h1').inner_text(), 'visible_intro_excerpt': page.locator('article').inner_text()[:550], 'screenshot': str(shot.relative_to(ROOT))})
+    cases = [('11.3.html', '7.12', '7.12.html'), ('11.5.html', 'T.6的固定實驗入口', 'training.html#T.6'), ('7.16.html', 'T.4', 'training.html#T.4'), ('14.1.html', 'T.8', 'training.html#T.8'), ('13.9.html', 'T.7', 'training.html#T.7'), ('11.14.html', '20.9', '20.9.html'), ('11.15.html', '第20章', '20.1.html'), ('11.16.html', '20.10', '20.10.html'), ('11.16.html', '20.11', '20.11.html'), ('12.13.html', '20.12', '20.12.html'), ('12.14.html', '20.13', '20.13.html'), ('13.17.html', '19.8', '19.8.html'), ('13.2.html', '7.3答案遮罩', '7.3.html'), ('12.9.html', '10.7展開與標籤錯位', '10.7.html')]
+    for index, (start, text, expected) in enumerate(cases):
+        page.goto(BASE + start, wait_until='domcontentloaded')
+        link = page.locator('article a').filter(has_text=text).first
+        label, href = link.inner_text(), link.get_attribute('href')
+        link.click()
+        page.wait_for_load_state('domcontentloaded')
+        assert page.url == BASE + expected, (start, text, page.url)
+        fragment = expected.split('#', 1)[1] if '#' in expected else None
+        target = page.locator('[id="' + fragment + '"]') if fragment else page.locator('article h1')
+        assert target.count() == 1
+        target.scroll_into_view_if_needed()
+        heading = target.inner_text()
+        after = target.evaluate('(h)=>{let result=[]; for(let e=h.nextElementSibling;e && !/^H[12]$/.test(e.tagName);e=e.nextElementSibling) {result.push(e.innerText); if(result.join(" ").length>650) break;} return result.join("\\n");}')
+        shot = None
+        if fragment or expected in ['20.13.html', '7.3.html']:
+            dest = OUT / 'navigation' / ('link-' + str(index) + '.png')
+            page.screenshot(path=str(dest))
+            shot = str(dest.relative_to(ROOT))
+        receipts['navigation'].append({'kind': 'meaningful_body_link_click', 'from': BASE + start, 'visible_link': label, 'href': href, 'destination': page.url, 'target_heading': heading, 'visible_target_excerpt': after[:800], 'screenshot': shot})
+    for slug in ['11.5', '12.9', '13.15']:
+        page.goto(BASE + slug + '.html', wait_until='domcontentloaded')
+        containers = page.locator('article .admonition')
+        observed = containers.evaluate_all('(xs)=>xs.filter(x=>x.innerText.includes("實際執行結果")).map(x=>x.innerText)')
+        shot = OUT / 'navigation' / ('output-' + slug + '.png')
+        if observed:
+            item = containers.filter(has_text='實際執行結果').first
+            item.scroll_into_view_if_needed()
+            item.screenshot(path=str(shot))
+        else:
+            raise AssertionError((slug, 'executed output widget absent'))
+        receipts['outputs'].append({'url': page.url, 'observed_widget_text': observed, 'screenshot': str(shot.relative_to(ROOT)), 'scope': 'Observed existing root-built executed preview; this reviewer did not rerun the teaching kernel.'})
+    browser.close()
+(OUT / 'browser-receipts.json').write_text(json.dumps(receipts, ensure_ascii=False, indent=2) + '\n')
+print('Navigation receipts', len(receipts['navigation']), 'Output widgets', len(receipts['outputs']))

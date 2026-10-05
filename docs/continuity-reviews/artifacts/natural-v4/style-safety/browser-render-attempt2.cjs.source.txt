@@ -1,0 +1,76 @@
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
+const { chromium } = require('/opt/codex/runtimes/cua/lib/node_modules/playwright-core');
+const root = '/workspace/tiny-perceptron-vlm';
+const out = path.join(root, 'docs/continuity-reviews/artifacts/natural-v4/style-safety');
+const sha = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
+const figures = [
+  'multimodal_style_scores', 'multimodal_lora_branches', 'audio_calibration_test',
+  'patchify', 'multimodal_expand_image', 'posttrain_signals', 'foundations_tensor_axes',
+  'foundations_answer_alignment', 'foundations_attention', 'foundations_causal',
+  'foundations_prediction_positions', 'fsdd_speaker_holdout'
+];
+const complete = ['course/chapters/08.md', 'course/chapters/09.md', 'course/chapters/10.md'];
+const scopes = {
+  'course/chapters/07.md': [[571,605], [5,36], [64,164], [330,401]],
+  'course/chapters/11.md': [[1,43]],
+  'course/first-steps.md': [[45,103], [129,190]],
+  'course/chapters/01.md': [[204,262], [358,389], [421,520]],
+  'course/chapters/03.md': [[60,118], [152,186]],
+  'course/chapters/04.md': [[5,35], [116,145], [183,229]],
+  'course/chapters/06.md': [[182,234]],
+  'course/chapters/12.md': [[220,259]],
+  'course/training.md': [[219,438], [439,529]],
+  'tiny_perceptron/alignment.py': [[1,28], [66,81]],
+  'tiny_perceptron/data.py': [[1,70]],
+  'tiny_perceptron/multimodal.py': [[1,138], [177,190]],
+  'tiny_perceptron/model.py': [[15,108]]
+};
+async function main() {
+  fs.mkdirSync(path.join(out, 'sources'), {recursive:true});
+  fs.mkdirSync(path.join(out, 'figures'), {recursive:true});
+  fs.mkdirSync(path.join(out, 'browser'), {recursive:true});
+  const records = [];
+  for (const relative of complete) {
+    const bytes = fs.readFileSync(path.join(root, relative));
+    const target = path.join(out, 'sources', relative.replaceAll('/', '__') + '.source.txt');
+    fs.writeFileSync(target, bytes);
+    records.push({original_path:relative, scope:'complete', original_sha256:sha(bytes), snapshot:path.relative(root,target), snapshot_sha256:sha(bytes)});
+  }
+  for (const [relative, ranges] of Object.entries(scopes)) {
+    const bytes = fs.readFileSync(path.join(root,relative));
+    const lines = bytes.toString('utf8').split(/(?<=\n)/);
+    for (const [first,last] of ranges) {
+      const excerpt = Buffer.from(lines.slice(first-1,last).join(''), 'utf8');
+      const suffix = relative.endsWith('.py') ? '.py.source.txt' : '.source.txt';
+      const target = path.join(out,'sources', relative.replaceAll('/','__') + `.L${first}-${last}` + suffix);
+      fs.writeFileSync(target,excerpt);
+      records.push({original_path:relative, scope:{first_line:first,last_line:last}, original_sha256:sha(bytes), snapshot:path.relative(root,target), snapshot_sha256:sha(excerpt)});
+    }
+  }
+  fs.writeFileSync(path.join(out,'source-snapshots.json'), JSON.stringify(records,null,2)+'\n');
+  const browser = await chromium.launch({executablePath:'/usr/bin/chromium',headless:true,args:['--no-sandbox']});
+  const context = await browser.newContext({viewport:{width:1400,height:1000},deviceScaleFactor:1});
+  const page = await context.newPage();
+  const figureRecords = [];
+  for (const name of figures) {
+    const relative = `course/figures/${name}.svg`;
+    const bytes = fs.readFileSync(path.join(root,relative));
+    fs.writeFileSync(path.join(out,'figures', name+'.svg'),bytes);
+    await page.setContent(bytes.toString('utf8'));
+    await page.locator('svg').waitFor();
+    const png = path.join(out,'figures',name+'.png');
+    await page.locator('svg').screenshot({path:png});
+    figureRecords.push({source:relative,source_sha256:sha(bytes),render:path.relative(root,png),render_sha256:sha(fs.readFileSync(png)),rendered_svg_text:await page.locator('svg').innerText().catch(()=>null)});
+  }
+  fs.writeFileSync(path.join(out,'figure-renders.json'),JSON.stringify(figureRecords,null,2)+'\n');
+  const response = await page.goto('http://127.0.0.1:8788/');
+  await page.waitForLoadState('networkidle');
+  const initial = {url:page.url(),status:response.status(),title:await page.title(),chapter_links:await page.locator('a').evaluateAll(links=>links.filter(a=>/chapters\/(07|08|09|10|11)\.html/.test(a.href)).map(a=>({text:a.innerText.trim(),href:a.href}))),guide_links:await page.locator('a').evaluateAll(links=>links.filter(a=>/course\.html|training\.html|first-steps\.html/.test(a.href)).map(a=>({text:a.innerText.trim(),href:a.href})))};
+  fs.writeFileSync(path.join(out,'browser','initial-links.json'),JSON.stringify(initial,null,2)+'\n');
+  fs.writeFileSync(path.join(out,'render-environment.json'),JSON.stringify({node:process.version,platform:process.platform,arch:process.arch,chromium:browser.version(),playwright:require('/opt/codex/runtimes/cua/lib/node_modules/playwright-core/package.json').version,renderer:'Playwright Chromium SVG locator screenshot; no Torch execution',viewport:{width:1400,height:1000},deviceScaleFactor:1},null,2)+'\n');
+  await browser.close();
+  console.log(JSON.stringify({complete_records:complete.length,figures_rendered:figureRecords.length,initial},null,2));
+}
+main().catch(error=>{console.error(error.stack);process.exitCode=1});

@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHONUTF8: "1" # Windows runner 的輸出預設不是 UTF-8，印中文會出錯
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.2.0
+      - name: uv.lock 與 pyproject.toml 一致
+        if: hashFiles('uv.lock') != ''
+        run: uv lock --check
+      - run: uv run --only-group dev ruff check .
+      - run: uv run --only-group dev ruff format --check .
+
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            extra: --extra cpu
+          - os: windows-latest
+            extra: --extra cpu
+          - os: macos-latest
+            extra: "" # macOS 直接用 PyPI 預設的 torch（含 MPS）
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Allow long review evidence paths on Windows
+        if: runner.os == 'Windows'
+        run: git config --global core.longpaths true
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.2.0
+      - run: uv sync ${{ matrix.extra }}
+      - run: uv run ${{ matrix.extra }} python scripts/check_env.py
+      - run: uv run ${{ matrix.extra }} pytest --junitxml=outputs/pytest-results.xml
+      - name: Preserve failing test details in the job summary
+        if: failure()
+        shell: bash
+        run: |
+          uv run ${{ matrix.extra }} python - <<'PY'
+          import html
+          import os
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+
+          report = Path("outputs/pytest-results.xml")
+          lines = ["## Test failure details", ""]
+          if not report.is_file():
+              lines.append("No JUnit report was written. The original failing step and exit code remain authoritative.")
+          else:
+              for case in ET.parse(report).iter("testcase"):
+                  failure = case.find("failure")
+                  if failure is None:
+                      failure = case.find("error")
+                  if failure is None:
+                      continue
+                  name = case.get("classname", "") + "::" + case.get("name", "")
+                  lines.extend([
+                      "<details><summary>" + html.escape(name) + "</summary>",
+                      "<pre>" + html.escape(failure.text or failure.get("message", "")) + "</pre>",
+                      "</details>",
+                      "",
+                  ])
+          with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as stream:
+              stream.write("\n".join(lines) + "\n")
+          PY

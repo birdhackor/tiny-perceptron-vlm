@@ -1,0 +1,985 @@
+[
+  {
+    "label": "preceding-ending",
+    "url": "http://127.0.0.1:8788/18.14.html",
+    "title": "18.14 蒸餾後再量化能省多少？ - 小小感知機",
+    "visible_heading": "18.14 蒸餾後再量化能省多少？¶",
+    "article_text_sha256": "7f66724a00a2b65829738be60294288230cd8077465edfc9f43b207949652d10",
+    "previous_next": [
+      {
+        "text": "上一頁\n18.13 圖片／音訊能力能如何蒸餾？",
+        "href": "http://127.0.0.1:8788/18.13.html"
+      },
+      {
+        "text": "下一頁\n本章導讀",
+        "href": "http://127.0.0.1:8788/chapter-19.html"
+      }
+    ],
+    "visible_excerpt": "18.14 蒸餾後再量化能省多少？¶\n\n先選較小學生，讓它學教師，再把學生權重存成低位元，可以同時利用兩種省成本方式。但它們改動的東西不同：學生縮小減少需要保存的數字，蒸餾希望改善小學生品質；量化減少部分數字每格的位元，並可能增加還原誤差。只比較教師與最終量化學生，會看不出哪一步帶來品質變化。\n\n實驗應保留四組：教師、同架構的普通SFT學生、蒸餾學生、量化蒸餾學生。前兩種學生架構相同，權重bytes通常相同，品質差異才主要反映學習訊號；後兩組可以隔離量化的影響。每組都在同一獨立資料上量正確率、格式與行為，再一起列成本，不能只有teacher與最終版兩個端點。\n\n下面只檢查結構儲存，不執行任何蒸餾。教師架構寬16、兩層，學生寬8、一層；量化副本換掉學生的Linear，其他嵌入與正規化保留浮點。算原始權重數字與buffer，讓我們先知道這條組合路線在此模型能省多少。\n\nimport copy\nfrom tiny_perceptron.model import TinyLM, ModelConfig\nfrom tiny_perceptron.quantization import replace_linear_layers\n\nteacher = TinyLM(ModelConfig(width=16, layers=2))\nstudent = TinyLM(ModelConfig(width=8, layers=1))\nquantized = replace_linear_layers(copy.deepcopy(student), bits=4)\n\n\ndef payload_bytes(model):\n    tensors = list(model.parameters()) + list(model.buffers())\n    return sum(t.numel() * t.element_size() for t in tensors)\n\n\nfor name, model in ((\"教師結構\", teacher), (\"學生結構\", student), (\"量化學生結構\", quantized)):\n    print(name, \"bytes\", payload_bytes(model))\nprint(\"量化學生/教師比例\", round(payload_bytes(quantized) / payload_bytes(teacher), 4))\n\n\n實際執行結果 · CPU\n\n教師結構 bytes 67840\n學生結構 bytes 24416\n量化學生結構 bytes 15680\n量化學生/教師比例 0.2311\n\n\n輸出應是67840、24416、15680bytes，最後比例約0.2311。學生架構先減少參數，四位元轉換再縮到15680；它沒有把完整學生縮成八分之一，因為一些層沒量化、scale與bias仍需要儲存。payload_bytes同時算parameters和buffers，避免轉換後量化權重登記成buffer就從報告消失。對每個tensor，numel()數它有多少元素，element_size()給每個元素佔幾個bytes，兩者相乘才是這張表的儲存量；最後把各表相加。這些是數字payload，不是磁碟檔案或執行峰值。\n\n三個模型都隨機初始化，名稱中的「結構」提醒你：此例只確認成本組合，沒有宣稱學生已學會教師。正式流程應先執行蒸餾、保存與驗證該學生，再對同一份權重做PTQ，最後重跑品質與行為保留。訓練過程的教師算力與生成資料成本也要另算，不能因為部署時只放學生就忽略它們。\n\n現在可用18.10的實際寬32學生補上這四個階段。每版用共同十道屬性題、69個真值目標，最後一版直接從已訓練KL學生量化，沒有新增更新：\n\n正式屬性版本\t模型tensor bytes\t私有原檔bytes\t答對／10題\t回答NLL\n寬64教師\t566,272\t587,913\t5\t0.5058\n寬32 CE學生\t134,528\t153,024\t4\t0.4393\n寬32 CE+KL學生\t134,528\t153,099\t4\t0.5037\n同一KL學生packed4\t64,160\t76,287\t3\t0.5960\n\n架構縮小後，數值儲存先變教師的約23.76%；packed4再變同一學生的約47.69%，合計是教師的約11.33%。但最後一步又少答對一題：藍圓形的color?，KL學生答blue，量化後答ble。四版都EOS10/10、沒有非法控制ID，仍有品質退步。檔案大小除了數值還有格式、metadata與浮點檔的隨機狀態，上表沒有optimizer；*-training.pt另存訓練狀態，公開移除狀態後的匯出大小也要重新量。\n\nMoE那條路同樣保留Dense CE、Dense KL與KL後packed4：後者數值64,160 bytes，最後52篇NLL由2.3890升至2.4057，仍低於CE的2.4601；三版原文續段匹配都0/52且仍重複。這個結果同時保留了較小儲存、少許分布收益與未解決的生成問題，沒有讓最後的壓縮比遮住它們。packed推論仍完整反量化到FP32，這組沒有量專用低位元kernel的速度或隔離執行RAM。\n\n蒸餾損失、量化權重的平均絕對差（MAE：逐格比較還原數值與原值，取絕對差後平均）與最終答案品質是不同指標。若四位元讓行為明顯改變，可以先比較八位元，或另設保留敏感層浮點的實驗。本例只量化權重，沒有",
+    "http_status": 200
+  },
+  {
+    "label": "chapter19-introduction",
+    "url": "http://127.0.0.1:8788/chapter-19.html",
+    "title": "本章導讀 - 小小感知機",
+    "visible_heading": "第 19 章：把零件組成一位小小助理¶",
+    "article_text_sha256": "4e3c670a83098c8f10c6222aae6c41e251990df1f752419d197c54719d79bbef",
+    "previous_next": [
+      {
+        "text": "上一頁\n18.14 蒸餾後再量化能省多少？",
+        "href": "http://127.0.0.1:8788/18.14.html"
+      },
+      {
+        "text": "下一頁\n19.1 一個成品，為什麼要試好幾種問題？",
+        "href": "http://127.0.0.1:8788/19.1.html"
+      }
+    ],
+    "visible_excerpt": "第 19 章：把零件組成一位小小助理¶\n\n前面各章像在認識腳踏車的零件：你可以分別研究輪子、煞車與變速器，不必每次都從製造整輛車開始。不過，輪子各自轉得動，還不表示整輛車能安全騎出門。本章把文字、圖片、聲音、工具與回答行為放進同一個小助理，檢查一項新能力加入後，原本的能力是否還在。\n\n這個成品仍住在我們能逐題核對的「小世界」：幾種合成顏色與形狀、高低純音、短句、照抄、資料問答與小數字加法。它沒有靠本章的幾次訓練變成通用中文助理。先從試用與閱讀紀錄開始，再看架構、資料與四個接續訓練階段；後半段把工具執行、效率、壓縮與權重交付接起來。各節的短程式只檢查一個機制；完整訓練使用另外明示的命令，避免讀到一半突然啟動長工作。\n\n本章小節¶\n\n依序閱讀，或點進眼前想弄懂的問題。\n\n19.1 一個成品，為什麼要試好幾種問題？\n19.2 為什麼成品選 MoE，卻仍保留 Dense 路線？\n19.3 同一題的不同版本，怎麼避免跑進兩份考卷？\n19.4 怎麼確認下一階段真的接著上一階段學？\n19.5 讓助理簡短、誠實與守規則，要教哪種示範？\n19.6 圖片與聲音怎麼交給同一位助理？\n19.7 計算器算對，為什麼助理還可能答錯？\n19.8 後訓練方法很多，成品需要全部依序跑嗎？\n19.9 接上較快的做法，先檢查什麼？\n19.10 如何把成品帶到較小的電腦？\n19.11 下載一份權重，就能從中斷處繼續訓練嗎？\n19.12 完成整合後，怎樣回答「這個模型會什麼」？",
+    "clicked_from": "http://127.0.0.1:8788/18.14.html",
+    "clicked_text": "下一頁\n本章導讀",
+    "clicked_href": "http://127.0.0.1:8788/chapter-19.html"
+  },
+  {
+    "label": "19.1",
+    "url": "http://127.0.0.1:8788/19.1.html",
+    "title": "19.1 一個成品，為什麼要試好幾種問題？ - 小小感知機",
+    "visible_heading": "19.1 一個成品，為什麼要試好幾種問題？¶",
+    "article_text_sha256": "64f8735bf662989f4979fdcf82b665cfce7d0645f351dc08e5fd46c3026f9c85",
+    "previous_next": [
+      {
+        "text": "上一頁\n本章導讀",
+        "href": "http://127.0.0.1:8788/chapter-19.html"
+      },
+      {
+        "text": "下一頁\n19.2 為什麼成品選 MoE，卻仍保留 Dense 路線？",
+        "href": "http://127.0.0.1:8788/19.2.html"
+      }
+    ],
+    "clicked_from": "http://127.0.0.1:8788/chapter-19.html",
+    "clicked_text": "試用與閱讀紀錄",
+    "clicked_href": "http://127.0.0.1:8788/19.1.html"
+  },
+  {
+    "label": "19.2",
+    "url": "http://127.0.0.1:8788/19.2.html",
+    "title": "19.2 為什麼成品選 MoE，卻仍保留 Dense 路線？ - 小小感知機",
+    "visible_heading": "19.2 為什麼成品選 MoE，卻仍保留 Dense 路線？¶",
+    "article_text_sha256": "f2047c265bdcc5840a9fbe2d52bb91ee6b95715cbac5920283ca15bcb9dfc7e2",
+    "previous_next": [
+      {
+        "text": "上一頁\n19.1 一個成品，為什麼要試好幾種問題？",
+        "href": "http://127.0.0.1:8788/19.1.html"
+      },
+      {
+        "text": "下一頁\n19.3 同一題的不同版本，怎麼避免跑進兩份考卷？",
+        "href": "http://127.0.0.1:8788/19.3.html"
+      }
+    ],
+    "clicked_from": "http://127.0.0.1:8788/19.1.html",
+    "clicked_text": "下一頁\n19.2 為什麼成品選 MoE，卻仍保留 Dense 路線？",
+    "clicked_href": "http://127.0.0.1:8788/19.2.html"
+  },
+  {
+    "label": "19.3",
+    "url": "http://127.0.0.1:8788/19.3.html",
+    "title": "19.3 同一題的不同版本，怎麼避免跑進兩份考卷？ - 小小感知機",
+    "visible_heading": "19.3 同一題的不同版本，怎麼避免跑進兩份考卷？¶",
+    "article_text_sha256": "91a46b4aa36dafa41679401d84a870a0671ed6b4be2630f4a27bc5262a7e11db",
+    "previous_next": [
+      {
+        "text": "上一頁\n19.2 為什麼成品選 MoE，卻仍保留 Dense 路線？",
+        "href": "http://127.0.0.1:8788/19.2.html"
+      },
+      {
+        "text": "下一頁\n19.4 怎麼確認下一階段真的接著上一階段學？",
+        "href": "http://127.0.0.1:8788/19.4.html"
+      }
+    ],
+    "clicked_from": "http://127.0.0.1:8788/19.2.html",
+    "clicked_text": "下一頁\n19.3 同一題的不同版本，怎麼避免跑進兩份考卷？",
+    "clicked_href": "http://127.0.0.1:8788/19.3.html"
+  },
+  {
+    "label": "19.4",
+    "url": "http://127.0.0.1:8788/19.4.html",
+    "title": "19.4 怎麼確認下一階段真的接著上一階段學？ - 小小感知機",
+    "visible_heading": "19.4 怎麼確認下一階段真的接著上一階段學？¶",
+    "article_text_sha256": "5798d55ae276da013f02fb1d2411f5d1f6a7f07e14e721c244d8e2e78e68c01f",
+    "previous_next": [
+      {
+        "text": "上一頁\n19.3 同一題的不同版本，怎麼避免跑進兩份考卷？",
+        "href": "http://127.0.0.1:8788/19.3.html"
+      },
+      {
+        "text": "下一頁\n19.5 讓助理簡短、誠實與守規則，要教哪種示範？",
+        "href": "http://127.0.0.1:8788/19.5.html"
+      }
+    ],
+    "visible_excerpt": "19.4 怎麼確認下一階段真的接著上一階段學？¶\n\n一位學生讀完課文再練習回答，和另一位學生直接練習回答，都可能得到好看的結果。但若我們想研究「讀書後再練習」這條路，就必須確認練習的人確實是剛讀完的那位。整合模型也是如此：各章獨立實驗的權重不能因為檔名都叫model.pt，就被當成同一個成品接續長大。\n\n前置是為何分預訓練與後訓練、只學回答位置、儲存訓練狀態與本成品的Dense／MoE選擇；偏好分支的兩份模型角色另見後訓練角色地圖。checkpoint是某一時刻的權重及相關狀態快照。本成品固定架構與tokenizer，先pretrain，再載入那份權重做SFT；後面的模態與偏好階段，也儲存自己讀進來的父檔案指紋。指紋是從檔案bytes算出的摘要，用來辨認實際讀的是哪一份檔案，不是替模型加能力。\n\n放大圖解 開啟原圖 ↗\n\n先從一筆資料看兩種教法的差別。下面只建立隨機Dense模型並各計一次誤差，不執行完整成品訓練。Dense示範每層只有一組前饋規則；正式成品則用MoE的多組expert與路由。短程式省去分派，是為了只看「哪些位置要學」，不能把它的模型誤當正式MoE權重。\n\nbuild_dataset()依固定規則產生資料，回傳splits與資料清單manifest；splits[\"train\"]是訓練記錄串列，_表示此處暫不使用第二個回傳值。每筆記錄用task標任務、user放問題、answer放示範回答。next(...)取第一筆style記錄，下面也印出那筆問答，讓你能知道誤差在量什麼。\n\nimport torch\n\nfrom tiny_perceptron.capstone import CapstoneModel, build_dataset, default_config, prepare_batch\nfrom tiny_perceptron.data import IGNORE\nfrom tiny_perceptron.model import masked_loss\n\ntorch.manual_seed(42)\nsplits, _ = build_dataset()\nrow = next(row for row in splits[\"train\"] if row[\"task\"] == \"style\")\nprint(\"問題\", row[\"user\"], \"示範回答\", row[\"answer\"])\nmodel = CapstoneModel(default_config(dense=True))\nfor pretrain in (True, False):\n    batch, labels = prepare_batch([row], pretrain=pretrain)\n    result = model(**batch)\n    loss = masked_loss(result[\"logits\"], labels)\n    print(\"預訓練\" if pretrain else \"SFT\", \"有效目標\", int((labels != IGNORE).sum()), \"誤差有限\", bool(loss.isfinite()))\n\n\n實際執行結果 · CPU\n\n問題 照抄數字29，只要答案。 示範回答 DIRECT:29\n預訓練 有效目標 43 誤差有限 True\nSFT 有效目標 10 誤差有限 True\n\n\n本例問題是「照抄數字29，只要答案。」，示範是DIRECT:29。prepare_batch把它轉成模型輸入字典batch與下一位置的目標編號labels；**batch將字典各欄展開成模型的具名參數，例如輸入編號ids。result[\"logits\"]是每個位置對候選編號的分數，masked_loss只計沒有被忽略的位置。\n\n預訓練版本把短文字裡每個下一byte都當目標；SFT版本提供對話前文，只把回答及結束編號當目標，因此本例的有效目標數分別是43與10。IGNORE是「這個位置不計回答誤差」的標記，不是從模型視野刪掉前文。兩行應印出有限誤差，這只證明資料與計分接得上，不表示預訓練更有效，也不比較兩種不同目標的loss高低。\n\n本小世界的預訓練材料把訓練家族的題目與標準回答接成短文字，不放對話角色，逐個下一byte學習。它沒有讀完大型網路語料，也不是用兩套全然不同內容來證明預訓練的好處；這輪主要演示同一個模型如何接續改變學習目標。正式流程每站會另測同一份能力矩陣，讓我們知道哪一站改善了哪項能力、又傷到哪項。\n\n正式流程使用固定資料版本capstone-small-world-v2、種子42與NVIDIA L4。前三站沿同一核心接續訓練，DPO則從joint接出比較分支；每站都評估同一份84題驗證資料。\n\n階段\t從哪裡接續\t這一站練什麼\t完成更新\t驗證整題正確\n預訓練\t隨機權重\t不帶角色的文字續寫\t300\t0／84\nSFT\t預訓練權重\t文字對話中的助理回答\t1,400\t42／84\njoint\tSFT權重\t文字、圖片、聲音與聯合示範\t600\t75／84\nDPO比較分支\tjoint權重\t比較偏好回答，並重練示範\t100\t71／84\n\n前三站都在交叉熵之外加入係數0.01的路由平衡項，避免少數專家獨占工作。實際學習目標數依序是364,409、647,067、249,100，包含反覆抽到的下一byte或EOS位置，不是不同文章數。DPO的41,403個目標只計重練示範的交叉熵位置，沒有包含",
+    "clicked_from": "http://127.0.0.1:8788/19.3.html",
+    "clicked_text": "下一頁\n19.4 怎麼確認下一階段真的接著上一階段學？",
+    "clicked_href": "http://127.0.0.1:8788/19.4.html"
+  },
+  {
+    "label": "19.5",
+    "url": "http://127.0.0.1:8788/19.5.html",
+    "title": "19.5 讓助理簡短、誠實與守規則，要教哪種示範？ - 小小感知機",
+    "visible_heading": "19.5 讓助理簡短、誠實與守規則，要教哪種示範？¶",
+    "article_text_sha256": "7bf0a856a515c264fa1af0c60f0e793e16752bb81d07081e78e37ea39ac9b2f6",
+    "previous_next": [
+      {
+        "text": "上一頁\n19.4 怎麼確認下一階段真的接著上一階段學？",
+        "href": "http://127.0.0.1:8788/19.4.html"
+      },
+      {
+        "text": "下一頁\n19.6 圖片與聲音怎麼交給同一位助理？",
+        "href": "http://127.0.0.1:8788/19.6.html"
+      }
+    ],
+    "clicked_from": "http://127.0.0.1:8788/19.4.html",
+    "clicked_text": "下一頁\n19.5 讓助理簡短、誠實與守規則，要教哪種示範？",
+    "clicked_href": "http://127.0.0.1:8788/19.5.html"
+  },
+  {
+    "label": "19.6",
+    "url": "http://127.0.0.1:8788/19.6.html",
+    "title": "19.6 圖片與聲音怎麼交給同一位助理？ - 小小感知機",
+    "visible_heading": "19.6 圖片與聲音怎麼交給同一位助理？¶",
+    "article_text_sha256": "fd2f2dae285ca383d6a05491353c7da62878c2eef5b902e430eada292db38277",
+    "previous_next": [
+      {
+        "text": "上一頁\n19.5 讓助理簡短、誠實與守規則，要教哪種示範？",
+        "href": "http://127.0.0.1:8788/19.5.html"
+      },
+      {
+        "text": "下一頁\n19.7 計算器算對，為什麼助理還可能答錯？",
+        "href": "http://127.0.0.1:8788/19.7.html"
+      }
+    ],
+    "clicked_from": "http://127.0.0.1:8788/19.5.html",
+    "clicked_text": "下一頁\n19.6 圖片與聲音怎麼交給同一位助理？",
+    "clicked_href": "http://127.0.0.1:8788/19.6.html"
+  },
+  {
+    "label": "19.7",
+    "url": "http://127.0.0.1:8788/19.7.html",
+    "title": "19.7 計算器算對，為什麼助理還可能答錯？ - 小小感知機",
+    "visible_heading": "19.7 計算器算對，為什麼助理還可能答錯？¶",
+    "article_text_sha256": "81e624bc1eb11f13153ae2f6a67c26fd4e1b1681f66baf353ba310771a48c350",
+    "previous_next": [
+      {
+        "text": "上一頁\n19.6 圖片與聲音怎麼交給同一位助理？",
+        "href": "http://127.0.0.1:8788/19.6.html"
+      },
+      {
+        "text": "下一頁\n19.8 後訓練方法很多，成品需要全部依序跑嗎？",
+        "href": "http://127.0.0.1:8788/19.8.html"
+      }
+    ],
+    "clicked_from": "http://127.0.0.1:8788/19.6.html",
+    "clicked_text": "下一頁\n19.7 計算器算對，為什麼助理還可能答錯？",
+    "clicked_href": "http://127.0.0.1:8788/19.7.html"
+  },
+  {
+    "label": "19.8",
+    "url": "http://127.0.0.1:8788/19.8.html",
+    "title": "19.8 後訓練方法很多，成品需要全部依序跑嗎？ - 小小感知機",
+    "visible_heading": "19.8 後訓練方法很多，成品需要全部依序跑嗎？¶",
+    "article_text_sha256": "a1cac28b0eff23fb2cd2072ed2e8d8e01004bb3cbc5140c5c100b4a46570df50",
+    "previous_next": [
+      {
+        "text": "上一頁\n19.7 計算器算對，為什麼助理還可能答錯？",
+        "href": "http://127.0.0.1:8788/19.7.html"
+      },
+      {
+        "text": "下一頁\n19.9 接上較快的做法，先檢查什麼？",
+        "href": "http://127.0.0.1:8788/19.9.html"
+      }
+    ],
+    "clicked_from": "http://127.0.0.1:8788/19.7.html",
+    "clicked_text": "下一頁\n19.8 後訓練方法很多，成品需要全部依序跑嗎？",
+    "clicked_href": "http://127.0.0.1:8788/19.8.html"
+  },
+  {
+    "label": "19.9",
+    "url": "http://127.0.0.1:8788/19.9.html",
+    "title": "19.9 接上較快的做法，先檢查什麼？ - 小小感知機",
+    "visible_heading": "19.9 接上較快的做法，先檢查什麼？¶",
+    "article_text_sha256": "880271c595484b08391086f25eaf4657f0d8c35125b3ac42f19a987208f7db24",
+    "previous_next": [
+      {
+        "text": "上一頁\n19.8 後訓練方法很多，成品需要全部依序跑嗎？",
+        "href": "http://127.0.0.1:8788/19.8.html"
+      },
+      {
+        "text": "下一頁\n19.10 如何把成品帶到較小的電腦？",
+        "href": "http://127.0.0.1:8788/19.10.html"
+      }
+    ],
+    "clicked_from": "http://127.0.0.1:8788/19.8.html",
+    "clicked_text": "下一頁\n19.9 接上較快的做法，先檢查什麼？",
+    "clicked_href": "http://127.0.0.1:8788/19.9.html"
+  },
+  {
+    "label": "19.10",
+    "url": "http://127.0.0.1:8788/19.10.html",
+    "title": "19.10 如何把成品帶到較小的電腦？ - 小小感知機",
+    "visible_heading": "19.10 如何把成品帶到較小的電腦？¶",
+    "article_text_sha256": "ee31d6f72e564538d2e63e25744f9558f26c0b3c4542fc97acced5b107c40b0a",
+    "previous_next": [
+      {
+        "text": "上一頁\n19.9 接上較快的做法，先檢查什麼？",
+        "href": "http://127.0.0.1:8788/19.9.html"
+      },
+      {
+        "text": "下一頁\n19.11 下載一份權重，就能從中斷處繼續訓練嗎？",
+        "href": "http://127.0.0.1:8788/19.11.html"
+      }
+    ],
+    "clicked_from": "http://127.0.0.1:8788/19.9.html",
+    "clicked_text": "下一頁\n19.10 如何把成品帶到較小的電腦？",
+    "clicked_href": "http://127.0.0.1:8788/19.10.html"
+  },
+  {
+    "label": "19.11",
+    "url": "http://127.0.0.1:8788/19.11.html",
+    "title": "19.11 下載一份權重，就能從中斷處繼續訓練嗎？ - 小小感知機",
+    "visible_heading": "19.11 下載一份權重，就能從中斷處繼續訓練嗎？¶",
+    "article_text_sha256": "dd99aa2b5c0e54bfe6052fadd521b24fa6476a2cebdeef50b4a4dc0266ac30be",
+    "previous_next": [
+      {
+        "text": "上一頁\n19.10 如何把成品帶到較小的電腦？",
+        "href": "http://127.0.0.1:8788/19.10.html"
+      },
+      {
+        "text": "下一頁\n19.12 完成整合後，怎樣回答「這個模型會什麼」？",
+        "href": "http://127.0.0.1:8788/19.12.html"
+      }
+    ],
+    "visible_excerpt": "19.11 下載一份權重，就能從中斷處繼續訓練嗎？¶\n\n把助理交給另一位學生時，有兩種需求：一位想直接試用，另一位想接著完成訓練。第一位需要模型權重與正確的結構、tokenizer；第二位還需要更新器狀態、隨機狀態、抽樣位置與訓練階段。只帶走期末作業，和帶走能繼續作業的完整工作桌，資料量與用途不同。\n\n前置是checkpoint與resume、tokenizer與模型的配套、本章父階段與量化、Dense學生兩條壓縮路線。FP32成品使用capstone-v1格式，量化儲存版使用capstone-ptq-v1；檔案另外標明資料版本與階段。公開推論檔可以去掉更新器等狀態，方便下載；去掉之後就不能稱能完全恢復原訓練軌跡。\n\nfrom pathlib import Path\nfrom tempfile import TemporaryDirectory\n\nfrom tiny_perceptron.capstone import CapstoneModel, load_capstone, save_capstone\n\nmodel = CapstoneModel()\nwith TemporaryDirectory() as directory:\n    path = Path(directory) / \"example.pt\"\n    save_capstone(path, model, stage=\"sft\", step=0, inference_only=True)\n    loaded, metadata = load_capstone(path)\n    print(\"格式\", metadata[\"format_version\"], \"訓練步數\", metadata[\"step\"])\n    print(\"只供推論\", metadata[\"inference_only\"], \"參數相同\", model.description() == loaded.description())\n\n\n實際執行結果 · CPU\n\n格式 capstone-v1 訓練步數 0\n只供推論 True 參數相同 True\n\n\n這段把隨機模型存到暫存資料夾，再真的讀回，結束後暫存夾自動清除。step=0明確表示沒有完成SFT；stage=\"sft\"是格式標籤，不能拿來冒充已訓成果。輸出應為capstone-v1、0、True、True；最後一個True只確認架構與參數數量描述一致，完整數值與逐題輸出相等還要另檢。\n\n正式交付把小型合成資料與來源規格保留在本專案，權重放Hugging Face公開模型庫。本輪已逐檔匿名下載、核對指紋並讀回全部11份模型，正式公開清單固定在revision 33c6898f0676fccc4f5f6114e3b93a4f9ebaeaed。revision像這一版包裹的封條編號；SHA-256則是每個檔案的內容指紋，不只檢查檔名相同。下載不需要登入或提供token。\n\n先照19.1準備Python環境，在專案資料夾執行：\n\npython scripts/fetch_capstone.py --list\npython scripts/fetch_capstone.py --stage joint\n\n\n--list只印出11份清單，不下載權重，也不訓練。每一行的stage是下一行--stage可用的名字；joint是驗證後選出的推薦成品。其他名稱可這樣讀：\n\n可以下載的名字\t用途\npretrain、sft、joint、dpo\t四站FP32推論檔，用來比較加入一項訓練後的變化\njoint-int4、joint-int8\t推薦joint的4／8-bit儲存版\ndpo-int4、dpo-int8\t偏好分支的4／8-bit儲存版\nstudent-ce、student-kd、student-kd-int4\t19.10較小Dense學生的答案訓練、蒸餾與蒸餾後量化比較\n\nFP32指權重以32-bit浮點數儲存；int4與int8指這裡的壓縮儲存格式，載入後仍還原成FP32計算，並不保證較少執行記憶體或更快。Dense學生的能力也不能直接當成joint能力。每個下載資料夾都包含model.pt、模型卡README.md、LICENSE、THIRD_PARTY_NOTICES.md與這次合成資料data.json；設定與tokenizer另存在模型檔內。各份用途、父檔來源與失敗案例要連同模型卡閱讀。\n\n第二行會安裝到checkpoints/capstone/joint/。其中公開的model.pt是1,327,950 bytes，SHA-256為d85cca83cdb4952f4653ef6b58d94562b41403db3a9db2ea31ff57e31246ca16。這是移除訓練內部狀態與整理交付資訊後的正式檔案，不能直接拿19.10實驗當時的檔案bytes當它的大小；權重數值保留相同，封裝資訊有變。下載程式會先核對全部五個檔案的大小、SHA與模型身分，成功後才把完整資料夾放到目的地。若joint已在，就直接使用它；想另留一份，可以改用python scripts/fetch_capstone.py --stage joint --output checkpoints/capstone-second，後續模型路徑也改成checkpoints/capstone-second/joint/model.pt。\n\n量化版可以另外下載，並用相同的",
+    "screenshot": "docs/continuity-reviews/artifacts/natural-v4/integration-tools/chapter19-state.png",
+    "clicked_from": "http://127.0.0.1:8788/19.10.html",
+    "clicked_text": "下一頁\n19.11 下載一份權重，就能從中斷處繼續訓練嗎？",
+    "clicked_href": "http://127.0.0.1:8788/19.11.html"
+  },
+  {
+    "label": "19.12",
+    "url": "http://127.0.0.1:8788/19.12.html",
+    "title": "19.12 完成整合後，怎樣回答「這個模型會什麼」？ - 小小感知機",
+    "visible_heading": "19.12 完成整合後，怎樣回答「這個模型會什麼」？¶",
+    "article_text_sha256": "ef73987938cb83d88ca7a52b471ad425c8efa315e097275e1221149bce83b0b7",
+    "previous_next": [
+      {
+        "text": "上一頁\n19.11 下載一份權重，就能從中斷處繼續訓練嗎？",
+        "href": "http://127.0.0.1:8788/19.11.html"
+      },
+      {
+        "text": "下一頁\n本章導讀",
+        "href": "http://127.0.0.1:8788/chapter-20.html"
+      }
+    ],
+    "visible_excerpt": "19.12 完成整合後，怎樣回答「這個模型會什麼」？¶\n\n一張總分單可能寫著80分，卻沒告訴你計算、聽音、看圖各會多少。多能力模型也是如此：如果照抄題很多，照抄表現很好，就可能蓋住工具流程和圖片的失敗。最終成品要交一張每項能力都有固定分母的矩陣，讓你知道成功在哪裡、限制在哪裡。\n\n前置是獨立評估、工具選擇不同錯誤與本章成品試用。矩陣是一張同考卷、不同階段並排的表。pretrain是先練習接下一個文字片段；SFT是照示範回答練習；joint在本章指文字、圖片、聲音與工具題的聯合訓練，階段接續見19.4。DPO則用同題較偏好的回答作比較訓練，見19.8。這些版本和部署版本都做同一檢查。加入新能力後舊能力下降，就留在表裡；最後選擇哪份權重，也要基於預先說明的validation規則，而不是看test挑最漂亮的一欄。\n\n先確認每項考題真的存在：\n\nfrom collections import Counter\n\nfrom tiny_perceptron.capstone import build_dataset\n\nsplits, _ = build_dataset()\ncounts = Counter(row[\"task\"] for row in splits[\"test\"])\nfor task, count in sorted(counts.items()):\n    print(\"最後檢查\", task, \"分母\", count)\nprint(\"合計\", sum(counts.values()), \"這只是考題數量，不是答對數量\")\n\n\n實際執行結果 · CPU\n\n最後檢查 audio 分母 6\n最後檢查 calculator 分母 12\n最後檢查 concept 分母 6\n最後檢查 image_color 分母 9\n最後檢查 image_shape 分母 9\n最後檢查 joint 分母 18\n最後檢查 missing 分母 3\n最後檢查 rag 分母 3\n最後檢查 safety 分母 3\n最後檢查 style 分母 3\n最後檢查 tool_return 分母 6\n最後檢查 unavailable 分母 12\n合計 90 這只是考題數量，不是答對數量\n\n\n程式只數固定test資料，完全沒有生成回答。輸出的rag是已提供短資料的問答，tool_return是單獨回填工具結果，unavailable是計算器不可用的題目。每個任務的count是那項分母；沒有對應任務就不能報它的成功率。正式評分另外讀取每題原始生成ID、EOS與解析結果，再按該任務規則數正確答案。平均方式也要明示：所有題直接平均會讓題多的能力佔較大比重，各任務等權平均則回答另一個問題。\n\n最後90題已依凍結配方跑完，所有原始回答都保留。先說能力界線：本章推薦的小世界成品仍不會可靠辨識留出的形狀，也會讀錯計算器結果；它只學幾種合成圖形、兩群純音、窄範圍句型與一個加法工具。本章沒有訓練或驗收一般照片理解、中文讀字與真人語音辨識，也沒有網路搜尋或通用安全與信心校準保證。下面每個分母都對應實際題目，而不是把教過的技術名字當成能力。\n\n這張表的第一個分數欄對應報告的action_correct：模型首段必須正常產生EOS，且完整文字等於expected_action。TOOL包含工具名與有順序的參數，DIRECT／ASK也包含回答或求助內容，不是只選對標記。例如真值DIRECT:square、模型DIRECT:circle，雖然解析為合法direct且有EOS，完整字串仍不吻合，該欄算錯；回填題答DIRECT:0而真值DIRECT:1也是如此。\n\n第二個分數欄end_to_end_correct再要求最後答案符合真值。直接回答沒有額外一次生成；工具題則要先執行，再讀回並由模型回答，所以首段請求全對仍可能整題錯。這解釋了下面80／90個首段吻合，但只78／90題完成：差兩題就是計算器得到1、模型讀回後答錯的例子。這個精確字串指標與B.7的選卡分類不是同一個分數。\n\n推薦joint的最後任務\t首段完整輸出吻合\t整題正確\t結果的範圍\n計算器完整迴圈\t12／12\t10／12\t兩次工具算對、模型讀回答錯\n計算器不可用\t12／12\t12／12\t正確ASK且未執行，固定模板\n單獨回填工具結果\t5／6\t5／6\t0+1回報1仍答錯\n加法概念說明\t6／6\t6／6\t固定「把兩個數合起來」答案\n原始圖片顏色\t9／9\t9／9\t原題全為green，另有換色對照\n原始圖片形狀\t0／9\t0／9\t綠色方形全部答circle\n顏色與音高聯合\t18／18\t18／18\tcolor、pitch兩部分都對，不含形狀\n單獨音高\t6／6\t6／6\tlow／high各3題，只辨純音\n已提供短資料的問答\t3／3\t3／3\t桌子／書櫃／抽屜各一題，無新增檢索\n缺數量求助\t3／3\t3／3\t固定ASK句子\n密碼拒絕示範\t3／3\t3／3\t本課窄範圍規則\n簡短照抄\t3／3\t3／3\t指定數字與短回答\n全部題目直接合計\t80／90\t78／90\t不是每項任務等權平均\n\n拒絕題3／3之外，另外87題沒有產生「不能提供他人密碼」這個拒絕句，整題正確75／87；因此不能說模型只是對每題都拒絕。但這仍只排除本題庫的那種誤拒，沒有測完所有正常問法。圖片成對對照是27／36對都正確，其中顏色9／9、形狀0／9、聯合18／18；換聲18對都正確，詳見19.6。只要原圖有錯，換後答對也不能把整對列為成功。\n\n同一份最後考卷，也評了之前各站與壓縮版本。這裡的",
+    "clicked_from": "http://127.0.0.1:8788/19.11.html",
+    "clicked_text": "下一頁\n19.12 完成整合後，怎樣回答「這個模型會什麼」？",
+    "clicked_href": "http://127.0.0.1:8788/19.12.html"
+  },
+  {
+    "label": "chapter20-introduction",
+    "url": "http://127.0.0.1:8788/chapter-20.html",
+    "title": "本章導讀 - 小小感知機",
+    "visible_heading": "第 20 章：做一位能看圖、讀字與聽問題的助理¶",
+    "article_text_sha256": "c62d2a92d57fc59e2124ca9549fac369ad51e99b42afe0d7d72d3b80a8b0ebee",
+    "previous_next": [
+      {
+        "text": "上一頁\n19.12 完成整合後，怎樣回答「這個模型會什麼」？",
+        "href": "http://127.0.0.1:8788/19.12.html"
+      },
+      {
+        "text": "下一頁\n20.1 照片、打字與說話，怎麼交給同一位助理？",
+        "href": "http://127.0.0.1:8788/20.1.html"
+      }
+    ],
+    "visible_excerpt": "第 20 章：做一位能看圖、讀字與聽問題的助理¶\n\n你拿一張照片問：「門口的人在做什麼？」接著又想問：「招牌寫了哪些字？」如果手上忙著拿東西，也許你會直接把問題說出來。這三件事看似很接近，需要的線索卻不一樣：看活動要連起人物與物件，讀字要保留小筆畫，聽問題則要先分清使用者說了什麼。\n\n第 19 章讓我們在小世界裡從頭組合文字、圖片、聲音與工具。這一章換一個起點：接手已經學過大量圖文的模型，再用適合用途的示範調整它。你可以先試用成品，接著學如何準備資料、只更新一小份權重，以及逐項驗收。第 19 章的小 MoE（混合專家模型）仍是理解零件的練習；這裡用另一份底座，不需要先親手完成前一章訓練。\n\n前兩節先看成品怎麼使用。20.3–20.8解釋模型、資料與訓練，20.9–20.12教你按用途核對回答，最後交出一張能力卡。各節的短 Python 例子都可用一般處理器 CPU 執行；它們幫你理解一件事，不會偷偷下載完整模型。成品試用與 GPU 重訓另有清楚的入口；GPU 是擅長同時處理大量計算的處理器。\n\n本章小節¶\n\n依序閱讀，或點進眼前想弄懂的問題。\n\n20.1 照片、打字與說話，怎麼交給同一位助理？\n20.2 不重新訓練，怎麼先開啟成品？\n20.3 只調整一小份權重，為什麼還要載入大模型？\n20.4 怎樣的練習，才能教到我們想要的能力？\n20.5 換個問法，為什麼仍可能是同一道舊題？\n20.6 保留底座，怎麼只學一小份修正？\n20.7 題目和答案都在輸入裡，模型究竟練哪一段？\n20.8 訓練跑完後，怎麼決定可以交付哪個版本？\n20.9 回答出現正確名詞，就算看懂照片了嗎？\n20.10 讀懂意思，和逐字抄寫，是同一項能力嗎？\n20.11 字都認對，為什麼整頁仍可能讀錯？\n20.12 助理答錯時，怎麼分清聽錯與回錯？\n20.13 交給別人使用時，要一起帶走哪些東西？",
+    "clicked_from": "http://127.0.0.1:8788/19.12.html",
+    "clicked_text": "下一頁\n本章導讀",
+    "clicked_href": "http://127.0.0.1:8788/chapter-20.html"
+  },
+  {
+    "label": "20.1-context",
+    "url": "http://127.0.0.1:8788/20.1.html",
+    "title": "20.1 照片、打字與說話，怎麼交給同一位助理？ - 小小感知機",
+    "visible_heading": "20.1 照片、打字與說話，怎麼交給同一位助理？¶",
+    "article_text_sha256": "fe79e38b3b7e3be2c7bacfbe15089e4904c5b19006d05ba381b58c37a9fca7be",
+    "previous_next": [
+      {
+        "text": "上一頁\n本章導讀",
+        "href": "http://127.0.0.1:8788/chapter-20.html"
+      },
+      {
+        "text": "下一頁\n20.2 不重新訓練，怎麼先開啟成品？",
+        "href": "http://127.0.0.1:8788/20.2.html"
+      }
+    ],
+    "visible_excerpt": "20.1 照片、打字與說話，怎麼交給同一位助理？¶\n\n假設你先打字說「接下來請用繁體中文回答」，再附一張照片問「招牌寫什麼」。下一輪改用說話提問時，剛才的照片與語言要求仍然有用。我們希望換的是提問方式，不是每按一個按鈕，就換成一位忘記前文的助理。\n\n先讀過7.1的對話角色與12.14的共同聊天入口，會更容易理解這張路線圖。打字直接成為這一輪的使用者訊息；錄音先交給語音辨識器，轉成它認出的文字，再接進同一份對話。語音辨識常簡稱 ASR，可以把它想成先替你聽寫的同學。聽寫完成的文字叫逐字稿，還不是回答。\n\n圖片另提供畫面線索，和對話一起交給圖文聊天模型。底座是我們接手時已訓練好的權重；本課另練一小份候選修正，像原書旁的修改筆記。修正要和底座一起使用，也可以關閉修正只用底座。兩種配置都能接收相同輸入，最後由驗證決定交付哪一種，詳見20.8。聲音辨識則是前面另一站。\n\n下圖在聊天核心裡標出「可選本課微調」。無論是否加上這份修正，打字、圖片與語音逐字稿仍會交給同一位助理。\n\n放大圖解 開啟原圖 ↗\n\n先用手寫的兩份訊息檢查會合點：\n\nhistory = [{\"role\": \"user\", \"content\": \"接下來請用繁體中文回答。\"}]\ntyped_question = \"請讀出照片裡的招牌。\"\nrecognized_question = \"請讀出照片裡的招牌。\"\ntyped_chat = history + [{\"role\": \"user\", \"content\": typed_question}]\nspoken_chat = history + [{\"role\": \"user\", \"content\": recognized_question}]\nprint(\"聊天模型收到相同對話\", typed_chat == spoken_chat)\nprint(\"這輪問題\", spoken_chat[-1][\"content\"])\n\n\n實際執行結果 · CPU\n\n聊天模型收到相同對話 True\n這輪問題 請讀出照片裡的招牌。\n\n\nhistory是此前的訊息清單。+建立新的清單，把這輪問題接在後面；[-1]取最後一筆。這裡兩個問題由我們寫成相同，所以第一行是True，第二行是招牌問題。程式只檢查對話格式，尚未讀圖或辨識錄音。實際提問還要使用相同照片，才能比較兩條路。\n\n真正說話時，辨識器可能漏字。因此介面會先顯示逐字稿，讓你看見助理將收到什麼，再送出問題。想重新開始才清除歷史與照片；想追問同一張圖，就保留同一段對話。這份成品先用文字回答，朗讀回覆需要另外的語音合成能力。\n\n練習把recognized_question改成「請介紹這張照片」。結果應變False，因為下一站已收到不同問題。記住這個會合點，下一節就可以實際打字、附圖與說話；20.12再教你定位哪一站造成錯誤。\n\n在 Colab 動手做 ↗\n下載本節 .ipynb\n\n要試做本節練習，可開啟 Colab；閱讀與練習使用同一份內容。操作步驟見暖身 W.1，小實驗使用 CPU 即可。",
+    "screenshot": "docs/continuity-reviews/artifacts/natural-v4/integration-tools/chapter20-boundary.png",
+    "clicked_from": "http://127.0.0.1:8788/chapter-20.html",
+    "clicked_text": "20.1 照片、打字與說話，怎麼交給同一位助理？",
+    "clicked_href": "http://127.0.0.1:8788/20.1.html"
+  },
+  {
+    "label": "appendixA-introduction",
+    "url": "http://127.0.0.1:8788/chapter-0A.html",
+    "title": "本章導讀 - 小小感知機",
+    "visible_heading": "A：上下文學習與 RAG¶",
+    "article_text_sha256": "b86376ad630e107041be3cc0e2b42cb3ca4f86aba006960675b30718ef9f8738",
+    "previous_next": [
+      {
+        "text": "上一頁\n自行重訓",
+        "href": "http://127.0.0.1:8788/natural-v4-training.html"
+      },
+      {
+        "text": "下一頁\nA.1 給幾個例子能改變回答嗎？",
+        "href": "http://127.0.0.1:8788/A.1.html"
+      }
+    ],
+    "visible_excerpt": "A：上下文學習與 RAG¶\n\n模型不必把所有知識都永久記在權重裡：本次提示可以先給例子，也可以附上新的文件。本附錄先看例子如何提供任務線索，再用架空書店公告走過找資料、引用來源、分辨失敗與分配上下文空間的流程。每段程式都讓輸入和中途紀錄可檢查，幫你分清「資料已提供」與「模型實際用對資料」兩件事。\n\n本章小節¶\n\n依序閱讀，或點進眼前想弄懂的問題。\n\nA.1 給幾個例子能改變回答嗎？\nA.2 不在訓練資料裡的資訊怎麼使用？\nA.3 文件多了怎麼找相關段落？\nA.4 答案能回到來源嗎？\nA.5 答錯是沒找到還是沒用好？\nA.6 找不到或文件不可靠時怎麼辦？\nA.7 多輪對話和答案怎麼分配長度？",
+    "clicked_from": "http://127.0.0.1:8788/20.1.html",
+    "clicked_text": "本章導讀",
+    "clicked_href": "http://127.0.0.1:8788/chapter-0A.html"
+  },
+  {
+    "label": "A.1",
+    "url": "http://127.0.0.1:8788/A.1.html",
+    "title": "A.1 給幾個例子能改變回答嗎？ - 小小感知機",
+    "visible_heading": "A.1 給幾個例子能改變回答嗎？¶",
+    "article_text_sha256": "3a01aba3d7bf1c1bb99027c627d1d6ec46e40ffafa4ff38f38cddbec0364250c",
+    "previous_next": [
+      {
+        "text": "上一頁\n本章導讀",
+        "href": "http://127.0.0.1:8788/chapter-0A.html"
+      },
+      {
+        "text": "下一頁\nA.2 不在訓練資料裡的資訊怎麼使用？",
+        "href": "http://127.0.0.1:8788/A.2.html"
+      }
+    ],
+    "clicked_from": "http://127.0.0.1:8788/chapter-0A.html",
+    "clicked_text": "A.1 給幾個例子能改變回答嗎？",
+    "clicked_href": "http://127.0.0.1:8788/A.1.html"
+  },
+  {
+    "label": "A.2",
+    "url": "http://127.0.0.1:8788/A.2.html",
+    "title": "A.2 不在訓練資料裡的資訊怎麼使用？ - 小小感知機",
+    "visible_heading": "A.2 不在訓練資料裡的資訊怎麼使用？¶",
+    "article_text_sha256": "a932fb4e061109ee6b42f592da92f25512010c061c59a38174bcec8f8ba9321c",
+    "previous_next": [
+      {
+        "text": "上一頁\nA.1 給幾個例子能改變回答嗎？",
+        "href": "http://127.0.0.1:8788/A.1.html"
+      },
+      {
+        "text": "下一頁\nA.3 文件多了怎麼找相關段落？",
+        "href": "http://127.0.0.1:8788/A.3.html"
+      }
+    ],
+    "clicked_from": "http://127.0.0.1:8788/A.1.html",
+    "clicked_text": "下一頁\nA.2 不在訓練資料裡的資訊怎麼使用？",
+    "clicked_href": "http://127.0.0.1:8788/A.2.html"
+  },
+  {
+    "label": "A.3",
+    "url": "http://127.0.0.1:8788/A.3.html",
+    "title": "A.3 文件多了怎麼找相關段落？ - 小小感知機",
+    "visible_heading": "A.3 文件多了怎麼找相關段落？¶",
+    "article_text_sha256": "6856a946178e46cfe54cc8ed32dc44e0131281e7e83f0fb355b0156a284540a8",
+    "previous_next": [
+      {
+        "text": "上一頁\nA.2 不在訓練資料裡的資訊怎麼使用？",
+        "href": "http://127.0.0.1:8788/A.2.html"
+      },
+      {
+        "text": "下一頁\nA.4 答案能回到來源嗎？",
+        "href": "http://127.0.0.1:8788/A.4.html"
+      }
+    ],
+    "clicked_from": "http://127.0.0.1:8788/A.2.html",
+    "clicked_text": "下一頁\nA.3 文件多了怎麼找相關段落？",
+    "clicked_href": "http://127.0.0.1:8788/A.3.html"
+  },
+  {
+    "label": "A.4",
+    "url": "http://127.0.0.1:8788/A.4.html",
+    "title": "A.4 答案能回到來源嗎？ - 小小感知機",
+    "visible_heading": "A.4 答案能回到來源嗎？¶",
+    "article_text_sha256": "fdab6fd01f649f776ec88f66aa6480b75c204e1459d354eccb102bc7f28462fd",
+    "previous_next": [
+      {
+        "text": "上一頁\nA.3 文件多了怎麼找相關段落？",
+        "href": "http://127.0.0.1:8788/A.3.html"
+      },
+      {
+        "text": "下一頁\nA.5 答錯是沒找到還是沒用好？",
+        "href": "http://127.0.0.1:8788/A.5.html"
+      }
+    ],
+    "clicked_from": "http://127.0.0.1:8788/A.3.html",
+    "clicked_text": "下一頁\nA.4 答案能回到來源嗎？",
+    "clicked_href": "http://127.0.0.1:8788/A.4.html"
+  },
+  {
+    "label": "A.5",
+    "url": "http://127.0.0.1:8788/A.5.html",
+    "title": "A.5 答錯是沒找到還是沒用好？ - 小小感知機",
+    "visible_heading": "A.5 答錯是沒找到還是沒用好？¶",
+    "article_text_sha256": "c7b968bee33819243ba503659f810c8d43b817eab1460e0b9abe6ad870c1e10f",
+    "previous_next": [
+      {
+        "text": "上一頁\nA.4 答案能回到來源嗎？",
+        "href": "http://127.0.0.1:8788/A.4.html"
+      },
+      {
+        "text": "下一頁\nA.6 找不到或文件不可靠時怎麼辦？",
+        "href": "http://127.0.0.1:8788/A.6.html"
+      }
+    ],
+    "clicked_from": "http://127.0.0.1:8788/A.4.html",
+    "clicked_text": "下一頁\nA.5 答錯是沒找到還是沒用好？",
+    "clicked_href": "http://127.0.0.1:8788/A.5.html"
+  },
+  {
+    "label": "A.6",
+    "url": "http://127.0.0.1:8788/A.6.html",
+    "title": "A.6 找不到或文件不可靠時怎麼辦？ - 小小感知機",
+    "visible_heading": "A.6 找不到或文件不可靠時怎麼辦？¶",
+    "article_text_sha256": "303fa981dc7a9be7b8db43461740070991f0443559e1d693c4aae8878d9291ed",
+    "previous_next": [
+      {
+        "text": "上一頁\nA.5 答錯是沒找到還是沒用好？",
+        "href": "http://127.0.0.1:8788/A.5.html"
+      },
+      {
+        "text": "下一頁\nA.7 多輪對話和答案怎麼分配長度？",
+        "href": "http://127.0.0.1:8788/A.7.html"
+      }
+    ],
+    "clicked_from": "http://127.0.0.1:8788/A.5.html",
+    "clicked_text": "下一頁\nA.6 找不到或文件不可靠時怎麼辦？",
+    "clicked_href": "http://127.0.0.1:8788/A.6.html"
+  },
+  {
+    "label": "A.7",
+    "url": "http://127.0.0.1:8788/A.7.html",
+    "title": "A.7 多輪對話和答案怎麼分配長度？ - 小小感知機",
+    "visible_heading": "A.7 多輪對話和答案怎麼分配長度？¶",
+    "article_text_sha256": "9dcf2d170faf37bfe2074bd55f3c96160acadefa507e8df4e8852d261432ecdd",
+    "previous_next": [
+      {
+        "text": "上一頁\nA.6 找不到或文件不可靠時怎麼辦？",
+        "href": "http://127.0.0.1:8788/A.6.html"
+      },
+      {
+        "text": "下一頁\n本章導讀",
+        "href": "http://127.0.0.1:8788/chapter-0B.html"
+      }
+    ],
+    "clicked_from": "http://127.0.0.1:8788/A.6.html",
+    "clicked_text": "下一頁\nA.7 多輪對話和答案怎麼分配長度？",
+    "clicked_href": "http://127.0.0.1:8788/A.7.html"
+  },
+  {
+    "label": "appendixB-introduction",
+    "url": "http://127.0.0.1:8788/chapter-0B.html",
+    "title": "本章導讀 - 小小感知機",
+    "visible_heading": "B：從結構化回答到工具使用¶",
+    "article_text_sha256": "19f28a3936b20cb7b69cdf8dcb45d7e05e7e85129694e5b2db51ea41576275a2",
+    "previous_next": [
+      {
+        "text": "上一頁\nA.7 多輪對話和答案怎麼分配長度？",
+        "href": "http://127.0.0.1:8788/A.7.html"
+      },
+      {
+        "text": "下一頁\nB.1 模型怎麼要求程式幫忙？",
+        "href": "http://127.0.0.1:8788/B.1.html"
+      }
+    ],
+    "visible_excerpt": "B：從結構化回答到工具使用¶\n\n當問題需要精確計算，模型可以先提出一張包含工具名稱與參數的請求單，再由本地程式真正運算。B.1–B.4先從123乘45出發，檢查請求格式、執行與返回紀錄，再核對完成信號及步數上限。你會看到模型生成的文字、程式執行的結果與任務是否完成，各自需要留下什麼證據。\n\n工具流程接通後，B.5–B.7再把問題移到請求之前：面對自然語言提問，何時直接回答、何時用計算器、何時先求助？我們會訂策略、訓練一個小模型選動作，再用新數字組合與新問法檢查。B.8最後用人工算例比較回答的可靠性與工具成本，說明要如何往依能力選擇的方向擴展。選對動作、工具真的執行與最後答對，會一路分開核對。\n\n本章小節¶\n\n依序閱讀，或點進眼前想弄懂的問題。\n\nB.1 模型怎麼要求程式幫忙？\nB.2 文字怎麼變成有效呼叫？\nB.3 工具結果怎麼回到對話？\nB.4 任務完成後怎麼停止？\nB.5 同樣有數字，何時需要計算器？\nB.6 模型如何學會選擇下一個動作？\nB.7 工具選擇怎樣才算可靠？\nB.8 依能力與成本，何時值得借助工具？",
+    "clicked_from": "http://127.0.0.1:8788/A.7.html",
+    "clicked_text": "下一頁\n本章導讀",
+    "clicked_href": "http://127.0.0.1:8788/chapter-0B.html"
+  },
+  {
+    "label": "B.1",
+    "url": "http://127.0.0.1:8788/B.1.html",
+    "title": "B.1 模型怎麼要求程式幫忙？ - 小小感知機",
+    "visible_heading": "B.1 模型怎麼要求程式幫忙？¶",
+    "article_text_sha256": "8000c3a611d3e292f9a41df5ca9c1b10def29ba27250e462cdbe6b98dfcb8bbf",
+    "previous_next": [
+      {
+        "text": "上一頁\n本章導讀",
+        "href": "http://127.0.0.1:8788/chapter-0B.html"
+      },
+      {
+        "text": "下一頁\nB.2 文字怎麼變成有效呼叫？",
+        "href": "http://127.0.0.1:8788/B.2.html"
+      }
+    ],
+    "clicked_from": "http://127.0.0.1:8788/chapter-0B.html",
+    "clicked_text": "B.1–B.4",
+    "clicked_href": "http://127.0.0.1:8788/B.1.html"
+  },
+  {
+    "label": "B.2",
+    "url": "http://127.0.0.1:8788/B.2.html",
+    "title": "B.2 文字怎麼變成有效呼叫？ - 小小感知機",
+    "visible_heading": "B.2 文字怎麼變成有效呼叫？¶",
+    "article_text_sha256": "72933b8e30e1976a7b58516b8f43abe4ca0dc776e830448479468b7c3f2e0309",
+    "previous_next": [
+      {
+        "text": "上一頁\nB.1 模型怎麼要求程式幫忙？",
+        "href": "http://127.0.0.1:8788/B.1.html"
+      },
+      {
+        "text": "下一頁\nB.3 工具結果怎麼回到對話？",
+        "href": "http://127.0.0.1:8788/B.3.html"
+      }
+    ],
+    "clicked_from": "http://127.0.0.1:8788/B.1.html",
+    "clicked_text": "下一頁\nB.2 文字怎麼變成有效呼叫？",
+    "clicked_href": "http://127.0.0.1:8788/B.2.html"
+  },
+  {
+    "label": "B.3",
+    "url": "http://127.0.0.1:8788/B.3.html",
+    "title": "B.3 工具結果怎麼回到對話？ - 小小感知機",
+    "visible_heading": "B.3 工具結果怎麼回到對話？¶",
+    "article_text_sha256": "05903d5b2c5dbf6a0433e5607cd55eabfae0927647b4ca3256580cbc7e3700ea",
+    "previous_next": [
+      {
+        "text": "上一頁\nB.2 文字怎麼變成有效呼叫？",
+        "href": "http://127.0.0.1:8788/B.2.html"
+      },
+      {
+        "text": "下一頁\nB.4 任務完成後怎麼停止？",
+        "href": "http://127.0.0.1:8788/B.4.html"
+      }
+    ],
+    "clicked_from": "http://127.0.0.1:8788/B.2.html",
+    "clicked_text": "下一頁\nB.3 工具結果怎麼回到對話？",
+    "clicked_href": "http://127.0.0.1:8788/B.3.html"
+  },
+  {
+    "label": "B.4",
+    "url": "http://127.0.0.1:8788/B.4.html",
+    "title": "B.4 任務完成後怎麼停止？ - 小小感知機",
+    "visible_heading": "B.4 任務完成後怎麼停止？¶",
+    "article_text_sha256": "fd4ada7ea28895edee0c11bee8b591483e4955eb28f4eb4951bbe9bfdbc65558",
+    "previous_next": [
+      {
+        "text": "上一頁\nB.3 工具結果怎麼回到對話？",
+        "href": "http://127.0.0.1:8788/B.3.html"
+      },
+      {
+        "text": "下一頁\nB.5 同樣有數字，何時需要計算器？",
+        "href": "http://127.0.0.1:8788/B.5.html"
+      }
+    ],
+    "clicked_from": "http://127.0.0.1:8788/B.3.html",
+    "clicked_text": "下一頁\nB.4 任務完成後怎麼停止？",
+    "clicked_href": "http://127.0.0.1:8788/B.4.html"
+  },
+  {
+    "label": "B.5",
+    "url": "http://127.0.0.1:8788/B.5.html",
+    "title": "B.5 同樣有數字，何時需要計算器？ - 小小感知機",
+    "visible_heading": "B.5 同樣有數字，何時需要計算器？¶",
+    "article_text_sha256": "d23d11b5dd6750aa89dc2c3ca1af69070730484165542a19b762b0ed84419f8e",
+    "previous_next": [
+      {
+        "text": "上一頁\nB.4 任務完成後怎麼停止？",
+        "href": "http://127.0.0.1:8788/B.4.html"
+      },
+      {
+        "text": "下一頁\nB.6 模型如何學會選擇下一個動作？",
+        "href": "http://127.0.0.1:8788/B.6.html"
+      }
+    ],
+    "clicked_from": "http://127.0.0.1:8788/B.4.html",
+    "clicked_text": "下一頁\nB.5 同樣有數字，何時需要計算器？",
+    "clicked_href": "http://127.0.0.1:8788/B.5.html"
+  },
+  {
+    "label": "B.6",
+    "url": "http://127.0.0.1:8788/B.6.html",
+    "title": "B.6 模型如何學會選擇下一個動作？ - 小小感知機",
+    "visible_heading": "B.6 模型如何學會選擇下一個動作？¶",
+    "article_text_sha256": "81f3aec0c7321e80a53679828b5d6db0aaee43d25feeacedd382c255847e2dd8",
+    "previous_next": [
+      {
+        "text": "上一頁\nB.5 同樣有數字，何時需要計算器？",
+        "href": "http://127.0.0.1:8788/B.5.html"
+      },
+      {
+        "text": "下一頁\nB.7 工具選擇怎樣才算可靠？",
+        "href": "http://127.0.0.1:8788/B.7.html"
+      }
+    ],
+    "clicked_from": "http://127.0.0.1:8788/B.5.html",
+    "clicked_text": "下一頁\nB.6 模型如何學會選擇下一個動作？",
+    "clicked_href": "http://127.0.0.1:8788/B.6.html"
+  },
+  {
+    "label": "B.7",
+    "url": "http://127.0.0.1:8788/B.7.html",
+    "title": "B.7 工具選擇怎樣才算可靠？ - 小小感知機",
+    "visible_heading": "B.7 工具選擇怎樣才算可靠？¶",
+    "article_text_sha256": "beabe2764e72c897067541ad75598372a32fc65f2ccfb05f36fdc9caaffc8ee2",
+    "previous_next": [
+      {
+        "text": "上一頁\nB.6 模型如何學會選擇下一個動作？",
+        "href": "http://127.0.0.1:8788/B.6.html"
+      },
+      {
+        "text": "下一頁\nB.8 依能力與成本，何時值得借助工具？",
+        "href": "http://127.0.0.1:8788/B.8.html"
+      }
+    ],
+    "clicked_from": "http://127.0.0.1:8788/B.6.html",
+    "clicked_text": "下一頁\nB.7 工具選擇怎樣才算可靠？",
+    "clicked_href": "http://127.0.0.1:8788/B.7.html"
+  },
+  {
+    "label": "B.8",
+    "url": "http://127.0.0.1:8788/B.8.html",
+    "title": "B.8 依能力與成本，何時值得借助工具？ - 小小感知機",
+    "visible_heading": "B.8 依能力與成本，何時值得借助工具？¶",
+    "article_text_sha256": "f784cfacf241b6224c4adec935076d71fcc3c79235ada4c2a36e2df2fb8598b9",
+    "previous_next": [
+      {
+        "text": "上一頁\nB.7 工具選擇怎樣才算可靠？",
+        "href": "http://127.0.0.1:8788/B.7.html"
+      },
+      {
+        "text": "下一頁\n本章導讀",
+        "href": "http://127.0.0.1:8788/chapter-0C.html"
+      }
+    ],
+    "clicked_from": "http://127.0.0.1:8788/B.7.html",
+    "clicked_text": "下一頁\nB.8 依能力與成本，何時值得借助工具？",
+    "clicked_href": "http://127.0.0.1:8788/B.8.html"
+  },
+  {
+    "label": "appendixC-introduction",
+    "url": "http://127.0.0.1:8788/chapter-0C.html",
+    "title": "本章導讀 - 小小感知機",
+    "visible_heading": "C：推理步驟、驗證與測試時算力¶",
+    "article_text_sha256": "422941b4f484e16542a7a96f155cfc1d8c769271f045d84eb4c68a81141caf66",
+    "previous_next": [
+      {
+        "text": "上一頁\nB.8 依能力與成本，何時值得借助工具？",
+        "href": "http://127.0.0.1:8788/B.8.html"
+      },
+      {
+        "text": "下一頁\nC.1 寫出中間步驟能幫忙嗎？",
+        "href": "http://127.0.0.1:8788/C.1.html"
+      }
+    ],
+    "visible_excerpt": "C：推理步驟、驗證與測試時算力¶\n\n面對一道題目，寫出步驟、多試幾份答案、選出正解與用回饋訓練，是不同的動作。本附錄用能精確驗證的小算術題，一步步比較步驟正確性、候選命中、選擇方法與計算預算，最後追蹤獎勵如何讓一個答案的機率稍微上升。示例提供可核對的流程與數字；真正的模型能力仍要在新題目上量測。\n\n本章小節¶\n\n依序閱讀，或點進眼前想弄懂的問題。\n\nC.1 寫出中間步驟能幫忙嗎？\nC.2 最後答對代表過程正確嗎？\nC.3 多試幾次能找到正確答案嗎？\nC.4 找得到也選得中嗎？\nC.5 花更多計算值得嗎？\nC.6 正確答案怎麼變成訓練回饋？\nC.7 Reward 怎麼改變輸出機率？",
+    "clicked_from": "http://127.0.0.1:8788/B.8.html",
+    "clicked_text": "下一頁\n本章導讀",
+    "clicked_href": "http://127.0.0.1:8788/chapter-0C.html"
+  },
+  {
+    "label": "C.1",
+    "url": "http://127.0.0.1:8788/C.1.html",
+    "title": "C.1 寫出中間步驟能幫忙嗎？ - 小小感知機",
+    "visible_heading": "C.1 寫出中間步驟能幫忙嗎？¶",
+    "article_text_sha256": "e196ffc5b1ed78aac581e183afbd6412137d1be96ba156f3a3047b65533888ef",
+    "previous_next": [
+      {
+        "text": "上一頁\n本章導讀",
+        "href": "http://127.0.0.1:8788/chapter-0C.html"
+      },
+      {
+        "text": "下一頁\nC.2 最後答對代表過程正確嗎？",
+        "href": "http://127.0.0.1:8788/C.2.html"
+      }
+    ],
+    "clicked_from": "http://127.0.0.1:8788/chapter-0C.html",
+    "clicked_text": "C.1 寫出中間步驟能幫忙嗎？",
+    "clicked_href": "http://127.0.0.1:8788/C.1.html"
+  },
+  {
+    "label": "C.2",
+    "url": "http://127.0.0.1:8788/C.2.html",
+    "title": "C.2 最後答對代表過程正確嗎？ - 小小感知機",
+    "visible_heading": "C.2 最後答對代表過程正確嗎？¶",
+    "article_text_sha256": "975f3dcdb6ee7f5e97d4120056fcf7fd5c88ea040d15ea72581a6afbe1e81e2f",
+    "previous_next": [
+      {
+        "text": "上一頁\nC.1 寫出中間步驟能幫忙嗎？",
+        "href": "http://127.0.0.1:8788/C.1.html"
+      },
+      {
+        "text": "下一頁\nC.3 多試幾次能找到正確答案嗎？",
+        "href": "http://127.0.0.1:8788/C.3.html"
+      }
+    ],
+    "clicked_from": "http://127.0.0.1:8788/C.1.html",
+    "clicked_text": "下一頁\nC.2 最後答對代表過程正確嗎？",
+    "clicked_href": "http://127.0.0.1:8788/C.2.html"
+  },
+  {
+    "label": "C.3",
+    "url": "http://127.0.0.1:8788/C.3.html",
+    "title": "C.3 多試幾次能找到正確答案嗎？ - 小小感知機",
+    "visible_heading": "C.3 多試幾次能找到正確答案嗎？¶",
+    "article_text_sha256": "93fe8c850891e0fb460df1f1001698855eaf07771c05ec7456d4429a301e8aa1",
+    "previous_next": [
+      {
+        "text": "上一頁\nC.2 最後答對代表過程正確嗎？",
+        "href": "http://127.0.0.1:8788/C.2.html"
+      },
+      {
+        "text": "下一頁\nC.4 找得到也選得中嗎？",
+        "href": "http://127.0.0.1:8788/C.4.html"
+      }
+    ],
+    "clicked_from": "http://127.0.0.1:8788/C.2.html",
+    "clicked_text": "下一頁\nC.3 多試幾次能找到正確答案嗎？",
+    "clicked_href": "http://127.0.0.1:8788/C.3.html"
+  },
+  {
+    "label": "C.4",
+    "url": "http://127.0.0.1:8788/C.4.html",
+    "title": "C.4 找得到也選得中嗎？ - 小小感知機",
+    "visible_heading": "C.4 找得到也選得中嗎？¶",
+    "article_text_sha256": "20c75d67d0f2d2e10491a5c2c22355cc6e81921e9048a9d1271ed6d562b7e024",
+    "previous_next": [
+      {
+        "text": "上一頁\nC.3 多試幾次能找到正確答案嗎？",
+        "href": "http://127.0.0.1:8788/C.3.html"
+      },
+      {
+        "text": "下一頁\nC.5 花更多計算值得嗎？",
+        "href": "http://127.0.0.1:8788/C.5.html"
+      }
+    ],
+    "clicked_from": "http://127.0.0.1:8788/C.3.html",
+    "clicked_text": "下一頁\nC.4 找得到也選得中嗎？",
+    "clicked_href": "http://127.0.0.1:8788/C.4.html"
+  },
+  {
+    "label": "C.5",
+    "url": "http://127.0.0.1:8788/C.5.html",
+    "title": "C.5 花更多計算值得嗎？ - 小小感知機",
+    "visible_heading": "C.5 花更多計算值得嗎？¶",
+    "article_text_sha256": "66dc3fcd217f5b5d874381ad7395cfd9ba31ea6e4ce77e663436cd16b97c41d3",
+    "previous_next": [
+      {
+        "text": "上一頁\nC.4 找得到也選得中嗎？",
+        "href": "http://127.0.0.1:8788/C.4.html"
+      },
+      {
+        "text": "下一頁\nC.6 正確答案怎麼變成訓練回饋？",
+        "href": "http://127.0.0.1:8788/C.6.html"
+      }
+    ],
+    "clicked_from": "http://127.0.0.1:8788/C.4.html",
+    "clicked_text": "下一頁\nC.5 花更多計算值得嗎？",
+    "clicked_href": "http://127.0.0.1:8788/C.5.html"
+  },
+  {
+    "label": "C.6",
+    "url": "http://127.0.0.1:8788/C.6.html",
+    "title": "C.6 正確答案怎麼變成訓練回饋？ - 小小感知機",
+    "visible_heading": "C.6 正確答案怎麼變成訓練回饋？¶",
+    "article_text_sha256": "f04d84732ae1a833dc019b455abbdc6f3b47fc144960390c1445633380656057",
+    "previous_next": [
+      {
+        "text": "上一頁\nC.5 花更多計算值得嗎？",
+        "href": "http://127.0.0.1:8788/C.5.html"
+      },
+      {
+        "text": "下一頁\nC.7 Reward 怎麼改變輸出機率？",
+        "href": "http://127.0.0.1:8788/C.7.html"
+      }
+    ],
+    "clicked_from": "http://127.0.0.1:8788/C.5.html",
+    "clicked_text": "下一頁\nC.6 正確答案怎麼變成訓練回饋？",
+    "clicked_href": "http://127.0.0.1:8788/C.6.html"
+  },
+  {
+    "label": "C.7",
+    "url": "http://127.0.0.1:8788/C.7.html",
+    "title": "C.7 Reward 怎麼改變輸出機率？ - 小小感知機",
+    "visible_heading": "C.7 Reward 怎麼改變輸出機率？¶",
+    "article_text_sha256": "2ee2bc8232216e5cb7f4f07feb57e18b510525dbf70b578665ea57d8e81adcbe",
+    "previous_next": [
+      {
+        "text": "上一頁\nC.6 正確答案怎麼變成訓練回饋？",
+        "href": "http://127.0.0.1:8788/C.6.html"
+      },
+      {
+        "text": "下一頁\n專案介紹",
+        "href": "http://127.0.0.1:8788/readme.html"
+      }
+    ],
+    "clicked_from": "http://127.0.0.1:8788/C.6.html",
+    "clicked_text": "下一頁\nC.7 Reward 怎麼改變輸出機率？",
+    "clicked_href": "http://127.0.0.1:8788/C.7.html"
+  },
+  {
+    "label": "C7-data-prerequisite",
+    "url": "http://127.0.0.1:8788/training.html#T.1",
+    "title": "訓練操作 - 小小感知機",
+    "visible_heading": "把一個小實驗做成可檢查的訓練¶",
+    "article_text_sha256": "a7e710908655b1a30e3354c3894333130963442c91931e01ec5a8d21dedd8d37",
+    "previous_next": [
+      {
+        "text": "上一頁\n名詞對照",
+        "href": "http://127.0.0.1:8788/glossary.html"
+      },
+      {
+        "text": "下一頁\n本章導讀",
+        "href": "http://127.0.0.1:8788/chapter-01.html"
+      }
+    ],
+    "visible_excerpt": "把一個小實驗做成可檢查的訓練¶\n\n讀過接字表的例子後，你可能想問：「它能不能真的學好一小組句子？」這頁帶你選一個有限任務、準備例子、更新模型，最後拿沒用來教它的新題檢查。先讀與任務相關的正文，再使用這些指令；這頁是動手時的操作橋樑，不要求第一次開網站就讀完。\n\n指令都從專案根目錄執行，也就是有 pyproject.toml 的資料夾。如何下載專案、啟用 .venv 和執行指令，請先看暖身 W.1；檔案與錯誤訊息見W.7。正文中的短程式先用 CPU 檢查一個機制；本頁另外整理實際更新模型的操作。標明「課程實測」的結果都有固定版本與完整實驗報告，仍可能失敗或只適用很小的題目。你自行更改的步數、資料和設定，要另存自己的結果，不能把課程成績當成重跑保證。\n\n本頁整理第1–19章自製小模型的訓練操作。如果你要重訓第20章的照片、中文讀字與聊天助理，請走自然助理重訓指引：它使用已有圖文能力的底座，另建.venv-natural並取得專用資料。只想先試成品，則走20.2；不需要先跑完本頁訓練。\n\n先決定要拿哪些例子教模型¶\n\n訓練資料是交給模型練習的題目，不是模型已學好的數字。最簡單的文字資料是一篇篇短文；對話資料則保存問題與希望它回答的內容。先看1.2的背誦與新題：教過的題目與用來檢查的新題需要分開，同一句話重複出現不能當成新的能力證據。\n\n第一次動手可先用本頁後面的規則資料。它們由程式生成，不用網路，也容易知道標準答案。如果想用公開短故事、對話、圖片或聲音，可以到固定資料包說明挑選；這批是小型起步樣本，不是完整的大規模語言訓練集。第20章的自然照片、中文招牌、中文聊天與真人華語錄音，另按專用資料指引取得，不能用這份起步包代替。\n\npython scripts/fetch_training_assets.py --list\npython scripts/fetch_training_assets.py --asset tinystories\n\n\n第一行列出可選的包與大小，不訓練模型；第二行只取得 TinyStories 這個短故事樣本包，核對檔案後解到 data/training/。資料包的來源、版本、授權和 SHA-256 都有記錄。SHA-256 是由檔案內容算出的指紋，用來確認取得的內容與記錄一致；它不保證資料本身沒有偏差或錯誤。\n\n現在不只備好了資料，也已完成T.4的兩個小型文字實驗：TinyStories包有512篇完整英文故事，中文詩包有365首完整古典詩。前者選自上游training材料，後者是未切分的詩集；我們在訓練前自行留出一部分來檢查，而不是把包內每篇都交給模型練習。這份自己的最後檢查不能冒稱官方test，唐詩的結果也不能代表現代中文對話能力。完整來源、固定版本與資料授權可由實跑報告追到各資料包的記錄。\n\n把資料讀進訓練工具前，先打開幾筆看實際欄位，再安排未用來教模型的題目。例如選本頁T.4的屬性問答，把單一能力限定為「從列出的屬性回答形狀」，答案必須與shape欄位完全相同。這裡先用可直接閱讀的示意小表練習分組，不需要執行指令，也不代表產生器預設會採用這份切分。\n\n題號\t教學輸入\t標準答案\t題目家族\nA\tcolor=red;shape=square;pitch=low;shape?\tsquare\tred:square:low\nB\tcolor=red;shape=square;pitch=low;describe\tsquare\tred:square:low\nC\tcolor=blue;shape=circle;pitch=high;shape?\tcircle\tblue:circle:high\n\n此例的describe也要求回答形狀。A與B只是同一組屬性換個問法，要放在同一側；可以用A、B教學，把C整個家族留作最後檢查。實際T.4產生的對話紀錄，問題在messages中role為user的content，標準答案在role為assistant的content，family保存題目家族。先查看這三處，就能分清原始資料、教學輸入與希望回答。文字接續的TinyStories則使用text欄位保存完整故事，沒有這種問題／標準回答配對，不應硬把兩種格式當成同一種。\n\n圖片與音訊尤其要核對檔案路徑、尺寸與取樣率。一段錄音是一筆訓練例子；取樣率的「樣本」則是聲音測量點，例如每秒8,000個點，兩者不同。這批FSDD原錄音為8,000點／秒，T.6的音訊訓練入口要求16,000點／秒且不自動轉換；取樣與時間軸見12.1。本節先選資料，使用前需明確重採樣，不能只改檔名。\n\n現在也有真實圖片與錄音的完整實跑。Fashion-MNIST的50張原training圖，十類各按3／1／1張分開，成為我們自己的30／10／10；FSDD的60段則固定jackson教學20段、nicolas驗證20段、theo最後檢查20段，每人0至9各兩次，不把同一說話者拆到三側。服飾測試3/10、真人數字3/20，皆只是一個很小的配方結果，不是官方benchmark或自然圖片問答。錄音從8kHz實際插值成16kHz、點數加倍而時長不變，完整方法見12.2，辨識失敗見12.8。\n\n現在先預測：用A教學，再拿B答對，能否證明模型會做新的屬性組合？按1.2的完整題目分組核對，答案是不能，因為A、B屬於同一家族。把它們一起留在教學側，C留在最後檢查側；C的合格答案是circle，答square就不合格。再選一包，仿照小表寫出一筆教學題、一筆未教過家族的新題、各",
+    "clicked_from": "http://127.0.0.1:8788/C.7.html",
+    "clicked_text": "T.1",
+    "clicked_href": "http://127.0.0.1:8788/training.html#T.1",
+    "anchor_id": "T.1",
+    "anchor_exists": true,
+    "anchor_visible_heading": "先決定要拿哪些例子教模型¶",
+    "section_visible_excerpt": "訓練資料是交給模型練習的題目，不是模型已學好的數字。最簡單的文字資料是一篇篇短文；對話資料則保存問題與希望它回答的內容。先看1.2的背誦與新題：教過的題目與用來檢查的新題需要分開，同一句話重複出現不能當成新的能力證據。\n第一次動手可先用本頁後面的規則資料。它們由程式生成，不用網路，也容易知道標準答案。如果想用公開短故事、對話、圖片或聲音，可以到固定資料包說明挑選；這批是小型起步樣本，不是完整的大規模語言訓練集。第20章的自然照片、中文招牌、中文聊天與真人華語錄音，另按專用資料指引取得，不能用這份起步包代替。\npython scripts/fetch_training_assets.py --list\npython scripts/fetch_training_assets.py --asset tinystories\n\n第一行列出可選的包與大小，不訓練模型；第二行只取得 TinyStories 這個短故事樣本包，核對檔案後解到 data/training/。資料包的來源、版本、授權和 SHA-256 都有記錄。SHA-256 是由檔案內容算出的指紋，用來確認取得的內容與記錄一致；它不保證資料本身沒有偏差或錯誤。\n現在不只備好了資料，也已完成T.4的兩個小型文字實驗：TinyStories包有512篇完整英文故事，中文詩包有365首完整古典詩。前者選自上游training材料，後者是未切分的詩集；我們在訓練前自行留出一部分來檢查，而不是把包內每篇都交給模型練習。這份自己的最後檢查不能冒稱官方test，唐詩的結果也不能代表現代中文對話能力。完整來源、固定版本與資料授權可由實跑報告追到各資料包的記錄。\n把資料讀進訓練工具前，先打開幾筆看實際欄位，再安排未用來教模型的題目。例如選本頁T.4的屬性問答，把單一能力限定為「從列出的屬性回答形狀」，答案必須與shape欄位完全相同。這裡先用可直接閱讀的示意小表練習分組，不需要執行指令，也不代表產生器預設會採用這份切分。\n題號\t教學輸入\t標準答案\t題目家族\nA\tcolor=red;shape=square;pitch=low;shape?\tsquare\tred:square:low\nB\tcolor=red;shape=square;pitch=low;describe\tsquare\tred:square:low\nC\tcolor=blue;shape=circle;pitch=high;shape?\tcircle\tblue:circle:high\n此例的describe也要求回答形狀。A與B只是同一組屬性換個問法，要放在同一側；可以用A、B教學，把C整個家族留作最後檢查。實際T.4產生的對話紀錄，問題在messages中role為user的content，標準答案在role為assistant的content，family保存題目家族。先查看這三處，就能分清原始資料、教學輸入與希望回答。文字接續的TinyStories則使用text欄位保存完整故事，沒有這種問題／標準回答配對，不應硬把兩種格式當成同一種。\n圖片與音訊尤其要核對檔案路徑、尺寸與取樣率。一段錄音是一筆訓練例子；取樣率的「樣本」則是聲音測量點，例如每秒8,000個點，兩者不同。這批FSDD原錄音為8,000點／秒，T.6的音訊訓練入口要求16,000點／秒且不自動轉換；取樣與時間軸見12.1。本節先選資料，使用前需明確重採樣，不能只改檔名。\n現在也有真實圖片與錄音的完整實跑。Fashion-MNIST的50張原training圖，十類各按3／1／1張分開，成為我們自己的30／10／10；FSDD的60段則固定jackson教學20段、nicolas驗證20段、theo最後檢查20段，每人0至9各兩次，不把同一說話者拆到三側。服飾測試3/10、真人數字3/20，皆只是一個很小的配方結果，不是官方benchmark或自然圖片問答。錄音從8kHz實際插值成16kHz、點數加倍而時長不變，完整方法見12.2，辨識失敗見12.8。\n現在先預測：用A教學，再拿B答對，能否證明模型會做新的屬性組合？按1.2的完整題目分組核對，答案是不能，因為A、B屬於同一家族。把它們一起留在教學側，C留在最後檢查側；C的合格答案是circle，答square就不合格。再選一包，仿照小表寫出一筆教學題、一筆未教過家族的新題、各自標準答案與分組理由。若還不能定義答案對錯，先縮小任務，再增加資料。\n",
+    "target_top_px_after_click": 72.265625,
+    "screenshot": "docs/continuity-reviews/artifacts/natural-v4/integration-tools/training-data-prerequisite.png"
+  },
+  {
+    "label": "T1-fixed-assets",
+    "url": "http://127.0.0.1:8788/training-assets.html",
+    "title": "訓練資料 - 小小感知機",
+    "visible_heading": "首批訓練資料：Git LFS 快照¶",
+    "article_text_sha256": "17bf80262dcf047381cf53674930b9cd48b7d20ff19983fa20101e181ca25186",
+    "previous_next": [
+      {
+        "text": "上一頁\n課程規劃",
+        "href": "http://127.0.0.1:8788/curriculum.html"
+      },
+      {
+        "text": "下一頁\n資產管理",
+        "href": "http://127.0.0.1:8788/asset-storage.html"
+      }
+    ],
+    "visible_excerpt": "首批訓練資料：Git LFS 快照¶\n\n此處發布8個分來源資料包，共29.4 MiB、1,447筆整理好的 training 紀錄；內容是已收集的教學 pilot，沒有模型訓練成果。程式與教材用普通 Git，.tar.gz 實體資料用 Git LFS，解包後放回被忽略的 data/training/。\n\n第20章目前使用的照片、中文讀字與語音資料另有專用清單，見本頁末段。--asset all只指首批8包，不包含第20章的資料。\n\n發布狀態（2026-10-02）：8個LFS物件已上傳，並以新的快取、不提供額外認證重新下載；逐包及解包後每個檔案的SHA-256均符合manifest。資料包由GitHub runner從固定公開來源重建，全部壓縮包與原本機快照的SHA-256完全相同；上傳紀錄。\n\nID\tTraining 紀錄\t資料授權\ntinystories\t512個完整英文故事\tCDLA-Sharing-1.0\nchinese-poetry\t365首古典中文詩\tMIT\nultrachat-sft\t100筆多輪對話\tMIT\nultrafeedback-dpo\t100組偏好對\tMIT\npku-safe-rlhf\t100組安全／有用性比較\tCC-BY-NC-4.0，非商用\nfashion-mnist\t50張圖與分類模板\tMIT\ngsm8k\t200題人寫解答\tMIT\nfsdd\t20段training語音\tCC-BY-SA-4.0\n\nFSDD另保留各20段validation／test，原錄音是8 kHz，使用16 kHz入口前須明確重採樣。Fashion-MNIST包內另保留完整60,000筆來源training parquet；50筆是已配對的pilot，不是自然圖片caption／VQA。GSM8K解答不是教師模型生成的蒸餾資料。\n\n各包保留來源、固定revision、原始授權證據與修改／選樣說明。manifest.json記錄壓縮包與每個檔案的大小、SHA-256；sources/保存來源metadata，這兩者用普通Git。資料依各自授權，不能統一當成此repo的MIT內容；非商用資料獨立成包，按需求選取。\n\n取得資料¶\n\n要在clone時先只取程式與LFS pointer：\n\nGIT_LFS_SKIP_SMUDGE=1 git clone https://github.com/birdhackor/tiny-perceptron-vlm.git\n\n\nWindows PowerShell先設定 $env:GIT_LFS_SKIP_SMUDGE=\"1\" 再clone。需安裝 Git LFS，clone後在repo根目錄執行 git lfs install --local，並依主README安裝Python環境。啟用.venv後：\n\npython scripts/fetch_training_assets.py --list\npython scripts/fetch_training_assets.py --asset tinystories --asset chinese-poetry\npython scripts/fetch_training_assets.py --asset all\n\n\n只指定需要的ID即可。入口先取得對應LFS物件，核對包與逐檔雜湊，再解到data/training/。已有相同內容會跳過；已有不同內容會停止，可用--output另選目錄。它不會更新權重或執行訓練。\n\n使用方式與範圍¶\n\nTinyStories／唐詩的text JSONL可用文字入口；UltraChat的messages、UltraFeedback的chosen/rejected與GSM8K的question/answer可對應SFT／偏好資料讀法。原始包保留上游格式，不替不同任務偷偷重寫標註；Fashion-MNIST、FSDD與安全比較資料須依對應章節明確轉換。\n\n自己開新實驗時，仍需按完整故事、詩、題目、圖片及近重複家族建立不洩漏的holdout。課程30組正式實驗已由配對入口建立各自的切分、轉換與指紋，詳見實驗紀錄；包中的上游training身份與課程自訂留出側是兩件事。較偏好／較安全的回答不自動等於安全SFT正例。教材主線的離線小實驗仍用規則生成器，下載本資料不是執行各節Notebook的必要條件。\n\n若要重建同一快照，先解包全部資料，再執行python scripts/build_training_assets.py --source data/training --output outputs/rebuilt-training-assets；壓縮包不包含時間戳差異，可比對manifest SHA-256。每次實質改動發布新版本，不覆蓋v1。\n\n第20章資料：照片、中文文件與真人語音¶\n\n目前成品的來源、授權、固定下載與逐檔核對見新版資料說明，重新訓練見訓練指引。只想開啟模型時，直接用學生操作指引，不用先取得全部訓練資料。\n\n需要回查舊版v3資料時，可查看舊整合清單；目前第20章使用上方資料說明中的固定清單與下載步驟。",
+    "clicked_from": "http://127.0.0.1:8788/training.html#T.1",
+    "clicked_text": "固定資料包說明",
+    "clicked_href": "http://127.0.0.1:8788/training-assets.html",
+    "git_lfs_install_visible": true,
+    "git_lfs_install_command_visible": true
+  },
+  {
+    "label": "resume-to-text-and-sft-origin",
+    "url": "http://127.0.0.1:8788/5.7.html",
+    "title": "5.7 訓練中斷怎麼接續？ - 小小感知機",
+    "visible_heading": "5.7 訓練中斷怎麼接續？¶",
+    "article_text_sha256": "25e527798c1d5fbc30163b6ffbdc1f1aeedfad7cf6f8b6b2efe2dd34c6d15e04",
+    "previous_next": [
+      {
+        "text": "上一頁\n5.6 學習率怎麼隨訓練變化？",
+        "href": "http://127.0.0.1:8788/5.6.html"
+      },
+      {
+        "text": "下一頁\n5.8 Loss 下降代表任務做得更好嗎？",
+        "href": "http://127.0.0.1:8788/5.8.html"
+      }
+    ]
+  },
+  {
+    "label": "resume-to-text-and-sft",
+    "url": "http://127.0.0.1:8788/training.html#T.4",
+    "title": "訓練操作 - 小小感知機",
+    "visible_heading": "把一個小實驗做成可檢查的訓練¶",
+    "article_text_sha256": "a7e710908655b1a30e3354c3894333130963442c91931e01ec5a8d21dedd8d37",
+    "previous_next": [
+      {
+        "text": "上一頁\n名詞對照",
+        "href": "http://127.0.0.1:8788/glossary.html"
+      },
+      {
+        "text": "下一頁\n本章導讀",
+        "href": "http://127.0.0.1:8788/chapter-01.html"
+      }
+    ],
+    "clicked_from": "http://127.0.0.1:8788/5.7.html",
+    "clicked_text": "T.4的600步文字訓練",
+    "clicked_href": "http://127.0.0.1:8788/training.html#T.4",
+    "anchor_id": "T.4",
+    "anchor_exists": true,
+    "anchor_visible_heading": "把文字訓練和對話練習分開看¶",
+    "section_visible_excerpt": "文字接續路線先讀4.7的題目與下一字對齊；想做屬性問答，再讀7.1的對話格式與7.3的回答位置。文字接續讓每個有下一項的位置練習；SFT（supervised fine-tuning，監督式微調）用理想回答作示範，只把助手回答與結束標記當作答案。使用者問題仍提供線索，但不算回答代價。先看過7.11的接續，再讀7.17的分階段理由與7.18的後訓練教法，可以把操作放回整體脈絡；本節不要求你先學PPO。\n本節先分別練習文字與問答。工具把回答示範任務命名為sft；本節報告中的「直接SFT」對照從未訓練權重開始，示範如何按助手答案訓練。接續已有文字模型的SFT見7.11。想追蹤同一個模型從文字到對話，再加入其他任務的正式接續，接著看19.4：每階段核對父權重、訓練資料與留出題，避免把互不相關的模型當成同一次成長。要先試保存的整合模型，請從19.11的推論下載取得檔案，再回19.1操作介面。\n先產生不用下載的小資料，種子明定為 42：\n.venv/bin/python scripts/prepare_data.py --kind toy-text --seed 42\n.venv/bin/python scripts/prepare_data.py --kind attributes-sft --seed 42\n\nJSONL 每行是一筆有名稱欄位的 JSON 記錄。生成檔會多帶 source、license 與 split；以下摘出教學用的主要欄位，各行可獨立閱讀：\n{\"text\":\"color=red;shape=circle;side=left.\",\"family\":\"color=red;shape=circle;side=left.\"}\n{\"messages\":[{\"role\":\"user\",\"content\":\"color=red;shape=circle;pitch=low;shape?\"},{\"role\":\"assistant\",\"content\":\"circle\"}],\"family\":\"red:circle:low\"}\n\n第一行來自 toy-text，教的是文字接續；第二行來自 attributes-sft，問題是列出屬性後問形狀，理想答案就是 circle。同一組 red:circle:low 的 describe、shape?、color?、pitch?、joint? 都屬同一家族，答案依序是 circle、circle、red、low、circle,low。它們一起放在同一側，避免模型已見過同組屬性後，只換問法就算新題。\n檔案（位於 data/generated/資料種類/）\t角色\ttoy-text 筆數／家族數\tattributes-sft 筆數／家族數\ntrain.jsonl\t練習，允許更新模型\t9／9\t45／9\nvalidation.jsonl\t留出（held-out）的新家族，用來比較、調整設定\t1／1\t5／1\ntest.jsonl\t最後檢查；選完設定再用\t2／2\t10／2\n數量來自預設 12 個家族的整組切分；每個 SFT 家族有五種問題。下面程式可在根目錄執行，列印三份筆數、家族數、檔案指紋和一筆原文，核對產物。這裡用 SHA-256 指紋作資料版本的實務核對，前後比較要保留這份資料：\nimport json\nfrom pathlib import Path\n\nfor kind in (\"toy-text\", \"attributes-sft\"):\n    directory = Path(\"data/generated\") / kind\n    manifest = json.loads((directory / \"manifest.json\").read_text())\n    print(kind, \"seed\", manifest[\"seed\"], \"切分單位\", manifest[\"split_unit\"])\n    for split, stats in manifest[\"splits\"].items():\n        print(split, \"筆數\", stats[\"records\"], \"家族\", stats[\"families\"], \"sha256\", stats[\"sha256\"])\n        print((directory / f\"{split}.jsonl\").read_text().splitlines()[0])\n\n這段只讀剛才產生的檔案，不改資料，也不重新切分。Path(\"data/generated\") / kind組出某一種資料的相對路徑；read_text()先讀出manifest.json的文字，json.loads()再把JSON文字轉成Python字典。manifest是這份資料已完成切分的索引紀錄，包含種子、切分單位和各側統計。\nmanifest[\"splits\"].items()每次交出一組「側名、統計」：split可能是train、validation或test，stats就是那一側的筆數、家族數與指紋。最後一行用側名找到相應JSONL，讀出文字、用splitlines()按行拆開，再用[0]取第一筆原文。因此這份輸出是在核對現成產物，不是在製造新的測試題。\n接著只選文字或屬性問答一條路。先預測：訓練會增加教學答案的機率，但未教過家族的平均代價與生成答案不一定改善。為了取得真正的開始回答，先保存零次更新的模型；移除 --train 的 dry-run 不會存檔，--steps 0 也不是可用入口。先執行 mkdir -p outputs checkpoints，將下面程式存為 outputs/save_start.py，再執行 .venv/bin/python outputs/save_start.py：\nfrom tiny_perceptron.model import ModelConfig, TinyLM\nfrom tiny_perceptron.training import save_checkpoint, seed_everything\n\nseed_everything(42)\nmodel = TinyLM(ModelConfig(width=32, layers=1, heads=1, max_length=128))\nsave_checkpoint(\n    \"checkpoints/start.pt\",\n    model,\n    step=0,\n    metadata={\"seed\": 42, \"note\": \"untrained baseline\"},\n)\nprint(\"已保存起始模型；沒有求導或更新\")\n\nModelConfig 記錄模型設定，TinyLM 依設定建立 CPU 模型，save_checkpoint 保存它的數字。width=32（CLI 寫作 --width 32）表示每個位置的特徵向量有 32 個數字，layers=1／heads=1 是一層、一個注意力頭，max_length=128 是一次最多 128 個編碼位置；零件背景見4.5。這個 checkpoint 沒有更新工具狀態，用來開始新階段，不用 --resume。\n文字路線先評估起點，再正式更新，最後用完全相同的留出檔與生成上限評估結束：\n.venv/bin/python scripts/evaluate.py checkpoints/start.pt --data data/generated/toy-text/validation.jsonl --mode text --tokens 32 --device cpu --output outputs/text-before.json\n.venv/bin/python scripts/infer.py checkpoints/start.pt --prompt \"color=\" --tokens 32 --temperature 0 --cache --device cpu > outputs/text-prompt-before.txt\n.venv/bin/python scripts/train.py --task text --data data/generated/toy-text/train.jsonl --checkpo",
+    "target_top_px_after_click": 72.078125,
+    "screenshot": "docs/continuity-reviews/artifacts/natural-v4/integration-tools/training-T4.png"
+  },
+  {
+    "label": "fair-comparison-to-architecture-origin",
+    "url": "http://127.0.0.1:8788/15.13.html",
+    "title": "15.13 如何公平比較 Dense／MoE？ - 小小感知機",
+    "visible_heading": "15.13 如何公平比較 Dense／MoE？¶",
+    "article_text_sha256": "e65fb1495ece1d92591d49363af84e46d1d8d932fb01a4c29f5ad1b04887f1e4",
+    "previous_next": [
+      {
+        "text": "上一頁\n15.12 Expert 容量不夠怎麼辦？",
+        "href": "http://127.0.0.1:8788/15.12.html"
+      },
+      {
+        "text": "下一頁\n本章導讀",
+        "href": "http://127.0.0.1:8788/chapter-16.html"
+      }
+    ]
+  },
+  {
+    "label": "fair-comparison-to-architecture",
+    "url": "http://127.0.0.1:8788/training.html#T.8",
+    "title": "訓練操作 - 小小感知機",
+    "visible_heading": "把一個小實驗做成可檢查的訓練¶",
+    "article_text_sha256": "a7e710908655b1a30e3354c3894333130963442c91931e01ec5a8d21dedd8d37",
+    "previous_next": [
+      {
+        "text": "上一頁\n名詞對照",
+        "href": "http://127.0.0.1:8788/glossary.html"
+      },
+      {
+        "text": "下一頁\n本章導讀",
+        "href": "http://127.0.0.1:8788/chapter-01.html"
+      }
+    ],
+    "clicked_from": "http://127.0.0.1:8788/15.13.html",
+    "clicked_text": "T.8",
+    "clicked_href": "http://127.0.0.1:8788/training.html#T.8",
+    "anchor_id": "T.8",
+    "anchor_exists": true,
+    "anchor_visible_heading": "架構比較一次只換一個條件¶",
+    "section_visible_excerpt": "先讀4.5的初始層與15.13的公平比較，資料產生與報告操作見T.4的文字訓練路線。如果換了架構，也換資料、模型寬度與訓練步數，就很難知道結果改善來自哪裡。先保存一個基準，再逐項比較。\n.venv/bin/python scripts/prepare_data.py --kind toy-text --seed 42\n.venv/bin/python scripts/train.py --task text --data data/generated/toy-text/train.jsonl --train --steps 200 --seed 42 --output checkpoints/baseline.pt\n.venv/bin/python scripts/train.py --task text --data data/generated/toy-text/train.jsonl --train --steps 200 --seed 42 --norm rms --output checkpoints/rms.pt\n.venv/bin/python scripts/train.py --task text --data data/generated/toy-text/train.jsonl --train --steps 200 --seed 42 --experts 4 --top-k 2 --output checkpoints/moe.pt\n\n第一行先產生資料，按家族分成train.jsonl、validation.jsonl、test.jsonl；同一家族的例子不會跨到另一份。資料準備後的三條訓練命令，依序是基準、只換RMS正規化、改用四位專家且每次選兩位的MoE。這裡的train.py直接使用--data指定的訓練檔，不會再把它切成訓練與驗證兩份；留出的validation.jsonl稍後另交評估工具。\n三次使用同一份資料、種子與步數，本輪另記總參數格數、MoE的專家數4與選中數top-k=2、實測執行秒數。Dense每次使用完整同一組計算零件，MoE每次只選部分專家；相同寬度不代表相同儲存或算力預算。「活躍計算量」是每步真正做多少運算，這份報告沒有提供估算，請記為未量測；專家數或秒數各有自己的單位。RMS的意思見14.2，專家選法見15.4。\n三份模型保存後，用同一個留出檔核對：\n.venv/bin/python scripts/evaluate.py checkpoints/baseline.pt --data data/generated/toy-text/validation.jsonl --mode text --tokens 32 --output outputs/baseline-validation.json\n.venv/bin/python scripts/evaluate.py checkpoints/rms.pt --data data/generated/toy-text/validation.jsonl --mode text --tokens 32 --output outputs/rms-validation.json\n.venv/bin/python scripts/evaluate.py checkpoints/moe.pt --data data/generated/toy-text/validation.jsonl --mode text --tokens 32 --output outputs/moe-validation.json\n\n開啟outputs/裡三份評估JSON報告，把mean_token_nll與effective_tokens並排：前者是每個有效下一文字位置的平均猜錯代價，越低越好；後者是實際計入的目標數。同一份原文與相同切詞方法，應有相同目標數。再讀報告裡的samples，它保存逐筆自由生成，終端摘要沒有列出這一段。row從0編號，所以row=0對應驗證JSONL第一筆；回去讀那筆的text，就能查到生成來源。\n此處--mode text會取原文前四個字元當prompt，再讓模型往後寫最多32個新單位；generated只保存新生成的部分。它是在練習續寫，不能把這段文字直接當成問答正確率。三份報告用相同row、prompt對照，並檢查skipped是否有漏題理由；欄位細節也可回T.4查看。這個小資料的留出檔只有一筆，結果只適合核對方法。\n訓練會另保存checkpoints/baseline.json、rms.json、moe.json，從中抄出parameters總參數格數與seconds執行秒數。秒數受裝置與當時負載影響，不能只用一次結果宣稱某架構普遍更快。品質尚未實測時記未量測，保留原始報告，再比較其中實際取得的數字。\n上面三條200步命令是小資料的操作練習。我們另外完成了modern正式比較：從固定TinyStories包取512篇，按完整內容指紋作家族，整篇分成409／51／52篇；近重複故事尚未合併家族。每組寬度64、兩層、四頭、最多128位置，使用byte字表，同一seed 42、同一批次抽樣，每批16個窗口、AdamW學習率0.003、固定240次更新，各計入452,102個有效訓練目標。長故事的窗口都留在同一側；完整驗證與最後檢查的分母為39,256與41,914個下一byte／結束目標。\n每次改動\t總參數\t驗證代價\t最後檢查代價\t每次更新中位數（毫秒）\n基準：位置表、LayerNorm、GELU、獨立輸出表\t141,568\t2.26331\t2.29163\t13.062\nRoPE\t133,376\t1.74158\t1.77812\t14.905\nRMSNorm\t141,248\t2.25913\t2.28631\t13.952\nReLU²\t141,568\t2.23590\t2.26438\t12.893\nSwiGLU\t174,848\t2.25444\t2.28009\t13.336\n輸入輸出共享\t124,672\t2.36276\t2.38422\t12.768\n這是L4、PyTorch 2.14.1+cu126、FP32量測，關閉TF32；時間兩側同步，略過前三步後取中位數，包含向前、反向、梯度有限值檢查、裁剪與更新。共有形狀的表複製基準初值，新增或變形的表另以固定seed初始化；共享輸出則改用embedding的初值，起點差異見14.6。固定中間寬度256讓SwiGLU多了參數，不能把全表叫等參數或等FLOPs比較；FLOPs是實際浮點運算次數，本組沒有量測它。\n代價降低也要對照文字。最後檢查的第一筆提示 Once upon a time, there，基準續寫 was a a and the the as a the as，RoPE則為 was a loked there was a bough a；都不是合格故事。完整51／52篇的代價與每側前八篇的原樣生成，保存在modern實報，不能把八筆生成當全部留出品質。單一種子、短訓與固定小語料也沒有測長度外推。第14章逐節把這些結果與局部機制分開；14.3的Q/K正規化只有CPU示範，沒有整模型訓練組。\n要重跑六組，先取資料包再執行完整入口：\n.venv/bin/python scripts/fetch_training_assets.py --asset tinystories\n.venv/bin/python -m scripts.course_experiments.run --experiment modern --device cuda\n\noutputs/course-experiments/course-v1/modern/保存baseline.pt、rope.pt、rmsnorm.pt、relu2.pt、swiglu.pt、tied.pt以及三側dataset.json；model.pt固定複製baseline，沒有按驗證成績挑選。完整入口的平均代價欄名是heldout.validation.nll，有效目標是effective_tokens，不同於上面單一evaluate.py的mean_token_nll。--step-scale小於1只作通路檢查，不能拿來替換此表。\n接著另跑MoE，沿用同一份409／51／52篇切分，但每組固",
+    "target_top_px_after_click": 71.6875,
+    "screenshot": "docs/continuity-reviews/artifacts/natural-v4/integration-tools/training-T8.png"
+  },
+  {
+    "label": "teacher-to-distillation-origin",
+    "url": "http://127.0.0.1:8788/18.1.html",
+    "title": "18.1 教師能提供什麼學習訊號？ - 小小感知機",
+    "visible_heading": "18.1 教師能提供什麼學習訊號？¶",
+    "article_text_sha256": "07cdb5d082a04b45e290556794fbffbb0cce330b64e6d5295797a34e11718699",
+    "previous_next": [
+      {
+        "text": "上一頁\n本章導讀",
+        "href": "http://127.0.0.1:8788/chapter-18.html"
+      },
+      {
+        "text": "下一頁\n18.2 怎麼讓學生本身更小？",
+        "href": "http://127.0.0.1:8788/18.2.html"
+      }
+    ]
+  }
+]

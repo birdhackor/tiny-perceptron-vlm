@@ -1,0 +1,87 @@
+from pathlib import Path
+from urllib.parse import unquote, urlparse
+import hashlib
+import json
+from playwright.sync_api import sync_playwright
+
+BASE = 'http://127.0.0.1:8789/'
+OUT = Path('docs/continuity-reviews/artifacts/natural-v4/integration-tools')
+records = []
+
+def save():
+    (OUT / 'preview8789-browser-receipt.json').write_text(json.dumps(records, ensure_ascii=False, indent=2) + '\n')
+
+def record(page, label, screenshot=None):
+    text = page.locator('article').inner_text()
+    data = {'label': label, 'url': page.url, 'title': page.title(),
+            'visible_heading': page.locator('article h1').inner_text(),
+            'visible_excerpt': text[:1800],
+            'article_text_sha256': hashlib.sha256(text.encode()).hexdigest()}
+    anchor = unquote(urlparse(page.url).fragment)
+    if anchor:
+        el = page.locator('[id="' + anchor + '"]')
+        data['anchor_id'] = anchor
+        data['anchor_exists'] = el.count() == 1
+        if el.count() == 1:
+            data['anchor_visible_heading'] = el.inner_text()
+            data['anchor_top_px'] = el.evaluate('el=>el.getBoundingClientRect().top')
+            data['section_visible_excerpt'] = el.evaluate('el=>{let s="";for(let n=el.nextElementSibling;n && !["H2","H3"].includes(n.tagName);n=n.nextElementSibling){s+=n.innerText+"\\n";}return s;}')[:4500]
+    if screenshot:
+        page.screenshot(path=str(OUT / screenshot))
+        data['screenshot'] = str(OUT / screenshot)
+    records.append(data)
+    save()
+    print(label, page.url, data.get('anchor_visible_heading', data['visible_heading']), flush=True)
+
+def click(page, link, label, screenshot=None):
+    origin = page.url
+    text = link.first.inner_text().strip()
+    href = link.first.get_attribute('href')
+    link.first.click()
+    page.wait_for_load_state('networkidle')
+    record(page, label, screenshot)
+    records[-1].update(clicked_from=origin, clicked_text=text, clicked_href=href)
+    save()
+
+with sync_playwright() as p:
+    b = p.chromium.launch(executable_path='/usr/bin/chromium', args=['--no-sandbox'])
+    page = b.new_page(viewport={'width':1440,'height':1080})
+    for origin, text, label, shot in [
+        ('5.7.html','T.4的600步文字訓練','T4-live-topic','preview8789-T4.png'),
+        ('15.13.html','T.8','T8-live-topic','preview8789-T8.png'),
+        ('16.1.html','T.8的效率量測方法','efficiency-specific-topic','preview8789-efficiency.png'),
+        ('C.7.html','T.1','optional-data-prerequisite',None),
+    ]:
+        response = page.goto(BASE+origin,wait_until='networkidle')
+        record(page,label+'-origin')
+        records[-1]['http_status'] = response.status
+        click(page,page.locator('article a').filter(has_text=text),label,shot)
+    click(page,page.locator('article a').filter(has_text='固定資料包說明'),'T1-LFS-install-destination')
+    records[-1]['git_lfs_install_present'] = 'git lfs install --local' in page.locator('article').inner_text()
+    page.goto(BASE+'training.html',wait_until='networkidle')
+    record(page,'current-training-guide-introduction')
+    records[-1]['all_training_headings'] = page.locator('article h2').all_inner_texts()
+    click(page,page.locator('article a[href$="/7.11.html"]'),'actual-pretrained-continuation')
+    page.goto(BASE+'19.11.html',wait_until='networkidle')
+    record(page,'chapter19-public-and-training-state','preview8789-capstone-state.png')
+    targets = page.locator('article a').evaluate_all('as=>as.map(a=>({text:a.innerText,href:a.href})).filter(a=>/公開清單|Hugging Face|訓練器原始碼/.test(a.text))')
+    records[-1]['important_external_targets'] = targets
+    click(page,page.locator('article a[href$="/5.7.html"]'),'chapter19-resume-state-prerequisite')
+    page.goto(BASE+'19.12.html',wait_until='networkidle')
+    click(page,page.locator('article a[href$="/20.1.html"]'),'chapter19-natural-product-boundary','preview8789-natural-boundary.png')
+    page.goto(BASE+'19.12.html',wait_until='networkidle')
+    click(page,page.locator('.md-footer__link--next'),'chapter20-next-introduction')
+    for target in targets:
+        ext = b.new_page()
+        try:
+            response = ext.goto(target['href'],wait_until='domcontentloaded',timeout=20000)
+            ext.wait_for_timeout(1500)
+            body = ext.locator('body').inner_text(timeout=10000)
+            info = {'label':'important-external-target','clicked_text':target['text'],'requested_url':target['href'],
+                    'url':ext.url,'http_status':response.status,'title':ext.title(),
+                    'visible_expected_terms':{term:term in body for term in ['33c6898f0676fccc4f5f6114e3b93a4f9ebaeaed','joint','capstone.py','capstone-public.json']}}
+        except Exception as error:
+            info = {'label':'important-external-target','requested_url':target['href'],'error':str(error)}
+        records.append(info);save();print(info,flush=True);ext.close()
+    b.close()
+save()

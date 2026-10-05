@@ -1,0 +1,111 @@
+## T.8 架構比較一次只換一個條件
+
+先讀[4.5的初始層](chapters/04.md#4.5)與[15.13的公平比較](chapters/15.md#15.13)，資料產生與報告操作見[T.4](#T.4)的文字訓練路線。如果換了架構，也換資料、模型寬度與訓練步數，就很難知道結果改善來自哪裡。先保存一個基準，再逐項比較。
+
+```bash
+.venv/bin/python scripts/prepare_data.py --kind toy-text --seed 42
+.venv/bin/python scripts/train.py --task text --data data/generated/toy-text/train.jsonl --train --steps 200 --seed 42 --output checkpoints/baseline.pt
+.venv/bin/python scripts/train.py --task text --data data/generated/toy-text/train.jsonl --train --steps 200 --seed 42 --norm rms --output checkpoints/rms.pt
+.venv/bin/python scripts/train.py --task text --data data/generated/toy-text/train.jsonl --train --steps 200 --seed 42 --experts 4 --top-k 2 --output checkpoints/moe.pt
+```
+
+第一行先產生資料，按家族分成`train.jsonl`、`validation.jsonl`、`test.jsonl`；同一家族的例子不會跨到另一份。資料準備後的三條訓練命令，依序是基準、只換RMS正規化、改用四位專家且每次選兩位的MoE。這裡的`train.py`直接使用`--data`指定的訓練檔，不會再把它切成訓練與驗證兩份；留出的`validation.jsonl`稍後另交評估工具。
+
+三次使用同一份資料、種子與步數，本輪另記總參數格數、MoE的專家數4與選中數`top-k=2`、實測執行秒數。Dense每次使用完整同一組計算零件，MoE每次只選部分專家；相同寬度不代表相同儲存或算力預算。「活躍計算量」是每步真正做多少運算，這份報告沒有提供估算，請記為未量測；專家數或秒數各有自己的單位。RMS的意思見[14.2](chapters/14.md#14.2)，專家選法見[15.4](chapters/15.md#15.4)。
+
+三份模型保存後，用同一個留出檔核對：
+
+```bash
+.venv/bin/python scripts/evaluate.py checkpoints/baseline.pt --data data/generated/toy-text/validation.jsonl --mode text --tokens 32 --output outputs/baseline-validation.json
+.venv/bin/python scripts/evaluate.py checkpoints/rms.pt --data data/generated/toy-text/validation.jsonl --mode text --tokens 32 --output outputs/rms-validation.json
+.venv/bin/python scripts/evaluate.py checkpoints/moe.pt --data data/generated/toy-text/validation.jsonl --mode text --tokens 32 --output outputs/moe-validation.json
+```
+
+開啟`outputs/`裡三份評估JSON報告，把`mean_token_nll`與`effective_tokens`並排：前者是每個有效下一文字位置的平均猜錯代價，越低越好；後者是實際計入的目標數。同一份原文與相同切詞方法，應有相同目標數。再讀報告裡的`samples`，它保存逐筆自由生成，終端摘要沒有列出這一段。`row`從0編號，所以`row=0`對應驗證JSONL第一筆；回去讀那筆的`text`，就能查到生成來源。
+
+此處`--mode text`會取原文前四個字元當`prompt`，再讓模型往後寫最多32個新單位；`generated`只保存新生成的部分。它是在練習續寫，不能把這段文字直接當成問答正確率。三份報告用相同`row`、`prompt`對照，並檢查`skipped`是否有漏題理由；欄位細節也可回[T.4](#T.4)查看。這個小資料的留出檔只有一筆，結果只適合核對方法。
+
+訓練會另保存`checkpoints/baseline.json`、`rms.json`、`moe.json`，從中抄出`parameters`總參數格數與`seconds`執行秒數。秒數受裝置與當時負載影響，不能只用一次結果宣稱某架構普遍更快。品質尚未實測時記未量測，保留原始報告，再比較其中實際取得的數字。
+
+上面三條200步命令是小資料的操作練習。我們另外完成了modern正式比較：從固定TinyStories包取512篇，按完整內容指紋作家族，整篇分成409／51／52篇；近重複故事尚未合併家族。每組寬度64、兩層、四頭、最多128位置，使用byte字表，同一seed 42、同一批次抽樣，每批16個窗口、AdamW學習率0.003、固定240次更新，各計入452,102個有效訓練目標。長故事的窗口都留在同一側；完整驗證與最後檢查的分母為39,256與41,914個下一byte／結束目標。
+
+| 每次改動 | 總參數 | 驗證代價 | 最後檢查代價 | 每次更新中位數（毫秒） |
+| --- | ---: | ---: | ---: | ---: |
+| 基準：位置表、LayerNorm、GELU、獨立輸出表 | 141,568 | 2.26331 | 2.29163 | 13.062 |
+| RoPE | 133,376 | 1.74158 | 1.77812 | 14.905 |
+| RMSNorm | 141,248 | 2.25913 | 2.28631 | 13.952 |
+| ReLU² | 141,568 | 2.23590 | 2.26438 | 12.893 |
+| SwiGLU | 174,848 | 2.25444 | 2.28009 | 13.336 |
+| 輸入輸出共享 | 124,672 | 2.36276 | 2.38422 | 12.768 |
+
+這是L4、PyTorch 2.14.1+cu126、FP32量測，關閉TF32；時間兩側同步，略過前三步後取中位數，包含向前、反向、梯度有限值檢查、裁剪與更新。共有形狀的表複製基準初值，新增或變形的表另以固定seed初始化；共享輸出則改用embedding的初值，起點差異見[14.6](chapters/14.md#14.6)。固定中間寬度256讓SwiGLU多了參數，不能把全表叫等參數或等FLOPs比較；FLOPs是實際浮點運算次數，本組沒有量測它。
+
+代價降低也要對照文字。最後檢查的第一筆提示 `Once upon a time, there `，基準續寫 `was a a and the the as a the as `，RoPE則為 `was a loked there was a bough a `；都不是合格故事。完整51／52篇的代價與每側前八篇的原樣生成，保存在[modern實報](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/course-experiments/results/modern.json)，不能把八筆生成當全部留出品質。單一種子、短訓與固定小語料也沒有測長度外推。第14章逐節把這些結果與局部機制分開；[14.3](chapters/14.md#14.3)的Q/K正規化只有CPU示範，沒有整模型訓練組。
+
+要重跑六組，先取資料包再執行完整入口：
+
+```bash
+.venv/bin/python scripts/fetch_training_assets.py --asset tinystories
+.venv/bin/python -m scripts.course_experiments.run --experiment modern --device cuda
+```
+
+`outputs/course-experiments/course-v1/modern/`保存`baseline.pt`、`rope.pt`、`rmsnorm.pt`、`relu2.pt`、`swiglu.pt`、`tied.pt`以及三側`dataset.json`；`model.pt`固定複製baseline，沒有按驗證成績挑選。完整入口的平均代價欄名是`heldout.validation.nll`，有效目標是`effective_tokens`，不同於上面單一`evaluate.py`的`mean_token_nll`。`--step-scale`小於1只作通路檢查，不能拿來替換此表。
+
+接著另跑MoE，沿用同一份409／51／52篇切分，但每組固定180次更新、337,761個有效訓練目標。三個Dense尺寸分別接近top-1使用代理、top-2使用代理與MoE總參數；四個MoE組則保持寬度64、每層四位expert，分別用top-1／top-2及輔助係數0／0.01。全部七組的尺寸、匹配剩餘差距與留出代價在[15.13](chapters/15.md#15.13)，路由梯度見[15.7](chapters/15.md#15.7)，負載與輔助項見[15.8–15.9](chapters/15.md#15.8)。這一組的180次更新不能直接與上表modern的240次當成相同訓練預算。
+
+例如top-2、0.01總共340,608個參數，每token容量代理208,256；代理相近的Dense有207,680個，總量相近的Dense則329,888個，沒有精確相等。它的最後檢查代價2.30170，兩個Dense對照分別2.30906、2.24943；哪種資源固定，影響比較答案。它也沒有在這輪跑得更快：每步27.242毫秒，兩個Dense為11.965與14.054毫秒。容量代理包含全部非expert參數，既不是精確權重訪問數，也不是FLOPs，算法範圍見[15.10](chapters/15.md#15.10)。
+
+取得同一TinyStories資料包後，執行：
+
+```bash
+.venv/bin/python -m scripts.course_experiments.run --experiment moe --device cuda
+```
+
+`outputs/course-experiments/course-v1/moe/`保存`dense_active_top1.pt`、`dense_active_top2.pt`、`dense_total.pt`與四份`top1_aux0.pt`、`top1_aux0.01.pt`、`top2_aux0.pt`、`top2_aux0.01.pt`。三側原始故事仍在`dataset.json`；`model.pt`固定複製top-2、0.01，供後面的教師教學使用，沒有用最後檢查成績挑選。完整訓練、51／52篇留出代價、每側前八篇的原樣續寫與每層路由計數，可核對[MoE實報](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/course-experiments/results/moe.json)。它仍會寫重複片語，不能把教師檔存在當成教師答案可靠。
+
+其他架構選項有 `--rotary`、`--activation swiglu` 或 `relu2`、`--tied`、`--heads` 與 `--kv-heads`。RoPE用旋轉表示位置，先看[14.1](chapters/14.md#14.1)；ReLU²把保留下來的正值再平方，見[14.4](chapters/14.md#14.4)；SwiGLU讓一組特徵控制另一組的通過程度，見[14.5](chapters/14.md#14.5)。其餘開關也各選眼前要檢查的一項，保留其他設定不變。
+
+速度比較也先量測原方法。`--backend sdpa` 選 PyTorch 的注意力運算介面；真正使用哪種加速核心，依裝置、資料型態與條件決定。CPU 上算出相同結果，不能證明 GPU 上會更快。GPU 計時需要先暖身、在量測區間兩側等待裝置工作完成，這些原理見[16.1](chapters/16.md#16.1)。
+
+efficiency正式組先載入[T.4](#T.4)的`sft/model.pt`與同目錄`dataset.json`，不是TinyStories模型。先完整跑過`sft`讓預設依賴目錄有這兩個檔，再執行：
+
+```bash
+.venv/bin/python -m scripts.course_experiments.run --experiment efficiency --device cuda
+```
+
+它先保存`mha.pt`、`gqa.pt`各100次SFT更新，再從MHA起點分開訓練`ordinary.pt`、`accumulated.pt`、`activation_checkpoint.pt`、`sdpa.pt`各40次，保持同一批抽樣與有效目標數。`accumulated`把一批拆小、累積梯度後才更新，讓較小記憶體也能處理同一批，先讀[16.6](chapters/16.md#16.6)；`activation_checkpoint`少保存部分中間結果，到反向時重算，用額外計算換記憶體，先讀[16.10](chapters/16.md#16.10)。`padded.pt`與`packed.pt`也各40次，但它們只學助手短文字，目標已改；本輪原問答最後檢查都只1/10，不能把裝填數值接近寫成問答品質保持，詳細對照在[16.5](chapters/16.md#16.5)。全部輸出在`outputs/course-experiments/course-v1/efficiency/`，`model.pt`固定複製ordinary，沒有選最好成績。
+
+同次實驗另核對快取、梯度與實際後端：[16.3](chapters/16.md#16.3)列數值容差與原始生成ID，[16.8](chapters/16.md#16.8)的profiler確定本輪FP32用了memory-efficient。真正Inductor只編譯一個固定形狀FFN，首次7.717秒、穩態比eager慢，沒有回本點，見[16.11](chapters/16.md#16.11)。`compile-input.pt`是內部傳給子程序的載荷，不能交給一般模型推論入口；`compile-result.json`另存編譯量測。完整有效分母、留出生成與每支線時間／記憶體可核對[efficiency實報](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/course-experiments/results/efficiency.json)。
+
+### 選讀：效率實驗的量測條件
+
+固定配方採L4、PyTorch 2.14.1+cu126、FP32，關閉TF32。TF32是支援的GPU處理FP32矩陣乘法時可用的一種模式：資料仍以FP32儲存，乘法卻可使用較少的精細位數，再以FP32累加；它會改變計算精度，也可能影響速度，因此本輪明記關閉，固定這個計算條件。前置是[T.4](#T.4)的直接屬性SFT模型與45／5／10題家族切分；原模型最後檢查答對5／10，不能因它可載入就當成全對。這次把模型改為四個Query頭，MHA與一個KV頭的組別各短續訓100次，再從MHA副本比較不同更新方式。形狀改動與留出結果在[16.4](chapters/16.md#16.4)，重跑入口在[本節入口](#T.8)。
+
+這份報告中的六支主要訓練——MHA與GQA[注意力頭數比較](chapters/16.md#16.4)、[一般更新與梯度累積](chapters/16.md#16.6)、[反向重算](chapters/16.md#16.10)及SDPA[注意力API](chapters/16.md#16.8)——各自重設PyTorch管理tensor記憶體的CUDA配置器峰值，保存開始前已配置、該段峰值與新增量。[短文件裝填](chapters/16.md#16.5)的padded與packed兩支更新沒有保存這三個記憶體欄位，因此這份報告不能拿它們比較逐支線峰值。
+
+上述記憶體數字只計PyTorch在目前訓練程序中交給tensor使用的GPU空間。driver是GPU驅動程式，也就是讓作業系統與GPU溝通的軟體；它本身的用量不在這個數字中。PyTorch留著準備再用、當時沒有交給tensor的空間，稱為未使用的reserved空間，也不在其中。本輪另用Inductor這個PyTorch編譯工具，把運算轉成可執行的程式；這項工作由另一個獨立程序執行，該程序的用量沒有算進上述訓練峰值。
+
+後面以MiB列量，1 MiB是2²⁰ bytes。這個範圍可對照[2.14的max_memory_allocated文件](https://docs.pytorch.org/docs/2.14/generated/torch.cuda.memory.max_memory_allocated.html)，不能把外層最後一次reset後的數字稱為整組實驗峰值。完整數字與原始採樣在[efficiency實報](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/course-experiments/results/efficiency.json)。
+
+推論先暖機三次，在計時兩側等待GPU工作完成，量九次取中位數；訓練則略過前三步後取更新中位數。兩種工作範圍分開保存，不混成一個速度數字。
+
+另有一份獨立Flash補驗：固定Q/K/V形狀`[2,4,512,32]`，用FP16與BF16，強制只開CUDA Flash後端。兩種精度都由profiler確認真正的CUDA前向與反傳kernel，並核對輸出與三份梯度的有限值及執行前固定的容差。這份實驗沒有訓練模型；它回答「此形狀是否真的使用Flash、數值是否接近、成本是多少」，不替代上面的整模型品質比較。
+
+```bash
+.venv/bin/python -m scripts.course_experiments.run --experiment flash_probe --device cuda
+```
+
+它不依賴SFT權重或資料包，但需要相容CUDA環境；CPU不會驗證Flash，也不會偷偷改走其他後端。輸出目錄`outputs/course-experiments/course-v1/flash_probe/`內的`fixture.pt`只是固定Q/K/V與反傳輸入，並非訓練權重，不能交給一般模型推論入口。`result.json`保留兩種精度、容差、profiler運算子／kernel、九次同步計時、最高配置與環境。數值對照的計算方式及誤差見[16.8](chapters/16.md#16.8)，記憶體圖與範圍見[16.9](chapters/16.md#16.9)。
+
+本次使用L4、PyTorch 2.14.1+cu126、CUDA 12.6與driver 580.95.05，程式版本為`382604d17d91cfe9e0a58a7de997486e3a0ccafa`。每條路線先暖機三次，再量九次取中位數。FP16向前加反傳為手寫1.689毫秒、Flash0.503毫秒；BF16為1.502、0.458毫秒。相同65MiB已配置基線上，兩種精度的手寫／Flash新增峰值都是32.75／2.032MiB；總峰值則為97.75／67.032MiB，不能把新增配置比值當成整張GPU省下的比例。這是一次程序內的固定注意力核心量測，沒有loss、更新器或整模型訓練速度。全部原始數字與環境在[Flash補驗實報](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/course-experiments/results/flash_probe.json)。
+
+精度比較也從同一份`sft/model.pt`與`dataset.json`重新開始，保留原本單頭設定，沒有接在efficiency的四頭模型之後：
+
+```bash
+.venv/bin/python -m scripts.course_experiments.run --experiment precision --device cuda
+```
+
+`outputs/course-experiments/course-v1/precision/`中的`fp32.pt`、`bf16.pt`、`fp16.pt`各完成200次嘗試；本輪成功更新都是200、跳過都是0。自動混合精度（Automatic Mixed Precision，AMP）依算子使用BF16／FP16，保存的權重與Adam狀態仍是FP32；`model.pt`固定複製FP32，不以驗證成績挑選。原始單頭SFT起點最後檢查5/10，本輪三支分別7/10、6/10、4/10；訓練與推論都沒有測到AMP加速。數值、有限值核對及峰值量測範圍見[16.7](chapters/16.md#16.7)與[precision實報](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/course-experiments/results/precision.json)。不能只看檔名較低位元或程式跑完，就宣稱更省記憶體、品質保持或每次都成功更新。
+
+練習先寫一個假設，例如「只換正規化，留出代價會改善嗎？」列出保持固定的資料、步數與種子，跑完後同時保存品質與成本。這樣結果不論好壞，都能回答原來的問題。
+
