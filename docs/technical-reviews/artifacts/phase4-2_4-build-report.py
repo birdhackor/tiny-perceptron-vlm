@@ -1,0 +1,211 @@
+"""Assemble a new report from this review's original-source and execution records."""
+import hashlib
+import json
+from pathlib import Path
+import shlex
+
+ROOT = Path(__file__).resolve().parents[3]
+OUT = ROOT / "docs/technical-reviews/artifacts"
+PREFIX = "phase4-2_4-"
+meta = json.loads((OUT / (PREFIX + "extraction.json")).read_text())
+values = json.loads((OUT / (PREFIX + "verification.json")).read_text())
+receipts = json.loads((OUT / (PREFIX + "source-receipts.json")).read_text())
+original_run = json.loads((OUT / (PREFIX + "original-execution.json")).read_text())
+run_receipts = json.loads((OUT / (PREFIX + "run-receipts.json")).read_text())
+env = values["environment"]
+
+def sha(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+def aid(name):
+    return name.replace(".", "-")
+
+descriptions = {
+    "section.md": "目前 2.4 小節的原始 UTF-8 bytes，未正規化換行。",
+    "original.py": "目前 2.4 唯一 Python fence 的原始 bytes。",
+    "bootstrap.py": "實際 helper 使用的課程 BOOTSTRAP 原碼快照。",
+    "extraction.json": "擷取時的小節／整檔／圖／fence／helper／bootstrap SHA-256 與原稿行號。",
+    "original-execution.json": "原始 fence 的實際 helper 命令、CPU 執行、exit 0 與 stdout/stderr/env 指紋。",
+    "original-environment.json": "原碼執行時的 Python、PyTorch CPU wheel、離線旗標及 guard_events=[]。",
+    "original-stdout.txt": "原碼實際標準輸出：hidden、純線性全零及 ReLU 的 2、0、2。",
+    "original-stderr.txt": "原碼執行的 stderr；空檔表示沒有輸出錯誤。",
+    "nonlinearity.svg": "本輪親讀及渲染的 SVG 原始快照。",
+    "nonlinearity.png": "Inkscape 1.4 實際渲染並用 view_image 親看的 640×990 PNG。",
+    "figure-inspection.md": "本人對已渲染圖之標籤、軸、三點、線段、註記與工具限制的實際檢查記錄。",
+    "derivation.md": "本人獨立推導：三點矛盾、仿射合成含 bias、ReLU 絕對值、斜率及容忍差。",
+    "verify.py": "本輪短 CPU 原碼／有意義變化／偏移合成控制的檢查程式。",
+    "variant-input3.py": "原碼只改最後輸入 2→3 的實際已執行變化。",
+    "variant-no-relu.py": "再移除 ReLU 的實際已執行對照原碼。",
+    "verification.json": "原码与變化的實際數值、形狀、參數／grad 狀態、bias 控制與最大誤差。",
+    "verification-stdout.txt": "短 CPU 檢查完整實際標準輸出。",
+    "verification-stderr.txt": "短 CPU 檢查實際 stderr，為空。",
+    "persist-and-run.py": "保留原始工具證據並捕捉 CPU 檢查／渲染命令、stdout、stderr 與環境的程式。",
+    "run-receipts.json": "實際 CPU 驗證、Inkscape 版本及圖渲染的 argv、時間、環境、退出碼與輸出指紋。",
+    "render-stdout.txt": "圖渲染實際 stdout，為空。",
+    "render-stderr.txt": "Inkscape PangoFT2FontMap／GtkRecentManager 警告原文；退出碼仍為 0。",
+    "inkscape-version-stdout.txt": "實際 Inkscape 1.4 (e7c3feb100, 2024-10-09) 版本輸出。",
+    "inkscape-version-stderr.txt": "Inkscape 版本命令實際 stderr，為空。",
+    "acquire-sources.py": "本輪以 TLS 驗證下載固定 v2.8.0 官方原始 source 的實際程式。",
+    "source-receipts.json": "官方原始來源 URL、v2.8.0 tag、HTTP 200、存取時間、原始 bytes 數與 SHA-256。",
+    "build-report.py": "從本輪自身證據組裝新報告的程式，未讀取舊 2.4 報告。",
+}
+artifacts = []
+for path in sorted(OUT.glob(PREFIX + "*")):
+    if not path.is_file():
+        continue
+    name = path.name.removeprefix(PREFIX)
+    kind = "source_snapshot"
+    if name in {"nonlinearity.png"}:
+        kind = "figure_render"
+    elif name in {"derivation.md", "figure-inspection.md"}:
+        kind = "derivation"
+    elif path.suffix == ".py" and not name.startswith("pytorch-"):
+        kind = "code"
+    if name in {"original-execution.json", "original-stdout.txt", "verification.json", "verification-stdout.txt"}:
+        kind = "execution"
+    artifact = {"id": aid(name), "kind": kind, "path": path.relative_to(ROOT).as_posix(), "sha256": sha(path), "description": descriptions.get(name, "本人下載及直接讀取的 PyTorch v2.8.0 官方原始檔快照。")}
+    if kind == "execution":
+        if name.startswith("original-"):
+            artifact.update(command=original_run["command"], result="exit 0；hidden=[[-2,2],[0,0],[2,-2]]；純線性=[0,0,0]；ReLU=[2,0,2]；原斷言通過。", environment=env)
+        else:
+            artifact.update(command=shlex.join(run_receipts[0]["argv"]), result="exit 0；原碼、輸入3、移除ReLU、單筆squeeze、兩段斜率及含偏移非方形合成控制皆通過；最大絕對誤差0。", environment=env)
+    artifacts.append(artifact)
+
+inspections = {
+    "linear": "親讀 torch/nn/modules/linear.py L50–125：明列 affine y=xA^T+b、weight=[out,in]、最後特徵軸、bias=False 時 register_parameter('bias', None)、forward 呼叫 F.linear。",
+    "activation": "親讀 torch/nn/modules/activation.py L99–135：ReLU 逐元素 max(0,x)、輸入輸出形狀相同，forward 呼叫 F.relu。另讀 L120–124 的 x 與 -x 兩支示例，僅作官方原碼脈絡。",
+    "functional": "親讀 torch/nn/functional.py L1690–1702 的 relu 逐元素／預設非原地分支，以及 L2306–2327 的 linear 定義、公式與 shape。",
+    "tensor": "親讀 torch/_tensor.py L592–605 的 backward 契約：對 graph leaves 求導，且梯度累積到 leaves；不將 forward 的 grad_fn 誤稱為 backward 或參數更新。",
+    "tensor-docs": "親讀 torch/_tensor_docs.py L1204–1222 的 copy_，L4980–4986 與 L6350–6355 的 squeeze/matmul 引導，L6655–6665 的 is_leaf/grad_fn/backward 關係，L6818–6831 的 T（此例只有二維）。",
+    "torch-docs": "親讀 torch/_torch_docs.py L759–778 的 allclose 預設值與逐元素容忍公式，L7452–7478 的 matmul 矩陣相乘，L10473–10502 的 squeeze 指定 size-1 維度與保留其他軸。",
+    "grad-mode": "親讀 torch/autograd/grad_mode.py L21–85：no_grad 的 disable-grad 契約、factory exception、enter/exit 恢復先前模式；本文只在填權重時使用。",
+}
+sources = []
+for receipt in receipts:
+    name = Path(receipt["path"]).name.removeprefix(PREFIX + "pytorch-").removesuffix(".py")
+    sources.append({
+        "id": "torch-" + name, "kind": "official_source",
+        "title": "PyTorch v2.8.0 original " + receipt["url"].split("v2.8.0/")[1],
+        "url": receipt["url"], "version": "PyTorch v2.8.0 release tag; installed execution is PyTorch 2.14.1+cpu (versions deliberately distinguished)",
+        "accessed_on": "2026-10-05", "authority_reason": "pytorch/pytorch 是 PyTorch 官方上游；下載固定 release tag 原始檔，原碼 docstring 與實作定義該版本 API。",
+        "verified": True, "checked_original": True, "inspection_note": inspections[name],
+        "snapshot_artifact_id": aid("pytorch-" + name + ".py"), "snapshot_sha256": receipt["sha256"],
+    })
+sources.extend([
+    {"id": "own-derivation", "kind": "derivation", "title": "本輪獨立仿射與 ReLU 手算", "verified": True, "details": "完整過程見 phase4-2_4-derivation.md：b=0 後 k 需同時為±1；兩層 W=W2W1、c=W2c1+c2；本例 W=0；ReLU(x)+ReLU(-x)=|x|；斜率−1/+1。", "artifact_id": "derivation-md"},
+    {"id": "original-run", "kind": "execution", "title": "現稿唯一本節原始 fence 的實際 CPU helper 執行", "verified": True, "artifact_id": "original-execution-json"},
+    {"id": "bounded-run", "kind": "execution", "title": "本輪獨立 CPU 變化與非方形含偏移合成控制", "verified": True, "artifact_id": "verification-json"},
+])
+
+def evidence(source, locator, supports):
+    return {"source_id": source, "locator": locator, "supports": supports}
+
+claims = [
+    {
+        "id": "affine-expressivity", "kind": "concept", "status": "verified",
+        "statement": "y=k*x+b 是仿射直線；兩層只含加權與偏移的 Linear 可合成同型的一層，單靠增加此類層不能表示本文絕對值所需的斜率轉折。",
+        "location": "course/chapters/02.md L154–156、L189、L195",
+        "scope": "相容維度的純仿射層及單一實數輸入；不包含層间非線性，也不宣稱 factorization 對優化過程或參數限制沒有影響。教材有偏移的 Linear 在嚴格数学上稱 affine，本文的敘述已把偏移列入。",
+        "evidence": [
+            evidence("torch-linear", "torch/nn/modules/linear.py L50–77、L124–125", "官方定義是 y=xA^T+b，weight=[out,in]；由此直接代入兩層可得到 W2W1 與 W2c1+c2，仍是 affine。"),
+            evidence("own-derivation", "phase4-2_4-derivation.md items 1–2、4", "本人代入三目標點得到 k=−1 與 k=+1 的矛盾；展開包含兩層偏移的公式，核對不能產生本文兩種斜率。"),
+            evidence("bounded-run", "verification.json affine_with_bias", "用2→3→2、非零偏移的獨立數值控制核對合成公式，沒有只用本文互相抵銷的零矩陣自證。"),
+        ],
+        "artifact_ids": ["derivation-md", "verification-json"],
+    },
+    {
+        "id": "relu-expression", "kind": "concept", "status": "verified",
+        "statement": "ReLU 是逐元素 max(0,t)，本節加入它可使兩個相反符號特徵相加表示 |x|；這是啟用函式的計算作用，展示可表示的規則，並未展示訓練或泛化成功。",
+        "location": "course/chapters/02.md L158、L191、L195–197",
+        "scope": "只核對這一個兩支 ReLU 構造及 representation 與 learned performance 的區別；不把此玩具例子当作 universal approximation、訓練收斂或模型有意識的證據。",
+        "evidence": [
+            evidence("torch-activation", "torch/nn/modules/activation.py L99–109、L134–135", "官方 ReLU 逐元素 max(0,x)，保持形狀，且實際轉呼 F.relu，支持本文清負數的啟用函式定義。"),
+            evidence("torch-functional", "torch/nn/functional.py L1690–1702", "F.relu 是逐元素轉換；預設 inplace=False，不把張量當成整筆樣本一起做 threshold。"),
+            evidence("torch-linear", "torch/nn/modules/linear.py L50–67", "單純 affine 輸出與 ReLU 構造不同，支持這個例子確實擴大了可表示函數集合。"),
+            evidence("own-derivation", "phase4-2_4-derivation.md item 4 and scope", "分 x<0 與 x>=0 證明 max(0,x)+max(0,-x)=|x|；只證明 forward 函數構造，沒有根據此推導訓練或評測結論。"),
+        ],
+        "artifact_ids": ["derivation-md", "verification-json"],
+    },
+    {
+        "id": "affine-numbers", "kind": "numeric", "status": "verified",
+        "statement": "三個目標點不能同在 y=k*x+b 上；2×3=6；本文 [1,1] @ [[1],[-1]]=0，所以逐層純線性與合成權重輸出都為 [0,0,0]。",
+        "location": "course/chapters/02.md L154–156、L160–164、L176–184、L189",
+        "scope": "三筆各一個 scalar、兩格 hidden、單一輸出；沒有平均或評測分母。更一般的含偏移公式另用三筆非方形輸入做有界檢查。",
+        "evidence": [
+            evidence("own-derivation", "phase4-2_4-derivation.md items 1–3、6–7", "手算 b=0 与互相矛盾的 k，並逐項計算 W2W1=0、三筆輸出與獨立偏移例子的期望值。"),
+            evidence("original-run", "original-stdout.txt; original-execution.json exit_code=0", "當前原始 fence 實際得到 hidden 的三排與純線性全零，原始 linear/combined 斷言通過。"),
+            evidence("bounded-run", "verification.json original、affine_with_bias、tolerance", "獨立檢查 a=[2,1]、b=[1,2]、X=[3,1]、hidden=[3,2]、输出=[3,1]；有偏移的不同例子得到相同合成輸出，故可定位 bias 合成。"),
+        ],
+        "artifact_ids": ["derivation-md", "original-execution-json", "original-stdout-txt", "verification-json"],
+        "verification": {"method": "executed", "expected": "b=0 後 k 需同時為−1/+1，無解；2×3=6；合成權重[[0]]，原 linear 與 combined 均[[0],[0],[0]]；偏移控制W=[[1,4],[1,3]]、c=[3,−1.5]、Y=[[12,5.5],[13,5.5],[3,−1.5]]。", "observed": "所有張量值和形狀符合期望，原碼 exit0；偏移控制兩條路徑完全相同；故意省偏移被判為不等；最大绝對誤差0。", "tolerance": "手算精確相等；CPU float32 獨立檢查 rtol=0、atol=1e−6，最大觀察誤差0。原 fence torch.allclose 默認 rtol=1e−5、atol=1e−8，與零 reference 比較的實際門檻是1e−8。", "details": "原碼執行與 verifier 两次獨立 forward；每排是一筆、最後軸是特徵，二維權重相乘順序 W2@W1，再 .T 配合 row samples。零的 sign bit 不影響等值；不涉及四捨五入或任何 accuracy 分母。"},
+    },
+    {
+        "id": "relu-numbers-and-figure", "kind": "numeric", "status": "verified",
+        "statement": "ReLU 後 hidden 為 [0,2]、[0,0]、[2,0]，相加是 [2,0,2]；圖為水平零線與 V 形，两段斜率−1/+1；最後輸入改3時得到[2,0,3]，移除 ReLU 退回全零。",
+        "location": "course/chapters/02.md L160–164、L179、L191–195、L199；course/figures/rewrite-02-nonlinearity.svg",
+        "scope": "數值輸入/輸出是無單位示例；斜率分母是同一區段輸入變化量；沒有聲稱在0可微。圖中三點來自手動配方，不是模型測試成績。",
+        "evidence": [
+            evidence("torch-activation", "torch/nn/modules/activation.py L99–109", "按 max(0,t) 逐元素運算得到三排非負特徵，輸出形狀不變。"),
+            evidence("own-derivation", "phase4-2_4-derivation.md items 4–5", "每个原始輸入代入两支規則；由 |x| 分段式與 delta y/delta x 手算−1/+1，並手算輸入3與移除 ReLU 的期望。"),
+            evidence("original-run", "original-stdout.txt 加ReLU", "原碼實际列印 [2,0,2]。"),
+            evidence("bounded-run", "verification.json original.relu_hidden、input3_stdout、no_relu_stdout、slope_checks", "实际原碼變化給 [2,0,3] 与 [0,0,0]；額外 ±1、±1.5、3 的值皆等於絕對值，兩次dx=0.5的 slope 为−1/+1。"),
+        ],
+        "artifact_ids": ["derivation-md", "original-execution-json", "verification-json", "nonlinearity-png", "figure-inspection-md"],
+        "verification": {"method": "executed", "expected": "ReLU hidden=[[0,2],[0,0],[2,0]]，curved=[[2],[0],[2]]；輸入3变为[[2],[0],[3]]，移除 ReLU 變為[[0],[0],[0]]；兩段斜率−1/+1。圖標示同一組權重、上0/0/0、下2/0/2。", "observed": "原碼與實際保存/執行的兩個變化全部符合；負段、正段dx=0.5各得到−1/+1；PNG已實際開啟，圖中的點、軸標籤、線段方向及手算註記均一致。", "tolerance": "rtol=0、atol=1e−6，最大絕對誤差0；斜率及整數/半整數值在本 CPU float32 檢查精確吻合。", "details": "先按最後特徵軸兩格逐元素 ReLU，再由 b 加總；每筆一個輸出，不跨樣本求和。图的数值軸而非像素座標決定斜率。Inkscape1.4 實際渲染640×990并view_image親看；完整工具警告與render receipt已永久保存。"},
+    },
+    {
+        "id": "api-and-shapes", "kind": "software", "status": "verified",
+        "statement": "本節使用 Linear(1,2)/(2,1)、bias=False、no_grad/copy_、F.relu、@、二維 .T、squeeze(-1)、allclose 的程式與 API 解說正確，特徵與樣本軸一致。",
+        "location": "course/chapters/02.md L171–191、L204",
+        "scope": "以實際 PyTorch2.14.1+cpu 執行驗證該碼；固定 v2.8.0 官方原始契約作權威定義，版本不同已明列。不宣稱其他 API 或整個2.14.1實作與2.8.0完全相同。",
+        "evidence": [
+            evidence("torch-linear", "torch/nn/modules/linear.py L57–77、L93–125", "in/out_features、最後特徵軸與weight shape吻合；bias=False使bias=None，原例省去偏移。"),
+            evidence("torch-functional", "torch/nn/functional.py L1690–1702、L2306–2327", "Linear forward 與 F.linear 契約一致；F.relu預設非原地且逐元素，原 hidden 不被改变。"),
+            evidence("torch-tensor-docs", "torch/_tensor_docs.py L1204–1222、L6818–6831", "copy_ 將來源數值填入參數；.T 為反轉 dimensions 的 view，本文二維weight就是交換兩軸。"),
+            evidence("torch-grad-mode", "torch/autograd/grad_mode.py L21–32、L80–85", "no_grad關閉區塊內求導記錄，退出後恢復原狀；因此填權重後 forward 仍可帶grad_fn。"),
+            evidence("torch-torch-docs", "torch/_torch_docs.py L759–778、L7452–7467、L10473–10499", "matmul兩個二維矩陣的乘法、指定squeeze只移除size1軸、allclose逐元素容忍公式與默認門檻均支持正文解說。"),
+            evidence("bounded-run", "verification.json original、singleton_batch、tolerance", "实际原碼操作得到X[3,1]→hidden[3,2]→output[3,1]→列印[3]；額外單筆[1,1]經squeeze(-1)保留batch為[1]，形狀核對不是只看三筆輸出的巧合。"),
+        ],
+        "artifact_ids": ["original-py", "original-execution-json", "verification-json", "verify-py"],
+        "verification": {"method": "executed", "expected": "a.weight[2,1]、b.weight[1,2]，bias均None；X[3,1]→hidden[3,2]→linear/curved/combined[3,1]，squeeze(-1)為[3]；單筆輸出squeeze後為[1]；合成權重[1,1]。", "observed": "所有 API 實際執行無錯誤；列印與獨立形狀/狀態斷言吻合，原allclose通過，單筆batch保持；原hidden含負值證明預設ReLU未原地覆蓋。", "details": "七個官方固定版本原始檔親讀定位，与CPU2.14.1+cpu實跑結果分開記錄；原始fence逐byte保存，helper guard_events為空。所有@操作都是二維矩陣相乘；没有把bias式省略推广到有bias的情況。"},
+    },
+    {
+        "id": "forward-only-scope", "kind": "software", "status": "verified",
+        "statement": "本節只手工指定權重並前向計算；grad_fn 是運算求導關係記錄，本節沒有 backward、梯度更新或泛化評測。",
+        "location": "course/chapters/02.md L173–184、L197、L204",
+        "scope": "僅核對本小節原始fence本身；對學習有用權重的後續訓練敘述是教學範圍說明。無現有訓練結果或評測數據需要重算，不以本例聲稱成熟方法成績。",
+        "evidence": [
+            evidence("torch-grad-mode", "torch/autograd/grad_mode.py L21–32、L80–85", "no_grad只是局部求導模式，手動copy_结束后forward会记录关系；这个上下文自身不会训练。"),
+            evidence("torch-tensor-docs", "torch/_tensor_docs.py L6655–6665", "官方明列grad_fn与是否由操作产生的關係，grad填充发生在backward；存在grad_fn不等于已求梯度。"),
+            evidence("torch-tensor", "torch/_tensor.py L592–605", "backward才对graph leaves求导并累积梯度，此原碼没有调用该操作。"),
+            evidence("bounded-run", "verification.json original.parameters_unchanged_after_forward、parameter_grads_all_none、backward_or_step_calls_in_original、grad_fn_types", "AST确认原碼無backward/step，forward后weight精確保持指定值且grad均None，hidden/linear/curved/combined仍有MmBackward0，列印squeeze有SqueezeBackward1。"),
+        ],
+        "artifact_ids": ["original-py", "original-execution-json", "verification-json"],
+        "verification": {"method": "executed", "expected": "手動copy_後a/b仍是指定權重，全部參數grad=None；原碼沒有backward/step；forward有grad_fn；無資料、損失函數、訓練/評測呼叫。", "observed": "本輪AST與实际状态核对全部满足；parameter_grads_all_none=True、backward_or_step_calls=0，权重保持指定值；原碼及變化皆僅forward。", "details": "copy_確實是手動填權重，不被錯當成optimizer update；grad_fn分類及沒有梯度/step的事实共同區分計算圖、反向求導与参数更新。没有 GPU、完整訓練、資料/模型下載、付費、上传或commit。"},
+    },
+]
+
+report = {
+    "schema_version": 1, "review_stage": "technical", "lesson_id": "2.4",
+    "source": "course/chapters/02.md#2.4", "source_sha256": meta["source_sha256"],
+    "reviewer_task": "/root/phase4_factual_coordinator/factual_2_4", "reviewer_context": "fresh", "author_tasks": [],
+    "reviewed_on": "2026-10-05", "verdict": "pass", "figure_sha256": meta["figure_sha256"],
+    "reading_scope": {
+        "primary": "直接完整讀目前course/chapters/02.md L152–207（含唯一Python fence、table、圖引用、練習、details）；原始UTF-8 snapshot/hash見extraction。",
+        "context": "為了解拼接、Linear與章節脈絡，實際讀02.md L1–151及L208–250（2.1–2.3及2.5上下文）與被引用的01.md#1.12 L433–471；這些上下文不承接本節以外的技術審閱判定。",
+        "implementation_and_tools": "完整讀factual-reviewer-instructions.md、scripts/check_technical_reviews.py、section_facts.py；讀scripts/build_course.py L1–170及BOOTSTRAP、pyproject.toml L1–120；原SVG完整親讀、兩次view_image實看渲染。",
+        "external_originals": "本人自行下載PyTorch v2.8.0七個官方原始檔，親讀sources中明列定位，自己寫supports；未使用搜尋摘要或他人inspection-notes。",
+        "independence": "未讀既有2.4.json，也未讀舊報告/history正文或結論；新報告從本輪原稿、原始來源、獨立推導与实际CPU證據組装。author_tasks未提供，因此不猜測作者身分。",
+    },
+    "artifacts": artifacts, "sources": sources, "claims": claims, "issues": [],
+    "checks": {
+        "factual_accuracy": {"status": "pass", "claim_ids": [c["id"] for c in claims], "details": "六組實質主張逐項有自己的原始來源與支持範圍：affine合成、ReLU、三點與權重數值、ReLU表/練習/圖、API軸/形狀、forward-only。未發現需修改的實質不確定或錯誤。"},
+        "numeric_verification": {"status": "pass", "claim_ids": ["affine-numbers", "relu-numbers-and-figure"], "details": "獨立手算并實跑原碼、最後輸入3、移除ReLU、±1/±1.5斜率、含偏移非方形控制，核對行列、無單位輸出、斜率分母、精確值与CPUfloat32容忍差；最大绝對誤差0。沒有實測評分/平均分母。"},
+        "figure_consistency": {"status": "pass", "claim_ids": ["relu-numbers-and-figure", "affine-numbers"], "details": "Inkscape1.4 SVG→640×990 PNG實際渲染并view_image亲看，上線全0，下V為2/0/2，輸入−2/0/2、輸出軸、向右/向上箭頭、同權重title、非訓練註記全部吻合。render警告保存，退出0；不宣稱有browser驗證。"},
+        "source_verification": {"status": "pass", "claim_ids": [c["id"] for c in claims], "details": "官方pytorch/pytorch固定v2.8.0原source直接取得HTTP200，保存URL、存取日期、版本與hash；每個引用有本人實際讀取locator与supports。已明確区分官方參考v2.8.0與安裝2.14.1+cpu，後者的實際API行為另以CPU檢查核對。"},
+        "limitations": {"status": "pass", "claim_ids": ["affine-expressivity", "relu-expression", "api-and-shapes", "forward-only-scope"], "details": "本節只是手填配方的forward/representation示例，没有backward/update/泛化實驗。沒有GPU或訓練recipe。PyTorch權威參考tag不是安裝版本，兩者並列且只對本節穩定API逐項測試；不宣稱全版本等同。Inkscape PangoFT2/GtkRecentManager warning已保存且成圖亲看；未使用Chromium，不捏造逾時。helper無guard阻擋事件。"},
+    },
+}
+target = ROOT / "docs/technical-reviews/2.4.json"
+target.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
+print(json.dumps({"report": str(target), "verdict": report["verdict"], "claims": len(claims), "sources": len(sources), "artifacts": len(artifacts), "source_sha256": report["source_sha256"]}, ensure_ascii=False))
