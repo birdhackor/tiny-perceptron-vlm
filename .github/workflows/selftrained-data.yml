@@ -1,0 +1,104 @@
+name: Publish reviewed from-zero data through native Git LFS
+
+on:
+  push:
+    branches: [natural-assistant-v4]
+    paths: [.github/workflows/selftrained-data.yml, docs/selftrained/data-publish.json]
+  workflow_dispatch:
+    inputs:
+      operation:
+        type: choice
+        options: [inspect, publish]
+        default: inspect
+        description: Publish only the already frozen root-reviewed package recipe
+      recipe:
+        type: string
+        default: docs/selftrained/package-recipe.json
+        description: Exact committed reconstruction recipe
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tiny-perceptron-selftrained-data
+  cancel-in-progress: false
+
+jobs:
+  select:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      operation: ${{ steps.select.outputs.operation }}
+      recipe: ${{ steps.select.outputs.recipe }}
+      python_version: ${{ steps.select.outputs.python_version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          lfs: false
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - name: Select inspect or exact descriptor-authorized publish
+        id: select
+        env:
+          SELFTRAINED_DATA_OPERATION: ${{ inputs.operation || 'inspect' }}
+          SELFTRAINED_DATA_RECIPE: ${{ inputs.recipe || 'docs/selftrained/package-recipe.json' }}
+        run: |
+          git lfs version
+          python scripts/selftrained/publish_data.py select --revision "$GITHUB_SHA"
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: selftrained-data-selection-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: outputs/selftrained/data-publish/selection.json
+          if-no-files-found: error
+  publish:
+    needs: select
+    if: needs.select.outputs.operation == 'publish'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: write
+    env:
+      SELFTRAINED_DATA_RECIPE: ${{ needs.select.outputs.recipe }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          lfs: false
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ needs.select.outputs.python_version }}
+      - name: Install exact reconstruction dependencies from frozen recipe
+        run: |
+          python - <<'PY'
+          import json, os, subprocess, sys
+          from pathlib import Path
+          from scripts.selftrained.publish_data import committed_json, validate_recipe
+          recipe, _ = committed_json(Path.cwd(), os.environ['SELFTRAINED_DATA_RECIPE'], os.environ['GITHUB_SHA'])
+          validate_recipe(recipe)
+          pins = [name + '==' + version for name, version in sorted(recipe['dependencies'].items())]
+          if pins:
+              subprocess.run([sys.executable, '-m', 'pip', 'install', *pins], check=True)
+          PY
+      - name: Reconstruct actual committed producers and deterministic reviewed package
+        run: |
+          python scripts/selftrained/package.py \
+            --recipe "$SELFTRAINED_DATA_RECIPE" \
+            --output-dir outputs/selftrained/data-publish --reconstruct
+      - name: Verify exact frozen archive and committed LFS pointer before publication
+        run: |
+          python scripts/selftrained/publish_data.py verify \
+            --revision "$GITHUB_SHA" --recipe "$SELFTRAINED_DATA_RECIPE"
+      - name: Push only the verified native Git LFS object
+        run: |
+          python scripts/selftrained/publish_data.py publish \
+            --revision "$GITHUB_SHA" --recipe "$SELFTRAINED_DATA_RECIPE"
+      - name: Retain actual reconstruction and upload receipts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: selftrained-data-publish-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: outputs/selftrained/data-publish/*.json
+          if-no-files-found: error
