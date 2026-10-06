@@ -319,7 +319,8 @@ def test_protocol_gate_rejects_changed_checkpoint_generation_code_and_started_te
     job = {"checkpoint": descriptor(), "architecture": "moe", "max_new_tokens": 64}
     code = {"scripts/selftrained/evaluate.py": "c" * 64}
     protocol = {
-        "version": "selftrained-generation-v1",
+        "version": "selftrained-generation-v2",
+        "generation_budget_policy": "full-history-ceiling-min-remaining-context-v1",
         "test_once": True,
         "checkpoint_sha256": job["checkpoint"]["sha256"],
         "architecture": "moe",

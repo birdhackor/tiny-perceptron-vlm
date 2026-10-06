@@ -222,6 +222,14 @@ def validate_job(job):
             validate_descriptor(job[field], checkpoint=True)
     if stage in ("validation", "freeze", "test") and not job.get("checkpoint"):
         raise ValueError("Evaluation needs an exact checkpoint descriptor")
+    if "public_export" in job:
+        from scripts.selftrained.hf_transport import validate_public_evaluation
+
+        if stage not in ("validation", "freeze", "test") or job.get("resume") or job.get("init_checkpoint"):
+            raise ValueError("Public safe exports are available only for evaluation")
+        if job["checkpoint"]["stage"] != "joint" or job["checkpoint"]["path"] != "best.pt":
+            raise ValueError("Public evaluation must bind the selected private joint checkpoint")
+        validate_public_evaluation(job["public_export"], job.get("architecture", "moe"))
     if stage in TRAIN_STAGES and stage != "pretrain" and not (job.get("resume") or job.get("init_checkpoint")):
         raise ValueError("Later stages must inherit the shared tokenizer and from-zero core")
     if stage == "test":
@@ -474,6 +482,82 @@ def release_sources_gate(batch_id, release, manifest_sha, manifest):
     return sources
 
 
+def public_evaluation_source_gate(batch_id, job, manifest_sha, manifest):
+    """Bind public file pins to a completed private source before reserving.
+
+    Only the trusted checkpoint and small provenance JSON are read here; public
+    weights are downloaded anonymously and verified on the executing GPU.
+    """
+    from scripts.selftrained.hf_transport import (
+        public_evaluation_identity,
+        validate_public_evaluation,
+        verify_file,
+    )
+
+    architecture = job.get("architecture", "moe")
+    files = validate_public_evaluation(job["public_export"], architecture)
+    if batch_id != "selftrained-v2":
+        raise ValueError("The authorized V2 public export requires its V2 private lineage")
+    checkpoint = job["checkpoint"]
+    path, execution = artifact_gate(batch_id, checkpoint, manifest_sha, architecture)
+    receipt = json.loads((path.parent / "receipt.json").read_text())
+    if (
+        checkpoint["stage"] != "joint"
+        or checkpoint["path"] != "best.pt"
+        or execution.get("status") != "completed"
+        or any(
+            receipt.get(key) != execution.get(key)
+            for key in ("status", "revision", "stage", "run_id", "manifest_sha256", "job")
+        )
+        or receipt.get("stage") != checkpoint["stage"]
+        or receipt.get("run_id") != checkpoint["run_id"]
+    ):
+        raise ValueError("Public evaluation source must have its completed exact private execution/receipt")
+    recorded = receipt.get("files", [])
+    entries = {item["path"]: item for item in recorded}
+    if len(entries) != len(recorded) or entries.get("best.pt", {}).get("sha256") != checkpoint["sha256"]:
+        raise ValueError("Public evaluation source receipt differs from its exact selected checkpoint")
+    if "train-receipt.json" not in entries:
+        raise ValueError("Public evaluation source is missing its recorded training receipt")
+    if any(
+        {key: entries.get(name, {}).get(key) for key in ("path", "sha256", "bytes")} != item
+        for name, item in files.items()
+    ):
+        raise ValueError("Public file pins differ from the actual completed private safe export")
+    training = json.loads(verify_file(path.parent, entries["train-receipt.json"]).read_text())
+    if training.get("steps", -1) < execution.get("job", {}).get("steps", 0):
+        raise ValueError("Public evaluation source did not finish its requested training steps")
+    return public_evaluation_identity(path.parent, job["public_export"], checkpoint, manifest, architecture, training)
+
+
+def evaluation_weight_identity(job):
+    if "public_export" in job:
+        from scripts.selftrained.hf_transport import validate_public_evaluation
+
+        files = validate_public_evaluation(job["public_export"], job.get("architecture", "moe"))
+        return {
+            "weight_source": "safe_export",
+            "checkpoint_sha256": files["model.safetensors"]["sha256"],
+            "safe_weights_sha256": files["model.safetensors"]["sha256"],
+            "inference_manifest_sha256": files["inference-manifest.json"]["sha256"],
+            "selected_checkpoint_sha256": job["checkpoint"]["sha256"],
+        }
+    return {
+        "weight_source": "private_checkpoint",
+        "checkpoint_sha256": job["checkpoint"]["sha256"],
+        "safe_weights_sha256": None,
+        "inference_manifest_sha256": None,
+        "selected_checkpoint_sha256": None,
+    }
+
+
+def evaluation_public_lineage_gate(execution, job):
+    if execution.get("job", {}).get("public_export") != job.get("public_export"):
+        raise ValueError(
+            "Evaluation continuation/protocol must bind the same immutable public descriptor and weight source"
+        )
+
+
 def evaluation_resume_gate(path, job, protocol_sha=None):
     receipt_path = path.with_name("evaluation-receipt.json")
     expected_sha = job["resume_evaluation"]["receipt_sha256"]
@@ -483,7 +567,7 @@ def evaluation_resume_gate(path, job, protocol_sha=None):
     if (
         receipt.get("schema") != "selftrained-evaluation-journal-v1"
         or receipt.get("split") != ("test" if job["stage"] == "test" else "validation")
-        or receipt.get("checkpoint_sha256") != job["checkpoint"]["sha256"]
+        or receipt.get("checkpoint_sha256") != evaluation_weight_identity(job)["checkpoint_sha256"]
         or receipt.get("protocol_sha256") != protocol_sha
         or type(receipt.get("completed_count")) is not int
         or type(receipt.get("expected_count")) is not int
@@ -516,9 +600,15 @@ def test_protocol_gate(path, job, manifest, source_hashes, resume_path=None):
         raise ValueError("This frozen final test already started; failed attempts are not silently retried")
     expected_data = {Path(item["path"]).name: item["sha256"] for item in manifest["records"]}
     if (
-        protocol.get("version") != "selftrained-generation-v1"
+        protocol.get("version") != "selftrained-generation-v2"
+        or protocol.get("generation_budget_policy") != "full-history-ceiling-min-remaining-context-v1"
         or protocol.get("test_once") is not True
-        or protocol.get("checkpoint_sha256") != job["checkpoint"]["sha256"]
+        or protocol.get("weight_source", "private_checkpoint") != evaluation_weight_identity(job)["weight_source"]
+        or any(
+            protocol.get(key) != value
+            for key, value in evaluation_weight_identity(job).items()
+            if key != "weight_source"
+        )
         or protocol.get("architecture") != job.get("architecture", "moe")
         or protocol.get("max_new_tokens") != job.get("max_new_tokens", 128)
         or protocol.get("data_sha256") != expected_data
@@ -532,7 +622,7 @@ def test_protocol_gate(path, job, manifest, source_hashes, resume_path=None):
     return protocol
 
 
-def trainer_command(job, manifest, root, output, batch_id):
+def trainer_command(job, manifest, root, output, batch_id, public_model_dir=None):
     script = "train.py" if job["stage"] in TRAIN_STAGES else "evaluate.py"
     command = [sys.executable, f"/repo/scripts/selftrained/{script}"]
     for record in manifest["records"]:
@@ -568,9 +658,13 @@ def trainer_command(job, manifest, root, output, batch_id):
             if job.get(field):
                 command += ["--" + field.replace("_", "-"), str(artifact_path(batch_id, job[field]))]
     else:
+        if "public_export" in job:
+            if public_model_dir is None:
+                raise ValueError("Public evaluation command requires its verified safe model directory")
+            command += ["--model-dir", str(public_model_dir)]
+        else:
+            command += ["--checkpoint", str(artifact_path(batch_id, job["checkpoint"]))]
         command += [
-            "--checkpoint",
-            str(artifact_path(batch_id, job["checkpoint"])),
             "--split",
             "test" if job["stage"] == "test" else "validation",
         ]
@@ -654,17 +748,25 @@ def register_modal():
             raise RuntimeError("Live shared ledger changed or disappeared since client probe; reread before reserving")
         if job["stage"] not in ("prepare", "release"):
             prepared_records_gate(manifest, manifest_sha)
+        if "public_export" in job:
+            public_evaluation_source_gate(batch_id, job, manifest_sha, manifest)
         resume_path = None
         if job.get("resume_evaluation"):
-            resume_path, _ = artifact_gate(
+            resume_path, resume_execution = artifact_gate(
                 batch_id, job["resume_evaluation"], manifest_sha, job.get("architecture", "moe")
             )
+            evaluation_public_lineage_gate(resume_execution, job)
             if job["stage"] in ("validation", "freeze"):
                 evaluation_resume_gate(resume_path, job)
         for field in ("resume", "init_checkpoint", "checkpoint", "protocol"):
             if job.get(field):
-                path, _ = artifact_gate(batch_id, job[field], manifest_sha, job.get("architecture", "moe"))
+                if field == "checkpoint" and "public_export" in job:
+                    continue  # Already verified by the completed public source gate.
+                path, source_execution = artifact_gate(
+                    batch_id, job[field], manifest_sha, job.get("architecture", "moe")
+                )
                 if field == "protocol":
+                    evaluation_public_lineage_gate(source_execution, job)
                     test_protocol_gate(path, job, manifest, source_hashes, resume_path)
         if job["stage"] == "release":
             release_sources_gate(batch_id, job["release"], manifest_sha, manifest)
@@ -779,7 +881,22 @@ def register_modal():
                 write_json(output / "execution.json", receipt)
                 volume.commit()
                 root, receipt["data_readiness"] = local_readiness(manifest, manifest_sha)
-                command = trainer_command(job, manifest, root, output, batch_id)
+                public_model_dir = None
+                if "public_export" in job:
+                    from scripts.selftrained.hf_transport import download_public_evaluation
+
+                    public_evaluation_source_gate(batch_id, job, manifest_sha, manifest)
+                    public_model_dir = Path("/tmp/selftrained-public") / canonical_sha(job["public_export"])
+                    public_receipt = download_public_evaluation(
+                        job["public_export"],
+                        public_model_dir,
+                        job["checkpoint"],
+                        manifest,
+                        job.get("architecture", "moe"),
+                    )
+                    receipt["public_export"] = public_receipt
+                    write_json(output / "public-download-receipt.json", public_receipt)
+                command = trainer_command(job, manifest, root, output, batch_id, public_model_dir)
                 receipt["command"] = command
                 write_json(output / "execution.json", receipt)
                 seconds = job.get("max_seconds", resource_spec(stage, job.get("wall_seconds"))["seconds"] - 180)
