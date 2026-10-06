@@ -1,0 +1,293 @@
+"""Exercise budget, exact CLI and transport behavior without cloud mutations."""
+
+import importlib.util
+import io
+import json
+import sys
+import tarfile
+from copy import deepcopy
+from decimal import Decimal
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def module(name):
+    path = ROOT / "scripts/selftrained" / f"{name}.py"
+    spec = importlib.util.spec_from_file_location(f"selftrained_test_{name}", path)
+    result = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(result)
+    return result
+
+
+runner = module("modal_runner")
+transport = module("hf_transport")
+RATES = {
+    "cpu_hour_cost": "0.04730",
+    "mem_gib_hour_cost": "0.00800",
+    "gpu_hour_cost_l4": "0.80000",
+    "egress_gib_cost": "0.00",
+}
+
+
+def historical_ledger(total="36.20"):
+    return {
+        "budget_usd": "40.00",
+        "reserved_total_usd": total,
+        "reservations": [{"run_id": "history", "reserved_usd": total, "status": "failed"}],
+    }
+
+
+def reserve(ledger, run_id="attempt", job=None):
+    return runner.reserve_entry(
+        ledger,
+        run_id,
+        "new-batch",
+        "a" * 40,
+        "b" * 64,
+        job or {"schema_version": 1, "stage": "pretrain"},
+        "c" * 64,
+        {"rates": RATES},
+        {"train.py": "d" * 64},
+    )
+
+
+def test_shared_history_survives_failures_batches_and_retry():
+    ledger = historical_ledger()
+    original = deepcopy(ledger["reservations"][0])
+    first = reserve(ledger)
+    assert first["reserved_usd"] == "0.29"
+    runner.finish_entry(ledger, "attempt", "failed")
+    second = reserve(ledger, "new-attempt")
+    assert Decimal(ledger["reserved_total_usd"]) == Decimal("36.78")
+    assert ledger["reservations"][0] == original
+    assert second["batch_id"] == "new-batch"
+    with pytest.raises(ValueError, match="fresh run"):
+        reserve(ledger)
+
+
+def test_refuses_empty_stale_exhausted_and_bad_ledgers_without_mutation():
+    for ledger in ({}, historical_ledger("9.83"), historical_ledger("39.99"), historical_ledger("NaN")):
+        original = deepcopy(ledger)
+        with pytest.raises((RuntimeError, ValueError)):
+            reserve(ledger)
+        assert ledger == original
+    ledger = historical_ledger()
+    ledger["reserved_total_usd"] = "10.00"
+    reserve(ledger)
+    assert ledger["reserved_total_usd"] == "36.49"
+
+
+def test_completed_job_cannot_be_repeated_or_downgraded_by_failure_cleanup():
+    ledger = historical_ledger()
+    reserve(ledger)
+    runner.finish_entry(ledger, "attempt", "completed")
+    runner.finish_entry(ledger, "attempt", "failed-or-cancelled")
+    assert ledger["reservations"][-1]["status"] == "completed"
+    with pytest.raises(ValueError, match="already completed"):
+        reserve(ledger, "repeat")
+
+
+def test_cost_guard_uses_live_units_and_reserves_auxiliary_cpu_memory_egress_storage():
+    guard = runner.reservation_guard("pretrain", RATES)
+    assert Decimal(guard["bounded_compute_usd"]) == Decimal("902") * Decimal("0.95860") / Decimal("3600")
+    assert guard["bounded_egress_gib"] == "0.25"
+    assert Decimal(guard["auxiliary_compute_usd"]) > 0
+    assert Decimal(guard["build_and_storage_allowance_usd"]) == Decimal("0.04")
+    assert runner.reservation_guard("prepare", RATES)["reserved_usd"] == "0.06"
+    assert runner.reservation_guard("release", RATES)["reserved_usd"] == "0.06"
+    for rates in (
+        RATES | {"gpu_hour_cost_l4": "10"},
+        RATES | {"mem_gib_hour_cost": "NaN"},
+        {"gpu_L4_per_second": "0.000222"},
+    ):
+        with pytest.raises((RuntimeError, ValueError)):
+            runner.reservation_guard("pretrain", rates)
+
+
+def test_live_ledger_probe_is_read_only_client_api_and_preserves_raw_history(monkeypatch):
+    raw = json.dumps(historical_ledger("37.12")).encode()
+    operations = []
+
+    class Volume:
+        @staticmethod
+        def from_name(name, create_if_missing):
+            assert name == "tiny-perceptron-course" and create_if_missing is False
+            operations.append("volume lookup")
+            return SimpleNamespace(read_file=lambda path: iter([raw[:20], raw[20:]]))
+
+    modal = SimpleNamespace(
+        Volume=Volume,
+        Workspace=SimpleNamespace(from_context=lambda: SimpleNamespace(billing=SimpleNamespace(rates=lambda: RATES))),
+    )
+    monkeypatch.setitem(sys.modules, "modal", modal)
+    evidence = runner.read_live_ledger()
+    assert evidence["remaining_reserved_budget_usd"] == "2.88"
+    assert evidence["ledger"]["reservations"][0]["status"] == "failed"
+    assert evidence["remote_container_started"] is False
+    assert evidence["ledger_written"] is False
+    assert operations == ["volume lookup"]
+
+
+def descriptor(stage="joint", path="best.pt"):
+    return {"stage": stage, "run_id": "prior-attempt", "path": path, "sha256": "e" * 64}
+
+
+def test_exact_train_and_evaluate_clis_are_parsed_by_actual_scripts(tmp_path, monkeypatch):
+    train, evaluate = module("train"), module("evaluate")
+    monkeypatch.setattr(runner, "artifact_path", lambda batch, item: tmp_path / item["path"])
+    manifest = {"records": [{"path": "records/text.jsonl"}, {"path": "records/audio.jsonl"}], "model_config": {}}
+    job = {
+        "schema_version": 1,
+        "stage": "joint",
+        "architecture": "dense",
+        "steps": 25,
+        "init_checkpoint": descriptor("audio"),
+    }
+    command = runner.trainer_command(job, manifest, tmp_path, tmp_path / "train", "batch")
+    parsed = train.parser().parse_args(command[2:])
+    assert parsed.architecture == "dense" and parsed.stage == "joint" and parsed.steps == 25
+    assert parsed.device == "cuda" and parsed.threads == 2
+    assert len(parsed.records) == 2
+    assert parsed.init_checkpoint == str(tmp_path / "best.pt")
+    freeze = {"schema_version": 1, "stage": "freeze", "checkpoint": descriptor()}
+    parsed = evaluate.parser().parse_args(
+        runner.trainer_command(freeze, manifest, tmp_path, tmp_path / "val", "batch")[2:]
+    )
+    assert parsed.split == "validation" and parsed.freeze_protocol.endswith("frozen.json")
+    test = {
+        "schema_version": 1,
+        "stage": "test",
+        "checkpoint": descriptor(),
+        "protocol": descriptor("freeze", "frozen.json"),
+    }
+    parsed = evaluate.parser().parse_args(
+        runner.trainer_command(test, manifest, tmp_path, tmp_path / "test", "batch")[2:]
+    )
+    assert parsed.split == "test" and parsed.protocol.endswith("frozen.json") and parsed.limit is None
+
+
+@pytest.mark.parametrize(
+    "job",
+    [
+        {"stage": "pretrain", "max_seconds": 721},
+        {"stage": "pretrain", "learning_rate": "NaN"},
+        {"stage": "sft"},
+        {"stage": "test", "checkpoint": descriptor(), "protocol": descriptor("freeze", "frozen.json"), "limit": 1},
+        {"stage": "freeze", "checkpoint": descriptor(), "limit": 1},
+        {"stage": "pretrain", "resume": descriptor(), "init_checkpoint": descriptor()},
+    ],
+)
+def test_unbounded_or_unfrozen_jobs_fail_before_cloud_call(job):
+    with pytest.raises(ValueError):
+        runner.validate_job({"schema_version": 1, **job})
+
+
+def test_protocol_gate_rejects_changed_checkpoint_generation_code_and_started_test(tmp_path):
+    path = tmp_path / "frozen.json"
+    manifest = {"records": [{"path": "records/text.jsonl", "sha256": "b" * 64}]}
+    job = {"checkpoint": descriptor(), "architecture": "moe", "max_new_tokens": 64}
+    code = {"scripts/selftrained/evaluate.py": "c" * 64}
+    protocol = {
+        "version": "selftrained-generation-v1",
+        "test_once": True,
+        "checkpoint_sha256": job["checkpoint"]["sha256"],
+        "architecture": "moe",
+        "max_new_tokens": 64,
+        "data_sha256": {"text.jsonl": "b" * 64},
+        "controls": "all",
+        "code_sha256": code,
+    }
+    path.write_text(json.dumps(protocol))
+    assert runner.test_protocol_gate(path, job, manifest, code) == protocol
+    for changed in (job | {"max_new_tokens": 63}, job | {"checkpoint": descriptor() | {"sha256": "f" * 64}}):
+        with pytest.raises(ValueError, match="frozen"):
+            runner.test_protocol_gate(path, changed, manifest, code)
+    with pytest.raises(ValueError, match="frozen"):
+        runner.test_protocol_gate(path, job, manifest, {"scripts/selftrained/evaluate.py": "d" * 64})
+    path.with_suffix(".json.test-started.json").write_text("{}")
+    with pytest.raises(ValueError, match="already started"):
+        runner.test_protocol_gate(path, job, manifest, code)
+
+
+def test_prior_artifact_binds_dataset_manifest_and_dense_moe_architecture(tmp_path, monkeypatch):
+    monkeypatch.setattr(runner, "EXPERIMENTS", tmp_path)
+    directory = tmp_path / "batch/joint/prior-attempt"
+    directory.mkdir(parents=True)
+    weight = directory / "best.pt"
+    weight.write_bytes(b"trusted internal checkpoint")
+    metadata = {"manifest_sha256": "b" * 64, "job": {"architecture": "dense"}, "revision": "a" * 40}
+    (directory / "execution.json").write_text(json.dumps(metadata))
+    item = descriptor() | {"sha256": runner.sha256(weight)}
+    path, execution = runner.artifact_gate("batch", item, "b" * 64, "dense")
+    assert path == weight and execution == metadata
+    with pytest.raises(ValueError, match="different frozen"):
+        runner.artifact_gate("batch", item, "c" * 64, "dense")
+    with pytest.raises(ValueError, match="cannot share"):
+        runner.artifact_gate("batch", item, "b" * 64, "moe")
+
+
+def archive(tmp_path, members):
+    file = tmp_path / "package.tar.gz"
+    with tarfile.open(file, "w:gz") as out:
+        for name, content, kind in members:
+            info = tarfile.TarInfo(name)
+            info.size = len(content)
+            info.type = kind
+            if kind == tarfile.SYMTYPE:
+                info.linkname = "/tmp/outside"
+            out.addfile(info, io.BytesIO(content) if kind == tarfile.REGTYPE else None)
+    return file, {
+        "bytes": file.stat().st_size,
+        "sha256": transport.digest(file),
+        "unpacked_bytes": sum(len(content) for _, content, _ in members),
+    }
+
+
+def test_data_archive_checks_bytes_hash_and_member_paths(tmp_path):
+    file, package = archive(tmp_path, [("records/train.jsonl", b'{"split":"train"}\n', tarfile.REGTYPE)])
+    output = transport.unpack_verified_archive(file, tmp_path / "verified", package)
+    assert (output / "records/train.jsonl").read_bytes() == b'{"split":"train"}\n'
+    with pytest.raises(ValueError, match="pinned bytes"):
+        transport.unpack_verified_archive(file, tmp_path / "bad", package | {"sha256": "f" * 64})
+    for members in (
+        [("records/../../outside", b"x", tarfile.REGTYPE)],
+        [("link", b"", tarfile.SYMTYPE)],
+        [("dup", b"x", tarfile.REGTYPE), ("dup", b"x", tarfile.REGTYPE)],
+    ):
+        file, package = archive(tmp_path, members)
+        with pytest.raises(ValueError):
+            transport.unpack_verified_archive(file, tmp_path / "bad", package)
+
+
+def test_public_release_rejects_resume_checkpoint_and_unreviewed_bytes(tmp_path):
+    source = tmp_path / "latest.pt"
+    source.write_bytes(b"private optimizer state")
+    item = {
+        "path": source.name,
+        "bytes": source.stat().st_size,
+        "sha256": transport.digest(source),
+        "kind": "inference",
+        "license": "mit",
+        "redistribution_approved": True,
+    }
+    release = {
+        "repo_id": transport.PUBLIC_MODEL_REPO,
+        "private": False,
+        "revision": "a" * 40,
+        "manifest_sha256": "b" * 64,
+        "prefix": "selftrained/v1",
+        "files": [item],
+    }
+    with pytest.raises(ValueError, match="Resume checkpoints"):
+        transport.approved_public_files(tmp_path, release, "a" * 40, "b" * 64)
+    source = tmp_path / "model.safetensors"
+    source.write_bytes(b"inference tensors")
+    item.update(path=source.name, bytes=source.stat().st_size, sha256=transport.digest(source))
+    assert transport.approved_public_files(tmp_path, release, "a" * 40, "b" * 64) == [item]
+    item["redistribution_approved"] = False
+    with pytest.raises(ValueError, match="redistribution"):
+        transport.approved_public_files(tmp_path, release, "a" * 40, "b" * 64)

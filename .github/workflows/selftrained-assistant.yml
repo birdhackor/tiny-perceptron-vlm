@@ -1,0 +1,150 @@
+name: From-zero finite multimodal assistant
+
+on:
+  # Initial registration on the active work branch only. Every push invocation
+  # is strictly ledger-only; paid run mode requires explicit workflow_dispatch.
+  push:
+    branches: [natural-assistant-v4]
+    paths: [.github/workflows/selftrained-assistant.yml]
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Ledger reads committed shared Volume and live rates without a remote container
+        type: choice
+        options: [ledger, run]
+        default: ledger
+      manifest:
+        description: Exact committed Git LFS transport and frozen records manifest
+        type: string
+        default: docs/selftrained/manifest.json
+      job:
+        description: Exact committed bounded stage options, checkpoint/protocol hashes and allowlist
+        type: string
+        default: docs/selftrained/jobs/prepare.json
+      batch_id:
+        description: Versioned run directory; changing it never resets the shared US$40 ledger
+        type: string
+        default: selftrained-v1
+
+permissions:
+  contents: read
+
+# Same group as ALL existing paid course/natural jobs protects the shared ledger.
+concurrency:
+  group: tiny-perceptron-course-gpu
+  cancel-in-progress: false
+
+jobs:
+  selftrained:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      MODAL_TOKEN_ID: ${{ vars.MODAL_TOKEN_ID }}
+      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+      MODAL_ENVIRONMENT: ${{ vars.MODAL_ENVIRONMENT || 'main' }}
+      SELFTRAINED_MANIFEST: ${{ inputs.manifest }}
+      SELFTRAINED_JOB: ${{ inputs.job }}
+      SELFTRAINED_BATCH: ${{ inputs.batch_id }}
+      SELFTRAINED_RUN: gha-${{ github.run_id }}-${{ github.run_attempt }}
+      SELFTRAINED_OPERATION: ${{ github.event_name == 'push' && 'ledger' || inputs.operation }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          lfs: false
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - name: Verify existing Modal bindings by presence only
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in MODAL_TOKEN_ID MODAL_TOKEN_SECRET; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Missing existing Repository setting: $name"
+              exit 1
+            fi
+          done
+          python -m py_compile scripts/selftrained/modal_runner.py scripts/selftrained/hf_transport.py
+          python -m pip install modal==1.6.0
+      - name: Read LIVE shared ledger and rates through client SDK only
+        if: env.SELFTRAINED_OPERATION == 'ledger'
+        run: python scripts/selftrained/modal_runner.py ledger
+      - name: Check committed actual trainer, manifest and bounded job
+        if: env.SELFTRAINED_OPERATION == 'run'
+        run: |
+          python scripts/selftrained/modal_runner.py check \
+            --revision "$GITHUB_SHA" --manifest "$SELFTRAINED_MANIFEST" --job "$SELFTRAINED_JOB"
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          job = json.loads(Path(os.environ['SELFTRAINED_JOB']).read_text())
+          with Path(os.environ['GITHUB_ENV']).open('a') as stream:
+              stream.write('SELFTRAINED_STAGE=' + job['stage'] + '\n')
+              stream.write('SELFTRAINED_EXECUTE_PHASE=' + ('execute' if job['stage'] not in ('prepare', 'release') else job['stage']) + '\n')
+          PY
+      - name: Reserve against LIVE shared ledger before asset upload or CUDA image build
+        id: reserve
+        if: env.SELFTRAINED_OPERATION == 'run'
+        env:
+          SELFTRAINED_MODAL_PHASE: control
+        run: |
+          modal run scripts/selftrained/modal_runner.py \
+            --mode reserve --run-id "$SELFTRAINED_RUN" --revision "$GITHUB_SHA" \
+            --manifest "$SELFTRAINED_MANIFEST" --job "$SELFTRAINED_JOB" --batch-id "$SELFTRAINED_BATCH"
+      - name: Fetch only the committed exact Git LFS dataset package
+        if: env.SELFTRAINED_OPERATION == 'run' && env.SELFTRAINED_STAGE == 'prepare'
+        run: |
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          from scripts.selftrained.hf_transport import materialize_git_lfs
+          manifest = json.loads(Path(os.environ['SELFTRAINED_MANIFEST']).read_text())
+          asset = materialize_git_lfs(manifest['package'], Path.cwd(), Path('.cache/selftrained') / (manifest['package']['sha256'] + '.tar.gz'))
+          with Path(os.environ['GITHUB_ENV']).open('a') as stream:
+              stream.write('SELFTRAINED_ASSET_FILE=' + str(asset.resolve()) + '\n')
+          PY
+      - name: Execute one bounded actual stage
+        id: execute
+        if: env.SELFTRAINED_OPERATION == 'run'
+        env:
+          SELFTRAINED_MODAL_PHASE: ${{ env.SELFTRAINED_EXECUTE_PHASE }}
+        run: |
+          modal run scripts/selftrained/modal_runner.py \
+            --mode execute --run-id "$SELFTRAINED_RUN" --revision "$GITHUB_SHA" \
+            --manifest "$SELFTRAINED_MANIFEST" --job "$SELFTRAINED_JOB" --batch-id "$SELFTRAINED_BATCH"
+      - name: Preserve failed reservation on interrupted build, fetch or execution
+        if: always() && steps.reserve.outcome == 'success' && steps.execute.outcome != 'success'
+        env:
+          SELFTRAINED_MODAL_PHASE: control
+        run: |
+          modal run scripts/selftrained/modal_runner.py \
+            --mode finish --run-id "$SELFTRAINED_RUN" --revision "$GITHUB_SHA" \
+            --batch-id "$SELFTRAINED_BATCH"
+      - name: Retain exact source SHA, attempt, raw receipts, generations and live budget evidence
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: selftrained-${{ env.SELFTRAINED_OPERATION }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: outputs/selftrained/
+          if-no-files-found: error
+      - name: Summarize actual evidence
+        if: always()
+        run: |
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          with Path(os.environ['GITHUB_STEP_SUMMARY']).open('a') as summary:
+              summary.write('Source Git SHA: ' + os.environ['GITHUB_SHA'] + '\n\n')
+              summary.write('Attempt: ' + os.environ['SELFTRAINED_RUN'] + '\n\n')
+              root = Path('outputs/selftrained')
+              ledger = root / 'live-ledger.json'
+              receipt = root / os.environ['SELFTRAINED_RUN'] / 'receipt.json'
+              if ledger.is_file():
+                  value = json.loads(ledger.read_text())
+                  summary.write('Live shared reserved total US$' + value['reserved_total_usd'] + '; remaining US$' + value['remaining_reserved_budget_usd'] + '\n\n')
+              if receipt.is_file():
+                  value = json.loads(receipt.read_text())
+                  summary.write('Actual stage: ' + value['stage'] + '; status: ' + value['status'] + '\n\n')
+              summary.write('Reservations are conservative bounds, not invoices. Full resumable checkpoints remain on the existing private course Volume.\n')
+          PY
