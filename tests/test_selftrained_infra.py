@@ -282,6 +282,65 @@ def test_prior_artifact_binds_dataset_manifest_and_dense_moe_architecture(tmp_pa
         runner.artifact_gate("batch", item, "b" * 64, "moe")
 
 
+def test_reserve_checks_prepared_identity_and_records_while_gpu_checks_all_assets(tmp_path, monkeypatch):
+    from scripts.selftrained import hf_transport
+
+    monkeypatch.setattr(runner, "EXPERIMENTS", tmp_path)
+    manifest_sha = "b" * 64
+    directory = runner.data_root(manifest_sha)
+    directory.mkdir(parents=True)
+    records = []
+    for number in range(12):
+        path = directory / f"records-{number}.jsonl"
+        path.write_bytes(b'{"split":"train"}\n')
+        records.append({"path": path.name, "bytes": path.stat().st_size, "sha256": runner.sha256(path)})
+    asset = directory / "image.png"
+    asset.write_bytes(b"verified prepared asset")
+    assets = [{"path": asset.name, "bytes": asset.stat().st_size, "sha256": runner.sha256(asset)}]
+    # These absent assets must never be touched by the small control container.
+    assets += [{"path": f"other-{i}.png", "bytes": 1, "sha256": "c" * 64} for i in range(6257)]
+    manifest = {"package": {"sha256": "d" * 64}, "records": records, "assets": assets}
+    receipt = {
+        "status": "completed",
+        "manifest_sha256": manifest_sha,
+        "package": manifest["package"],
+        "records": records,
+        "asset_count": len(assets),
+    }
+    receipt_path = directory / "prepare-receipt.json"
+    receipt_path.write_text(json.dumps(receipt))
+    calls = []
+    original_verify = hf_transport.verify_file
+
+    def verify(root, item):
+        calls.append(item["path"])
+        return original_verify(root, item)
+
+    monkeypatch.setattr(hf_transport, "verify_file", verify)
+    assert runner.prepared_records_gate(manifest, manifest_sha) == directory
+    assert calls == [item["path"] for item in records]
+    for changed in (
+        receipt | {"manifest_sha256": "e" * 64},
+        receipt | {"package": {"sha256": "e" * 64}},
+        receipt | {"records": records[:-1]},
+        receipt | {"asset_count": 1},
+        receipt | {"status": "failed"},
+    ):
+        receipt_path.write_text(json.dumps(changed))
+        with pytest.raises(ValueError, match="identity"):
+            runner.prepared_records_gate(manifest, manifest_sha)
+    receipt_path.write_text(json.dumps(receipt))
+    asset.write_bytes(b"mutated prepared asset")
+    calls.clear()
+    assert runner.prepared_records_gate(manifest, manifest_sha) == directory
+    assert calls == [item["path"] for item in records]
+    with pytest.raises(ValueError, match="Size/hash mismatch: image.png"):
+        runner.readiness(manifest, manifest_sha)
+    (directory / records[0]["path"]).write_bytes(b"mutated record")
+    with pytest.raises(ValueError, match="Size/hash mismatch"):
+        runner.prepared_records_gate(manifest, manifest_sha)
+
+
 def test_partial_evaluation_resume_pins_raw_prefix_receipt_and_freeze_protocol(tmp_path):
     output = tmp_path / "outputs.jsonl"
     prefix = b'{"record":{"id":"frozen-case-1"},"trace":{"final_output":"answer"}}\n'

@@ -383,14 +383,33 @@ def artifact_path(batch_id, descriptor):
     return path
 
 
-def readiness(manifest, manifest_sha):
+def prepared_records_gate(manifest, manifest_sha):
+    """Bounded control check; full asset verification still precedes training."""
     from scripts.selftrained.hf_transport import verify_file
 
     root = data_root(manifest_sha)
-    receipt = root / "prepare-receipt.json"
-    if not receipt.is_file() or json.loads(receipt.read_text()).get("manifest_sha256") != manifest_sha:
+    receipt_path = root / "prepare-receipt.json"
+    if not receipt_path.is_file():
         raise ValueError("Exact frozen package must complete CPU prepare before GPU reservation")
-    for item in [*manifest["records"], *manifest.get("assets", [])]:
+    receipt = json.loads(receipt_path.read_text())
+    if (
+        receipt.get("status") != "completed"
+        or receipt.get("manifest_sha256") != manifest_sha
+        or receipt.get("package") != manifest["package"]
+        or receipt.get("records") != manifest["records"]
+        or receipt.get("asset_count") != len(manifest.get("assets", []))
+    ):
+        raise ValueError("Prepared package/records identity differs from the exact frozen manifest")
+    for item in manifest["records"]:
+        verify_file(root, item)
+    return root
+
+
+def readiness(manifest, manifest_sha):
+    from scripts.selftrained.hf_transport import verify_file
+
+    root = prepared_records_gate(manifest, manifest_sha)
+    for item in manifest.get("assets", []):
         verify_file(root, item)
     return root
 
@@ -582,7 +601,7 @@ def register_modal():
         if not LEDGER.is_file() or sha256(LEDGER) != previous_sha:
             raise RuntimeError("Live shared ledger changed or disappeared since client probe; reread before reserving")
         if job["stage"] not in ("prepare", "release"):
-            readiness(manifest, manifest_sha)
+            prepared_records_gate(manifest, manifest_sha)
         resume_path = None
         if job.get("resume_evaluation"):
             resume_path, _ = artifact_gate(
