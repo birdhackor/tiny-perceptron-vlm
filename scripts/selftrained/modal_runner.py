@@ -20,6 +20,7 @@ from decimal import ROUND_CEILING, Decimal
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
 COURSE = Path("/course")
 LEDGER = COURSE / "budget.json"
 EXPERIMENTS = COURSE / "selftrained"
