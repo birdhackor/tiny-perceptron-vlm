@@ -1,0 +1,257 @@
+"""Read-only local finance review; inputs are archived artifacts or explicit synthetic fixtures."""
+import hashlib
+import importlib.util
+import json
+import sys
+from copy import deepcopy
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal as D
+from pathlib import Path
+
+ROOT = Path('/workspace/selftrained-v2')
+CANDIDATE = Path('/tmp/p5-gross-quota-highwater-candidate/scripts/selftrained/finance.py')
+PROOF = Path('/tmp/p6-highwater-finance-independent-proof.json')
+POLICY_PATH = ROOT / 'docs/selftrained/v2-gross-quota-20261006.json'
+EXPECTED_POLICY = '557b2bd1135c41beff0fdc38bc69ed8a4c36ddc06d14b917d16bf5b732867372'
+EXPECTED_OLD = '5c94a11d5314b956c42f09777345088fab375586cad0c16e0a9785ed0fccb5a2'
+EXPECTED_CANDIDATE = sys.argv[1]
+
+
+def sha(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def module(path, name):
+    spec = importlib.util.spec_from_file_location(name, path)
+    value = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(value)
+    return value
+
+
+assert sha(CANDIDATE) == EXPECTED_CANDIDATE
+preserved_paths = [ROOT / 'scripts/selftrained/finance.py', POLICY_PATH,
+                   ROOT / 'tests/test_selftrained_gross_quota.py',
+                   *sorted((ROOT / 'docs/selftrained/infrastructure').glob('v2-gross-quota-*.json'))]
+preserved_sha = {str(path): sha(path) for path in preserved_paths}
+old = module(ROOT / 'scripts/selftrained/finance.py', 'old_finance_review')
+new = module(CANDIDATE, 'candidate_finance_review')
+assert sha(POLICY_PATH) == EXPECTED_POLICY
+assert sha(ROOT / 'scripts/selftrained/finance.py') == EXPECTED_OLD
+policy = json.loads(POLICY_PATH.read_text())
+op = ROOT / 'outputs/selftrained-v2/operations/dense-public-final-test-attempt-1/monitor/artifact/selftrained-run-9482b50212cca4c6b68cf7ad2d54abe27c2b308b-37451905991-1/gha-37451905991-1'
+before = json.loads((op / 'live-ledger-before.json').read_text())
+reservation = json.loads((op / 'reservation.json').read_text())
+receipt = json.loads((op / 'receipt.json').read_text())
+refresh_path = next((ROOT / 'outputs/selftrained-v2/billing-refresh-37456850365').rglob('workspace-billing-summary.json'))
+refresh_raw = json.loads(refresh_path.read_text())
+refresh = {'source': new.SOURCE, **deepcopy(refresh_raw)}
+refresh_now = new.utc(refresh['observed_at'])
+results = []
+
+
+def passed(name, detail=None):
+    results.append({'name': name, 'status': 'PASS', 'detail': detail})
+
+
+def reject(name, call, expected=None):
+    try:
+        call()
+    except (ValueError, RuntimeError, KeyError, TypeError) as error:
+        if expected is not None:
+            assert expected in str(error), (name, str(error), expected)
+        passed(name, {'error_type': type(error).__name__, 'error': str(error)})
+        return
+    raise AssertionError('unexpected acceptance: ' + name)
+
+
+def check(state, ledger, snapshot, amount='.07', name='synthetic-new', now=None, implementation=new):
+    return implementation.check_quota(policy, EXPECTED_POLICY, state, snapshot, ledger, amount, name,
+                                      now or new.utc(snapshot['observed_at']))
+
+
+# Archived before4 and actual fifth snapshot replay. Reservation timestamp used
+# solely for reconstructed5 is explicitly chosen; no actual post5 sidecar claim.
+fifth_snapshot = reservation['entry']['billing_before']['gross_quota_snapshot']
+reconstruction_time = new.utc(fifth_snapshot['observed_at']) + timedelta(microseconds=1)
+state5_old, report5_old = check(before['gross_quota_state'], before['ledger'], fifth_snapshot,
+                              reservation['entry']['reserved_usd'], reservation['entry']['run_id'],
+                              reconstruction_time, old)
+state5_new, report5_new = check(before['gross_quota_state'], before['ledger'], fifth_snapshot,
+                              reservation['entry']['reserved_usd'], reservation['entry']['run_id'],
+                              reconstruction_time)
+assert state5_old == state5_new
+assert all(report5_new[k] == v for k, v in report5_old.items())
+assert all(report5_new[k] == v for k, v in reservation['gross_quota_guard'].items())
+passed('actual_before4_fifth_snapshot_old_new_equal', report5_new)
+ledger5 = deepcopy(before['ledger'])
+entry5 = deepcopy(reservation['entry'])
+assert receipt['status'] == 'completed'
+entry5.update(status=receipt['status'], finished_at=receipt['finished_at'], receipt_sha256=sha(op / 'receipt.json'))
+ledger5['reservations'].append(entry5)
+ledger5['reserved_total_usd'] = str(D(ledger5['reserved_total_usd']) + D(entry5['reserved_usd']))
+input_state, input_ledger, input_refresh = deepcopy(state5_new), deepcopy(ledger5), deepcopy(refresh)
+state6, report6 = check(state5_new, ledger5, refresh)
+assert state5_new == input_state and ledger5 == input_ledger and refresh == input_refresh
+assert D(report6['official_current_gross_usd']) == D('7.24629663')
+assert D(report6['actual_gross_increment_usd']) == D('.92288452')
+assert D(report6['retained_official_highwater_gross_usd']) == D('7.28629446')
+assert D(report6['retained_highwater_gross_increment_usd']) == D('.96288235')
+assert D(report6['unreconciled_round_bounds_usd']) == D('2.23')
+assert D(report6['carry_in_bounds_usd']) == D('.54')
+assert D(report6['guarded_increment_usd']) == D('3.80288235')
+assert D(report6['remaining_guarded_quota_usd']) == D('26.19711765')
+assert state6['month_gross_highwater_usd'] == state5_new['month_gross_highwater_usd']
+assert state6['last_observed_at'] == refresh['observed_at']
+assert state6['attempts'][:-1] == state5_new['attempts']
+passed('reconstructed5_actual_refresh_gross_separated_highwater_retained_no_input_mutation', report6)
+reject('old_strict_source_still_rejects_actual_refresh_regression',
+       lambda: check(state5_old, ledger5, refresh, implementation=old), 'regressed')
+
+# Changes to any historical snapshot must be rejected against its existing SHA.
+for index in range(5):
+    historical_id = state5_new['attempts'][index]['run_id']
+    for field, value in [('metered_cost_usd', '6.50'), ('observed_at', '2026-10-06T09:15:33+00:00')]:
+        ledger_bad = deepcopy(ledger5)
+        historical = next(x for x in ledger_bad['reservations'] if x['run_id'] == historical_id)['billing_before']['gross_quota_snapshot']
+        if field == 'metered_cost_usd':
+            historical['summaries'][-1][field] = value
+        else:
+            historical[field] = value
+        reject(f'actual_history_{index}_ledger_{field}_tamper',
+               lambda ledger_bad=ledger_bad: check(state5_new, ledger_bad, refresh), 'snapshot differs')
+    bad_state = deepcopy(state5_new)
+    bad_state['attempts'][index]['billing_snapshot_sha256'] = '0' * 64
+    reject(f'actual_history_{index}_sidecar_snapshot_hash_tamper',
+           lambda bad_state=bad_state: check(bad_state, ledger5, refresh), 'snapshot differs')
+
+for change in ['highwater_down', 'highwater_up', 'drop_month', 'last_observed', 'delete_attempt',
+               'shrink_bound', 'duplicate_attempt', 'wrong_round', 'wrong_policy', 'state_reset']:
+    bad = deepcopy(state5_new)
+    if change == 'highwater_down': bad['month_gross_highwater_usd']['2026-10'] = '7.24629663'
+    elif change == 'highwater_up': bad['month_gross_highwater_usd']['2026-10'] = '10'
+    elif change == 'drop_month': del bad['month_gross_highwater_usd']['2026-09']
+    elif change == 'last_observed': bad['last_observed_at'] = '2026-10-06T10:47:08+00:00'
+    elif change == 'delete_attempt': bad['attempts'].pop(0)
+    elif change == 'shrink_bound': bad['attempts'][0]['reserved_usd'] = '.001'
+    elif change == 'duplicate_attempt': bad['attempts'].append(deepcopy(bad['attempts'][0]))
+    elif change == 'wrong_round': bad['round_id'] = 'old-round'
+    elif change == 'wrong_policy': bad['policy_sha256'] = '0' * 64
+    elif change == 'state_reset': bad = None
+    reject('actual_state_' + change, lambda bad=bad: check(bad, ledger5, refresh))
+
+for change in ['below_baseline', 'missing_cycle', 'duplicate_cycle', 'reversed_cycles', 'time_backward',
+               'wrong_workspace', 'wrong_source', 'stale', 'future', 'bad_boundary', 'nan', 'negative']:
+    bad = deepcopy(refresh)
+    replay_now = refresh_now
+    if change == 'below_baseline': bad['summaries'][-1]['metered_cost_usd'] = '6.32341210'
+    elif change == 'missing_cycle': bad['summaries'].pop(0)
+    elif change == 'duplicate_cycle': bad['summaries'].append(deepcopy(bad['summaries'][0]))
+    elif change == 'reversed_cycles': bad['summaries'].reverse()
+    elif change == 'time_backward':
+        bad['observed_at'] = '2026-10-06T10:47:07+00:00'; replay_now = new.utc(bad['observed_at'])
+    elif change == 'wrong_workspace': bad['workspace_name'] = 'other-workspace'
+    elif change == 'wrong_source': bad['source'] = 'credits-ledger'
+    elif change == 'stale': replay_now += timedelta(seconds=121)
+    elif change == 'future': bad['observed_at'] = (refresh_now + timedelta(seconds=1)).isoformat()
+    elif change == 'bad_boundary': bad['summaries'][-1]['end'] = '2026-11-02T00:00:00+00:00'
+    elif change == 'nan': bad['summaries'][-1]['metered_cost_usd'] = 'NaN'
+    elif change == 'negative': bad['summaries'][-1]['metered_cost_usd'] = '-1'
+    reject('actual_current_' + change, lambda bad=bad, replay_now=replay_now: check(state5_new, ledger5, bad, now=replay_now))
+
+for change in ['carry_active', 'attempt_active', 'duplicate_ledger_id', 'old_policy_record']:
+    bad = deepcopy(ledger5)
+    if change == 'carry_active':
+        next(x for x in bad['reservations'] if x['run_id'] == policy['carry_in_bounds'][0]['run_id'])['status'] = 'reserved'
+    elif change == 'attempt_active': bad['reservations'][-1]['status'] = 'reserved'
+    elif change == 'duplicate_ledger_id': bad['reservations'].append(deepcopy(bad['reservations'][-1]))
+    elif change == 'old_policy_record': bad['reservations'][-1]['gross_quota_policy_sha256'] = '0' * 64
+    reject('actual_ledger_' + change, lambda bad=bad: check(state5_new, bad, refresh))
+
+# Multi-attempt histories with regression and month rollover prove complete
+# history reconstruction rather than use of only the last snapshot.
+carry = next(x for x in before['ledger']['reservations'] if x['run_id'] == policy['carry_in_bounds'][0]['run_id'])
+synthetic_ledger = {'reservations': [deepcopy(carry)], 'reserved_total_usd': '.54'}
+synthetic_state = None
+
+
+def synth_snapshot(time, oct_value, nov_value=None):
+    value = deepcopy(fifth_snapshot)
+    value['observed_at'] = time.isoformat()
+    value['summaries'][-1]['metered_cost_usd'] = oct_value
+    if nov_value is not None:
+        value['summaries'].append({'cycle': '2026-11', 'start': '2026-11-01T00:00:00+00:00',
+                                  'end': '2026-12-01T00:00:00+00:00', 'metered_cost_usd': nov_value})
+    return value
+
+
+def store(ledger, state, snapshot, status='completed'):
+    attempt = state['attempts'][-1]
+    ledger['reservations'].append({'run_id': attempt['run_id'], 'reserved_usd': attempt['reserved_usd'],
+        'status': status, 'gross_quota_policy_sha256': EXPECTED_POLICY,
+        'billing_before': {'gross_quota_snapshot': deepcopy(snapshot)}})
+
+
+monotonic = ['6.50', '7.0', '8.0']
+old_state = None
+for i, value in enumerate(monotonic):
+    snap = synth_snapshot(datetime(2026, 10, 6, 9, 30 + i, tzinfo=UTC), value)
+    synthetic_state, nr = check(synthetic_state, synthetic_ledger, snap, '.1', f'monotonic-{i}')
+    old_state, ore = check(old_state, synthetic_ledger, snap, '.1', f'monotonic-{i}', implementation=old)
+    assert synthetic_state == old_state and all(nr[k] == v for k,v in ore.items())
+    store(synthetic_ledger, synthetic_state, snap, ['completed', 'failed', 'failed-or-cancelled'][i])
+passed('synthetic_three_monotonic_attempts_backward_compatible_old_exact_state_report')
+snap = synth_snapshot(datetime(2026, 10, 6, 9, 33, tzinfo=UTC), '7.0')
+synthetic_state, nr = check(synthetic_state, synthetic_ledger, snap, '.1', 'regression-3')
+store(synthetic_ledger, synthetic_state, snap)
+snap = synth_snapshot(datetime(2026, 11, 1, 0, 1, tzinfo=UTC), '6.50', '.20')
+rolled, nr = check(synthetic_state, synthetic_ledger, snap, '.1', 'rollover-4')
+assert D(nr['official_current_gross_usd']) == D('6.70')
+assert D(nr['retained_official_highwater_gross_usd']) == D('8.20')
+assert D(nr['unreconciled_round_bounds_usd']) == D('.4')
+assert D(rolled['month_gross_highwater_usd']['2026-10']) == D('8.0')
+passed('synthetic_history_max_exceeds_last_actual_snapshot_and_rollover_keeps_each_month', nr)
+bad = deepcopy(synthetic_state); bad['month_gross_highwater_usd']['2026-10'] = '7.0'
+reject('synthetic_only_last_snapshot_max_cannot_replace_full_history', lambda: check(bad, synthetic_ledger, snap), 'complete exact ledger')
+
+# Recompute a matching digest to isolate structural and timestamp validation,
+# without treating these synthetic rows as authentic artifacts.
+for change in ['historical_workspace', 'historical_missing_cycle', 'historical_below_baseline',
+               'historical_time_backward', 'historical_after_reserved_at']:
+    bad_ledger, bad_state = deepcopy(synthetic_ledger), deepcopy(synthetic_state)
+    index = 1
+    row = bad_ledger['reservations'][index + 1]['billing_before']['gross_quota_snapshot']
+    if change == 'historical_workspace': row['workspace_name'] = 'other-workspace'
+    elif change == 'historical_missing_cycle': row['summaries'].pop(0)
+    elif change == 'historical_below_baseline': row['summaries'][-1]['metered_cost_usd'] = '6.30'
+    elif change == 'historical_time_backward': row['observed_at'] = '2026-10-06T09:29:59+00:00'
+    elif change == 'historical_after_reserved_at': row['observed_at'] = '2026-10-06T09:31:01+00:00'
+    bad_state['attempts'][index]['billing_snapshot_sha256'] = new.canonical_sha(row)
+    reject(change + '_despite_matching_synthetic_digest', lambda bad_state=bad_state,bad_ledger=bad_ledger: check(bad_state,bad_ledger,snap))
+
+# An extreme observed decrease must not refund room below a retained near-limit
+# high-water mark; USD0.01 exceeds the additive authorized ceiling.
+near_ledger = {'reservations': [deepcopy(carry)]}
+high_snap = synth_snapshot(datetime(2026, 10, 6, 9, 30, tzinfo=UTC), '35.68341211')
+near_state, near_report = check(None, near_ledger, high_snap, '.1', 'near-limit')
+assert D(near_report['guarded_increment_usd']) == D('30')
+store(near_ledger, near_state, high_snap)
+low_snap = synth_snapshot(datetime(2026, 10, 6, 9, 31, tzinfo=UTC), '6.32341211')
+reject('synthetic_extreme_regression_29_36_dollars_does_not_refund_one_cent',
+       lambda: check(near_state, near_ledger, low_snap, '.01'), 'exhausted')
+
+assert sha(CANDIDATE) == EXPECTED_CANDIDATE
+assert preserved_sha == {str(path): sha(path) for path in preserved_paths}
+proof = {
+    'status': 'PASS_LOCAL_FINANCE_REVIEW_ONLY',
+    'scope': 'Pure local function replay and synthetic positive/negative finance checks. No API/auth/paid operation, remote or actual ledger/sidecar writes, policy rewrite, source apply, core/model/training/test inference or quota release. Archived 11:31 snapshot replay is not fresh authorization at review time. Reconstructed fifth sidecar reservation timestamp is chosen for a local fixture and is not an actual archived post5 sidecar.',
+    'candidate_sha256': sha(CANDIDATE), 'repository_original_finance_sha256': sha(ROOT / 'scripts/selftrained/finance.py'),
+    'policy_sha256': sha(POLICY_PATH), 'checks_passed': len(results), 'checks': results,
+    'actual_inputs': {str(path): sha(path) for path in [op/'live-ledger-before.json',op/'reservation.json',op/'receipt.json',refresh_path]},
+    'repository_original_source_policy_tests_prior_finance_proofs_preserved': preserved_sha,
+    'reconstructed5_fixture': {'scope': 'before4 archived ledger/state + fifth actual reservation/terminal receipt + locally reconstructed sidecar only',
+                               'reserved_at_chosen': reconstruction_time.isoformat(), 'state': state5_new},
+    'limitations': 'Digest binding checks detect mismatches with the saved sidecar. They are not an independent authenticity signature against coordinated alteration of both ledger and sidecar. Unknown unregistered delayed charges and future storage retain the pre-existing scope limitation; no billing finality inferred.',
+}
+PROOF.write_text(json.dumps(proof,ensure_ascii=False,indent=2) + '\n')
+print(json.dumps({'proof':str(PROOF),'status':proof['status'],'checks_passed':len(results),
+                  'candidate_sha256':proof['candidate_sha256'],'proof_sha256':sha(PROOF)},ensure_ascii=False))

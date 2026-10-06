@@ -1,0 +1,116 @@
+"""Local metadata replay, never an observed post-fifth live ledger/sidecar."""
+
+import hashlib
+import importlib.util
+import json
+from copy import deepcopy
+from datetime import datetime
+from pathlib import Path
+
+ROOT = Path("/workspace/selftrained-v2")
+OUT = Path(__file__).resolve().parent
+BASE = (
+    ROOT
+    / "outputs/selftrained-v2/operations/dense-public-final-test-attempt-1/monitor/artifact/selftrained-run-9482b50212cca4c6b68cf7ad2d54abe27c2b308b-37451905991-1/gha-37451905991-1"
+)
+BILLING = (
+    ROOT
+    / "outputs/selftrained-v2/billing-refresh-37456850365/selftrained-inspection-fb8287d90483e6e1ccb7996844f8b86b7640f623-37456850365-1/workspace-billing.json"
+)
+POLICY = ROOT / "docs/selftrained/v2-gross-quota-20261006.json"
+
+
+def read(path):
+    return json.loads(path.read_bytes())
+
+
+spec = importlib.util.spec_from_file_location("original_finance_reference", ROOT / "scripts/selftrained/finance.py")
+old = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(old)
+assert (
+    hashlib.sha256((ROOT / "scripts/selftrained/finance.py").read_bytes()).hexdigest()
+    == "5c94a11d5314b956c42f09777345088fab375586cad0c16e0a9785ed0fccb5a2"
+)
+policy = read(POLICY)
+policy_sha = hashlib.sha256(POLICY.read_bytes()).hexdigest()
+assert policy_sha == "557b2bd1135c41beff0fdc38bc69ed8a4c36ddc06d14b917d16bf5b732867372"
+before, reservation, receipt, billing = [
+    read(p) for p in (BASE / "live-ledger-before.json", BASE / "reservation.json", BASE / "receipt.json", BILLING)
+]
+assert len(before["ledger"]["reservations"]) == 134 and len(before["gross_quota_state"]["attempts"]) == 4
+assert (
+    hashlib.sha256((json.dumps(before["ledger"], ensure_ascii=False, indent=2) + "\n").encode()).hexdigest()
+    == before["ledger_sha256"]
+)
+assert (
+    hashlib.sha256((json.dumps(before["gross_quota_state"], ensure_ascii=False, indent=2) + "\n").encode()).hexdigest()
+    == before["gross_quota_state_sha256"]
+)
+assert before["gross_quota_state_sha256"] == "2045ba8a9ee5983a48f3549d47b996f22d88013c6e8038dbcc8c4928eeb87471"
+entry = reservation["entry"]
+assert entry["run_id"] == receipt["run_id"] == "gha-37451905991-1" and receipt["status"] == "completed"
+fifth_snapshot = entry["billing_before"]["gross_quota_snapshot"]
+state, guard = old.check_quota(
+    policy,
+    policy_sha,
+    before["gross_quota_state"],
+    fifth_snapshot,
+    before["ledger"],
+    entry["reserved_usd"],
+    entry["run_id"],
+    now=datetime.fromisoformat(fifth_snapshot["observed_at"]),
+)
+assert guard == entry["gross_quota_guard"]
+ledger = deepcopy(before["ledger"])
+closed = deepcopy(entry)
+closed.update(status="completed", finished_at=receipt["finished_at"], receipt_sha256=old.canonical_sha(receipt))
+ledger["reservations"].append(closed)
+ledger["reserved_total_usd"] = reservation["reserved_total_usd"]
+assert len(ledger["reservations"]) == 135 and len(state["attempts"]) == 5
+assert [item["reserved_usd"] for item in state["attempts"]] == ["0.07", "0.54", "0.54", "0.54", "0.54"]
+assert billing["source"] == "Official modal.Workspace.billing.summary/report; modal==1.6.0"
+snapshot = {
+    "source": old.SOURCE,
+    "workspace_name": billing["workspace_name"],
+    "observed_at": billing["observed_at"],
+    "summaries": [{k: item[k] for k in ("cycle", "start", "end", "metered_cost_usd")} for item in billing["summaries"]],
+}
+assert (
+    snapshot["workspace_name"] == policy["workspace_name"]
+    and snapshot["summaries"][-1]["metered_cost_usd"] == "7.24629663"
+)
+fixture = {
+    "fixture_kind": "RECONSTRUCTED_CLOSED_POST_FIFTH_FROM_ACTUAL_METADATA_NOT_LIVE",
+    "policy": policy,
+    "policy_sha256": policy_sha,
+    "actual_before_four": {"ledger": before["ledger"], "state": before["gross_quota_state"]},
+    "reconstructed_after_five": {"ledger": ledger, "state": state},
+    "actual_reported_regression_snapshot": snapshot,
+    "source_byte_sha256": {
+        str(p): hashlib.sha256(p.read_bytes()).hexdigest()
+        for p in (BASE / "live-ledger-before.json", BASE / "reservation.json", BASE / "receipt.json", BILLING, POLICY)
+    },
+    "limitations": [
+        "Fifth post-sidecar bytes remain independently unobserved; state is old-code metadata replay only.",
+        "Fifth reserved_at is replayed at its actual official observation time, not a claim of actual sidecar timestamp.",
+        "Official reader summary fields are mapped unchanged into finance snapshot schema; SDK SOURCE label is adapted from the pinned actual reader provenance.",
+        "now in tests is the archived observation time; no live freshness or paid authorization is claimed.",
+        "No original files, ledger, policy, credentials, API, model/gold payload or repository are modified.",
+    ],
+}
+(OUT / "actual-metadata-reconstructed-fixture.json").write_text(
+    json.dumps(fixture, ensure_ascii=False, indent=2) + "\n"
+)
+print(
+    json.dumps(
+        {
+            "fixture_kind": fixture["fixture_kind"],
+            "actual_before_attempts": 4,
+            "reconstructed_after_attempts": 5,
+            "fixture_sha256": hashlib.sha256(
+                (OUT / "actual-metadata-reconstructed-fixture.json").read_bytes()
+            ).hexdigest(),
+            "official_current_gross_usd": snapshot["summaries"][-1]["metered_cost_usd"],
+        }
+    )
+)

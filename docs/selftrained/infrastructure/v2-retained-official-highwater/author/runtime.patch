@@ -1,0 +1,132 @@
+diff --git a/scripts/selftrained/finance.py b/scripts/selftrained/finance.py
+--- a/scripts/selftrained/finance.py
++++ b/scripts/selftrained/finance.py
+@@ -121,6 +121,29 @@
+     }
+ 
+ 
++def snapshot_month_values(policy, snapshot):
++    """Validate actual official monthly values without replacing reported gross."""
++    if snapshot.get("source") != SOURCE or snapshot.get("workspace_name") != policy["workspace_name"]:
++        raise ValueError("Official snapshot must identify the same authenticated workspace")
++    observed = utc(snapshot["observed_at"])
++    if observed < utc(policy["baseline"]["observed_at"]):
++        raise ValueError("Official snapshot precedes the pinned baseline")
++    expected_cycles = months(min(policy["baseline"]["cycle_gross_usd"]) + "-01T00:00:00+00:00", observed.isoformat())
++    if [item["cycle"] for item in snapshot["summaries"]] != expected_cycles:
++        raise ValueError("Official monthly gross cycles are missing, duplicate or reordered")
++    result = {}
++    for item in snapshot["summaries"]:
++        start, end = utc(item["start"]), utc(item["end"])
++        if start.isoformat() != item["cycle"] + "-01T00:00:00+00:00" or end != start.replace(
++            year=start.year + (start.month == 12), month=start.month % 12 + 1
++        ):
++            raise ValueError("Official summary has the wrong UTC calendar-month boundaries")
++        result[item["cycle"]] = str(usd(item["metered_cost_usd"]))
++    if any(usd(result[cycle]) < usd(value) for cycle, value in policy["baseline"]["cycle_gross_usd"].items()):
++        raise ValueError("Official gross is below its per-month pinned baseline")
++    return result
++
++
+ def check_quota(policy, policy_sha, state, snapshot, ledger, proposed_usd, run_id, now=None):
+     """Pure guard. The caller writes state only after all checks pass."""
+     validate_policy(policy, policy_sha)
+@@ -132,21 +155,7 @@
+         or observed < utc(policy["baseline"]["observed_at"])
+     ):
+         raise ValueError("Gross snapshot is stale, future-dated or precedes the baseline")
+-    if snapshot.get("source") != SOURCE or snapshot.get("workspace_name") != policy["workspace_name"]:
+-        raise ValueError("Official snapshot must identify the same authenticated workspace")
+-    expected_cycles = months(min(policy["baseline"]["cycle_gross_usd"]) + "-01T00:00:00+00:00", observed.isoformat())
+-    summaries = snapshot["summaries"]
+-    if [item["cycle"] for item in summaries] != expected_cycles:
+-        raise ValueError("Official monthly gross cycles are missing, duplicate or reordered")
+-    current = {}
+-    for item in summaries:
+-        start = utc(item["start"])
+-        end = utc(item["end"])
+-        if start.isoformat() != item["cycle"] + "-01T00:00:00+00:00" or end != start.replace(
+-            year=start.year + (start.month == 12), month=start.month % 12 + 1
+-        ):
+-            raise ValueError("Official summary has the wrong UTC calendar-month boundaries")
+-        current[item["cycle"]] = str(usd(item["metered_cost_usd"]))
++    current = snapshot_month_values(policy, snapshot)
+     if state is not None:
+         if (
+             state.get("schema") != SCHEMA
+@@ -163,10 +172,6 @@
+             min(policy["baseline"]["cycle_gross_usd"]) + "-01T00:00:00+00:00", state["last_observed_at"]
+         ):
+             raise ValueError("Stored gross high-water coverage must retain every baseline-to-observation month")
+-    if any(usd(current[cycle]) < usd(value) for cycle, value in policy["baseline"]["cycle_gross_usd"].items()):
+-        raise ValueError("Official gross is below its per-month pinned baseline")
+-    if any(cycle not in current or usd(current[cycle]) < usd(value) for cycle, value in previous.items()):
+-        raise ValueError("Official gross regressed; reconcile without silently refunding quota")
+     attempts = [] if state is None else state["attempts"]
+     if state is not None and not attempts:
+         raise ValueError("An initialized quota sidecar must retain its actual attempts")
+@@ -208,20 +213,38 @@
+             actual_snapshot = record["billing_before"]["gross_quota_snapshot"]
+             if canonical_sha(actual_snapshot) != item["billing_snapshot_sha256"]:
+                 raise ValueError("Attempt billing snapshot differs from its actual audit ledger binding")
+-    if state is not None:
+-        last_snapshot = records[attempts[-1]["run_id"]]["billing_before"]["gross_quota_snapshot"]
+-        recorded_highwater = {item["cycle"]: str(usd(item["metered_cost_usd"])) for item in last_snapshot["summaries"]}
+-        if utc(last_snapshot["observed_at"]) != utc(state["last_observed_at"]) or recorded_highwater != previous:
+-            raise ValueError("Sidecar gross high-water differs from its last exact ledger snapshot")
++    # Rebuild the conservative maximum from every SHA-matched actual attempt,
++    # including the baseline. Never trust a saved maximum or silently lower it.
++    historical_highwater = {cycle: usd(value) for cycle, value in policy["baseline"]["cycle_gross_usd"].items()}
++    last_observed = utc(policy["baseline"]["observed_at"])
++    for item in attempts:
++        actual_snapshot = records[item["run_id"]]["billing_before"]["gross_quota_snapshot"]
++        actual_observed = utc(actual_snapshot["observed_at"])
++        if actual_observed < last_observed or actual_observed > utc(item["reserved_at"]):
++            raise ValueError("Actual historical snapshots must be ordered before their reservation times")
++        values = snapshot_month_values(policy, actual_snapshot)
++        for cycle, value in values.items():
++            historical_highwater[cycle] = max(historical_highwater.get(cycle, Decimal(0)), usd(value))
++        last_observed = actual_observed
++    if state is not None and (
++        last_observed != utc(state["last_observed_at"])
++        or {cycle: usd(value) for cycle, value in previous.items()} != historical_highwater
++    ):
++        raise ValueError("Sidecar gross high-water differs from its complete exact ledger snapshot history")
++    retained_highwater = {
++        cycle: str(max(usd(value), historical_highwater.get(cycle, Decimal(0)))) for cycle, value in current.items()
++    }
+     gross = sum((usd(value) for value in current.values()), Decimal(0))
+     increment = gross - usd(policy["baseline"]["gross_usd"])
++    retained_gross = sum((usd(value) for value in retained_highwater.values()), Decimal(0))
++    retained_increment = retained_gross - usd(policy["baseline"]["gross_usd"])
+     pending = sum((usd(item["reserved_usd"]) for item in attempts), Decimal(0))
+     carry = sum((usd(item["reserved_usd"]) for item in policy["carry_in_bounds"]), Decimal(0))
+     proposed = usd(proposed_usd)
+-    guarded = increment + pending + carry + proposed
++    guarded = retained_increment + pending + carry + proposed
+     if guarded > usd(policy["additional_quota_usd"]):
+         raise RuntimeError(
+-            f"Gross quota exhausted: actualincrement {increment} + unreconciled {pending} + carry-in {carry} + proposed {proposed} exceeds USD30"
++            f"Gross quota exhausted: retainedofficialincrement {retained_increment} + unreconciled {pending} + carry-in {carry} + proposed {proposed} exceeds USD30"
+         )
+     result = {
+         "schema": SCHEMA,
+@@ -229,7 +252,7 @@
+         "policy_canonical_sha256": canonical_sha(policy),
+         "round_id": policy["round_id"],
+         "last_observed_at": observed.isoformat(),
+-        "month_gross_highwater_usd": current,
++        "month_gross_highwater_usd": retained_highwater,
+         "attempts": deepcopy(attempts),
+     }
+     result["attempts"].append(
+@@ -245,6 +268,9 @@
+         "official_baseline_gross_usd": policy["baseline"]["gross_usd"],
+         "authorized_gross_ceiling_usd": str(usd(policy["baseline"]["gross_usd"]) + usd(policy["additional_quota_usd"])),
+         "actual_gross_increment_usd": str(increment),
++        "retained_official_highwater_gross_usd": str(retained_gross),
++        "retained_highwater_gross_increment_usd": str(retained_increment),
++        "guard_basis": "Per-month maximum of baseline, all SHA-matched actual attempt snapshots and current official snapshot; all bounds remain additive",
+         "unreconciled_round_bounds_usd": str(pending),
+         "carry_in_bounds_usd": str(carry),
+         "proposed_bound_usd": str(proposed),
