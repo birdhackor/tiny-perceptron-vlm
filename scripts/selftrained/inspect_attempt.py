@@ -16,6 +16,9 @@ FILES = (
     "train-receipt.json",
     "metrics.jsonl",
     "inference-manifest.json",
+    "evaluation-receipt.json",
+    "metrics.json",
+    "outputs.jsonl",
 )
 STAGES = ("pretrain", "sft", "vision", "ocr", "audio", "joint", "validation", "freeze", "test", "prepare", "release")
 SAFE_EXPORT_FILES = ("model.safetensors", "model-config.json", "tokenizer.json", "inference-manifest.json")
