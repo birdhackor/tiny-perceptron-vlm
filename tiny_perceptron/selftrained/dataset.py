@@ -15,7 +15,7 @@ from tiny_perceptron.multimodal import log_mel
 ROLES = ("system", "user", "assistant", "tool")
 MODALITY_SLOTS = {"image": 2, "ocr": 32, "audio": 16}
 OCR_CHARACTERS = "大小上下左右開關入出人口"
-PREPROCESS_VERSION = "gray-crops32-full-logmel40-v1"
+PREPROCESS_VERSION = "gray-crops32-ocr-letterbox-full-logmel40-v2"
 
 
 def file_sha256(path):
@@ -140,8 +140,19 @@ class RecordEncoder:
                     roi = metadata.get("roi")
                     if not roi or len(roi) != 4:
                         raise ValueError("OCR 需要公開指定的 roi")
-                    crops = [image.crop(tuple(roi)).resize((128, 32), Image.Resampling.BILINEAR)]
-                    values = torch.from_numpy(np.asarray(crops[0], dtype=np.float32).copy())[None] / 255
+                    if not (0 <= roi[0] < roi[2] <= image.width and 0 <= roi[1] < roi[3] <= image.height):
+                        raise ValueError("OCR roi 必須在影像內且有正寬高")
+                    crop = image.crop(tuple(roi))
+                    # Public ROI geometry alone determines scale; no target length.
+                    # Keep glyph aspect ratio and a common 32px cell scale across
+                    # 1–4-character lines, then leave the right margin white.
+                    width = max(1, round(crop.width * 32 / crop.height))
+                    if width > 128:
+                        raise ValueError("OCR roi 的等比高32寬度超過128")
+                    resized = crop.resize((width, 32), Image.Resampling.BILINEAR)
+                    padded = Image.new("L", (128, 32), 255)
+                    padded.paste(resized, (0, 0))
+                    values = torch.from_numpy(np.asarray(padded, dtype=np.float32).copy())[None] / 255
                     payload = {"kind": kind, "values": values}
                 else:
                     slots = metadata.get("image_layout", {}).get("slots")

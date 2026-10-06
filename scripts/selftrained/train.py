@@ -34,6 +34,15 @@ CHECKPOINT_SCHEMA = "selftrained-random-v1"
 STAGES = ("pretrain", "sft", "vision", "ocr", "audio", "joint")
 SAMPLING_MODES = ("bucket", "task-family")
 TASK_FAMILIES = ("text", "tools", "vision", "ocr", "voice")
+# task-family tools cycle: 12/16 slots are numeric call/reply training.
+TOOL_TASK_MULTIPLICITIES = {
+    "tool_call": 6,
+    "tool_reply": 6,
+    "tool_unavailable": 1,
+    "tool_missing": 1,
+    "tool_concept": 1,
+    "tool_unsupported": 1,
+}
 # Vision.projection 是 supervised head 上游；固定它才能保留感知 logits。
 PERCEPTION_BRIDGE_PREFIXES = (
     "vision_encoder.symbol_projection.",
@@ -101,6 +110,7 @@ class BalancedSampler:
         self.mode = mode
         self.by_task = {}
         bucket_families = {}
+        bucket_tasks = {}
         for record in records:
             intent = record.get("supervision", {}).get("intent", "")
             bucket = record["task"] + (":" + intent if intent else "")
@@ -109,9 +119,18 @@ class BalancedSampler:
                 if record["task"] not in TASK_FAMILY_BY_TASK:
                     raise ValueError(f"task-family 不支援未知 task: {record['task']}")
                 bucket_families[bucket] = TASK_FAMILY_BY_TASK[record["task"]]
+                bucket_tasks[bucket] = record["task"]
         self.tasks = sorted(self.by_task)
         self.by_family = (
-            {family: [task for task in self.tasks if bucket_families.get(task) == family] for family in TASK_FAMILIES}
+            {
+                family: [
+                    bucket
+                    for bucket in self.tasks
+                    if bucket_families.get(bucket) == family
+                    for _ in range(TOOL_TASK_MULTIPLICITIES[bucket_tasks[bucket]] if family == "tools" else 1)
+                ]
+                for family in TASK_FAMILIES
+            }
             if mode == "task-family"
             else {}
         )
@@ -120,6 +139,20 @@ class BalancedSampler:
         self.family_draws = {family: 0 for family in self.by_family}
         self.generator = torch.Generator().manual_seed(seed)
         self.draws = 0
+
+    def policy(self):
+        return {
+            "mode": self.mode,
+            "family_draw_weights": dict.fromkeys(TASK_FAMILIES, 1) if self.mode == "task-family" else {},
+            "family_cycle": list(TASK_FAMILIES) if self.mode == "task-family" else [],
+            "within_family_bucket_cycles": {family: list(buckets) for family, buckets in self.by_family.items()},
+            "within_family_bucket_multiplicities": {
+                family: {bucket: buckets.count(bucket) for bucket in sorted(set(buckets))}
+                for family, buckets in self.by_family.items()
+            },
+            "tools_task_multiplicities": TOOL_TASK_MULTIPLICITIES.copy() if self.mode == "task-family" else {},
+            "record_sampling": "uniform_with_replacement_per_bucket",
+        }
 
     def batch(self, size):
         result = []
@@ -139,17 +172,22 @@ class BalancedSampler:
         return result
 
     def state_dict(self):
-        return {
+        state = {
             "draws": self.draws,
             "generator": self.generator.get_state(),
             "mode": self.mode,
             "family_draws": self.family_draws.copy(),
         }
+        if self.mode == "task-family":
+            state["sampler_policy"] = self.policy()
+        return state
 
     def load_state_dict(self, state):
         if state.get("mode", "bucket") != self.mode:
             raise ValueError("sampler resume sampling mode 不同")
         if self.mode == "task-family":
+            if state.get("sampler_policy") != self.policy():
+                raise ValueError("sampler resume task-family policy 不同或缺失")
             expected = {
                 family: state["draws"] // len(TASK_FAMILIES) + int(index < state["draws"] % len(TASK_FAMILIES))
                 for index, family in enumerate(TASK_FAMILIES)
@@ -566,6 +604,7 @@ def main(argv=None):
         "trainable_parameters": sum(p.numel() for p in parameters),
         "freeze_perception_backbones": args.freeze_perception_backbones,
         "sampling_mode": args.sampling_mode,
+        "sampler_policy": sampler.policy(),
         "comparison": {
             "per_expert_ffn_hidden": config.ffn_hidden,
             "active_ffn_count": config.top_k if config.architecture == "moe" else 1,

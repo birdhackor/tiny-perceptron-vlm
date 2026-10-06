@@ -22,8 +22,12 @@ def family_records():
     records = []
     for task, intents in (
         ("text", ("address", "app_error", "card_issues")),
-        ("tool_call", ("",)),
-        ("tool_reply", ("",)),
+        ("tool_call", ("calculation",)),
+        ("tool_reply", ("calculation",)),
+        ("tool_concept", ("scope",)),
+        ("tool_missing", ("calculation",)),
+        ("tool_unavailable", ("calculation",)),
+        ("tool_unsupported", ("calculation",)),
         ("vision_clothing", ("",)),
         ("vision_relation", ("",)),
         ("ocr", ("",)),
@@ -48,6 +52,33 @@ def test_family_sampling_covers_independent_sources_and_intents(family_records):
     assert buckets[("voice_qa", "card_issues")] == 20
     assert buckets[("vision_relation", "")] == 60
     assert buckets[("ocr", "")] == 120
+
+
+def test_numeric_tools_quota_and_mid_weighted_cycle_resume(family_records):
+    # Real candidate quota: 6000 steps x batch16; IDs are independent artificial sources.
+    sampler = train.BalancedSampler(family_records, 41, mode="task-family")
+    sampled = sampler.batch(6000 * 16)
+    counts = Counter(record["task"] for record in sampled)
+    assert Counter(train.TASK_FAMILY_BY_TASK[r["task"]] for r in sampled) == dict.fromkeys(train.TASK_FAMILIES, 19200)
+    assert counts["tool_call"] == counts["tool_reply"] == 7200
+    for task in ("tool_concept", "tool_missing", "tool_unavailable", "tool_unsupported"):
+        assert counts[task] == 1200
+    assert sampler.policy()["within_family_bucket_multiplicities"]["tools"] == {
+        "tool_call:calculation": 6,
+        "tool_concept:scope": 1,
+        "tool_missing:calculation": 1,
+        "tool_reply:calculation": 6,
+        "tool_unavailable:calculation": 1,
+        "tool_unsupported:calculation": 1,
+    }
+    partial = train.BalancedSampler(family_records, 41, mode="task-family")
+    # 53 global draws ends inside repeated numeric slots, rather than at a cycle boundary.
+    prefix = partial.batch(53)
+    restored = train.BalancedSampler(family_records, 999, mode="task-family")
+    restored.load_state_dict(partial.state_dict())
+    assert [r["id"] for r in prefix + restored.batch(6000 * 16 - 53)] == [r["id"] for r in sampled]
+    assert torch.equal(restored.generator.get_state(), sampler.generator.get_state())
+    assert restored.family_draws == sampler.family_draws
 
 
 @pytest.mark.parametrize("mode", ["bucket", "task-family"])
@@ -78,6 +109,41 @@ def test_sampler_rejects_changed_mode_counters_or_unmapped_families(family_recor
         train.BalancedSampler(family_records + [{"task": "unknown"}], 7, mode="task-family")
     with pytest.raises(ValueError, match="五種資料"):
         train.BalancedSampler([r for r in family_records if r["task"] != "ocr"], 7, mode="task-family")
+
+
+def test_task_family_resume_rejects_previous_quota_membership_or_order_without_mutation(family_records):
+    source = train.BalancedSampler(family_records, 41, mode="task-family")
+    source.batch(53)
+    state = source.state_dict()
+    missing_policy = copy.deepcopy(state)
+    del missing_policy["sampler_policy"]
+    old_quota = copy.deepcopy(state)
+    old_policy = old_quota["sampler_policy"]
+    old_policy["within_family_bucket_cycles"]["tools"] = sorted(set(old_policy["within_family_bucket_cycles"]["tools"]))
+    old_policy["within_family_bucket_multiplicities"]["tools"] = dict.fromkeys(
+        old_policy["within_family_bucket_cycles"]["tools"], 1
+    )
+    old_policy["tools_task_multiplicities"] = dict.fromkeys(old_policy["tools_task_multiplicities"], 1)
+    reordered = copy.deepcopy(state)
+    reordered["sampler_policy"]["within_family_bucket_cycles"]["tools"].reverse()
+    changed_family_order = copy.deepcopy(state)
+    changed_family_order["sampler_policy"]["family_cycle"].reverse()
+    destination = train.BalancedSampler(family_records, 19, mode="task-family")
+    destination.batch(17)
+    before = destination.state_dict()
+    for incompatible in (missing_policy, old_quota, reordered, changed_family_order):
+        with pytest.raises(ValueError, match="policy"):
+            destination.load_state_dict(incompatible)
+        after = destination.state_dict()
+        assert after["draws"] == before["draws"]
+        assert after["family_draws"] == before["family_draws"]
+        assert after["sampler_policy"] == before["sampler_policy"]
+        assert torch.equal(after["generator"], before["generator"])
+    changed_membership = [
+        r for r in family_records if not (r["task"] == "voice_qa" and r["supervision"]["intent"] == "card_issues")
+    ]
+    with pytest.raises(ValueError, match="policy"):
+        train.BalancedSampler(changed_membership, 41, mode="task-family").load_state_dict(state)
 
 
 def test_legacy_bucket_state_and_default_sequence_remain_compatible(family_records):
@@ -235,6 +301,7 @@ def test_frozen_family_trainer_resume_metadata_and_option_guards(neural_corpus, 
     assert whole["tokens"] == resumed["tokens"]
     assert whole["sampler"]["draws"] == resumed["sampler"]["draws"] == 21
     assert whole["sampler"]["family_draws"] == resumed["sampler"]["family_draws"]
+    assert whole["sampler"]["sampler_policy"] == resumed["sampler"]["sampler_policy"]
     assert torch.equal(whole["sampler"]["generator"], resumed["sampler"]["generator"])
     assert all(torch.equal(weight, resumed["model"][name]) for name, weight in whole["model"].items())
     for directory in (root / "whole", root / "resumed"):
@@ -246,6 +313,8 @@ def test_frozen_family_trainer_resume_metadata_and_option_guards(neural_corpus, 
         assert receipt["comparison"]["sample_draws"] == 21
         assert receipt["comparison"]["input_tokens_observed"] == receipt["tokens"]
         assert receipt["comparison"]["active_ffn_count"] == 2
+        assert receipt["sampler_policy"]["tools_task_multiplicities"]["tool_call"] == 6
+        assert receipt["sampler_policy"]["within_family_bucket_multiplicities"]["tools"] == {"tool_call": 6}
         verified, _ = verify_export(directory)
         assert verified == manifest
     for field, replacement in (
