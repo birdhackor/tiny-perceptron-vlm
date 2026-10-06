@@ -310,7 +310,7 @@ def code_fingerprints():
     root = Path(__file__).resolve().parents[2]
     # 明定執行邊界：包含重用 backbone/attention/log-mel 與公開 inference。
     # Modal、發布、封裝與 jobs 屬操作流程，不放入最終測試的模型契約。
-    names = [path.relative_to(root).as_posix() for path in sorted((root / "tiny_perceptron").rglob("*.py"))]
+    names = [str(path.relative_to(root)) for path in sorted((root / "tiny_perceptron").rglob("*.py"))]
     names.extend(("scripts/selftrained/train.py", "scripts/selftrained/evaluate.py", "scripts/selftrained/chat.py"))
     return {name: file_sha256(root / name) for name in names}
 
@@ -836,7 +836,7 @@ def main(argv=None):
     with journal:
         if args.split == "test":
             # 先 commit 驗證過的 raw prefix 與初始收據，再允許新 attempt 生成。
-            with journal.receipt_path.open("r+b") as handle:
+            with journal.receipt_path.open("rb") as handle:
                 os.fsync(handle.fileno())
             marker = json.loads(test_marker.read_text(encoding="utf-8"))
             marker["latest_output_dir"] = str(output_dir.resolve())

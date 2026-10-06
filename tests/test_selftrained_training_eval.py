@@ -3,7 +3,7 @@
 import copy
 import json
 import signal
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 import numpy as np
 import pytest
@@ -411,7 +411,7 @@ def test_voice_continuation_uses_actual_first_reply_not_demonstration(corpus, mo
     capsys.readouterr()
 
 
-def test_frozen_protocol_rejects_changed_conditions_and_second_test(corpus, capsys):
+def test_frozen_protocol_rejects_changed_conditions_and_second_test(corpus, monkeypatch, capsys):
     root, records_path, _ = corpus
     train.main(
         [
@@ -449,7 +449,31 @@ def test_frozen_protocol_rejects_changed_conditions_and_second_test(corpus, caps
     metrics = evaluate.main(common + ["--output-dir", str(root / "val"), "--freeze-protocol", str(protocol)])
     assert metrics["count"] == 5 and not metrics["teacher_forcing_used_for_generation"]
     test_args = common + ["--split", "test", "--output-dir", str(root / "test"), "--protocol", str(protocol)]
+    original_open, original_fsync = Path.open, evaluate.os.fsync
+    receipt_handles, synced_receipts = [], []
+
+    def track_receipt_open(path, *args, **kwargs):
+        handle = original_open(path, *args, **kwargs)
+        if path.name == "evaluation-receipt.json":
+            receipt_handles.append((path, handle))
+        return handle
+
+    def require_writable_receipt_sync(descriptor):
+        # Windows rejects fsync on read-only descriptors; enforce that on every OS.
+        for path, handle in receipt_handles:
+            if not handle.closed and handle.fileno() == descriptor:
+                assert handle.writable()
+                before = path.read_bytes()
+                original_fsync(descriptor)
+                assert path.read_bytes() == before
+                synced_receipts.append(path)
+                return
+        original_fsync(descriptor)
+
+    monkeypatch.setattr(Path, "open", track_receipt_open)
+    monkeypatch.setattr(evaluate.os, "fsync", require_writable_receipt_sync)
     evaluate.main(test_args)
+    assert synced_receipts == [root / "test/evaluation-receipt.json"]
     with pytest.raises(FileExistsError):
         evaluate.main(test_args)
     current = json.loads(protocol.read_text())
@@ -557,6 +581,18 @@ def test_split_groups_must_stay_together(corpus):
     path.write_text("\n".join(json.dumps(r) for r in records))
     with pytest.raises(ValueError, match="跨 split"):
         read_records([path])
+
+
+def test_code_fingerprints_use_posix_keys_for_windows_relative_paths(monkeypatch):
+    expected = evaluate.code_fingerprints()
+    assert all("\\" not in name for name in expected)
+
+    class WindowsRelativePath(type(Path())):
+        def relative_to(self, *args, **kwargs):
+            return PureWindowsPath(super().relative_to(*args, **kwargs))
+
+    monkeypatch.setattr(evaluate, "Path", WindowsRelativePath)
+    assert evaluate.code_fingerprints() == expected
 
 
 @pytest.mark.parametrize(
