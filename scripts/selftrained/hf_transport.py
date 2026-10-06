@@ -16,6 +16,8 @@ MAX_PACKAGE_BYTES = 512 * 1024 * 1024
 MAX_UNPACKED_BYTES = 1024 * 1024 * 1024
 MAX_RELEASE_BYTES = 128 * 1024 * 1024
 PUBLIC_MODEL_REPO = "birdhackor/tiny-perceptron-course-models"
+REPOSITORY_CARD_SOURCE = "docs/selftrained/model-cards/repository-README.md"
+MAX_REPOSITORY_CARD_BYTES = 64 * 1024
 EXPORT_STAGES = {
     "moe-pretrain": ("moe", "pretrain"),
     "moe-sft": ("moe", "sft"),
@@ -561,4 +563,162 @@ def publish_batch_inference(sources, release, manifest_sha, manifest, token, sta
         "recovered_existing_revision": recovered,
         "new_commit_created": not recovered,
         "scope": "Exactly four safe exports in one immutable public revision; optimizer/resume state stays private",
+    }
+
+
+def validate_repository_card_release(release):
+    """One separately approved root card; no arbitrary upload paths or exports."""
+    fields = {"mode", "repo_id", "private", "parent_commit", "manifest_sha256", "confirm_write", "file"}
+    if not isinstance(release, dict) or set(release) != fields:
+        raise ValueError("Repository card requires its exact one-file release descriptor")
+    if (
+        release["mode"] != "repository-card"
+        or release["repo_id"] != PUBLIC_MODEL_REPO
+        or release["private"] is not False
+        or release["confirm_write"] != "README.md"
+    ):
+        raise ValueError("Only an explicitly confirmed README.md in the authorized public model repo may change")
+    for key, length in (("parent_commit", 40), ("manifest_sha256", 64)):
+        if not isinstance(release[key], str) or not re.fullmatch(f"[a-f0-9]{{{length}}}", release[key]):
+            raise ValueError("Repository card needs exact HF parent and frozen manifest pins")
+    item = release["file"]
+    if not isinstance(item, dict) or set(item) != {
+        "path",
+        "sha256",
+        "bytes",
+        "kind",
+        "license",
+        "redistribution_approved",
+    }:
+        raise ValueError("Repository card requires its exact source file descriptor")
+    if (
+        item["path"] != REPOSITORY_CARD_SOURCE
+        or item["kind"] != "model_card"
+        or item["license"] != "MIT"
+        or item["redistribution_approved"] is not True
+        or not isinstance(item["sha256"], str)
+        or not re.fullmatch(r"[a-f0-9]{64}", item["sha256"])
+        or type(item["bytes"]) is not int
+        or not 0 < item["bytes"] <= MAX_REPOSITORY_CARD_BYTES
+    ):
+        raise ValueError("Repository card must use the fixed reviewed MIT source and bounded bytes/SHA")
+    return item
+
+
+def approved_repository_card(payload, release, manifest_sha):
+    item = validate_repository_card_release(release)
+    if release["manifest_sha256"] != manifest_sha:
+        raise ValueError("Repository card differs from the exact frozen manifest")
+    if (
+        type(payload) is not bytes
+        or len(payload) != item["bytes"]
+        or hashlib.sha256(payload).hexdigest() != item["sha256"]
+    ):
+        raise ValueError("Actual repository card bytes differ from the reviewed Git source")
+    # Keep the original bytes for publishing; never serialize/reformat the card.
+    text = payload.decode("utf-8")
+    if "\x00" in text:
+        raise ValueError("Repository card must be UTF-8 text without NUL")
+    if not text.startswith("---\n") or "\n---\n" not in text[4:]:
+        raise ValueError("Repository card requires canonical YAML front matter")
+    header = text[4:].split("\n---\n", 1)[0]
+    licenses = re.findall(r"^[ \t]*[\"']?license[\"']?[ \t]*:.*$", header, re.MULTILINE)
+    if licenses != ["license: mit"]:
+        raise ValueError("Repository card front matter must declare license: mit")
+    return item
+
+
+def repository_card_roundtrip(release, revision):
+    """Verify only the immutable public root README with auth disabled."""
+    from huggingface_hub import get_hf_file_metadata, hf_hub_download, hf_hub_url
+
+    item = validate_repository_card_release(release)
+    url = hf_hub_url(
+        PUBLIC_MODEL_REPO, "README.md", repo_type="model", revision=revision, endpoint="https://huggingface.co"
+    )
+    metadata = get_hf_file_metadata(url, token=False)
+    if metadata.commit_hash != revision or metadata.size != item["bytes"]:
+        raise ValueError("Anonymous README metadata differs from the exact commit/bytes")
+    local = Path(
+        hf_hub_download(
+            PUBLIC_MODEL_REPO,
+            "README.md",
+            repo_type="model",
+            revision=revision,
+            token=False,
+            endpoint="https://huggingface.co",
+        )
+    )
+    if not local.is_file() or local.stat().st_size != item["bytes"] or digest(local) != item["sha256"]:
+        raise ValueError("Anonymous README bytes differ from the reviewed card")
+    return {
+        "path": "README.md",
+        "bytes": item["bytes"],
+        "sha256": item["sha256"],
+        "authentication": "disabled",
+        "revision": revision,
+    }
+
+
+def repository_card_public_gate(payload, release):
+    from huggingface_hub import HfApi, ModelCard
+
+    item = approved_repository_card(payload, release, release["manifest_sha256"])
+    if ModelCard(payload.decode("utf-8")).data.license != "mit":
+        raise ValueError("Actual repository card YAML license differs from MIT")
+    api = HfApi(token=False, endpoint="https://huggingface.co")
+    info = api.repo_info(PUBLIC_MODEL_REPO, repo_type="model", revision="main")
+    if info.private is not False or info.sha != release["parent_commit"]:
+        raise ValueError("Public repository HEAD differs from the reviewed exact HF parent; do not retry blindly")
+    paths = api.get_paths_info(PUBLIC_MODEL_REPO, ["README.md"], repo_type="model", revision=info.sha, token=False)
+    if len(paths) > 1 or any(path.path != "README.md" for path in paths):
+        raise ValueError("Public README preflight returned unexpected paths")
+    blob_sha = hashlib.sha1(f"blob {len(payload)}\0".encode() + payload).hexdigest()
+    no_op = bool(paths and paths[0].size == item["bytes"] and paths[0].blob_id == blob_sha)
+    public = repository_card_roundtrip(release, info.sha) if no_op else None
+    return {"parent_commit": info.sha, "no_op": no_op, "public_verification": public}
+
+
+def publish_repository_card(payload, release, manifest_sha, token):
+    from huggingface_hub import CommitOperationAdd, HfApi
+
+    item = approved_repository_card(payload, release, manifest_sha)
+    gate = repository_card_public_gate(payload, release)
+    parent = gate["parent_commit"]
+    # A single call, no automatic retry or recovery after an ambiguous API failure.
+    commit_sha, commit_url = parent, f"https://huggingface.co/{PUBLIC_MODEL_REPO}/commit/{parent}"
+    public = gate["public_verification"]
+    if not gate["no_op"]:
+        operation = CommitOperationAdd(path_in_repo="README.md", path_or_fileobj=payload)
+        result = HfApi(token=token, endpoint="https://huggingface.co").create_commit(
+            repo_id=PUBLIC_MODEL_REPO,
+            repo_type="model",
+            revision="main",
+            create_pr=False,
+            operations=[operation],
+            commit_message=f"Reviewed repository card {item['sha256'][:12]}",
+            parent_commit=parent,
+        )
+        # Pinned hub SDK1.33 sets this only after _send_commit; its no-op return
+        # bypasses parent CAS. A missing/false flag is ambiguous, never success.
+        if getattr(operation, "_is_committed", False) is not True:
+            raise ValueError("HF SDK skipped the commit; preserve ambiguous attempt and review the public revision")
+        if not isinstance(result.oid, str) or not re.fullmatch(r"[a-f0-9]{40}", result.oid) or result.oid == parent:
+            raise ValueError("HF card commit did not return a new immutable full revision")
+        commit_sha, commit_url = result.oid, result.commit_url
+        public = repository_card_roundtrip(release, commit_sha)
+    return {
+        "repo_id": PUBLIC_MODEL_REPO,
+        "repo_type": "model",
+        "private": False,
+        "mode": "repository-card",
+        "parent_commit": parent,
+        "commit_sha": commit_sha,
+        "commit_url": commit_url,
+        "files": [public],
+        "source_file": item,
+        "no_op": gate["no_op"],
+        "new_commit_created": not gate["no_op"],
+        "recovered_existing_revision": False,
+        "scope": "Exactly one root README.md Add; no inference export or other repository path operation",
     }

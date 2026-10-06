@@ -1,0 +1,68 @@
+.F.....                                                                  [100%]
+=================================== FAILURES ===================================
+______________ test_actual_pinned_sdk_flag_and_cas[sdk_race_noop] ______________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7efef3ece060>
+tmp_path = PosixPath('/tmp/p5-repository-card-engineering-review/pytest-independent-tmp/test_actual_pinned_sdk_flag_an1')
+outcome = 'sdk_race_noop'
+
+    @pytest.mark.parametrize('outcome', ['sent', 'sdk_race_noop', 'ambiguous_response'])
+    def test_actual_pinned_sdk_flag_and_cas(monkeypatch, tmp_path, outcome):
+        assert huggingface_hub.__version__ == '1.33.0'
+        real_api = huggingface_hub.HfApi
+        sends, parent_checks, downloads, ops = [], [], [], []
+    
+        class API(real_api):
+            def repo_info(self, repo_id, repo_type, revision, token=None):
+                parent_checks.append((self.token, token))
+                sha = helpers.NEW if token is not None else helpers.PARENT
+                return SimpleNamespace(private=False, sha=sha)
+    
+            def get_paths_info(self, repo_id, paths, **kwargs):
+                assert paths == ['README.md'] and kwargs['token'] is False
+                return []
+    
+            def _validate_yaml(self, *args, **kwargs):
+                return None
+    
+            def preupload_lfs_files(self, repo_id, additions, **kwargs):
+                assert len(additions) == 1 and additions[0].path_in_repo == 'README.md'
+                ops.extend(additions)
+                if outcome == 'sdk_race_noop':
+                    additions[0]._remote_oid = additions[0]._local_oid
+    
+        def send(**kwargs):
+            sends.append(kwargs)
+            assert kwargs['parent_commit'] == helpers.PARENT
+            assert kwargs['revision'] == 'main' and kwargs['create_pr'] is False
+            assert len(kwargs['operations']) == 1 and kwargs['operations'][0].path_in_repo == 'README.md'
+            assert kwargs.get('retry_on_error', False) is False
+            if outcome == 'ambiguous_response':
+                raise RuntimeError('Synthetic lost response')
+            return SimpleNamespace(oid=helpers.NEW, commit_url='https://huggingface.co/synthetic/commit/' + helpers.NEW)
+    
+        local = tmp_path / 'README.md'
+        local.write_bytes(helpers.PAYLOAD)
+        def download(repo_id, filename, **kwargs):
+            downloads.append(kwargs)
+            assert filename == 'README.md' and kwargs['token'] is False and kwargs['revision'] == helpers.NEW
+            return str(local)
+    
+        monkeypatch.setattr(huggingface_hub, 'HfApi', API)
+        monkeypatch.setattr(commit_api, '_send_commit', send)
+        monkeypatch.setattr(huggingface_hub, 'get_hf_file_metadata', lambda url, token: SimpleNamespace(commit_hash=helpers.NEW, size=len(helpers.PAYLOAD)))
+        monkeypatch.setattr(huggingface_hub, 'hf_hub_download', download)
+    
+        if outcome == 'sent':
+            result = transport.publish_repository_card(helpers.PAYLOAD, helpers.release_for(), helpers.MANIFEST_SHA, 'synthetic-placeholder')
+            assert result['new_commit_created'] and ops[0]._is_committed is True
+            assert len(sends) == len(downloads) == 1
+        elif outcome == 'sdk_race_noop':
+>           with pytest.raises(ValueError, match='SDK skipped'):
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           Failed: DID NOT RAISE ValueError
+
+/tmp/p5-repository-card-engineering-review/test_independent_extra.py:79: Failed
+=========================== short test summary info ============================
+FAILED ../../tmp/p5-repository-card-engineering-review/test_independent_extra.py::test_actual_pinned_sdk_flag_and_cas[sdk_race_noop]
+1 failed, 6 passed in 1.08s

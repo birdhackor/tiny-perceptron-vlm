@@ -1,0 +1,286 @@
+    @validate_hf_hub_args
+    @future_compatible
+    def create_commit(
+        self,
+        repo_id: str,
+        operations: Iterable[CommitOperation],
+        *,
+        commit_message: str,
+        commit_description: str | None = None,
+        token: str | bool | None = None,
+        repo_type: str | None = None,
+        revision: str | None = None,
+        create_pr: bool | None = None,
+        num_threads: int = 5,
+        parent_commit: str | None = None,
+        run_as_future: bool = False,
+        _hot_reload: bool | None = None,
+    ) -> CommitInfo | Future[CommitInfo]:
+        """
+        Creates a commit in the given repo, deleting & uploading files as needed.
+
+        > [!WARNING]
+        > The input list of `CommitOperation` will be mutated during the commit process. Do not reuse the same objects
+        > for multiple commits.
+
+        > [!WARNING]
+        > `create_commit` assumes that the repo already exists on the Hub. If you get a
+        > Client error 404, please make sure you are authenticated, that your token has the required permissions,
+        > and that `repo_id` and `repo_type` are set correctly. If repo does not exist,
+        > create it first using [`~hf_api.create_repo`].
+
+        > [!WARNING]
+        > `create_commit` is limited to 25k LFS files and a 1GB payload for regular files.
+
+        Args:
+            repo_id (`str`):
+                The repository in which the commit will be created, for example:
+                `"username/custom_transformers"`
+
+            operations (`Iterable` of [`~hf_api.CommitOperation`]):
+                An iterable of operations to include in the commit, either:
+
+                    - [`~hf_api.CommitOperationAdd`] to upload a file
+                    - [`~hf_api.CommitOperationDelete`] to delete a file
+                    - [`~hf_api.CommitOperationCopy`] to copy a file
+
+                Operation objects will be mutated to include information relative to the upload. Do not reuse the
+                same objects for multiple commits.
+
+            commit_message (`str`):
+                The summary (first line) of the commit that will be created.
+
+            commit_description (`str`, *optional*):
+                The description of the commit that will be created
+
+            token (`bool` or `str`, *optional*):
+                A valid user access token (string). Defaults to the locally saved
+                token, which is the recommended method for authentication (see
+                https://huggingface.co/docs/huggingface_hub/quick-start#authentication).
+                To disable authentication, pass `False`.
+
+            repo_type (`str`, *optional*):
+                Set to `"dataset"` or `"space"` if uploading to a dataset or
+                space, `None` or `"model"` if uploading to a model. Default is
+                `None`.
+
+            revision (`str`, *optional*):
+                The git revision to commit from. Defaults to the head of the `"main"` branch.
+
+            create_pr (`boolean`, *optional*):
+                Whether or not to create a Pull Request with that commit. Defaults to `False`.
+                If `revision` is not set, PR is opened against the `"main"` branch. If
+                `revision` is set and is a branch, PR is opened against this branch. If
+                `revision` is set and is not a branch name (example: a commit oid), an
+                `RevisionNotFoundError` is returned by the server.
+
+            num_threads (`int`, *optional*):
+                Number of concurrent threads for uploading files. Defaults to 5.
+                Setting it to 2 means at most 2 files will be uploaded concurrently.
+
+            parent_commit (`str`, *optional*):
+                The OID / SHA of the parent commit, as a hexadecimal string.
+                Shorthands (7 first characters) are also supported. If specified and `create_pr` is `False`,
+                the commit will fail if `revision` does not point to `parent_commit`. If specified and `create_pr`
+                is `True`, the pull request will be created from `parent_commit`. Specifying `parent_commit`
+                ensures the repo has not changed before committing the changes, and can be especially useful
+                if the repo is updated / committed to concurrently.
+            run_as_future (`bool`, *optional*):
+                Whether or not to run this method in the background. Background jobs are run sequentially without
+                blocking the main thread. Passing `run_as_future=True` will return a [Future](https://docs.python.org/3/library/concurrent.futures.html#future-objects)
+                object. Defaults to `False`.
+
+        Returns:
+            [`CommitInfo`] or `Future`:
+                Instance of [`CommitInfo`] containing information about the newly created commit (commit hash, commit
+                url, pr url, commit message,...). If `run_as_future=True` is passed, returns a Future object which will
+                contain the result when executed.
+
+        Raises:
+            [`ValueError`](https://docs.python.org/3/library/exceptions.html#ValueError)
+                If commit message is empty.
+            [`ValueError`](https://docs.python.org/3/library/exceptions.html#ValueError)
+                If parent commit is not a valid commit OID.
+            [`ValueError`](https://docs.python.org/3/library/exceptions.html#ValueError)
+                If a README.md file with an invalid metadata section is committed. In this case, the commit will fail
+                early, before trying to upload any file.
+            [`ValueError`](https://docs.python.org/3/library/exceptions.html#ValueError)
+                If `create_pr` is `True` and revision is neither `None` nor `"main"`.
+            [`~utils.RepositoryNotFoundError`]:
+                If repository is not found (error 404): wrong repo_id/repo_type, private
+                but not authenticated or repo does not exist.
+        """
+
+        from ._commit_api import (
+            CommitOperationAdd,
+            CommitOperationCopy,
+            _fetch_files_to_copy,
+            _send_commit,
+            _warn_on_overwriting_operations,
+        )
+
+        if parent_commit is not None and not constants.REGEX_COMMIT_OID.fullmatch(parent_commit):
+            raise ValueError(
+                f"`parent_commit` is not a valid commit OID. It must match the following regex: {constants.REGEX_COMMIT_OID}"
+            )
+
+        if commit_message is None or len(commit_message) == 0:
+            raise ValueError("`commit_message` can't be empty, please pass a value.")
+
+        commit_description = commit_description if commit_description is not None else ""
+        repo_type = repo_type if repo_type is not None else constants.REPO_TYPE_MODEL
+        if repo_type not in constants.REPO_TYPES:
+            raise ValueError(f"Invalid repo type, must be one of {constants.REPO_TYPES}")
+        unquoted_revision = revision or constants.DEFAULT_REVISION
+        revision = quote(unquoted_revision, safe="")
+        create_pr = create_pr if create_pr is not None else False
+        _hot_reload = _hot_reload if _hot_reload is not None else False
+
+        headers = self._build_hf_headers(token=token)
+
+        operations = list(operations)
+        additions = [op for op in operations if isinstance(op, CommitOperationAdd)]
+        copies = [op for op in operations if isinstance(op, CommitOperationCopy)]
+        nb_additions = len(additions)
+        nb_copies = len(copies)
+        nb_deletions = len(operations) - nb_additions - nb_copies
+
+        for addition in additions:
+            if addition._is_committed:
+                raise ValueError(
+                    f"CommitOperationAdd {addition} has already being committed and cannot be reused. Please create a"
+                    " new CommitOperationAdd object if you want to create a new commit."
+                )
+
+        if repo_type != "dataset":
+            for addition in additions:
+                if addition.path_in_repo.endswith((".arrow", ".parquet")):
+                    warnings.warn(
+                        f"It seems that you are about to commit a data file ({addition.path_in_repo}) to a {repo_type}"
+                        " repository. You are sure this is intended? If you are trying to upload a dataset, please"
+                        " set `repo_type='dataset'` or `--repo-type=dataset` in a CLI."
+                    )
+
+        logger.debug(
+            f"About to commit to the hub: {len(additions)} addition(s), {len(copies)} copy(ies) and"
+            f" {nb_deletions} deletion(s)."
+        )
+
+        # If updating a README.md file, make sure the metadata format is valid
+        # It's better to fail early than to fail after all the files have been uploaded.
+        for addition in additions:
+            if addition.path_in_repo == "README.md":
+                with addition.as_file() as file:
+                    content = file.read().decode()
+                self._validate_yaml(content, repo_type=repo_type, token=token)
+                # Skip other additions after `README.md` has been processed
+                break
+
+        # If updating twice the same file or update then delete a file in a single commit
+        _warn_on_overwriting_operations(operations)
+
+        self.preupload_lfs_files(
+            repo_id=repo_id,
+            additions=additions,
+            token=token,
+            repo_type=repo_type,
+            revision=unquoted_revision,  # first-class methods take unquoted revision
+            create_pr=create_pr,
+            num_threads=num_threads,
+            free_memory=False,  # do not remove `CommitOperationAdd.path_or_fileobj` on LFS files for "normal" users
+        )
+
+        files_to_copy = _fetch_files_to_copy(
+            copies=copies,
+            repo_type=repo_type,
+            repo_id=repo_id,
+            headers=headers,
+            revision=unquoted_revision,
+            endpoint=self.endpoint,
+        )
+
+        self._duplicate_lfs_files(
+            repo_id=repo_id, copies=copies, files_to_copy=files_to_copy, token=token, repo_type=repo_type
+        )
+
+        # Remove no-op operations (files that have not changed)
+        operations_without_no_op = []
+        for operation in operations:
+            if (
+                isinstance(operation, CommitOperationAdd)
+                and operation._remote_oid is not None
+                and operation._remote_oid == operation._local_oid
+            ):
+                # File already exists on the Hub and has not changed: we can skip it.
+                logger.debug(f"Skipping upload for '{operation.path_in_repo}' as the file has not changed.")
+                continue
+            if (
+                isinstance(operation, CommitOperationCopy)
+                and operation._dest_oid is not None
+                and operation._dest_oid == operation._src_oid
+            ):
+                # Source and destination files are identical - skip
+                logger.debug(
+                    f"Skipping copy for '{operation.src_path_in_repo}' -> '{operation.path_in_repo}' as the content of the source file is the same as the destination file."
+                )
+                continue
+            operations_without_no_op.append(operation)
+        if len(operations) != len(operations_without_no_op):
+            logger.info(
+                f"Removing {len(operations) - len(operations_without_no_op)} file(s) from commit that have not changed."
+            )
+
+        # Return early if empty commit
+        if len(operations_without_no_op) == 0:
+            logger.warning("No files have been modified since last commit. Skipping to prevent empty commit.")
+
+            # Get latest commit info
+            try:
+                info = self.repo_info(repo_id=repo_id, repo_type=repo_type, revision=unquoted_revision, token=token)
+            except RepositoryNotFoundError as e:
+                e.append_to_message(_CREATE_COMMIT_NO_REPO_ERROR_MESSAGE)
+                raise
+
+            # Return commit info based on latest commit
+            url_prefix = self.endpoint
+            if repo_type is not None and repo_type != constants.REPO_TYPE_MODEL:
+                url_prefix = f"{url_prefix}/{repo_type}s"
+            return CommitInfo(
+                commit_url=f"{url_prefix}/{repo_id}/commit/{info.sha}",
+                commit_message=commit_message,
+                commit_description=commit_description,
+                oid=info.sha,  # type: ignore
+                _endpoint=self.endpoint,
+            )
+
+        try:
+            commit_info = _send_commit(
+                operations=operations_without_no_op,
+                files_to_copy=files_to_copy,
+                commit_message=commit_message,
+                commit_description=commit_description,
+                repo_type=repo_type,
+                repo_id=repo_id,
+                headers=headers,
+                revision=revision,
+                endpoint=self.endpoint,
+                parent_commit=parent_commit,
+                create_pr=create_pr,
+                hot_reload=_hot_reload,
+            )
+        except RepositoryNotFoundError as e:
+            e.append_to_message(_CREATE_COMMIT_NO_REPO_ERROR_MESSAGE)
+            raise
+        except RemoteEntryNotFoundError as e:
+            if nb_deletions > 0 and "A file with this name doesn't exist" in str(e):
+                e.append_to_message(
+                    "\nMake sure to differentiate file and folder paths in delete"
+                    " operations with a trailing '/' or using `is_folder=True/False`."
+                )
+            raise
+
+        # Mark additions as committed (cannot be reused in another commit)
+        for addition in additions:
+            addition._is_committed = True
+
+        return commit_info
