@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import copy
 import datetime as dt
 import hashlib
 import json
@@ -33,7 +34,8 @@ from tiny_perceptron.selftrained.tools import (  # noqa: E402
     serialize_tool_result,
 )
 
-PROTOCOL_VERSION = "selftrained-generation-v1"
+PROTOCOL_VERSION = "selftrained-generation-v2"
+GENERATION_BUDGET_POLICY = "full-history-ceiling-min-remaining-context-v1"
 THRESHOLDS = {
     "text_semantic_per_intent": 0.8,
     "format": 0.9,
@@ -293,6 +295,14 @@ def score_reply(record, output, trace):
         )
     if expected_tool is False:
         scored["semantic"] = bool(scored["semantic"] and not requested_tool)
+    if trace.get("generation_failure") == "context_budget_exhausted":
+        # No neural answer was produced; an empty placeholder must not count
+        # as a one-sentence-format success or a matching empty reference.
+        for key in ("exact", "semantic", "tool_final", "tool_roundtrip"):
+            if key in scored:
+                scored[key] = False
+        if scored["format"] is not None:
+            scored["format"] = False
     return scored
 
 
@@ -334,6 +344,7 @@ def protocol_contents(args, checkpoint, records):
         "preprocess_version": PREPROCESS_VERSION,
         "context": checkpoint["config"]["max_length"],
         "max_new_tokens": args.max_new_tokens,
+        "generation_budget_policy": GENERATION_BUDGET_POLICY,
         "controls": args.controls,
         "thresholds": THRESHOLDS,
         "prompt_policy": "ordered messages without last assistant target; public ROI/layout; no supervision/transcript/path text",
@@ -360,6 +371,7 @@ def validate_protocol(protocol, current):
         "preprocess_version",
         "context",
         "max_new_tokens",
+        "generation_budget_policy",
         "controls",
         "thresholds",
         "prompt_policy",
@@ -371,37 +383,90 @@ def validate_protocol(protocol, current):
 class Generator:
     def __init__(self, model, encoder, maximum):
         self.model, self.encoder, self.maximum = model, encoder, maximum
+        # Encode the full public history to measure its budget; the model and
+        # original encoder context remain unchanged. Only generation admission
+        # bypasses the loader's length guard, never its metadata/gold guards.
+        self.full_history_encoder = copy.copy(encoder)
+        self.full_history_encoder.context = sys.maxsize
         self.calls = []
+        self.perception_budget_failure = None
 
     @torch.no_grad()
     def generate(self, record, messages, override=None):
-        encoded = self.encoder.encode(record, generation=True, messages=messages, modality_override=override)
+        encoded = self.full_history_encoder.encode(
+            record, generation=True, messages=messages, modality_override=override
+        )
+        length = len(encoded["input_ids"])
+        remaining = max(0, self.encoder.context - length)
+        effective = min(self.maximum, remaining)
+        call = {
+            "prompt_messages": [
+                {
+                    key: message[key]
+                    for key in ("role", "content", "image", "audio", "roi", "image_layout")
+                    if key in message
+                }
+                for message in messages
+            ],
+            "prompt_ids": encoded["input_ids"],
+            "prompt_token_count": length,
+            "context": self.encoder.context,
+            "requested_max_new_tokens": self.maximum,
+            "effective_max_new_tokens": effective,
+            "remaining_context_tokens": remaining,
+            "generation_budget_policy": GENERATION_BUDGET_POLICY,
+            "generated_ids": [],
+            "generated_token_count": 0,
+            "raw_output": "",
+            "modality_kinds": [m["kind"] for m in encoded["modalities"]],
+            "invalid_control_tokens": [],
+            "neural_generation": False,
+            "generation_status": "context_budget_exhausted",
+            "stop_reason": "context_budget_exhausted",
+        }
+        if effective == 0:
+            self.calls.append(call)
+            return ""
         ids = torch.tensor([encoded["input_ids"]], dtype=torch.long, device=self.encoder.device)
-        if len(encoded["input_ids"]) + self.maximum > self.encoder.context:
-            raise ValueError(f"{record['id']} prompt+generation 超出 context；請在 validation 確定合法預算後凍結")
         modalities = [self.encoder.to_device(encoded["modalities"])]
         output_ids = self.model.generate(
-            ids, modalities=modalities, max_new_tokens=self.maximum, eos_id=self.encoder.tokenizer.eos_id
+            ids, modalities=modalities, max_new_tokens=effective, eos_id=self.encoder.tokenizer.eos_id
         )
         tokens = output_ids[0].detach().cpu().tolist()
         output = self.encoder.tokenizer.decode(tokens, skip_special_tokens=True)
-        self.calls.append(
+        if self.encoder.tokenizer.eos_id in tokens:
+            stop_reason = "eos"
+        elif len(tokens) == effective:
+            stop_reason = "context_limit" if effective < self.maximum else "max_new_tokens"
+        else:
+            stop_reason = "model_returned"
+        call.update(
             {
-                "prompt_messages": [{"role": m["role"], "content": m["content"]} for m in messages],
-                "prompt_ids": encoded["input_ids"],
                 "generated_ids": tokens,
+                "generated_token_count": len(tokens),
                 "raw_output": output,
-                "modality_kinds": [m["kind"] for m in encoded["modalities"]],
                 "invalid_control_tokens": [
                     token for token in tokens if token < 11 and token not in (self.encoder.tokenizer.eos_id,)
                 ],
+                "neural_generation": True,
+                "generation_status": "generated",
+                "stop_reason": stop_reason,
             }
         )
+        self.calls.append(call)
         return output
 
     @torch.no_grad()
     def perception(self, record, messages=None):
-        encoded = self.encoder.encode(record, generation=True, messages=messages)
+        self.perception_budget_failure = None
+        encoded = self.full_history_encoder.encode(record, generation=True, messages=messages)
+        if len(encoded["input_ids"]) > self.encoder.context:
+            self.perception_budget_failure = {
+                "status": "context_budget_exhausted",
+                "prompt_token_count": len(encoded["input_ids"]),
+                "context": self.encoder.context,
+            }
+            return [], []
         ids = torch.tensor([encoded["input_ids"]], dtype=torch.long, device=self.encoder.device)
         result = self.model(
             input_ids=ids,
@@ -565,13 +630,20 @@ def summarize(rows):
             "count": sum("zero_output" in row for row in rows),
             "changed": sum(
                 row.get("zero_output") is not None
+                and not row.get("generation_budget_failure", False)
+                and not row.get("zero_generation_budget_failure", False)
                 and normalize(row["zero_output"]) != normalize(row["trace"]["final_output"])
                 for row in rows
             ),
         },
         "tool_return_dependency": {
             "count": sum("replay_score" in row for row in rows),
-            "correct": sum(row.get("replay_score", False) for row in rows),
+            "correct": sum(
+                row.get("replay_score", False)
+                and not row.get("generation_budget_failure", False)
+                and not row.get("replay_generation_budget_failure", False)
+                for row in rows
+            ),
         },
     }
     route_counts = []
@@ -617,6 +689,22 @@ def summarize(rows):
         "controls": controls,
         "routing": routing,
         "voice_topic_continuation": continuation,
+        "generation_budget": {
+            "policy": GENERATION_BUDGET_POLICY,
+            "main_reply_failure_rows": sum(row.get("generation_budget_failure", False) for row in rows),
+            "perception_failure_rows": sum(row.get("perception_budget_failure") is not None for row in rows),
+            "exhausted_attempts": sum(
+                call.get("generation_status") == "context_budget_exhausted"
+                for row in rows
+                for call in row.get("model_generations", []) + row.get("control_generations", [])
+            ),
+            "capped_neural_generations": sum(
+                call.get("neural_generation", False)
+                and call["effective_max_new_tokens"] < call["requested_max_new_tokens"]
+                for row in rows
+                for call in row.get("model_generations", []) + row.get("control_generations", [])
+            ),
+        },
     }
 
 
@@ -793,13 +881,21 @@ def main(argv=None):
                     "messages": prefix + [first_reference],
                     "supervision": {**record["supervision"], "format": specification["initial_format"]},
                 }
-                first_score = score_reply(first_record, first_output, {**trace, "final_output": first_output})
+                first_trace = {**trace, "final_output": first_output}
+                if generator.calls and generator.calls[0].get("generation_status") == "context_budget_exhausted":
+                    first_trace["generation_failure"] = "context_budget_exhausted"
+                first_score = score_reply(first_record, first_output, first_trace)
             else:
                 trace = run_tool_loop(
                     lambda history: generator.generate(record, history),
                     messages,
                     tools_enabled=record["task"] != "tool_unavailable",
                 )
+            budget_failure = any(
+                call.get("generation_status") == "context_budget_exhausted" for call in generator.calls
+            )
+            if budget_failure:
+                trace["generation_failure"] = "context_budget_exhausted"
             perception, routing = generator.perception(record, messages=messages)
             row = {
                 "record": record,
@@ -808,6 +904,8 @@ def main(argv=None):
                 "model_generations": list(generator.calls),
                 "perception": perception,
                 "routing": routing,
+                "generation_budget_failure": budget_failure,
+                "perception_budget_failure": generator.perception_budget_failure,
             }
             if first_score is not None:
                 row["first_reply_score"] = first_score
@@ -821,6 +919,7 @@ def main(argv=None):
                 )
             if args.controls == "all":
                 if record_asset_paths(record, "image") or record_asset_paths(record, "audio"):
+                    before_zero = len(generator.calls)
                     if first_score is not None:
                         zero_first = generator.generate(record, prefix, override="zero")
                         zero_messages = prefix + [{"role": "assistant", "content": zero_first}, continuation]
@@ -828,6 +927,10 @@ def main(argv=None):
                         row["zero_output"] = generator.generate(record, zero_messages, override="zero")
                     else:
                         row["zero_output"] = generator.generate(record, messages, override="zero")
+                    row["zero_generation_budget_failure"] = any(
+                        call.get("generation_status") == "context_budget_exhausted"
+                        for call in generator.calls[before_zero:]
+                    )
                 if trace["executed"]:
                     returned = trace["tool_result"]["result"]
                     changed = returned + 1 if returned < 9801 else returned - 1
@@ -841,6 +944,10 @@ def main(argv=None):
                         replay_tool_message=replay_messages[-1],
                         replay_output=replay_output,
                         replay_score=numeric_reply_value(replay_output) == changed,
+                        replay_generation_budget_failure=bool(
+                            generator.calls
+                            and generator.calls[-1].get("generation_status") == "context_budget_exhausted"
+                        ),
                     )
                 row["control_generations"] = generator.calls[len(row["model_generations"]) :]
             journal.append(row)
