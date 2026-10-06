@@ -1,0 +1,419 @@
+CURRENT_PRIMARY_COMPLETE_READ course/chapters/18.md#18.3 a69d6880083c580d589b55cab996392e9cf9ded6f03b4bd9c3f46d42b91b872d
+PRIOR_ARTIFACT_HASHES all_match 43
+NECESSARY_CONTEXT {"source": "course/chapters/07.md#7.11", "read_scope": "Header and complete opening prose through the paragraph immediately before first Python fence; later examples/results not read in this callback.", "section_sha256_hashed_only": "a5f2ab4d56da0a8cdf6ba988f0cfca92d0ea902b2f1a4760ac4bf67724c60872", "necessary_slice_sha256": "43ceee3b563564759fdef2fd7749c14309946aa32d064a5f5574e764adb60977", "slice_path": "docs/technical-reviews/artifacts/phase4-18_3-current-callback-20261006/necessary-context-7.11-prefix.md", "first_line": 374, "last_line": 379, "raw_section_bytes": 3943, "slice_bytes": 781, "original_necessary_prefix_sha256": "43ceee3b563564759fdef2fd7749c14309946aa32d064a5f5574e764adb60977", "necessary_prefix_equal_to_original": true, "original_complete_context_section_sha256": "574547cc33d59e4bae79eccb9ef9c4a0634a629a9fe984dc78adb356a812934d", "complete_context_hash_changed_without_expanded_inspection": true}
+## 7.11 預訓練模型怎麼學會對話？
+
+讀文章時，模型練「原句接什麼」；當助理時，還要練「這位使用者要什麼回答」。監督式微調SFT把正確問答與角色邊界放進前文，只用回答目標繼續調參數。仍是下一token和交叉熵，不需另換一種模型才能回答。
+
+先用0+0→0、0+1→1兩筆對話，把輸入、答案與有效位置接到模型。下面新建隨機小模型只求梯度，讓接口可見；真正微調則載入已有基模與匹配字表，再加入優化器更新。valid標出非PAD的有效輸入格；Y的非回答目標則填-100，masked_loss略過那些格的代價，只計回答bytes與EOS，沿用[7.1的答案標籤](#71-對話怎麼表示)。問題仍在輸入裡供模型讀取。
+
+
+NECESSARY_CONTEXT {"source": "course/chapters/06.md#6.1", "read_scope": "Header and complete opening prose through the paragraph immediately before first Python fence; later examples/results not read in this callback.", "section_sha256_hashed_only": "aecd7b3bee1470b4e1e15d0b714a38c34eac34eb3de072e8dfee05de272304a6", "necessary_slice_sha256": "752fa8ee3ab09f2d4e614e4b36149544fe7e05779ba55c0338f07cd1ffa300bc", "slice_path": "docs/technical-reviews/artifacts/phase4-18_3-current-callback-20261006/necessary-context-6.1-prefix.md", "first_line": 5, "last_line": 10, "raw_section_bytes": 2912, "slice_bytes": 502, "original_necessary_prefix_sha256": "752fa8ee3ab09f2d4e614e4b36149544fe7e05779ba55c0338f07cd1ffa300bc", "necessary_prefix_equal_to_original": true, "original_complete_context_section_sha256": "c6b1480d385c82c46fab9eee79d756be2626f36aa656c0ba39971ea4bfe9cd74", "complete_context_hash_changed_without_expanded_inspection": true}
+## 6.1 字元切詞有什麼成本？
+
+「小小貓」和「cat」各三個文字元素，存成UTF-8卻各要9與3byte；🙂是一個圖案，需4byte。原文佔幾個模型位置，要先知道拆分單位。
+
+token是模型一次處理的片段，tokenizer將原文拆成片段並轉ID；decoder把ID轉回文字，能否完整還原原文取決於字表與前處理規則。「切詞」不保證切出人類的詞，可以是一字、多字或字的一部分bytes；下面先分碼點與byte。
+
+
+NECESSARY_CONTEXT {"source": "course/chapters/07.md#7.3", "read_scope": "Header and complete opening prose through the paragraph immediately before first Python fence; later examples/results not read in this callback.", "section_sha256_hashed_only": "5c36cbb802c83d3e23586457498db50d0763152681d26a359cd20baca0b313c2", "necessary_slice_sha256": "5dcebf241cd85db8de9071ff6af375e4f51e88c21abb101264fe6522d58cadd7", "slice_path": "docs/technical-reviews/artifacts/phase4-18_3-current-callback-20261006/necessary-context-7.3-prefix.md", "first_line": 72, "last_line": 77, "raw_section_bytes": 2398, "slice_bytes": 516, "original_necessary_prefix_sha256": "5dcebf241cd85db8de9071ff6af375e4f51e88c21abb101264fe6522d58cadd7", "necessary_prefix_equal_to_original": true, "original_complete_context_section_sha256": "5c36cbb802c83d3e23586457498db50d0763152681d26a359cd20baca0b313c2", "complete_context_hash_changed_without_expanded_inspection": false}
+## 7.3 哪些位置應該學？
+
+「問→答」這筆對話，需要模型讀到「問」，但我們希望它練習寫的是「答」和回答結束。把問題留在輸入X，再分開標出哪些下一項答案要計代價，就能同時做到這兩件事。
+
+Y中的-100表示忽略直接答案代價，不是輸入token。因X每格預測下一項，答案與是否計分的標記要一起配到前一格的預測位置；以下先印每格的輸入ID、目標與是否計分，下一節再定位首答案。
+
+
+CURRENT_METHOD tiny_perceptron/data.py ByteTokenizer 14-28
+14: class ByteTokenizer:
+15:     """不學切詞的可還原起點；每個 UTF-8 byte 對應一個 ID。"""
+16: 
+17:     vocab_size = 264
+18:     pad_id, bos_id, eos_id, user_id, assistant_id, image_id, audio_id, system_id = range(8)
+19: 
+20:     def encode(self, text):
+21:         return [b + len(SPECIALS) for b in text.encode("utf-8")]
+22: 
+23:     def decode(self, ids):
+24:         raw = bytes(i - len(SPECIALS) for i in ids if i >= len(SPECIALS))
+25:         return raw.decode("utf-8", errors="replace")
+26: 
+27:     def state(self):
+28:         return {"type": "byte", "specials": list(SPECIALS)}
+CURRENT_METHOD tiny_perceptron/data.py render_chat 54-68
+54: def render_chat(messages, tokenizer=None):
+55:     """邊界由角色欄位建立；使用者文字不會被解析為特殊 token。"""
+56:     tok = tokenizer or ByteTokenizer()
+57:     ids, targets = [tok.bos_id], [IGNORE]
+58:     roles = {"user": tok.user_id, "assistant": tok.assistant_id, "system": tok.system_id}
+59:     for message in messages:
+60:         role = message["role"]
+61:         if role not in roles or not isinstance(message["content"], str):
+62:             raise ValueError("role 必須是 user/assistant/system，content 必須是文字")
+63:         content = tok.encode(message["content"]) + [tok.eos_id]
+64:         ids += [roles[role]] + content
+65:         targets += [IGNORE] + (content if role == "assistant" else [IGNORE] * len(content))
+66:     if not any(t != IGNORE for t in targets):
+67:         raise ValueError("這筆對話没有可監督的 assistant 答案")
+68:     return torch.tensor(ids[:-1]), torch.tensor(targets[1:])
+CURRENT_METHOD tiny_perceptron/model.py ModelConfig 15-28
+15: class ModelConfig:
+16:     vocab_size: int = 264
+17:     width: int = 32
+18:     layers: int = 1
+19:     heads: int = 1
+20:     max_length: int = 128
+21:     norm: str = "layer"
+22:     activation: str = "gelu"
+23:     rotary: bool = False
+24:     tied: bool = False
+25:     kv_heads: int | None = None
+26:     backend: str = "manual"
+27:     experts: int = 0
+28:     top_k: int = 2
+CURRENT_METHOD tiny_perceptron/model.py loss_sum 92-100
+92: def loss_sum(logits, labels):
+93:     """先求和再數有效 token，才能正確合併長短不同的 micro-batch。"""
+94:     count = (labels != IGNORE).sum()
+95:     if count.item() == 0:
+96:         raise ValueError("所有 labels 都被忽略：没有可學習的答案")
+97:     loss = F.cross_entropy(
+98:         logits.reshape(-1, logits.shape[-1]), labels.reshape(-1), ignore_index=IGNORE, reduction="sum"
+99:     )
+100:     return loss, count
+CURRENT_METHOD tiny_perceptron/model.py masked_loss 103-105
+103: def masked_loss(logits, labels):
+104:     total, count = loss_sum(logits, labels)
+105:     return total / count
+CURRENT_METHOD tiny_perceptron/model.py generate 109-131
+109: def generate(model, ids, max_new_tokens=16, temperature=0.0, eos_id=2, use_cache=False):
+110:     """先提供無 padding 版本；遇到長度上限停止，位置不會悄悄回捲。"""
+111:     was_training = model.training
+112:     model.eval()
+113:     sequence, state = ids.clone(), None
+114:     try:
+115:         for _ in range(max_new_tokens):
+116:             if sequence.shape[1] >= model.config.max_length:
+117:                 break
+118:             current = sequence if state is None else sequence[:, -1:]
+119:             result = model(current, cache=state if use_cache else None)
+120:             scores = result["logits"][:, -1]
+121:             if temperature <= 0:
+122:                 next_id = scores.argmax(-1, keepdim=True)
+123:             else:
+124:                 next_id = torch.multinomial((scores / temperature).softmax(-1), 1)
+125:             sequence = torch.cat((sequence, next_id), 1)
+126:             state = result["cache"] if use_cache else None
+127:             if sequence.shape[0] == 1 and next_id.item() == eos_id:
+128:                 break
+129:     finally:
+130:         model.train(was_training)
+131:     return sequence
+CURRENT_METHOD tiny_perceptron/tokenization.py generation_report 116-142
+116: def generation_report(tokenizer, ids):
+117:     """非法控制 ID 留在可見答案與報告，不能被 decoder 丟掉後看似成功。"""
+118:     ids = [int(value) for value in ids]
+119:     if any(value < 0 or value >= tokenizer.vocab_size for value in ids):
+120:         raise ValueError("生成 ID 超出 tokenizer 詞表")
+121:     pieces, content, invalid = [], [], []
+122:     for position, value in enumerate(ids):
+123:         if value >= len(SPECIALS):
+124:             content.append(value)
+125:             continue
+126:         if content:
+127:             pieces.append(tokenizer.decode(content))
+128:             content = []
+129:         if value != tokenizer.eos_id:
+130:             pieces.append(SPECIALS[value])
+131:             invalid.append({"position": position, "id": value, "token": SPECIALS[value]})
+132:     if content:
+133:         pieces.append(tokenizer.decode(content))
+134:     eos = tokenizer.eos_id in ids
+135:     return {
+136:         "answer": "".join(pieces),
+137:         "generated_ids": ids,
+138:         "eos": eos,
+139:         "invalid_special_tokens": invalid,
+140:         "valid_answer_tokens": not invalid,
+141:         "generation_status": "invalid_special_tokens" if invalid else "eos" if eos else "token_or_context_limit",
+142:     }
+CURRENT_METHOD scripts/course_experiments/compression.py _prompt 131-142
+131: def _prompt(record, maximum=None):
+132:     tok = ByteTokenizer()
+133:     messages = _chat(record)
+134:     ids = [tok.bos_id]
+135:     roles = {"user": tok.user_id, "assistant": tok.assistant_id, "system": tok.system_id}
+136:     # 最後一個 assistant 是待生成答案，其餘前文皆保留。
+137:     for message in messages[:-1]:
+138:         ids += [roles[message["role"]]] + tok.encode(message["content"]) + [tok.eos_id]
+139:     ids.append(tok.assistant_id)
+140:     if maximum is not None and len(ids) >= maximum:
+141:         raise ValueError("prompt 沒有留下答案空間")
+142:     return torch.tensor(ids, dtype=torch.long)
+CURRENT_METHOD scripts/course_experiments/compression.py _example 79-97
+79: def _example(record, maximum):
+80:     if "_hard_ids" in record:
+81:         prefix = _prompt(record, maximum)
+82:         hard_ids = record["_hard_ids"]
+83:         if not hard_ids:
+84:             raise ValueError("教師沒有生成任何有效 hard target；不可捏造 EOS 標籤")
+85:         eos = ByteTokenizer().eos_id in hard_ids
+86:         if record.get("_hard_eos") is not eos:
+87:             raise ValueError("教師 hard target 的實際 IDs 與 EOS 標記不一致")
+88:         tail = torch.tensor(hard_ids, dtype=torch.long)
+89:         full = torch.cat((prefix, tail))
+90:         labels = torch.cat((torch.full_like(prefix, IGNORE), tail))
+91:         if len(full) - 1 > maximum:
+92:             raise ValueError("教師 hard target 超過學生 max_length")
+93:         return full[:-1], labels[1:]
+94:     x, y = render_chat(_chat(record))
+95:     if len(x) > maximum:
+96:         raise ValueError("壓縮實驗不能默默截斷答案；請提供符合 max_length 的教學紀錄")
+97:     return x, y
+CURRENT_METHOD scripts/course_experiments/compression.py _hard_targets 574-627
+574: def _hard_targets(ctx, teacher, records, name, tokens):
+575:     teacher.eval().requires_grad_(False)
+576:     tok = ByteTokenizer()
+577:     prepared, audit = [], []
+578:     start = time.perf_counter()
+579:     for record in records:
+580:         if "text" in record:
+581:             raise ValueError("hard answer 蒸餾本節使用 SFT 問答，不把自然文件改成教師真值")
+582:         prefix = _prompt(record, teacher.config.max_length).to(ctx.device)
+583:         ids = generate(teacher, prefix[None], max_new_tokens=tokens)[0, len(prefix) :].tolist()
+584:         raw = ids[: ids.index(tok.eos_id)] if tok.eos_id in ids else ids
+585:         teacher_output = generation_report(tok, ids)
+586:         answer = teacher_output["answer"]
+587:         row = copy.deepcopy(record)
+588:         row["messages"] = copy.deepcopy(_chat(record))
+589:         row["messages"][-1]["content"] = answer
+590:         row["_hard_ids"] = ids
+591:         row["_hard_eos"] = tok.eos_id in ids
+592:         row.pop("answer", None)
+593:         prepared.append(row)
+594:         audit.append(
+595:             {
+596:                 "family": record["family"],
+597:                 "question": _chat(record)[-2]["content"],
+598:                 "gold_answer": _answer(record),
+599:                 "teacher_answer": answer,
+600:                 "teacher_ids": ids,
+601:                 "teacher_correct": raw == tok.encode(_answer(record)),
+602:                 "eos": tok.eos_id in ids,
+603:                 "valid_target_tokens": len(ids),
+604:                 "invalid_special_tokens": teacher_output["invalid_special_tokens"],
+605:                 "valid_answer_tokens": teacher_output["valid_answer_tokens"],
+606:                 "generation_status": teacher_output["generation_status"],
+607:             }
+608:         )
+609:     _sync(ctx.device)
+610:     elapsed = time.perf_counter() - start
+611:     path = Path(ctx.output) / f"{name}-hard-targets.json"
+612:     _json(path, {"records": prepared, "audit": audit})
+613:     return prepared, {
+614:         "seconds": elapsed,
+615:         "records": len(records),
+616:         "usable_target_records": sum(bool(row["teacher_ids"]) for row in audit),
+617:         "zero_target_records": sum(not row["teacher_ids"] for row in audit),
+618:         "zero_target_families": [row["family"] for row in audit if not row["teacher_ids"]],
+619:         "invalid_control_records": sum(bool(row["invalid_special_tokens"]) for row in audit),
+620:         "invalid_control_tokens": sum(len(row["invalid_special_tokens"]) for row in audit),
+621:         "correct": sum(row["teacher_correct"] for row in audit),
+622:         "wrong": sum(not row["teacher_correct"] for row in audit),
+623:         "file": str(path),
+624:         "file_bytes": path.stat().st_size,
+625:         "sha256": _sha(path),
+626:         "audit": audit,
+627:     }
+CURRENT_METHOD scripts/course_experiments/compression.py _fit_text 350-410
+350: def _fit_text(ctx, model, records, name, steps=200, teacher_cache=None, alpha=0.5, temperature=2.0):
+351:     """相同 seed／init／batch plan；KL 只比較同一 gold answer 前文的有效位置。"""
+352:     seed_everything(ctx.seed)
+353:     model.train().requires_grad_(True)
+354:     examples = _examples(records, model.config.max_length)
+355:     before = _parameter_hash(model)
+356:     rng = random.Random(ctx.seed)
+357:     plan = [[rng.randrange(len(examples)) for _ in range(16)] for _ in range(steps)]
+358:     optimizer = torch.optim.AdamW(model.parameters(), lr=0.003, weight_decay=0.01)
+359:     trace, initial_gradient, effective = [], None, 0
+360:     _sync(ctx.device)
+361:     start = time.perf_counter()
+362:     for step, indices in enumerate(plan):
+363:         x, y, valid = pad_batch([examples[i] for i in indices])
+364:         x, y, valid = x.to(ctx.device), y.to(ctx.device), valid.to(ctx.device)
+365:         logits = model(x, valid=valid)["logits"]
+366:         ce = masked_loss(logits, y)
+367:         kl = ce.new_zeros(())
+368:         if teacher_cache is not None:
+369:             selected = logits[y != IGNORE][None]
+370:             targets = torch.cat([teacher_cache[i] for i in indices]).to(ctx.device)[None]
+371:             labels = y[y != IGNORE][None]
+372:             kl = distillation_kl(selected, targets, labels, temperature)
+373:         loss = (1 - alpha) * ce + alpha * kl if teacher_cache is not None else ce
+374:         if not torch.isfinite(loss):
+375:             raise FloatingPointError(f"{name}: nonfinite loss at {step + 1}")
+376:         optimizer.zero_grad(set_to_none=True)
+377:         loss.backward()
+378:         if step == 0:
+379:             initial_gradient = float(model.output.weight.grad.norm())
+380:         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0, error_if_nonfinite=True)
+381:         optimizer.step()
+382:         effective += int((y != IGNORE).sum())
+383:         if step in (0, steps - 1) or (step + 1) % 50 == 0:
+384:             trace.append(
+385:                 {"step": step + 1, "loss": float(loss.detach()), "ce": float(ce.detach()), "kl": float(kl.detach())}
+386:             )
+387:     _sync(ctx.device)
+388:     elapsed = time.perf_counter() - start
+389:     after = _parameter_hash(model)
+390:     report = {
+391:         "steps": steps,
+392:         "optimizer_updates": steps,
+393:         "batch_size": 16,
+394:         "learning_rate": 0.003,
+395:         "seconds": elapsed,
+396:         "initialization_sha256": before,
+397:         "final_sha256": after,
+398:         "weights_changed": before != after,
+399:         "first_output_weight_gradient_norm": initial_gradient,
+400:         "batch_plan_sha256": hashlib.sha256(json.dumps(plan).encode()).hexdigest(),
+401:         "training_examples": len(records),
+402:         "training_sequence_chunks": len(examples),
+403:         "effective_supervised_tokens": effective,
+404:         "training_checkpoint": f"{name}-training.pt",
+405:         "objective": "(1-alpha)*CE + alpha*KL(teacher||student)*T²" if teacher_cache is not None else "CE",
+406:         "alpha": alpha if teacher_cache is not None else 0,
+407:         "temperature": temperature,
+408:         "temperature_squared_applied_once": teacher_cache is not None,
+409:         "loss_trace": trace,
+410:     }
+CURRENT_METHOD scripts/course_experiments/compression.py _distill_case 749-755
+749:     if hard:
+750:         generated, hard_report = _hard_targets(ctx, teacher, train_records, identifier, tokens)
+751:         if hard_report["zero_target_records"]:
+752:             raise ValueError(
+753:                 f"{identifier}: {hard_report['zero_target_records']} 個教師回答沒有有效 hard target；"
+754:                 f"沒有捏造 EOS 或略過題目，請查 {hard_report['file']}"
+755:             )
+CURRENT_METHOD scripts/course_experiments/compression.py _distill_case 770-796
+770:     for width in widths:
+771:         seed_everything(ctx.seed)
+772:         initial = TinyLM(ModelConfig(width=width, layers=1, heads=2, max_length=teacher.config.max_length)).to(
+773:             ctx.device
+774:         )
+775:         methods = ("ce", "teacher_hard", "ce_kl") if hard else ("ce", "ce_kl")
+776:         for method in methods:
+777:             name = f"{identifier}-w{width}-{method}"
+778:             model, path, training = _fit_text(
+779:                 ctx,
+780:                 copy.deepcopy(initial),
+781:                 generated if method == "teacher_hard" else train_records,
+782:                 name,
+783:                 _steps(ctx, steps),
+784:                 teacher_cache=cache if method == "ce_kl" else None,
+785:             )
+786:             result = {
+787:                 "training": training,
+788:                 "storage": _storage(model, path),
+789:                 "validation": _evaluate(model, parts["validation"], ctx.device, tokens),
+790:                 "test": _evaluate(model, parts["test"], ctx.device, tokens),
+791:             }
+792:             teacher_samples = evaluation["test"]["generated_samples"]
+793:             result["teacher_agreement"] = sum(
+794:                 left["generated_ids"] == right["generated_ids"]
+795:                 for left, right in zip(result["test"]["generated_samples"], teacher_samples, strict=True)
+796:             ) / len(teacher_samples)
+REUSED_ORIGINAL_AUTHORITY pytorch https://raw.githubusercontent.com/pytorch/pytorch/5c4886908584029761b579af026dcfb627c84070/torch/nn/functional.py Installed PyTorch2.14.1+cpu;git5c4886908584029761b579af026dcfb627c84070 3493-3504 95ff403085bb179477a01df63acfddf59dfac0fb58829e99a9c8b5c2fe98899b
+3493:         input (Tensor) : Predicted unnormalized logits;
+3494:             see Shape section below for supported shapes.
+3495:         target (Tensor) : Ground truth class indices or class probabilities;
+3496:             see Shape section below for supported shapes.
+3497:         weight (Tensor, optional): a manual rescaling weight given to each
+3498:             class. If given, has to be a Tensor of size `C`
+3499:         size_average (bool, optional): Deprecated (see :attr:`reduction`).
+3500:         ignore_index (int, optional): Specifies a target value that is ignored
+3501:             and does not contribute to the input gradient. When :attr:`size_average` is
+3502:             ``True``, the loss is averaged over non-ignored targets. Note that
+3503:             :attr:`ignore_index` is only applicable when the target contains class indices.
+3504:             Default: -100
+REUSED_ORIGINAL_AUTHORITY pytorch https://raw.githubusercontent.com/pytorch/pytorch/5c4886908584029761b579af026dcfb627c84070/torch/nn/functional.py Installed PyTorch2.14.1+cpu;git5c4886908584029761b579af026dcfb627c84070 3517-3522 95ff403085bb179477a01df63acfddf59dfac0fb58829e99a9c8b5c2fe98899b
+3517:     Shape:
+3518:         - Input: Shape :math:`(C)`, :math:`(N, C)` or :math:`(N, C, d_1, d_2, ..., d_K)` with :math:`K \geq 1`
+3519:           in the case of `K`-dimensional loss.
+3520:         - Target: If containing class indices, shape :math:`()`, :math:`(N)` or :math:`(N, d_1, d_2, ..., d_K)` with
+3521:           :math:`K \geq 1` in the case of K-dimensional loss where each value should be between :math:`[0, C)`.
+3522:           If containing class probabilities, same shape as the input and each value should be between :math:`[0, 1]`.
+REUSED_ORIGINAL_AUTHORITY tokenizers https://raw.githubusercontent.com/huggingface/tokenizers/v0.23.2/tokenizers/src/models/bpe/model.rs tokenizersv0.23.2;方法原碼查閱，未用該套件運行本課byte測試 593-598 550f2d0fa8f0ecd27013a0787d8343c961e83a724fc09f7d596c695220f72429
+593:     fn get_vocab(&self) -> HashMap<String, u32> {
+594:         self.vocab.clone().into_iter().collect()
+595:     }
+596: 
+597:     fn get_vocab_size(&self) -> usize {
+598:         self.vocab.len()
+REUSED_ORIGINAL_AUTHORITY tokenizers https://raw.githubusercontent.com/huggingface/tokenizers/v0.23.2/tokenizers/src/models/bpe/model.rs tokenizersv0.23.2;方法原碼查閱，未用該套件運行本課byte測試 614-619 550f2d0fa8f0ecd27013a0787d8343c961e83a724fc09f7d596c695220f72429
+614:     fn token_to_id(&self, token: &str) -> Option<u32> {
+615:         self.vocab.get(token).copied()
+616:     }
+617: 
+618:     fn id_to_token(&self, id: u32) -> Option<String> {
+619:         self.vocab_r.get(&id).cloned()
+REUSED_ORIGINAL_AUTHORITY json https://raw.githubusercontent.com/python/cpython/v3.13.5/Doc/library/json.rst CPythonv3.13.5，和實跑Python一致 248-255 0db52f6a0a962b70fb295e926593d279e17b3e807cb1cfc534461b1e13e2ff9a
+248: .. function:: dumps(obj, *, skipkeys=False, ensure_ascii=True, \
+249:                     check_circular=True, allow_nan=True, cls=None, \
+250:                     indent=None, separators=None, default=None, \
+251:                     sort_keys=False, **kw)
+252: 
+253:    Serialize *obj* to a JSON formatted :class:`str` using this :ref:`conversion
+254:    table <py-to-json-table>`.  The arguments have the same meaning as in
+255:    :func:`dump`.
+REUSED_ORIGINAL_AUTHORITY json https://raw.githubusercontent.com/python/cpython/v3.13.5/Doc/library/json.rst CPythonv3.13.5，和實跑Python一致 497-499 0db52f6a0a962b70fb295e926593d279e17b3e807cb1cfc534461b1e13e2ff9a
+497:    If *ensure_ascii* is true (the default), the output is guaranteed to
+498:    have all incoming non-ASCII characters escaped.  If *ensure_ascii* is
+499:    false, these characters will be output as-is.
+REUSED_MINILLM_ORIGINAL_INTRO https://arxiv.org/pdf/2306.08543v6 arXiv2306.08543v6;31Jan2026 a96fbfb8fcb935aead8dd04d8e375bc12e149a48d5dd26c06e6f9e561c579fc6 prior_pdftotext_sha 06e0b3380e344ffb103f9e4842e03c62ccc1b329dc6bbb4a057585e8c21f4074
+1   Introduction
+
+With the rapid development of large language models (LLMs; BMR+ 20, HZD+ 21, BHA+ 21,
+CND+ 22, Ope23), a common technique to reduce their high computational resource demand is
+knowledge distillation (KD; HVD15), where we train a small student model with supervision from
+a large teacher model. Two categories of KD are commonly applied: black-box KD, where only
+the teacher-generated texts are accessible, and white-box KD, where the teacher model’s output dis-
+tribution or intermediate hidden states are also available [JBMD21]. Recently, black-box KD has
+shown promising results in fine-tuning small models on the prompt-response pairs generated by
+LLM APIs [TGZ+ 23, CLL+ 23, WWZ+ 23, PLH+ 23]. With the emergence of more open-source
+LLMs [ZRG+ 22, TLI+ 23], white-box KD becomes more valuable for both research communities
+and industry sectors because student models receive better signals from the output distribution and
+hidden states of teacher models, thereby potentially resulting in higher performance. However,
+white-box KD approaches are mostly studied for small (< 1B parameters) language understanding
+models [SDCW19, WWD+ 20], while white-box KD for LLMs is yet to be explored.
+
+REUSED_GSM8K_ORIGINAL_PROVENANCE https://raw.githubusercontent.com/openai/grade-school-math/3101c7d5072418e28b9008a6636bde82a006892c/README.md 27e1676d572f2289210170ff6dbb8c2ef7d9f6950c0f08c978ea8ee6b39dca29
+## Dataset Details
+
+GSM8K consists of 8.5K high quality grade school math problems created by human problem writers. We segmented these into 7.5K training problems and 1K test problems. These problems take between 2 and 8 steps to solve, and solutions primarily involve performing a sequence of elementary calculations using basic arithmetic operations (+ - / \*) to reach the final answer. A bright middle school student should be able to solve every problem.
+
+The raw data files can be found in:
+
+- `grade_school_math/data/train.jsonl`
+- `grade_school_math/data/test.jsonl`
+
+Each line of those files corresponds to a single grade school math problem, saved as a json dictionary (with a "question" key and an "answer" key). The answer is formatted such that it uses calculation annotations and so that the final numeric solution is the final line of the solution, preceded by `####`.
+
+
+We generated each Socratic subquestion by conditioning on each ground truth (contractor-provided) step in a solution, using a model specifically finetuned for this task (on around 800 examples). To construct the full Socratic dataset, each step in the solution was prefixed by the model-generated Socratic subquestion. Steps were otherwise left untouched.
+
+
+RAW_JSON_TOP_KEYS_TYPES_ONLY {'schema_version': 'int', 'experiment_id': 'str', 'title': 'str', 'revision': 'str', 'device': 'str', 'seed': 'int', 'torch_version': 'str', 'python_version': 'str', 'gpu': 'str', 'elapsed_seconds': 'float', 'timing_scope': 'str', 'step_scale': 'float', 'evidence_status': 'str', 'unfinished_schedules': 'list', 'peak_allocated_bytes': 'int', 'peak_memory_scope': 'str', 'results': 'dict', 'artifacts': 'list', 'assets': 'list', 'code_sha256': 'dict', 'public_exports': 'list', 'status': 'str', 'modal': 'dict', 'hf': 'dict'}
+SAVED_RAW_LEAF_RECHECK {"task": "attributes", "records": 45, "correct": 45, "eos": 45, "zero": 0, "invalid_control": 0, "target_tokens": 315, "wrong": []}
+SAVED_RAW_LEAF_RECHECK {"task": "style_transfer", "records": 185, "correct": 180, "eos": 185, "zero": 0, "invalid_control": 0, "target_tokens": 3783, "wrong": [{"gold_answer": "已確認2026-10-06。", "teacher_answer": "已確認2026-10-16。", "difference_days": 10}, {"gold_answer": "已確認2026-10-02。", "teacher_answer": "已確認2026-10-12。", "difference_days": 10}, {"gold_answer": "已確認2026-10-07。", "teacher_answer": "已確認2026-10-17。", "difference_days": 10}, {"gold_answer": "已確認2026-10-03。", "teacher_answer": "已確認2026-10-13。", "difference_days": 10}, {"gold_answer": "已確認2026-10-05。", "teacher_answer": "已確認2026-10-15。", "difference_days": 10}]}
+SAVED_MATCHED_TRAINING_AND_SAMPLES_LEAVES [{"width": 16, "matched_training_leaves": ["initialization_sha256", "final_sha256", "batch_plan_sha256", "steps", "training_examples", "effective_supervised_tokens"], "final_sha256": "118253915c6ff52407f3973392c083b1fdbde95af2475433386814e7970a5622", "validation_examples": 5, "test_examples": 10}, {"width": 32, "matched_training_leaves": ["initialization_sha256", "final_sha256", "batch_plan_sha256", "steps", "training_examples", "effective_supervised_tokens"], "final_sha256": "5f6b57647c07523ab6d20e674409b4552685b58e99ec743c3a9016d2069932f4", "validation_examples": 5, "test_examples": 10}]
+RAW_TARGET_JSON_TOP_KEYS_TYPES_ONLY {'records': 'list', 'audit': 'list'}
+SAVED_RAW_TARGET_RECORD_LEAVES 45 8d09066e9d8390a08220219bb8696a254c1dc9b4ed4599f346d5c87fc3c9ab51
+REUSED_PRIOR_ACTUAL_CPU_STDOUT 保留筆數 1
+REUSED_PRIOR_ACTUAL_CPU_STDOUT 保留筆數 2
+REUSED_PRIOR_ACTUAL_CPU_STDOUT TOKEN_CONTRACT {"specials": ["<pad>", "<bos>", "<eos>", "<user>", "<assistant>", "<image>", "<audio>", "<system>"], "vocab_size": 264, "byte_4": [60], "char_4": [1], "decode_can_hide_control": true, "generation_report": {"answer": "4<user>", "generated_ids": [60, 3, 2], "eos": true, "invalid_special_tokens": [{"position": 1, "id": 3, "token": "<user>"}], "valid_answer_tokens": false, "generation_status": "invalid_special_tokens"}}
+REUSED_PRIOR_ACTUAL_CPU_STDOUT CONTROLLED_GENERATION bounded_original_hard_target_path_calls [{"max_new_tokens": 2, "prefix_shape": [1, 9]}, {"max_new_tokens": 2, "prefix_shape": [1, 9]}, {"max_new_tokens": 2, "prefix_shape": [1, 9]}, {"max_new_tokens": 2, "prefix_shape": [1, 9]}]
+REUSED_PRIOR_ACTUAL_CPU_STDOUT MASK_AND_LOSS {"x_shape": [2, 10], "logits_shape": [2, 10, 264], "answer_target_count": 3, "targets": [60, 2, 60], "loss_nats": 5.575949192047119, "expected_log264": 5.575949103146316, "ignored_gradient_exactly_zero": true, "optimizer_updates": 0}
+REUSED_PRIOR_ACTUAL_CPU_STDOUT ALL_ASSERTIONS_PASSED; no model training, new model evaluation, network access, or retained weights
+CURRENT_INSPECTION_RECEIPT /workspace/tiny-perceptron-vlm/docs/technical-reviews/artifacts/phase4-18_3-current-callback-20261006/current-inspection.json a87cde087b13ab00855cf6cea94740553567b3cdd2a5db5ed6a785f75fde77c9
+ALL_CURRENT_CALLBACK_CHECKS_PASSED; no source edits, model execution, network, downloads, training or rendering

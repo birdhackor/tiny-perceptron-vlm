@@ -1,0 +1,85 @@
+CURRENT CHAPTER INTRO UTF8 BYTES SHA 803ef51cbe69ad31a5d1222179c56cff83160643ba928ae43e02787e0e6e284e
+# 第 18 章：蒸餾，讓小模型向教師學習
+
+如果想降低部署成本，可以先選較小的學生，再用教師的回答或候選比例提供指導；這條蒸餾路線是否值得採用，要看同一任務的品質與成本。教師是否可靠、訊號能否對齊、學生有沒有改善，是三個需要分別回答的問題。本章先追蹤固定數字裡的軟目標、溫度與KL，再檢查內容、風格及多模態答案位置。短程式幫助理解機制；實際結果用共同真值比較，不由「更像教師」或更小檔案代替任務完成。
+
+CURRENT COMPLETE 18.1 UTF8 BYTES SHA 2d50fee86657a86a9471cdf1713b8b73f54f729b6c8957a1e04730f72a4d67ae
+5: ## 18.1 教師能提供什麼學習訊號？
+6: 
+7: 同樣回答「4」，有一位教師把80%給4，另一位只給40%。想讓較小模型學它們的做法，這兩份指導應該相同嗎？教師究竟要交給學生什麼？最容易取得的是完整回答文字；若能取得模型每個位置的候選機率，還能提供「最終沒選的候選有多接近」。這兩種訊號包含的資訊不同，不能只因它們都來自教師就使用同一個誤差公式。蒸餾（distillation）指讓學生透過教師提供的訊號學習，教師本身不一定是真值。
+8: 
+9: [下一字分數](04.md#4.6)常叫logits，softmax把它們轉成總和為一的機率分布；[SFT](07.md#7.11)則用回答文字作目標，讓模型增加每個示範答案token的機率。只能看到教師生成文字的方式常叫黑盒蒸餾；可讀取教師分布的方式常叫白盒蒸餾。這些名字描述能拿到的訊號，不表示教師是不是可靠。
+10: 
+11: 對問題「2+2=?」，教師可能回答「4」。假設候選是 `[4,3,5]`，分布 `[0.8,0.15,0.05]`的第一名是4，`[0.4,0.35,0.25]`的第一名也相同。只取得「4」無法分辨這兩種情況：它沒有記錄第二名與第一名的差距，也沒有記錄5的相對位置。
+12: 
+13: ```python
+14: import torch
+15: 
+16: candidates = ["4", "3", "5"]
+17: probabilities = [torch.tensor([0.8, 0.15, 0.05]), torch.tensor([0.4, 0.35, 0.25])]
+18: for prob in probabilities:
+19:     answer = candidates[prob.argmax().item()]
+20:     print("回答", answer, "分布", prob.tolist())
+21: ```
+22: 
+23: 輸入是人工指定的兩個分布，用來隔離資訊差別，不是呼叫真的教師。`argmax`選最大機率索引，再查候選文字，兩行回答都應為4；分布欄卻不同。實際回答是一串token，黑盒資料保存整串文字；白盒通常要保存或即時讀取每個有效回答位置的一整列詞表分布，資料量和計算需求可能更大。
+24: 
+25: 取得文字後，可由學生自己的tokenizer重新切分，所以黑盒方式能搭配不同詞表。逐欄對機率則必須確保兩邊同一欄代表同一個token，這是[詞表對齊](18.md#18.6)會處理的問題。白盒能提供更多候選關係，也可能把教師的錯誤偏好一起交給學生；多一份資訊不等於保證更好。
+26: 
+27: 練習將程式只改成 `print("回答", answer)`，先預測兩行完全相同，再執行核對。接著問自己：還能從留下的文字還原0.15、0.35這些數字嗎？答案不能，因為不同分布映成了同一個最大候選。這會決定後續哪些蒸餾方法有足夠輸入，哪些只能使用文字答案。
+28: 
+29: <details>
+30: <summary>選讀：訊號分類、教師來源與方法範圍</summary>
+31: 
+32: [MiniLLM原文的導論](https://arxiv.org/abs/2306.08543v6)也按可取得的文字或分布區分這兩類訊號。本章的正式對照使用普通CE與固定前文上的forward KL，沒有採用該論文的reverse KL或policy-gradient方法。教師來源則是[直接SFT](../training.md#T.4)、[條件式風格](../training.md#T.5)與[MoE的固定top-2支線](../training.md#T.8)，都載入實際訓練權重。它們的完整檔案SHA、架構與步數保存在[蒸餾實報的`teacher_provenance`](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/course-experiments/results/distillation.json)。
+33: 
+34: </details>
+35: 
+CURRENT NECESSARY 7.11 UTF8 BYTES SHA a5f2ab4d56da0a8cdf6ba988f0cfca92d0ea902b2f1a4760ac4bf67724c60872
+374: ## 7.11 預訓練模型怎麼學會對話？
+375: 
+376: 讀文章時，模型練「原句接什麼」；當助理時，還要練「這位使用者要什麼回答」。監督式微調SFT把正確問答與角色邊界放進前文，只用回答目標繼續調參數。仍是下一token和交叉熵，不需另換一種模型才能回答。
+377: 
+378: 先用0+0→0、0+1→1兩筆對話，把輸入、答案與有效位置接到模型。下面新建隨機小模型只求梯度，讓接口可見；真正微調則載入已有基模與匹配字表，再加入優化器更新。valid標出非PAD的有效輸入格；Y的非回答目標則填-100，masked_loss略過那些格的代價，只計回答bytes與EOS，沿用[7.1的答案標籤](#71-對話怎麼表示)。問題仍在輸入裡供模型讀取。
+379: 
+380: ```python
+381: import torch
+382: from tiny_perceptron.data import toy_conversations, render_chat, pad_batch
+383: from tiny_perceptron.model import TinyLM, ModelConfig, masked_loss
+384: 
+385: torch.manual_seed(42)
+386: examples = [render_chat(messages) for messages in toy_conversations()[:2]]
+387: x, y, valid = pad_batch(examples)
+388: model = TinyLM(ModelConfig(width=8))
+389: loss = masked_loss(model(x, valid=valid)["logits"], y)
+390: loss.backward()
+391: print("batch形狀", x.shape, "有效答案", (y != -100).sum().item())
+392: print("問答接口代價", loss.item())
+393: ```
+394: 
+395: `toy_conversations` 是專案的合成加法小世界，前兩筆問題0+0與0+1、回答0與1，ASCII答案各一byte加EOS，所以有效目標共4。`pad_batch` 回傳X、Y與有效輸入表，模型處理兩筆每筆10位置，輸出每位置264個byte/結構候選。最後loss為正，backward有梯度，說明串接成功；這段沒有optimizer.step，尚未進行新訓練。
+396: 
+397: 固定題目與生成規則，比較微調前後的內容、格式及舊能力。已有的小世界比較，先文字再問答的支線多了文字更新預算，不能把差異全歸因於階段形式。常見兩階段的資料成本和重用理由在本章後段展開，眼前只需記住材料從文章換成回答示範。
+398: 
+399: 練習取第一筆對話，沿用[7.1的消息結構](#71-對話怎麼表示)：每項是含role與content的字典，第二項是assistant答案。以下逐項複製字典成新的消息清單，再把答案0改成3，原資料仍保留正確答案。
+400: 
+401: ```python
+402: messages = [message.copy() for message in toy_conversations()[0]]
+403: messages[1]["content"] = "3"
+404: exercise_x, exercise_y = render_chat(messages)
+405: print("練習有效目標", exercise_y[exercise_y != -100].tolist())
+406: ```
+407: 
+408: `message.copy()`建立一份新字典；此處role與content都是字串，逐項複製足以讓新清單的修改保留在練習副本。`exercise_y[exercise_y != -100]`只選出要計代價的答案ID。執行前先預測原0的byte48加8=56變成3的51加8=59，輸出應為 `[59,2]`；EOS仍2，其他角色與問題不變。核對後把副本答案恢復0，避免把演示錯誤當正式訓練資料。
+409: 
+410: <details>
+411: <summary>補充：實作約定與原始紀錄</summary>
+412: 
+413: 我們已實跑兩條獨立路線。第一條從隨機模型開始，只用45筆屬性問答更新900次；第二條先把這45筆的問題與答案接成文字、練250次續寫，保存後再以對話角色與回答遮罩微調900次。第二條並沒有沿用前章的故事模型，也沒有先得到廣泛知識；它只在同一批小世界材料上多做了一個文字階段。兩條對話階段都用同樣寬度64、兩層、種子42、每批16筆與學習率0.003，最後用同一組留出題比較，成績見[7.17](#7.17)；下一節[7.12](#7.12)先用四格材料說明題目家族的切分規則。因為第二條多了250次文字更新，成績差異不能全當成「預訓練形式本身」的因果效果；要隔離它，還需另外匹配總訓練預算。
+414: 
+415: 短程式沿用本課工具與原計算語義。安裝、長訓練與重做操作見[訓練配方](../training.md)，不需要先完成長配方才能閱讀這個例子。
+416: 
+417: </details>
+418: 
+INSPECTION FACTS: {"reviewer_task": "/root/phase4_factual_coordinator/factual_18_1", "current_own_source": "course/chapters/18.md#18.1", "current_source_sha256": "2d50fee86657a86a9471cdf1713b8b73f54f729b6c8957a1e04730f72a4d67ae", "current_source_lines": [5, 35], "current_intro_sha256": "803ef51cbe69ad31a5d1222179c56cff83160643ba928ae43e02787e0e6e284e", "intro_lines": [1, 4], "current_whole_chapter_frozen_sha256": "d4c6444442feb929349537995786532a4218449e142d30534fc3e94353c4519d", "current_context_source": "course/chapters/07.md#7.11", "current_context_sha256": "a5f2ab4d56da0a8cdf6ba988f0cfca92d0ea902b2f1a4760ac4bf67724c60872", "current_context_lines": [374, 418], "prior_context_sha256": "574547cc33d59e4bae79eccb9ef9c4a0634a629a9fe984dc78adb356a812934d", "context_bytes_changed": true, "figure_sha256": {}, "versioned_helpers": [{"source": "tiny_perceptron/alignment.py", "old_sha256": "3e0c2203323c931214bfcd0f4390ad4c031caeed492e8b1c00e1dd096a861a79", "current_sha256": "3e0c2203323c931214bfcd0f4390ad4c031caeed492e8b1c00e1dd096a861a79", "exact_bytes_unchanged": true}, {"source": "tiny_perceptron/training.py", "old_sha256": "6aefd29750e468a61ea8e0984087fd9f691e37a055313903cbdac746e5649a6a", "current_sha256": "6aefd29750e468a61ea8e0984087fd9f691e37a055313903cbdac746e5649a6a", "exact_bytes_unchanged": true}, {"source": "tiny_perceptron/model.py", "old_sha256": "176e3a2c305f3ec509934abe41a1e8e48c5a76de8e9b0cea5c41eefd5a9adf69", "current_sha256": "176e3a2c305f3ec509934abe41a1e8e48c5a76de8e9b0cea5c41eefd5a9adf69", "exact_bytes_unchanged": true}, {"source": "tiny_perceptron/data.py", "old_sha256": "6b40ba4bccc4a1ce169a90df8ce71f40e7c9e33e3d7633a36fdd8348d9536321", "current_sha256": "6b40ba4bccc4a1ce169a90df8ce71f40e7c9e33e3d7633a36fdd8348d9536321", "exact_bytes_unchanged": true}, {"source": "scripts/course_experiments/common.py", "old_sha256": "df08fb4d378170e930bb5deb50b97749c33e5d97d0fbd3ce77ba916b12b07206", "current_sha256": "df08fb4d378170e930bb5deb50b97749c33e5d97d0fbd3ce77ba916b12b07206", "exact_bytes_unchanged": true}], "original_compression_full_sha256": "28d8ce258369672d71a24f7efbcbf68f3e5e8114e073620aba91c4d807043a44", "current_compression_full_sha256": "ede22f6c4b9c01d2dc5be149f20cf84b01b9591c925c270d510a81678ce0d444", "distillation_method_AST_matches": [{"method": "_teacher", "current_lines": [55, 67], "recorded_lines": [55, 67], "ast_sha256": "b877caefd1cff914bbb0b8e92b13dc3fa8dd02546bea63ff82d1f73bb0475bd7", "AST_unchanged": true}, {"method": "_cache_text", "current_lines": [337, 347], "recorded_lines": [337, 347], "ast_sha256": "c490b6bbb0507d136031f8bf32871bbc79b127c8ff3f71cdf374e8b0b74b9b29", "AST_unchanged": true}, {"method": "_fit_text", "current_lines": [350, 417], "recorded_lines": [350, 417], "ast_sha256": "a677a17c9af846ec79138a8b5e3f42d6705faf065513fc83d79e927c5639c47c", "AST_unchanged": true}, {"method": "_distill_case", "current_lines": [720, 844], "recorded_lines": [720, 844], "ast_sha256": "e60a5e87a8572ee2fd8bdc445271bfaf45cde7142cd70617adff7193e3fc924f", "AST_unchanged": true}, {"method": "run_distillation", "current_lines": [847, 883], "recorded_lines": [847, 883], "ast_sha256": "9657194f52e873ec1265a39151c10863df52ea418b964a2a22d826a1303d693d", "AST_unchanged": true}], "raw_result_versions": [{"source": "docs/course-experiments/results/distillation.json", "original_sha256": "53ed77dc35fce33163da45bf06916636a17ddacbbf1ccd54139ea8089f9a0b8d", "current_sha256": "53ed77dc35fce33163da45bf06916636a17ddacbbf1ccd54139ea8089f9a0b8d", "exact_bytes_unchanged": true, "current_content_pointers_read": []}, {"source": "docs/course-experiments/results/sft.json", "original_sha256": "77caf612ec0856053f40cba862fac186c989fb8863bf6f0832f9209278ec3998", "current_sha256": "77caf612ec0856053f40cba862fac186c989fb8863bf6f0832f9209278ec3998", "exact_bytes_unchanged": true, "current_content_pointers_read": []}, {"source": "docs/course-experiments/results/style.json", "original_sha256": "b534bf8062231c452c01b259ff3419df53e1da771ec19c339549ed736f0f4384", "current_sha256": "b534bf8062231c452c01b259ff3419df53e1da771ec19c339549ed736f0f4384", "exact_bytes_unchanged": true, "current_content_pointers_read": []}, {"source": "docs/course-experiments/results/moe.json", "original_sha256": "a95f60479ef6c51b018af486b1e42d3f8e6ea99bb90c88470184406adb8f9890", "current_sha256": "a95f60479ef6c51b018af486b1e42d3f8e6ea99bb90c88470184406adb8f9890", "exact_bytes_unchanged": true, "current_content_pointers_read": []}], "instruction_versions": [{"path": "docs/review-tools/factual-reviewer-instructions.md", "sha256": "3a5e49f326c7cc282c0d150bfa9d8569b3701e6089eb825d0332bd007548f311"}, {"path": ".agents/skills/clear-tutorial/references/review-protocol.md", "sha256": "e4a3d6c81021f0212c742643e84df06b10b55dff86667c4b4917548e08e272c0"}, {"path": "scripts/check_technical_reviews.py", "sha256": "e0cc6772faebd51e081f31c09b678f88e1ea748d72be406e6e310b9db2d94ad4"}, {"path": "docs/review-tools/section_facts.py", "sha256": "d729cfba5a1bb772a3956cfbc85f8f13103efd740d93ac0358888724e3e9b814"}], "prior_canonical_opaque_path": "docs/technical-reviews/artifacts/phase4-18_1-current-callback-20261006/history/prior-18.1.canonical.json", "prior_canonical_sha256": "62edf92b18c17922f2edf31fff36d2eb3a5b1911ca5b1ab0215d741dddf1467e", "prior_proof_archive_path": "docs/technical-reviews/artifacts/phase4-18_1-current-callback-20261006/history/prior-proof-complete.tar", "prior_proof_archive_sha256": "01e5c36258ab3cb6d7e0ae644d29e675d8cc06f71f58a21e1e70d3700c66efa0", "actual_execution_scope": "Current source/context and prior proof/code/source version inspection only; prior original CPU/paper/official-source evidence is reused after exact hash/AST checks, not re-executed or fetched."}
+ALL CURRENT SOURCE/INTRO/CTX/PRIORPROOF VERSION CHECKS PASSED
