@@ -35,7 +35,10 @@ def main():
             }
         )
     complete_hour = observed.replace(minute=0, second=0, microsecond=0)
-    rows = billing.report(start=last_month, end=complete_hour, resolution="h")
+    today = complete_hour.replace(hour=0)
+    rows = billing.report(start=last_month, end=today, resolution="d")
+    if today < complete_hour:
+        rows += billing.report(start=today, end=complete_hour, resolution="h")
     by_object = defaultdict(lambda: Decimal("0"))
     raw_rows = []
     for row in rows:
@@ -58,7 +61,7 @@ def main():
         "summaries": summaries,
         "report_start": last_month.isoformat(),
         "report_end_exclusive": complete_hour.isoformat(),
-        "report_resolution": "h",
+        "report_resolution": "daily before today, hourly today; nonoverlapping complete intervals",
         "report_metered_total_usd": str(sum((row.cost for row in rows), Decimal("0"))),
         "report_objects": [
             {"object_id": key[0], "description": key[1], "environment_name": key[2], "cost_usd": str(cost)}
