@@ -1,0 +1,174 @@
+"""Actual archived metadata replay and explicitly synthetic mutations; no API."""
+
+import hashlib
+import importlib.util
+import json
+from copy import deepcopy
+from datetime import datetime, timedelta
+from decimal import Decimal
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+spec = importlib.util.spec_from_file_location("retained_finance_candidate", ROOT / "scripts/selftrained/finance.py")
+finance = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(finance)
+FIXTURE = json.loads((ROOT / "actual-metadata-reconstructed-fixture.json").read_bytes())
+
+
+def inputs():
+    fixture = deepcopy(FIXTURE)
+    return (
+        fixture["policy"],
+        fixture["reconstructed_after_five"]["ledger"],
+        fixture["reconstructed_after_five"]["state"],
+        fixture["actual_reported_regression_snapshot"],
+    )
+
+
+def check(policy, ledger, state, snapshot, proposed="0.07", run_id="synthetic-card-proposal"):
+    return finance.check_quota(
+        policy,
+        FIXTURE["policy_sha256"],
+        state,
+        snapshot,
+        ledger,
+        proposed,
+        run_id,
+        now=datetime.fromisoformat(snapshot["observed_at"]),
+    )
+
+
+def test_actual_five_metadata_and_reported_regression_keep_all_bounds():
+    policy, ledger, state, snapshot = inputs()
+    original = deepcopy((policy, ledger, state, snapshot))
+    next_state, guard = check(policy, ledger, state, snapshot)
+    assert (policy, ledger, state, snapshot) == original
+    assert guard["official_current_gross_usd"] == "7.24629663"
+    assert guard["actual_gross_increment_usd"] == "0.92288452"
+    assert guard["retained_official_highwater_gross_usd"] == "7.28629446"
+    assert guard["retained_highwater_gross_increment_usd"] == "0.96288235"
+    assert guard["unreconciled_round_bounds_usd"] == "2.23" and guard["carry_in_bounds_usd"] == "0.54"
+    assert guard["guarded_increment_usd"] == "3.80288235" and guard["remaining_guarded_quota_usd"] == "26.19711765"
+    assert next_state["month_gross_highwater_usd"]["2026-10"] == "7.28629446"
+    assert next_state["last_observed_at"] == snapshot["observed_at"]
+    assert next_state["attempts"][-1]["billing_snapshot_sha256"] == finance.canonical_sha(snapshot)
+    assert len(next_state["attempts"]) == 6
+
+
+def test_next_replay_after_regression_reconstructs_peak_not_last_report():
+    policy, ledger, state, snapshot = inputs()
+    state, _ = check(policy, ledger, state, snapshot)
+    ledger["reservations"].append(
+        {
+            "run_id": "synthetic-card-proposal",
+            "reserved_usd": "0.07",
+            "status": "completed",
+            "gross_quota_policy_sha256": FIXTURE["policy_sha256"],
+            "billing_before": {"gross_quota_snapshot": deepcopy(snapshot)},
+        }
+    )
+    snapshot["observed_at"] = (datetime.fromisoformat(snapshot["observed_at"]) + timedelta(seconds=30)).isoformat()
+    snapshot["summaries"][-1]["metered_cost_usd"] = "7.26"
+    next_state, guard = check(policy, ledger, state, snapshot, run_id="synthetic-second-card")
+    assert guard["retained_official_highwater_gross_usd"] == "7.28629446"
+    assert guard["official_current_gross_usd"] == "7.26000000"
+    assert guard["guarded_increment_usd"] == "3.87288235"
+    assert next_state["month_gross_highwater_usd"]["2026-10"] == "7.28629446"
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "state_shrink",
+        "state_inflate",
+        "drop_older_attempt",
+        "ledger_dup",
+        "history_sha",
+        "last_time",
+        "historical_workspace",
+        "historical_missing_month",
+        "historical_time",
+        "historical_baseline",
+        "bound_shrink",
+    ],
+)
+def test_complete_actual_history_tamper_rejects(change):
+    policy, ledger, state, snapshot = inputs()
+    records = {item["run_id"]: item for item in ledger["reservations"]}
+    first = state["attempts"][0]
+    historical = records[first["run_id"]]["billing_before"]["gross_quota_snapshot"]
+    if change == "state_shrink":
+        state["month_gross_highwater_usd"]["2026-10"] = "7.24629663"
+    if change == "state_inflate":
+        state["month_gross_highwater_usd"]["2026-10"] = "8"
+    if change == "drop_older_attempt":
+        state["attempts"].pop(0)
+    if change == "ledger_dup":
+        ledger["reservations"].append(deepcopy(ledger["reservations"][-1]))
+    if change == "history_sha":
+        first["billing_snapshot_sha256"] = "f" * 64
+    if change == "last_time":
+        state["last_observed_at"] = snapshot["observed_at"]
+    if change == "historical_workspace":
+        historical["workspace_name"] = "wrong"
+    if change == "historical_missing_month":
+        historical["summaries"].pop(0)
+    if change == "historical_time":
+        historical["observed_at"] = snapshot["observed_at"]
+    if change == "historical_baseline":
+        historical["summaries"][-1]["metered_cost_usd"] = "6.30"
+    if change == "bound_shrink":
+        first["reserved_usd"] = "0.01"
+    if change.startswith("historical_"):
+        first["billing_snapshot_sha256"] = finance.canonical_sha(historical)
+    with pytest.raises((ValueError, RuntimeError)):
+        check(policy, ledger, state, snapshot)
+
+
+@pytest.mark.parametrize(
+    "change", ["below_baseline", "missing_month", "wrong_workspace", "time_backward", "future", "stale"]
+)
+def test_fresh_actual_interface_controls_still_reject(change):
+    policy, ledger, state, snapshot = inputs()
+    now = datetime.fromisoformat(snapshot["observed_at"])
+    if change == "below_baseline":
+        snapshot["summaries"][-1]["metered_cost_usd"] = "6.30"
+    if change == "missing_month":
+        snapshot["summaries"].pop(0)
+    if change == "wrong_workspace":
+        snapshot["workspace_name"] = "wrong"
+    if change == "time_backward":
+        snapshot["observed_at"] = (datetime.fromisoformat(state["last_observed_at"]) - timedelta(seconds=1)).isoformat()
+    if change == "future":
+        snapshot["observed_at"] = (now + timedelta(seconds=1)).isoformat()
+    if change == "stale":
+        now += timedelta(seconds=121)
+    with pytest.raises(ValueError):
+        finance.check_quota(policy, FIXTURE["policy_sha256"], state, snapshot, ledger, ".07", "synthetic-new", now=now)
+
+
+def test_retained_history_cap_cannot_be_evaded_by_lower_current():
+    policy, ledger, state, snapshot = inputs()
+    last = state["attempts"][-1]
+    record = next(item for item in ledger["reservations"] if item["run_id"] == last["run_id"])
+    record["billing_before"]["gross_quota_snapshot"]["summaries"][-1]["metered_cost_usd"] = "37"
+    last["billing_snapshot_sha256"] = finance.canonical_sha(record["billing_before"]["gross_quota_snapshot"])
+    state["month_gross_highwater_usd"]["2026-10"] = "37"
+    with pytest.raises(RuntimeError, match="exhausted"):
+        check(policy, ledger, state, snapshot)
+
+
+def test_policy_bytes_and_original_snapshot_bytes_unchanged():
+    for path, sha in FIXTURE["source_byte_sha256"].items():
+        assert hashlib.sha256(Path(path).read_bytes()).hexdigest() == sha
+    assert (
+        hashlib.sha256(
+            Path("/workspace/selftrained-v2/docs/selftrained/v2-gross-quota-20261006.json").read_bytes()
+        ).hexdigest()
+        == FIXTURE["policy_sha256"]
+    )
+    assert Decimal(FIXTURE["reconstructed_after_five"]["state"]["month_gross_highwater_usd"]["2026-10"]) == Decimal(
+        "7.28629446"
+    )

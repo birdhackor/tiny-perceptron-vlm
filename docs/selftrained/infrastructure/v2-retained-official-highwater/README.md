@@ -1,0 +1,15 @@
+# Retained official high-water review archive
+
+This is a local finance review archive for the conservative high-water change. The frozen runtime patch changes only `scripts/selftrained/finance.py`. The applied candidate SHA is `8db20ad988335a6eafc8fbe69ac84abea96ffac9def137adc3a416b5b84b20b6`; the original strict source is retained here with SHA `5c94a11d5314b956c42f09777345088fab375586cad0c16e0a9785ed0fccb5a2`.
+
+The evidence records 53 independent positive and negative checks and separate 106-test author and reviewer runs. It distinguishes current reported gross USD7.24629663 from retained monthly high-water gross USD7.28629446. The local replay adds all USD2.23 round bounds, USD0.54 carry-in and a proposed USD0.07 bound, giving guarded increment USD3.80288235. The retained value is a conservative budget basis, not current actual spending or a refund.
+
+The fixture contains archived actual before-four ledger/state, an actual fifth reservation and completion receipt, and an explicitly reconstructed after-fifth ledger/state. Real after-five sidecar bytes were not independently observed. The fifth replay reservation timestamp is chosen for the fixture, not claimed as an actual stored timestamp. Tests replay the archived 2026-10-06 11:31 UTC observation as `now`; these data are not fresh enough to authorize a later release. The next actual reservation still requires the real live ledger/sidecar and a fresh official snapshot.
+
+This archival step writes only this evidence directory. It makes no API call or live ledger/sidecar write, resets no state, releases or refunds no bounds, and changes no policy, source, tests or book content. The policy SHA remains `557b2bd1135c41beff0fdc38bc69ed8a4c36ddc06d14b917d16bf5b732867372`. Historical strict proofs remain preserved. The provider-side cause of the gross regression remains unknown; unregistered delayed charges and future storage retain the existing scope limitations, without any invoice-finality claim.
+
+All archived Python source uses `.py.txt` filenames so absolute-path evidence cannot enter ordinary pytest discovery. These files record the original runs and their original paths; they are not portable test targets. The independent script additionally requires the pre-application strict source. Root retains the ordinary portable tests under the repository's `tests/` directory.
+
+The author stdout logs are byte-exact copies of its frozen files. The independent stdout logs and tool-response metadata are copied verbatim from the original tool results; no run was repeated during archiving. `proof-initial-53-checks.json` is reconstructed from the final proof by removing later evidence fields, with bytes checked against the original emitted SHA. The final independent proof remains byte unchanged.
+
+Use [index.json](index.json) for every archived artifact's byte count, SHA and provenance, and [archive-checks.json](archive-checks.json) for the archive validation result. The index excludes its own hash to avoid a circular dependency; the archivist's response records that hash.
