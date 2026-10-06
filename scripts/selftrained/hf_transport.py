@@ -1,10 +1,11 @@
 """Pinned data transport and an explicit public inference-file allowlist.
 
-This module never downloads model weights. Training checkpoints and optimizer
-state stay on the existing private course Volume.
+This module never supplies external weights to training. Release recovery reads
+only previously reviewed public files; optimizer state stays on the private Volume.
 """
 
 import hashlib
+import json
 import re
 import shutil
 import subprocess
@@ -15,6 +16,13 @@ MAX_PACKAGE_BYTES = 512 * 1024 * 1024
 MAX_UNPACKED_BYTES = 1024 * 1024 * 1024
 MAX_RELEASE_BYTES = 128 * 1024 * 1024
 PUBLIC_MODEL_REPO = "birdhackor/tiny-perceptron-course-models"
+EXPORT_STAGES = {
+    "moe-pretrain": ("moe", "pretrain"),
+    "moe-sft": ("moe", "sft"),
+    "moe-joint": ("moe", "joint"),
+    "dense-joint": ("dense", "joint"),
+}
+SAFE_EXPORT_FILES = {"model.safetensors", "model-config.json", "tokenizer.json", "inference-manifest.json"}
 
 
 def digest(path):
@@ -183,4 +191,190 @@ def publish_inference(source, release, revision, manifest_sha, token, staging):
         "prefix": release["prefix"],
         "files": files,
         "scope": "Only reviewed inference files; full training/resume state retained privately on course Volume",
+    }
+
+
+def validate_batch_release(release):
+    if release.get("repo_id") != PUBLIC_MODEL_REPO or release.get("private") is not False:
+        raise ValueError("Batch release must name the authorized public model repository")
+    prefix = relative_path(release.get("prefix", ""))
+    if prefix.parts[0] != "selftrained" or len(prefix.parts) < 2:
+        raise ValueError("Batch release prefix must be versioned under selftrained/")
+    if not re.fullmatch(r"[a-f0-9]{64}", release.get("manifest_sha256", "")):
+        raise ValueError("Batch release needs the exact frozen data/config manifest")
+    exports = release.get("exports", [])
+    if len(exports) != 4 or {item.get("name") for item in exports} != set(EXPORT_STAGES):
+        raise ValueError("Batch release needs exactly MoE pretrain/SFT/joint and Dense joint")
+    for item in exports:
+        architecture, stage = EXPORT_STAGES[item["name"]]
+        source = item.get("source", {})
+        if item.get("architecture") != architecture or source.get("stage") != stage or source.get("path") != "best.pt":
+            raise ValueError("Public export must name its exact architecture/stage selected checkpoint")
+        for key in ("execution_sha256", "train_receipt_sha256"):
+            if not re.fullmatch(r"[a-f0-9]{64}", item.get(key, "")):
+                raise ValueError("Each export needs exact execution and training receipt hashes")
+        if not re.fullmatch(r"[a-f0-9]{40}", item.get("revision", "")):
+            raise ValueError("Each export needs its original full source Git revision")
+        files = item.get("files", [])
+        if len(files) != 4 or {file.get("path") for file in files} != SAFE_EXPORT_FILES:
+            raise ValueError("Each export publishes exactly four reviewed safe inference files")
+    return exports
+
+
+def approved_batch_exports(sources, release, manifest_sha, manifest):
+    """Verify every private source and safe file before reserving or publishing."""
+    exports = validate_batch_release(release)
+    if release["manifest_sha256"] != manifest_sha or set(sources) != set(EXPORT_STAGES):
+        raise ValueError("Batch release sources differ from the frozen manifest or four-export set")
+    expected_records = {Path(item["path"]).name: item["sha256"] for item in manifest["records"]}
+    expected_assets = {item["path"]: item["sha256"] for item in manifest.get("assets", [])}
+    approved, total = [], 0
+    for export in exports:
+        source = Path(sources[export["name"]]["directory"])
+        execution = sources[export["name"]]["execution"]
+        if (
+            digest(source / "execution.json") != export["execution_sha256"]
+            or execution.get("status") != "completed"
+            or execution.get("revision") != export["revision"]
+            or execution.get("manifest_sha256") != manifest_sha
+            or execution.get("stage") != export["source"]["stage"]
+            or execution.get("run_id") != export["source"]["run_id"]
+            or execution.get("job", {}).get("architecture", "moe") != export["architecture"]
+            or digest(source / "best.pt") != export["source"]["sha256"]
+        ):
+            raise ValueError("Export source differs from its completed immutable execution/checkpoint")
+        receipt_path = source / "train-receipt.json"
+        if digest(receipt_path) != export["train_receipt_sha256"]:
+            raise ValueError("Export training receipt differs from its reviewed hash")
+        receipt = json.loads(receipt_path.read_text())
+        asset_hashes = receipt.get("asset_sha256", {})
+        if (
+            receipt.get("architecture") != export["architecture"]
+            or receipt.get("stage") != export["source"]["stage"]
+            or receipt.get("data_sha256") != expected_records
+            or not asset_hashes
+            or any(expected_assets.get(path) != value for path, value in asset_hashes.items())
+            or receipt.get("completed_requested_steps") is not True
+            or receipt.get("selected_checkpoint_available") is not True
+            or receipt.get("inference_exported") is not True
+            or receipt.get("test_used_for_selection") is not False
+            or receipt.get("origin", {}).get("kind") != "all-neural-weights-random"
+            or receipt.get("steps", -1) < execution.get("job", {}).get("steps", 0)
+        ):
+            raise ValueError(
+                "Only completed from-random training with frozen data and validation selection can publish"
+            )
+        files = approved_public_files(
+            source,
+            release
+            | {
+                "revision": export["revision"],
+                "prefix": release["prefix"] + "/" + export["name"],
+                "files": export["files"],
+            },
+            export["revision"],
+            manifest_sha,
+        )
+        inference = json.loads((source / "inference-manifest.json").read_text())
+        config = json.loads((source / "model-config.json").read_text())
+        file_hashes = {item["path"]: item["sha256"] for item in files if item["path"] != "inference-manifest.json"}
+        if (
+            inference.get("selected_checkpoint_sha256") != export["source"]["sha256"]
+            or inference.get("files") != file_hashes
+            or inference.get("stage") != export["source"]["stage"]
+            or inference.get("selection") != "validation_loss"
+            or inference.get("origin", {}).get("kind") != "all-neural-weights-random"
+            or config != receipt.get("config")
+            or config.get("architecture") != export["architecture"]
+        ):
+            raise ValueError("Safe inference manifest/config differs from the selected private checkpoint")
+        total += sum(item["bytes"] for item in files)
+        approved.append({"descriptor": export, "source": source, "files": files})
+    if total > MAX_RELEASE_BYTES:
+        raise ValueError("The complete four-export batch exceeds the 128 MiB release allowance")
+    return approved
+
+
+def publish_batch_inference(sources, release, manifest_sha, manifest, token, staging):
+    from huggingface_hub import CommitOperationAdd, HfApi, hf_hub_download
+    from huggingface_hub.errors import EntryNotFoundError
+
+    approved = approved_batch_exports(sources, release, manifest_sha, manifest)
+    api = HfApi(token=token)
+    info = api.repo_info(PUBLIC_MODEL_REPO, repo_type="model")
+    if info.private or not re.fullmatch(r"[a-f0-9]{40}", info.sha):
+        raise ValueError("Authorized repository must be public with an exact commit revision")
+    expected = {
+        f"{release['prefix']}/{item['descriptor']['name']}/{file['path']}": file
+        for item in approved
+        for file in item["files"]
+    }
+    try:
+        existing = {
+            item.path: item
+            for item in api.list_repo_tree(
+                PUBLIC_MODEL_REPO, repo_type="model", revision=info.sha, path_in_repo=release["prefix"], recursive=True
+            )
+            if hasattr(item, "size")
+        }
+    except EntryNotFoundError:
+        existing = {}
+    recovered = bool(existing)
+    if existing:
+        if set(existing) != set(expected):
+            raise ValueError("Immutable public prefix already contains a different file set")
+        for path, file in expected.items():
+            item = existing[path]
+            lfs = getattr(item, "lfs", None)
+            lfs_sha = lfs.get("sha256") if isinstance(lfs, dict) else getattr(lfs, "sha256", None)
+            if item.size != file["bytes"] or (lfs_sha and lfs_sha != file["sha256"]):
+                raise ValueError("Existing public release differs from the reviewed safe bytes")
+            if not lfs_sha:
+                # Only our exact, bounded reviewed files are read for recovery;
+                # this path never supplies external weights to training.
+                local = Path(
+                    hf_hub_download(PUBLIC_MODEL_REPO, path, repo_type="model", revision=info.sha, token=token)
+                )
+                if local.stat().st_size != file["bytes"] or digest(local) != file["sha256"]:
+                    raise ValueError("Existing public release differs from the reviewed safe bytes")
+        commit_sha, commit_url = info.sha, f"https://huggingface.co/{PUBLIC_MODEL_REPO}/commit/{info.sha}"
+    else:
+        staging = Path(staging)
+        operations = []
+        for item in approved:
+            name = item["descriptor"]["name"]
+            for file in item["files"]:
+                target = staging / name / file["path"]
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(item["source"] / file["path"], target)
+                verify_file(staging / name, file)
+                operations.append(
+                    CommitOperationAdd(
+                        path_in_repo=f"{release['prefix']}/{name}/{file['path']}", path_or_fileobj=target
+                    )
+                )
+        result = api.create_commit(
+            repo_id=PUBLIC_MODEL_REPO,
+            repo_type="model",
+            operations=operations,
+            commit_message="Four reviewed self-trained inference exports",
+            parent_commit=info.sha,
+        )
+        commit_sha, commit_url = result.oid, result.commit_url
+    return {
+        "repo_id": PUBLIC_MODEL_REPO,
+        "repo_type": "model",
+        "private": False,
+        "commit_sha": commit_sha,
+        "commit_url": commit_url,
+        "prefix": release["prefix"],
+        "manifest_sha256": manifest_sha,
+        "exports": release["exports"],
+        "files": [
+            {"path": path, **{key: value for key, value in file.items() if key != "path"}}
+            for path, file in expected.items()
+        ],
+        "recovered_existing_revision": recovered,
+        "new_commit_created": not recovered,
+        "scope": "Exactly four safe exports in one immutable public revision; optimizer/resume state stays private",
     }

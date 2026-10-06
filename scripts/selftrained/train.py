@@ -158,6 +158,9 @@ def export_inference(output_dir, *, required=False):
         "selected_step": checkpoint["step"],
         "origin": checkpoint["origin"],
         "preprocess_version": checkpoint["preprocess_version"],
+        "data_sha256": checkpoint["data_sha256"],
+        "asset_sha256": checkpoint["asset_sha256"],
+        "tokenizer_sha256": checkpoint["tokenizer_sha256"],
         "selection": "validation_loss",
     }
     (output_dir / "inference-manifest.json").write_text(

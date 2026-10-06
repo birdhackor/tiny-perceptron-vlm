@@ -604,3 +604,252 @@ def test_protocol_binds_shared_attention_logmel_and_inference_sources(
     assert original[shared_path] != current[shared_path]
     with pytest.raises(ValueError, match="code_sha256"):
         evaluate.validate_protocol({"code_sha256": original}, {"code_sha256": current})
+
+
+@pytest.fixture
+def safe_eval_export(corpus, capsys):
+    root, records_path, _ = corpus
+    output = root / "safe-eval-model"
+    train.main(
+        [
+            "--records",
+            str(records_path),
+            "--asset-dir",
+            str(root),
+            "--output-dir",
+            str(output),
+            "--stage",
+            "joint",
+            "--steps",
+            "1",
+            "--batch-size",
+            "5",
+            "--context",
+            "256",
+            "--config",
+            str(config_file(root)),
+            "--threads",
+            "2",
+            "--export-inference",
+        ]
+    )
+    selected = torch.load(output / "best.pt", map_location="cpu", weights_only=False)
+    manifest = json.loads((output / "inference-manifest.json").read_text())
+    for key in ("data_sha256", "asset_sha256", "tokenizer_sha256"):
+        assert manifest[key] == selected[key]
+    capsys.readouterr()
+    return root, records_path, output
+
+
+def safe_eval_args(root, records_path, model_dir, output):
+    return [
+        "--records",
+        str(records_path),
+        "--asset-dir",
+        str(root),
+        "--model-dir",
+        str(model_dir),
+        "--output-dir",
+        str(output),
+        "--max-new-tokens",
+        "4",
+        "--controls",
+        "all",
+        "--threads",
+        "2",
+    ]
+
+
+def test_safe_export_validation_generates_without_deserializing_pickle(safe_eval_export, monkeypatch):
+    root, records_path, model_dir = safe_eval_export
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Safe evaluation must never call torch.load")
+
+    monkeypatch.setattr(torch, "load", forbidden)
+    output = root / "safe-val-three"
+    metrics = evaluate.main(safe_eval_args(root, records_path, model_dir, output) + ["--limit", "3"])
+    assert metrics["count"] == 3 and not metrics["teacher_forcing_used_for_generation"]
+    assert metrics["weight_source"] == "safe_export"
+    assert metrics["checkpoint_sha256"] == metrics["safe_weights_sha256"]
+    rows = [json.loads(line) for line in (output / "outputs.jsonl").read_text().splitlines()]
+    assert len(rows) == 3
+    assert all(row["model_generations"] and 1 <= len(row["model_generations"][0]["generated_ids"]) <= 4 for row in rows)
+    assert all(row["model_generations"][0]["prompt_messages"] == row["record"]["messages"][:-1] for row in rows)
+    assert any(row.get("control_generations") for row in rows if row["record"]["task"] == "ocr")
+    with pytest.raises(SystemExit):
+        evaluate.parser().parse_args(safe_eval_args(root, records_path, model_dir, output) + ["--checkpoint", "x.pt"])
+
+
+@pytest.mark.parametrize("violation", ["weights", "data", "asset", "tokenizer", "legacy"])
+def test_safe_export_evaluation_rejects_corruption_and_wrong_identity(safe_eval_export, violation):
+    root, records_path, model_dir = safe_eval_export
+    manifest_path = model_dir / "inference-manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    expected = "訓練資料/資產指紋"
+    if violation == "weights":
+        weights = model_dir / "model.safetensors"
+        original = weights.read_bytes()
+        weights.write_bytes(original[:-1] + bytes([original[-1] ^ 1]))
+        expected = "SHA-256 mismatch"
+    elif violation == "data":
+        records_path.write_bytes(records_path.read_bytes() + b"\n")
+    elif violation == "asset":
+        audio = root / "wave.wav"
+        audio.write_bytes(audio.read_bytes() + b"changed_asset_bytes")
+    elif violation == "tokenizer":
+        manifest["tokenizer_sha256"] = "a" * 64
+        manifest_path.write_text(json.dumps(manifest))
+        expected = "tokenizer_sha256"
+    else:
+        from tiny_perceptron.selftrained.inference import InferenceAssistant
+
+        del manifest["asset_sha256"]
+        manifest_path.write_text(json.dumps(manifest))
+        # 舊安全匯出仍可公開 inference，但缺實際資料身分不能正式評估。
+        assert InferenceAssistant(model_dir, root).model is not None
+        expected = "缺少評估資料身分"
+    with pytest.raises(ValueError, match=expected):
+        evaluate.main(safe_eval_args(root, records_path, model_dir, root / "rejected-safe-val"))
+    assert not (root / "rejected-safe-val/outputs.jsonl").exists()
+
+
+def test_frozen_safe_protocol_binds_weights_manifest_lineage_and_source_mode(safe_eval_export):
+    root, records_path, model_dir = safe_eval_export
+    protocol_path = root / "safe-frozen.json"
+    metrics = evaluate.main(
+        safe_eval_args(root, records_path, model_dir, root / "safe-full-val")
+        + ["--freeze-protocol", str(protocol_path)]
+    )
+    assert metrics["count"] == 5 and metrics["evaluation_complete"]
+    protocol = json.loads(protocol_path.read_text())
+    manifest_path = model_dir / "inference-manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    assert protocol["safe_weights_sha256"] == evaluate.file_sha256(model_dir / "model.safetensors")
+    assert protocol["inference_manifest_sha256"] == evaluate.file_sha256(manifest_path)
+    assert protocol["selected_checkpoint_sha256"] == manifest["selected_checkpoint_sha256"]
+    for key in ("checkpoint_sha256", "safe_weights_sha256", "inference_manifest_sha256", "selected_checkpoint_sha256"):
+        with pytest.raises(ValueError, match=key):
+            evaluate.validate_protocol(protocol, {**protocol, key: "a" * 64})
+    with pytest.raises(ValueError, match="weight_source"):
+        evaluate.validate_protocol(protocol, {**protocol, "weight_source": "private_checkpoint"})
+    missing_mode = {key: value for key, value in protocol.items() if key != "weight_source"}
+    with pytest.raises(ValueError, match="weight_source"):
+        evaluate.validate_protocol(missing_mode, protocol)
+    manifest["selected_checkpoint_sha256"] = "a" * 64
+    manifest_path.write_text(json.dumps(manifest))
+    with pytest.raises(ValueError, match="inference_manifest_sha256"):
+        evaluate.main(
+            safe_eval_args(root, records_path, model_dir, root / "changed-lineage-val")
+            + ["--protocol", str(protocol_path)]
+        )
+
+
+def test_local_test_resume_only_advances_newest_three_record_lineage(corpus, monkeypatch, capsys):
+    root, records_path, records = corpus
+    records = [record for record in records if record["task"] in ("text", "ocr", "voice_qa")]
+    records_path.write_text("\n".join(json.dumps(record, ensure_ascii=False) for record in records) + "\n")
+    model_dir = root / "lineage-model"
+    train.main(
+        [
+            "--records",
+            str(records_path),
+            "--asset-dir",
+            str(root),
+            "--output-dir",
+            str(model_dir),
+            "--stage",
+            "joint",
+            "--steps",
+            "1",
+            "--batch-size",
+            "3",
+            "--context",
+            "256",
+            "--config",
+            str(config_file(root)),
+            "--threads",
+            "2",
+            "--export-inference",
+        ]
+    )
+    common = [
+        "--records",
+        str(records_path),
+        "--asset-dir",
+        str(root),
+        "--model-dir",
+        str(model_dir),
+        "--max-new-tokens",
+        "2",
+        "--controls",
+        "none",
+        "--threads",
+        "2",
+    ]
+    protocol = root / "lineage-frozen.json"
+    evaluate.main(common + ["--output-dir", str(root / "lineage-val"), "--freeze-protocol", str(protocol)])
+    marker_path = protocol.with_suffix(protocol.suffix + ".test-started.json")
+    original_append, original_generate = evaluate.EvaluationJournal.append, evaluate.Generator.generate
+    generated = []
+    expected_output = root / "partial-one"
+
+    def observed_generate(self, record, messages, override=None):
+        # Marker 必須在這次 attempt 的第一個真神經生成之前已經前進。
+        marker = json.loads(marker_path.read_text())
+        assert Path(marker["latest_output_dir"]) == expected_output.resolve()
+        generated.append(record["id"])
+        return original_generate(self, record, messages, override)
+
+    def stop_at_count(count):
+        def append(self, row):
+            original_append(self, row)
+            if len(self.rows) == count:
+                self.stop_requested = True
+
+        return append
+
+    monkeypatch.setattr(evaluate.Generator, "generate", observed_generate)
+    monkeypatch.setattr(evaluate.EvaluationJournal, "append", stop_at_count(1))
+    test_args = common + ["--split", "test", "--protocol", str(protocol)]
+    first = evaluate.main(test_args + ["--output-dir", str(expected_output)])
+    assert first["count"] == 1 and not first["evaluation_complete"]
+    first_raw = (expected_output / "outputs.jsonl").read_bytes()
+    initial_output = str(expected_output.resolve())
+    marker = json.loads(marker_path.read_text())
+    assert marker["output_dir"] == initial_output
+    # 舊 marker 的唯一 output_dir 仍作為初始 latest fallback。
+    del marker["latest_output_dir"]
+    marker_path.write_text(json.dumps(marker))
+    expected_output = root / "partial-two"
+    monkeypatch.setattr(evaluate.EvaluationJournal, "append", stop_at_count(2))
+    second = evaluate.main(
+        test_args + ["--output-dir", str(expected_output), "--resume-output", str(root / "partial-one/outputs.jsonl")]
+    )
+    assert second["count"] == 2 and not second["evaluation_complete"]
+    second_raw = (expected_output / "outputs.jsonl").read_bytes()
+    assert second_raw.startswith(first_raw)
+    marker = json.loads(marker_path.read_text())
+    assert marker["output_dir"] == initial_output and marker["latest_output_dir"] == str(expected_output.resolve())
+    with pytest.raises(ValueError, match="最新 partial"):
+        evaluate.main(
+            test_args
+            + ["--output-dir", str(root / "stale"), "--resume-output", str(root / "partial-one/outputs.jsonl")]
+        )
+    assert len(generated) == 2 and not (root / "stale/outputs.jsonl").exists()
+    expected_output = root / "lineage-complete"
+    monkeypatch.setattr(evaluate.EvaluationJournal, "append", original_append)
+    complete = evaluate.main(
+        test_args + ["--output-dir", str(expected_output), "--resume-output", str(root / "partial-two/outputs.jsonl")]
+    )
+    assert complete["count"] == 3 and complete["evaluation_complete"]
+    assert (expected_output / "outputs.jsonl").read_bytes().startswith(second_raw)
+    assert len(generated) == len(set(generated)) == 3
+    with pytest.raises(ValueError, match="test 已全部完成"):
+        evaluate.main(
+            test_args
+            + ["--output-dir", str(root / "duplicate"), "--resume-output", str(expected_output / "outputs.jsonl")]
+        )
+    assert len(generated) == 3
+    assert json.loads(marker_path.read_text())["latest_output_dir"] == str(expected_output.resolve())
+    capsys.readouterr()

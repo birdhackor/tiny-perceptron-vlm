@@ -306,10 +306,26 @@ def code_fingerprints():
 
 
 def protocol_contents(args, checkpoint, records):
+    model_dir = getattr(args, "model_dir", None)
+    identity = {
+        "weight_source": "private_checkpoint",
+        "checkpoint_sha256": file_sha256(args.checkpoint) if not model_dir else None,
+        "safe_weights_sha256": None,
+        "inference_manifest_sha256": None,
+        "selected_checkpoint_sha256": None,
+    }
+    if model_dir:
+        identity.update(
+            weight_source="safe_export",
+            checkpoint_sha256=file_sha256(Path(model_dir) / "model.safetensors"),
+            safe_weights_sha256=file_sha256(Path(model_dir) / "model.safetensors"),
+            inference_manifest_sha256=file_sha256(Path(model_dir) / "inference-manifest.json"),
+            selected_checkpoint_sha256=checkpoint["selected_checkpoint_sha256"],
+        )
     return {
         "version": PROTOCOL_VERSION,
         "created_at": dt.datetime.now(dt.UTC).isoformat(),
-        "checkpoint_sha256": file_sha256(args.checkpoint),
+        **identity,
         "architecture": checkpoint["config"]["architecture"],
         "tokenizer_sha256": checkpoint["tokenizer_sha256"],
         "data_sha256": data_fingerprints(args.records),
@@ -327,9 +343,15 @@ def protocol_contents(args, checkpoint, records):
 
 
 def validate_protocol(protocol, current):
+    # 舊 private 協定未標 mode；safe 協定必須明確標記並綁所有匯出身分。
+    if protocol.get("weight_source", "private_checkpoint") != current.get("weight_source", "private_checkpoint"):
+        raise ValueError("凍結協定不匹配: weight_source；不能切換 safe/private 權重來源")
     for key in (
         "version",
         "checkpoint_sha256",
+        "safe_weights_sha256",
+        "inference_manifest_sha256",
+        "selected_checkpoint_sha256",
         "architecture",
         "tokenizer_sha256",
         "data_sha256",
@@ -602,7 +624,9 @@ def parser():
     result = argparse.ArgumentParser(description=__doc__)
     result.add_argument("--records", action="append", required=True)
     result.add_argument("--asset-dir", required=True)
-    result.add_argument("--checkpoint", required=True)
+    weights = result.add_mutually_exclusive_group(required=True)
+    weights.add_argument("--checkpoint", help="受信任的本管線 private .pt checkpoint")
+    weights.add_argument("--model-dir", help="經 SHA 驗證且含資料身分的安全 inference 匯出；不讀 pickle")
     result.add_argument("--split", choices=("validation", "test"), default="validation")
     result.add_argument("--output-dir", required=True)
     result.add_argument("--max-new-tokens", type=int, default=128)
@@ -632,17 +656,39 @@ def main(argv=None):
     from tiny_perceptron.selftrained.model import LimitedAssistant, SelftrainedConfig
     from tiny_perceptron.selftrained.tokenizer import CharacterTokenizer
 
-    checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
+    assistant = None
+    if args.model_dir:
+        from tiny_perceptron.selftrained.inference import InferenceAssistant, verify_export
+
+        assistant = InferenceAssistant(args.model_dir, args.asset_dir, device=args.device)
+        manifest, _ = verify_export(args.model_dir, manifest_sha256=assistant.receipt["manifest_sha256"])
+        for key in ("data_sha256", "asset_sha256", "tokenizer_sha256"):
+            if key not in manifest:
+                raise ValueError(f"安全匯出缺少評估資料身分: {key}；legacy 匯出只可 inference")
+        actual_tokenizer_sha = hashlib.sha256(
+            json.dumps(assistant.encoder.tokenizer.to_dict(), ensure_ascii=False, sort_keys=True).encode()
+        ).hexdigest()
+        if manifest["tokenizer_sha256"] != actual_tokenizer_sha:
+            raise ValueError("安全匯出 tokenizer_sha256 與實際 tokenizer 不同")
+        checkpoint = {**manifest, "config": assistant.receipt["config"]}
+    else:
+        checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
     if checkpoint.get("schema") != "selftrained-random-v1":
         raise ValueError("只評估本從零管線 checkpoint")
     if checkpoint.get("preprocess_version") != PREPROCESS_VERSION:
         raise ValueError("checkpoint preprocess_version 與目前模態前處理不同")
     records = read_records(args.records)
     current = protocol_contents(args, checkpoint, records)
+    if assistant is not None:
+        if (
+            current["inference_manifest_sha256"] != assistant.receipt["manifest_sha256"]
+            or current["safe_weights_sha256"] != assistant.receipt["files"]["model.safetensors"]
+        ):
+            raise ValueError("安全匯出在載入後變更")
     if checkpoint["data_sha256"] != current["data_sha256"] or checkpoint["asset_sha256"] != current["asset_sha256"]:
         raise ValueError("checkpoint 訓練資料/資產指紋與評估不同")
     if args.protocol:
-        protocol_path = Path(args.protocol)
+        protocol_path = Path(args.protocol).resolve()
         protocol = json.loads(protocol_path.read_text(encoding="utf-8"))
         validate_protocol(protocol, current)
         # 同協定的 test 只能啟動一次；續跑須以 journal 證明已完成 prefix。
@@ -653,12 +699,17 @@ def main(argv=None):
             marker = json.loads(test_marker.read_text(encoding="utf-8"))
             if marker["protocol_sha256"] != file_sha256(protocol_path):
                 raise ValueError("既有 test marker 協定不同")
+            latest = Path(marker.get("latest_output_dir", marker["output_dir"])).resolve()
+            if Path(args.resume_output).resolve().parent != latest:
+                raise ValueError("test resume 必須來自最新 partial attempt，禁止從舊輸出分支")
+        elif args.split == "test" and args.resume_output:
+            raise ValueError("test resume 缺少既有 protocol marker")
         elif args.split == "test" and not args.resume_output:
             with test_marker.open("x", encoding="utf-8") as handle:
                 json.dump(
                     {
                         "started_at": dt.datetime.now(dt.UTC).isoformat(),
-                        "output_dir": args.output_dir,
+                        "output_dir": str(Path(args.output_dir).resolve()),
                         "protocol_sha256": file_sha256(protocol_path),
                     },
                     handle,
@@ -678,11 +729,14 @@ def main(argv=None):
         selected = ordered
     if not selected:
         raise ValueError("沒有評估列")
-    model = LimitedAssistant(SelftrainedConfig(**checkpoint["config"])).to(args.device)
-    model.load_state_dict(checkpoint["model"])
-    model.eval()
-    tokenizer = CharacterTokenizer.from_dict(checkpoint["tokenizer"])
-    encoder = RecordEncoder(tokenizer, args.asset_dir, checkpoint["config"]["max_length"], args.device)
+    if assistant is not None:
+        model, encoder = assistant.model, assistant.encoder
+    else:
+        model = LimitedAssistant(SelftrainedConfig(**checkpoint["config"])).to(args.device)
+        model.load_state_dict(checkpoint["model"])
+        model.eval()
+        tokenizer = CharacterTokenizer.from_dict(checkpoint["tokenizer"])
+        encoder = RecordEncoder(tokenizer, args.asset_dir, checkpoint["config"]["max_length"], args.device)
     generator = Generator(model, encoder, args.max_new_tokens)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -692,6 +746,18 @@ def main(argv=None):
     journal = EvaluationJournal(args, current, selected)
     rows = journal.rows
     with journal:
+        if args.split == "test":
+            # 先 commit 驗證過的 raw prefix 與初始收據，再允許新 attempt 生成。
+            with journal.receipt_path.open("rb") as handle:
+                os.fsync(handle.fileno())
+            marker = json.loads(test_marker.read_text(encoding="utf-8"))
+            marker["latest_output_dir"] = str(output_dir.resolve())
+            temporary = test_marker.with_suffix(test_marker.suffix + ".tmp")
+            with temporary.open("w", encoding="utf-8") as handle:
+                json.dump(marker, handle, ensure_ascii=False, indent=2)
+                handle.flush()
+                os.fsync(handle.fileno())
+            temporary.replace(test_marker)
         for record in selected[len(rows) :]:
             if journal.stop_requested:
                 break
@@ -789,6 +855,10 @@ def main(argv=None):
         "recovered_complete_tail_count": journal.recovered_complete_tail_count,
         "interrupted": journal.stop_requested,
         "checkpoint_sha256": current["checkpoint_sha256"],
+        "weight_source": current["weight_source"],
+        "safe_weights_sha256": current["safe_weights_sha256"],
+        "inference_manifest_sha256": current["inference_manifest_sha256"],
+        "selected_checkpoint_sha256": current["selected_checkpoint_sha256"],
         "protocol": args.protocol,
         "teacher_forcing_used_for_generation": False,
         "thresholds": THRESHOLDS,
