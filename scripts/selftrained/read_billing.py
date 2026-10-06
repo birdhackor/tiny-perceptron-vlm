@@ -36,7 +36,15 @@ def main():
         )
     complete_hour = observed.replace(minute=0, second=0, microsecond=0)
     today = complete_hour.replace(hour=0)
-    rows = billing.report(start=last_month, end=today, resolution="d")
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    (args.output_dir / "workspace-billing-summary.json").write_text(
+        json.dumps({"observed_at": observed.isoformat(), "summaries": summaries}, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    print(json.dumps({"observed_at": observed.isoformat(), "summaries": summaries}), flush=True)
+    rows = billing.report(start=last_month, end=this_month, resolution="d")
+    if this_month < today:
+        rows += billing.report(start=this_month, end=today, resolution="d")
     if today < complete_hour:
         rows += billing.report(start=today, end=complete_hour, resolution="h")
     by_object = defaultdict(lambda: Decimal("0"))
