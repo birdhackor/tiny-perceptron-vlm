@@ -538,7 +538,7 @@ def register_modal():
     control = (
         modal.Image.debian_slim(python_version="3.13")
         .pip_install("huggingface-hub==1.33.0")
-        .env({"PYTHONPATH": "/repo"})
+        .env({"PYTHONPATH": "/repo:/repo/scripts/selftrained"})
         .add_local_dir(ROOT / "scripts/selftrained", "/repo/scripts/selftrained", ignore=["**/__pycache__/**"])
     )
     image, prepare_image = control, control
@@ -552,7 +552,13 @@ def register_modal():
             modal.Image.debian_slim(python_version="3.13")
             .uv_sync(str(ROOT), extras=["cu126"], uv_version="0.12.22", extra_options="--no-dev")
             .pip_install("safetensors==0.8.0")
-            .env({"PYTHONPATH": "/repo", "CUBLAS_WORKSPACE_CONFIG": ":4096:8", "HF_HUB_DISABLE_PROGRESS_BARS": "1"})
+            .env(
+                {
+                    "PYTHONPATH": "/repo:/repo/scripts/selftrained",
+                    "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
+                    "HF_HUB_DISABLE_PROGRESS_BARS": "1",
+                }
+            )
             .workdir("/repo")
             .add_local_dir(ROOT / "tiny_perceptron", "/repo/tiny_perceptron", ignore=["**/__pycache__/**"])
             .add_local_dir(ROOT / "scripts/selftrained", "/repo/scripts/selftrained", ignore=["**/__pycache__/**"])
