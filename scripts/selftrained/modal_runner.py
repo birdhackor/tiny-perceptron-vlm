@@ -209,6 +209,12 @@ def validate_job(job):
     learning_rate = Decimal(str(job.get("learning_rate", "0.001")))
     if not learning_rate.is_finite() or not Decimal("0.00001") <= learning_rate <= Decimal("0.01"):
         raise ValueError("Learning rate exceeds the bounded training range")
+    sampling = job.get("sampling_mode", "bucket")
+    if sampling not in ("bucket", "task-family") or (sampling != "bucket" and stage != "joint"):
+        raise ValueError("task-family sampling is available only for joint training")
+    freeze = job.get("freeze_perception_backbones", False)
+    if type(freeze) is not bool or (freeze and stage != "joint"):
+        raise ValueError("freeze_perception_backbones must be boolean and is available only for joint training")
     if job.get("resume") and job.get("init_checkpoint"):
         raise ValueError("Resume and fresh-stage initialization are mutually exclusive")
     for field in ("resume", "init_checkpoint", "checkpoint"):
@@ -554,6 +560,10 @@ def trainer_command(job, manifest, root, output, batch_id):
             ("save_every", 100),
         ):
             command += ["--" + flag.replace("_", "-"), str(job.get(flag, default))]
+        if job.get("sampling_mode", "bucket") != "bucket":
+            command += ["--sampling-mode", job["sampling_mode"]]
+        if job.get("freeze_perception_backbones", False):
+            command += ["--freeze-perception-backbones"]
         for field in ("resume", "init_checkpoint"):
             if job.get(field):
                 command += ["--" + field.replace("_", "-"), str(artifact_path(batch_id, job[field]))]

@@ -32,6 +32,38 @@ from tiny_perceptron.selftrained.dataset import (  # noqa: E402
 
 CHECKPOINT_SCHEMA = "selftrained-random-v1"
 STAGES = ("pretrain", "sft", "vision", "ocr", "audio", "joint")
+SAMPLING_MODES = ("bucket", "task-family")
+TASK_FAMILIES = ("text", "tools", "vision", "ocr", "voice")
+# Vision.projection 是 supervised head 上游；固定它才能保留感知 logits。
+PERCEPTION_BRIDGE_PREFIXES = (
+    "vision_encoder.symbol_projection.",
+    "vision_encoder.coordinates.",
+    "vision_encoder.slot_position.",
+    "vision_encoder.norm.",
+    "ocr_encoder.projection.",
+    "ocr_encoder.symbol_projection.",
+    "ocr_encoder.column_position.",
+    "ocr_encoder.norm.",
+    "audio_encoder.projection.",
+    "audio_encoder.symbol_projection.",
+    "audio_encoder.time_position.",
+    "audio_encoder.norm.",
+)
+TASK_FAMILY_BY_TASK = {
+    "text": "text",
+    "text_pretrain": "text",
+    "tool_call": "tools",
+    "tool_reply": "tools",
+    "tool_unavailable": "tools",
+    "tool_missing": "tools",
+    "tool_concept": "tools",
+    "tool_unsupported": "tools",
+    "vision_clothing": "vision",
+    "vision_relation": "vision",
+    "ocr": "ocr",
+    "voice_qa": "voice",
+    "voice_topic_continuation": "voice",
+}
 
 
 def tokenizer_sha(tokenizer):
@@ -63,13 +95,29 @@ def stage_records(records, stage, split):
 class BalancedSampler:
     """独立 RNG 讓 Dense/MoE 使用相同順序，不受模型初始化抽樣影響。"""
 
-    def __init__(self, records, seed):
+    def __init__(self, records, seed, mode="bucket"):
+        if mode not in SAMPLING_MODES:
+            raise ValueError(f"未知 sampling mode: {mode}")
+        self.mode = mode
         self.by_task = {}
+        bucket_families = {}
         for record in records:
             intent = record.get("supervision", {}).get("intent", "")
             bucket = record["task"] + (":" + intent if intent else "")
             self.by_task.setdefault(bucket, []).append(record)
+            if mode == "task-family":
+                if record["task"] not in TASK_FAMILY_BY_TASK:
+                    raise ValueError(f"task-family 不支援未知 task: {record['task']}")
+                bucket_families[bucket] = TASK_FAMILY_BY_TASK[record["task"]]
         self.tasks = sorted(self.by_task)
+        self.by_family = (
+            {family: [task for task in self.tasks if bucket_families.get(task) == family] for family in TASK_FAMILIES}
+            if mode == "task-family"
+            else {}
+        )
+        if mode == "task-family" and any(not tasks for tasks in self.by_family.values()):
+            raise ValueError("task-family 需要完整 text/tools/vision/ocr/voice 五種資料")
+        self.family_draws = {family: 0 for family in self.by_family}
         self.generator = torch.Generator().manual_seed(seed)
         self.draws = 0
 
@@ -77,7 +125,13 @@ class BalancedSampler:
         result = []
         for _ in range(size):
             # round robin 任務、任務內有放回抽樣；節省多模態資料複製。
-            task = self.tasks[self.draws % len(self.tasks)]
+            if self.mode == "task-family":
+                family = TASK_FAMILIES[self.draws % len(TASK_FAMILIES)]
+                family_tasks = self.by_family[family]
+                task = family_tasks[self.family_draws[family] % len(family_tasks)]
+                self.family_draws[family] += 1
+            else:
+                task = self.tasks[self.draws % len(self.tasks)]
             candidates = self.by_task[task]
             index = int(torch.randint(len(candidates), (), generator=self.generator))
             result.append(candidates[index])
@@ -85,9 +139,24 @@ class BalancedSampler:
         return result
 
     def state_dict(self):
-        return {"draws": self.draws, "generator": self.generator.get_state()}
+        return {
+            "draws": self.draws,
+            "generator": self.generator.get_state(),
+            "mode": self.mode,
+            "family_draws": self.family_draws.copy(),
+        }
 
     def load_state_dict(self, state):
+        if state.get("mode", "bucket") != self.mode:
+            raise ValueError("sampler resume sampling mode 不同")
+        if self.mode == "task-family":
+            expected = {
+                family: state["draws"] // len(TASK_FAMILIES) + int(index < state["draws"] % len(TASK_FAMILIES))
+                for index, family in enumerate(TASK_FAMILIES)
+            }
+            if state.get("family_draws") != expected:
+                raise ValueError("sampler resume family counters 與實際 draws 不符")
+            self.family_draws = state["family_draws"].copy()
         self.draws = state["draws"]
         self.generator.set_state(state["generator"])
 
@@ -161,6 +230,8 @@ def export_inference(output_dir, *, required=False):
         "data_sha256": checkpoint["data_sha256"],
         "asset_sha256": checkpoint["asset_sha256"],
         "tokenizer_sha256": checkpoint["tokenizer_sha256"],
+        "freeze_perception_backbones": checkpoint.get("training_options", {}).get("freeze_perception_backbones", False),
+        "sampling_mode": checkpoint.get("training_options", {}).get("sampling_mode", "bucket"),
         "selection": "validation_loss",
     }
     (output_dir / "inference-manifest.json").write_text(
@@ -169,10 +240,15 @@ def export_inference(output_dir, *, required=False):
     return True
 
 
-def set_trainable(model, stage):
+def set_trainable(model, stage, freeze_perception_backbones=False):
+    if freeze_perception_backbones and stage != "joint":
+        raise ValueError("--freeze-perception-backbones 只可用於 joint")
     prefix = {"vision": "vision_encoder.", "ocr": "ocr_encoder.", "audio": "audio_encoder."}.get(stage)
     for name, parameter in model.named_parameters():
-        parameter.requires_grad = name.startswith(prefix) if prefix else stage == "joint" or name.startswith("lm.")
+        if freeze_perception_backbones:
+            parameter.requires_grad = name.startswith(("lm.", *PERCEPTION_BRIDGE_PREFIXES))
+        else:
+            parameter.requires_grad = name.startswith(prefix) if prefix else stage == "joint" or name.startswith("lm.")
     trainable = [parameter for parameter in model.parameters() if parameter.requires_grad]
     if not trainable:
         raise ValueError(f"stage={stage} 沒有可訓練參數，檢查模型 prefix")
@@ -250,6 +326,17 @@ def parser():
     result.add_argument("--max-tokens", type=int, help="本 stage 輸入 token 預算；遇超額 batch 就停止")
     result.add_argument("--perception-weight", type=float, default=1.0)
     result.add_argument("--router-weight", type=float, default=0.01)
+    result.add_argument(
+        "--freeze-perception-backbones",
+        action="store_true",
+        help="joint only：固定三種感知 backbone/head（含 Vision.projection），只訓練 LM 與 bridges",
+    )
+    result.add_argument(
+        "--sampling-mode",
+        choices=SAMPLING_MODES,
+        default="bucket",
+        help="bucket 保留原 task:intent 平衡；task-family 只可 joint，五種 family 各占 20%",
+    )
     result.add_argument("--device", default="cpu")
     result.add_argument("--threads", type=int, default=2)
     result.add_argument(
@@ -262,6 +349,8 @@ def main(argv=None):
     args = parser().parse_args(argv)
     if args.resume and args.init_checkpoint:
         raise ValueError("resume 與 init-checkpoint 不能同時使用")
+    if args.stage != "joint" and (args.freeze_perception_backbones or args.sampling_mode != "bucket"):
+        raise ValueError("freeze-perception-backbones / task-family sampling 只可用於 joint")
     if min(args.steps, args.batch_size, args.context, args.eval_every, args.save_every, args.threads) < 1:
         raise ValueError("步數、batch、context、interval、threads 必須為正")
     torch.set_num_threads(args.threads)
@@ -299,7 +388,7 @@ def main(argv=None):
     model = LimitedAssistant(config).to(args.device)
     if source:
         model.load_state_dict(source["model"])
-    parameters = set_trainable(model, args.stage)
+    parameters = set_trainable(model, args.stage, args.freeze_perception_backbones)
     optimizer = torch.optim.AdamW(parameters, lr=args.learning_rate, weight_decay=args.weight_decay)
     encoder = RecordEncoder(tokenizer, args.asset_dir, args.context, args.device)
     # 先審查所有 stage train/val 長度；不讀 test 模態或 target。
@@ -309,7 +398,7 @@ def main(argv=None):
             # validation 可有未知字，train 不得因 stage 增詞而靜默退化。
             if record["split"] == "train":
                 raise ValueError(f"train 有 tokenizer 未見字: {record['id']}")
-    sampler = BalancedSampler(records, args.seed)
+    sampler = BalancedSampler(records, args.seed, mode=args.sampling_mode)
     step, token_count, target_token_count, best_val = 0, 0, 0, math.inf
     history = list(source.get("stage_history", [])) if source else []
     if args.resume:
@@ -318,6 +407,9 @@ def main(argv=None):
         old = source["training_options"]
         for name in ("batch_size", "seed", "learning_rate", "weight_decay", "perception_weight", "router_weight"):
             if old[name] != getattr(args, name):
+                raise ValueError(f"resume 改變 {name}；請使用 init-checkpoint 明確開始新階段")
+        for name, default in (("freeze_perception_backbones", False), ("sampling_mode", "bucket")):
+            if old.get(name, default) != getattr(args, name):
                 raise ValueError(f"resume 改變 {name}；請使用 init-checkpoint 明確開始新階段")
         optimizer.load_state_dict(source["optimizer"])
         sampler.load_state_dict(source["sampler"])
@@ -472,7 +564,17 @@ def main(argv=None):
         "seconds": time.monotonic() - started,
         "total_parameters": sum(p.numel() for p in model.parameters()),
         "trainable_parameters": sum(p.numel() for p in parameters),
-        "comparison": "same train data/tokenizer/task sampler/seed/input-token budget; matched per-token FFN width, different total parameters",
+        "freeze_perception_backbones": args.freeze_perception_backbones,
+        "sampling_mode": args.sampling_mode,
+        "comparison": {
+            "per_expert_ffn_hidden": config.ffn_hidden,
+            "active_ffn_count": config.top_k if config.architecture == "moe" else 1,
+            "sampling_mode": args.sampling_mode,
+            "freeze_perception_backbones": args.freeze_perception_backbones,
+            "sample_draws": sampler.draws,
+            "input_tokens_observed": token_count,
+            "pairing_requires": "same data/tokenizer/seed/sampler/backbone options; compare actual draws and input tokens in both receipts",
+        },
         "origin": checkpoint()["origin"],
         "stage_history": history,
         "interrupted": stop_requested,
