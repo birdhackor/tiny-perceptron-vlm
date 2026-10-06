@@ -286,10 +286,18 @@ def validate_job(job):
     if stage == "freeze" and "limit" in job:
         raise ValueError("Final validation freeze must evaluate its entire fixed split")
     if stage == "release":
-        from scripts.selftrained.hf_transport import validate_batch_release
+        from scripts.selftrained.hf_transport import validate_batch_release, validate_repository_card_release
 
-        for export in validate_batch_release(job.get("release", {})):
-            validate_descriptor(export["source"], checkpoint=True)
+        release = job.get("release", {})
+        if release.get("mode") == "repository-card":
+            validate_repository_card_release(release)
+            if set(job) != {"schema_version", "stage", "release", "gross_quota_policy"}:
+                raise ValueError("Repository card needs only its release descriptor and explicit gross policy")
+        else:
+            if "mode" in release:
+                raise ValueError("Unknown release mode")
+            for export in validate_batch_release(release):
+                validate_descriptor(export["source"], checkpoint=True)
     if "gross_quota_policy" in job:
         policy = job["gross_quota_policy"]
         if not isinstance(policy, dict) or set(policy) != {"path", "sha256"}:
@@ -323,6 +331,44 @@ def job_quota_policy(job, revision):
         raise ValueError("Gross quota policy differs from committed job descriptor")
     validate_policy(policy, policy_sha)
     return policy, policy_sha
+
+
+def committed_repository_card(job, revision, manifest_sha):
+    """Read the one card from the actual dispatch Git blob, before remote work."""
+    from scripts.selftrained.hf_transport import approved_repository_card, validate_repository_card_release
+
+    release = job.get("release", {})
+    if release.get("mode") != "repository-card":
+        return None
+    item = validate_repository_card_release(release)
+    if not re.fullmatch(r"[a-f0-9]{40}", revision):
+        raise ValueError("Repository card requires the actual full dispatch Git SHA")
+    source = ROOT / item["path"]
+    if source.is_symlink() or not source.is_file() or not source.resolve().is_relative_to(ROOT.resolve()):
+        raise ValueError("Repository card source is absent or outside the repository")
+    if source.stat().st_size != item["bytes"]:
+        raise ValueError("Repository card source exceeds or differs from reviewed bytes")
+    size = subprocess.run(
+        ["git", "cat-file", "-s", f"{revision}:{item['path']}"], cwd=ROOT, capture_output=True, check=True, text=True
+    ).stdout.strip()
+    if size != str(item["bytes"]):
+        raise ValueError("Committed card blob size differs from bounded descriptor")
+    payload = subprocess.run(
+        ["git", "show", f"{revision}:{item['path']}"], cwd=ROOT, capture_output=True, check=True
+    ).stdout
+    if source.read_bytes() != payload:
+        raise ValueError("Repository card source differs from the exact dispatch Git blob")
+    approved_repository_card(payload, release, manifest_sha)
+    return payload
+
+
+def repository_card_source_gate(payload, release, revision, manifest_sha, source_hashes):
+    from scripts.selftrained.hf_transport import approved_repository_card, repository_card_public_gate
+
+    item = approved_repository_card(payload, release, manifest_sha)
+    if not re.fullmatch(r"[a-f0-9]{40}", revision) or source_hashes.get(item["path"]) != item["sha256"]:
+        raise ValueError("Repository card bytes are not bound to the actual dispatch source SHA")
+    return repository_card_public_gate(payload, release)
 
 
 def source_gate(revision):
@@ -1179,6 +1225,7 @@ def register_modal():
         quota_policy=None,
         quota_policy_sha=None,
         quota_previous_sha=None,
+        repository_card_bytes=None,
     ):
         volume.reload()
         if not LEDGER.is_file() or sha256(LEDGER) != previous_sha:
@@ -1217,7 +1264,16 @@ def register_modal():
                     evaluation_public_lineage_gate(source_execution, job)
                     test_protocol_gate(path, job, manifest, source_hashes, resume_path)
         if job["stage"] == "release":
-            release_sources_gate(batch_id, job["release"], manifest_sha, manifest)
+            if job["release"].get("mode") == "repository-card":
+                gate = repository_card_source_gate(
+                    repository_card_bytes, job["release"], revision, manifest_sha, source_hashes
+                )
+                if gate["no_op"]:
+                    raise ValueError(
+                        "Repository card already matches the pinned parent; use free preflight, no reservation"
+                    )
+            else:
+                release_sources_gate(batch_id, job["release"], manifest_sha, manifest)
         ledger = json.loads(LEDGER.read_text())
         quota_state = None
         if quota_policy is not None:
@@ -1278,7 +1334,7 @@ def register_modal():
         volume.commit()
         return {"entry": entry, "reserved_total_usd": str(ledger_total(ledger))}
 
-    def execute(stage, run_id, batch_id, revision, manifest, manifest_sha, job, job_sha):
+    def execute(stage, run_id, batch_id, revision, manifest, manifest_sha, job, job_sha, repository_card_bytes=None):
         volume.reload()
         ledger = json.loads(LEDGER.read_text())
         entry = next((item for item in ledger["reservations"] if item.get("run_id") == run_id), None)
@@ -1292,6 +1348,10 @@ def register_modal():
         }
         if entry is None or any(entry.get(key) != value for key, value in expected.items()):
             raise RuntimeError("Execution differs from exact prior shared-ledger reservation")
+        if stage == "release" and job["release"].get("mode") == "repository-card":
+            repository_card_source_gate(
+                repository_card_bytes, job["release"], revision, manifest_sha, entry["source_sha256"]
+            )
         entry["status"] = "running"
         write_json(LEDGER, ledger)
         volume.commit()
@@ -1343,17 +1403,22 @@ def register_modal():
                     },
                 )
             elif stage == "release":
-                from scripts.selftrained.hf_transport import publish_batch_inference
+                from scripts.selftrained.hf_transport import publish_batch_inference, publish_repository_card
 
-                sources = release_sources_gate(batch_id, job["release"], manifest_sha, manifest)
-                result = publish_batch_inference(
-                    sources,
-                    job["release"],
-                    manifest_sha,
-                    manifest,
-                    os.environ["HF_TOKEN"],
-                    output / "public-staging",
-                )
+                if job["release"].get("mode") == "repository-card":
+                    result = publish_repository_card(
+                        repository_card_bytes, job["release"], manifest_sha, os.environ["HF_TOKEN"]
+                    )
+                else:
+                    sources = release_sources_gate(batch_id, job["release"], manifest_sha, manifest)
+                    result = publish_batch_inference(
+                        sources,
+                        job["release"],
+                        manifest_sha,
+                        manifest,
+                        os.environ["HF_TOKEN"],
+                        output / "public-staging",
+                    )
                 write_json(output / "hf-receipt.json", result)
             else:
                 receipt["data_readiness"] = {
@@ -1531,6 +1596,9 @@ def register_modal():
         validate_manifest(manifest_value)
         validate_job(job_value)
         source_hashes = source_gate(revision)
+        repository_card_bytes = committed_repository_card(job_value, revision, manifest_sha)
+        if repository_card_bytes is not None:
+            source_hashes[job_value["release"]["file"]["path"]] = hashlib.sha256(repository_card_bytes).hexdigest()
         quota_policy, quota_policy_sha = job_quota_policy(job_value, revision)
         if mode == "reserve":
             live = read_live_ledger(quota_policy, quota_policy_sha)
@@ -1565,6 +1633,7 @@ def register_modal():
                 quota_policy,
                 quota_policy_sha,
                 live.get("gross_quota_state_sha256"),
+                **({"repository_card_bytes": repository_card_bytes} if repository_card_bytes is not None else {}),
             )
             write_json(output / "reservation.json", result)
             print(
@@ -1585,6 +1654,8 @@ def register_modal():
         if mode != "execute":
             raise ValueError("Mode must be reserve, execute or finish")
         args = (run_id, batch_id, revision, manifest_value, manifest_sha, job_value, job_sha)
+        if repository_card_bytes is not None:
+            args += (repository_card_bytes,)
         if job_value["stage"] == "prepare":
             receipt = prepare_remote.remote(*args)
         elif job_value["stage"] == "release":
@@ -1650,6 +1721,7 @@ if __name__ == "__main__":
         validate_manifest(manifest_value)
         validate_job(job_value)
         source_gate(options.revision)
+        committed_repository_card(job_value, options.revision, manifest_sha)
         job_quota_policy(job_value, options.revision)
         print(
             json.dumps(
