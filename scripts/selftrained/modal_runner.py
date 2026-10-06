@@ -30,6 +30,7 @@ MAX_EGRESS_GIB = Decimal("0.25")
 BUILD_STORAGE_ALLOWANCE_USD = Decimal("0.04")
 CONTROL_SECONDS = 180
 MAX_LEDGER_BYTES = 4 * 1024 * 1024
+GROSS_QUOTA = COURSE / "gross-quota.json"
 MAX_BACKUP_BYTES = 512 * 1024 * 1024
 MAX_REVIEW_BYTES = 64 * 1024 * 1024
 TRAIN_STAGES = ("pretrain", "sft", "vision", "ocr", "audio", "joint")
@@ -87,7 +88,10 @@ def ledger_total(ledger):
     total = max(reported, sum(amounts, Decimal("0")))
     if total < HISTORY_FLOOR_USD:
         raise RuntimeError("Ledger precedes confirmed $9.84 history; reconcile before running")
-    if total > TOTAL_CAP_USD:
+    quota_sha = ledger.get("gross_quota_policy_sha256")
+    if quota_sha is not None and not re.fullmatch(r"[a-f0-9]{64}", quota_sha):
+        raise ValueError("Invalid gross quota policy marker in legacy audit ledger")
+    if total > TOTAL_CAP_USD and quota_sha is None:
         raise RuntimeError(f"Shared conservative reservation total already exceeds authorized ${TOTAL_CAP_USD}")
     return total
 
@@ -285,6 +289,13 @@ def validate_job(job):
 
         for export in validate_batch_release(job.get("release", {})):
             validate_descriptor(export["source"], checkpoint=True)
+    if "gross_quota_policy" in job:
+        policy = job["gross_quota_policy"]
+        if not isinstance(policy, dict) or set(policy) != {"path", "sha256"}:
+            raise ValueError("Gross quota policy needs an exact committed path/SHA descriptor")
+        path = relative_path(policy["path"])
+        if path.parts[:2] != ("docs", "selftrained") or not re.fullmatch(r"[a-f0-9]{64}", policy["sha256"]):
+            raise ValueError("Gross quota policy must be committed under docs/selftrained")
     return job
 
 
@@ -298,6 +309,19 @@ def committed_json(relative, revision):
     if (ROOT / path).read_bytes() != committed:
         raise ValueError("Input differs from selected committed Git revision")
     return json.loads(committed), hashlib.sha256(committed).hexdigest()
+
+
+def job_quota_policy(job, revision):
+    descriptor = job.get("gross_quota_policy")
+    if descriptor is None:
+        return None, None
+    from scripts.selftrained.finance import validate_policy
+
+    policy, policy_sha = committed_json(descriptor["path"], revision)
+    if policy_sha != descriptor["sha256"]:
+        raise ValueError("Gross quota policy differs from committed job descriptor")
+    validate_policy(policy, policy_sha)
+    return policy, policy_sha
 
 
 def source_gate(revision):
@@ -345,7 +369,7 @@ def live_snapshot():
     }
 
 
-def read_live_ledger():
+def read_live_ledger(quota_policy=None, quota_policy_sha=None):
     import modal
 
     chunks, total = [], 0
@@ -359,6 +383,28 @@ def read_live_ledger():
     ledger = json.loads(raw)
     reserved = ledger_total(ledger)
     live = live_snapshot()
+    quota_state, quota_state_sha = None, None
+    if quota_policy is not None:
+        from scripts.selftrained.finance import official_snapshot
+
+        try:
+            quota_chunks, quota_bytes = [], 0
+            for chunk in shared.read_file("gross-quota.json"):
+                quota_bytes += len(chunk)
+                if quota_bytes > MAX_LEDGER_BYTES:
+                    raise ValueError("Gross quota sidecar exceeds bounded review size")
+                quota_chunks.append(chunk)
+            quota_raw = b"".join(quota_chunks)
+        except (FileNotFoundError, modal.exception.NotFoundError):
+            quota_raw = None
+        if quota_raw is not None:
+            if len(quota_raw) > MAX_LEDGER_BYTES:
+                raise ValueError("Gross quota sidecar exceeds bounded review size")
+            quota_state = json.loads(quota_raw)
+            quota_state_sha = hashlib.sha256(quota_raw).hexdigest()
+        if bool(ledger.get("gross_quota_policy_sha256")) != bool(quota_state is not None):
+            raise RuntimeError("Gross quota sidecar and legacy marker disagree; reconcile without reset")
+        live["gross_quota_snapshot"] = official_snapshot(modal.Workspace.from_context(), quota_policy, quota_policy_sha)
     return {
         "observed_at": live["observed_at"],
         "volume_name": "tiny-perceptron-course",
@@ -374,14 +420,41 @@ def read_live_ledger():
         "gpu_used": False,
         "ledger_written": False,
         "scope": "Latest committed shared Volume bytes; conservative reservations are not measured invoices",
+        **(
+            {
+                "gross_quota_state": quota_state,
+                "gross_quota_state_sha256": quota_state_sha,
+                "legacy_totals_audit_only": True,
+                "gross_quota_authorized_ceiling_usd": str(
+                    Decimal(quota_policy["baseline"]["gross_usd"]) + Decimal(quota_policy["additional_quota_usd"])
+                ),
+            }
+            if quota_policy is not None
+            else {}
+        ),
     }
 
 
-def reserve_entry(ledger, run_id, batch_id, revision, manifest_sha, job, job_sha, live, source_hashes):
+def reserve_entry(
+    ledger,
+    run_id,
+    batch_id,
+    revision,
+    manifest_sha,
+    job,
+    job_sha,
+    live,
+    source_hashes,
+    quota_policy=None,
+    quota_policy_sha=None,
+    quota_state=None,
+):
     prior = ledger_total(ledger)
     if any(entry.get("run_id") == run_id for entry in ledger["reservations"]):
         raise ValueError("Each attempt needs a fresh run ID; prior reservations are never reused")
-    numerical_job = {key: value for key, value in job.items() if key not in ("wall_seconds", "max_seconds")}
+    numerical_job = {
+        key: value for key, value in job.items() if key not in ("wall_seconds", "max_seconds", "gross_quota_policy")
+    }
     logical_sha = canonical_sha({"batch_id": batch_id, "manifest_sha256": manifest_sha, "job": numerical_job})
     if any(
         entry.get("logical_job_sha256") == logical_sha and entry.get("status") == "completed"
@@ -390,7 +463,22 @@ def reserve_entry(ledger, run_id, batch_id, revision, manifest_sha, job, job_sha
         raise ValueError("This exact job already completed; do not rerun successful numbers")
     guard = reservation_guard(job["stage"], live["rates"], job.get("wall_seconds"))
     amount = Decimal(guard["reserved_usd"])
-    if prior + amount > TOTAL_CAP_USD:
+    quota_next, quota_guard = None, None
+    descriptor = job.get("gross_quota_policy")
+    marker = ledger.get("gross_quota_policy_sha256")
+    if descriptor is not None or marker is not None or quota_policy is not None:
+        from scripts.selftrained.finance import check_quota
+
+        if descriptor is None or quota_policy is None or descriptor["sha256"] != quota_policy_sha:
+            raise ValueError("New round requires the same explicit gross quota policy on client and server")
+        if marker is not None and marker != quota_policy_sha:
+            raise ValueError("Gross quota epoch cannot replace an existing policy")
+        if bool(marker) != bool(quota_state is not None):
+            raise ValueError("Gross quota sidecar and existing marker must agree")
+        quota_next, quota_guard = check_quota(
+            quota_policy, quota_policy_sha, quota_state, live["gross_quota_snapshot"], ledger, amount, run_id
+        )
+    elif prior + amount > TOTAL_CAP_USD:
         raise RuntimeError(f"Cumulative reservation {prior} + {amount} exceeds authorized ${TOTAL_CAP_USD}")
     entry = {
         "run_id": run_id,
@@ -409,9 +497,16 @@ def reserve_entry(ledger, run_id, batch_id, revision, manifest_sha, job, job_sha
         "compute_guard": guard,
         "scope": "Existing original $10 + authorized $30 + $15 course ledger; all history and failed reservations retained",
     }
+    if quota_next is not None:
+        entry.update(
+            gross_quota_policy_sha256=quota_policy_sha,
+            gross_quota_guard=quota_guard,
+            scope="Official gross increment plus temporary current-round bounds; legacy reserved totals are audit only",
+        )
+        ledger["gross_quota_policy_sha256"] = quota_policy_sha
     ledger["reservations"].append(entry)
     ledger.update(budget_usd=str(TOTAL_CAP_USD), reserved_total_usd=str(prior + amount))
-    return entry
+    return (entry, quota_next) if quota_next is not None else entry
 
 
 def data_root(manifest_sha):
@@ -1070,7 +1165,19 @@ def register_modal():
         scaledown_window=2,
     )
     def reserve_remote(
-        run_id, batch_id, revision, manifest, manifest_sha, job, job_sha, live, source_hashes, previous_sha
+        run_id,
+        batch_id,
+        revision,
+        manifest,
+        manifest_sha,
+        job,
+        job_sha,
+        live,
+        source_hashes,
+        previous_sha,
+        quota_policy=None,
+        quota_policy_sha=None,
+        quota_previous_sha=None,
     ):
         volume.reload()
         if not LEDGER.is_file() or sha256(LEDGER) != previous_sha:
@@ -1111,10 +1218,45 @@ def register_modal():
         if job["stage"] == "release":
             release_sources_gate(batch_id, job["release"], manifest_sha, manifest)
         ledger = json.loads(LEDGER.read_text())
-        entry = reserve_entry(ledger, run_id, batch_id, revision, manifest_sha, job, job_sha, live, source_hashes)
+        quota_state = None
+        if quota_policy is not None:
+            from scripts.selftrained.finance import official_snapshot
+
+            current_quota_sha = sha256(GROSS_QUOTA) if GROSS_QUOTA.is_file() else None
+            if current_quota_sha != quota_previous_sha:
+                raise RuntimeError("Gross quota sidecar changed since the client probe")
+            quota_state = json.loads(GROSS_QUOTA.read_text()) if GROSS_QUOTA.is_file() else None
+            live = {
+                **live,
+                "gross_quota_snapshot": official_snapshot(
+                    modal.Workspace.from_context(), quota_policy, quota_policy_sha
+                ),
+            }
+        result = reserve_entry(
+            ledger,
+            run_id,
+            batch_id,
+            revision,
+            manifest_sha,
+            job,
+            job_sha,
+            live,
+            source_hashes,
+            quota_policy,
+            quota_policy_sha,
+            quota_state,
+        )
+        entry, quota_next = result if quota_policy is not None else (result, None)
+        if quota_next is not None:
+            write_json(GROSS_QUOTA, quota_next)
         write_json(LEDGER, ledger)
         volume.commit()
-        return {"entry": entry, "budget_usd": ledger["budget_usd"], "reserved_total_usd": ledger["reserved_total_usd"]}
+        return {
+            "entry": entry,
+            "budget_usd": ledger["budget_usd"],
+            "reserved_total_usd": ledger["reserved_total_usd"],
+            **({"gross_quota_guard": entry["gross_quota_guard"]} if "gross_quota_guard" in entry else {}),
+        }
 
     @app.function(
         serialized=True,
@@ -1388,8 +1530,9 @@ def register_modal():
         validate_manifest(manifest_value)
         validate_job(job_value)
         source_hashes = source_gate(revision)
+        quota_policy, quota_policy_sha = job_quota_policy(job_value, revision)
         if mode == "reserve":
-            live = read_live_ledger()
+            live = read_live_ledger(quota_policy, quota_policy_sha)
             write_json(output / "live-ledger-before.json", live)
             # Avoid a paid reservation container for exhausted budgets or an
             # exact job whose successful evidence already exists.
@@ -1403,6 +1546,9 @@ def register_modal():
                 job_sha,
                 live["live"],
                 source_hashes,
+                quota_policy,
+                quota_policy_sha,
+                live.get("gross_quota_state"),
             )
             result = reserve_remote.remote(
                 run_id,
@@ -1415,6 +1561,9 @@ def register_modal():
                 live["live"],
                 source_hashes,
                 live["ledger_sha256"],
+                quota_policy,
+                quota_policy_sha,
+                live.get("gross_quota_state_sha256"),
             )
             write_json(output / "reservation.json", result)
             print(
@@ -1423,6 +1572,11 @@ def register_modal():
                         "stage": job_value["stage"],
                         "reserved_usd": result["entry"]["reserved_usd"],
                         "reserved_total_usd": result["reserved_total_usd"],
+                        **(
+                            {"legacy_totals_audit_only": True, "gross_quota_guard": result["gross_quota_guard"]}
+                            if "gross_quota_guard" in result
+                            else {}
+                        ),
                     }
                 )
             )
@@ -1495,6 +1649,7 @@ if __name__ == "__main__":
         validate_manifest(manifest_value)
         validate_job(job_value)
         source_gate(options.revision)
+        job_quota_policy(job_value, options.revision)
         print(
             json.dumps(
                 {
