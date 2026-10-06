@@ -30,7 +30,7 @@ BUILD_STORAGE_ALLOWANCE_USD = Decimal("0.04")
 CONTROL_SECONDS = 180
 MAX_LEDGER_BYTES = 1024 * 1024
 MAX_BACKUP_BYTES = 512 * 1024 * 1024
-MAX_REVIEW_BYTES = 16 * 1024 * 1024
+MAX_REVIEW_BYTES = 64 * 1024 * 1024
 TRAIN_STAGES = ("pretrain", "sft", "vision", "ocr", "audio", "joint")
 GPU_STAGES = (*TRAIN_STAGES, "validation", "freeze", "test")
 STAGES = ("prepare", *GPU_STAGES, "release")
@@ -91,7 +91,19 @@ def ledger_total(ledger):
     return total
 
 
-def reservation_guard(stage, rates):
+def resource_spec(stage, wall_seconds=None):
+    if stage not in STAGES:
+        raise ValueError("Unknown bounded stage")
+    spec = dict(SPEC[stage])
+    seconds = spec["seconds"] if wall_seconds is None else wall_seconds
+    if type(seconds) is not int or (spec["gpu"] and seconds not in (600, 900)):
+        raise ValueError("GPU wall_seconds must be exactly 600 or 900")
+    if not spec["gpu"] and seconds != spec["seconds"]:
+        raise ValueError("CPU stage wall_seconds must match its fixed resource timeout")
+    return spec | {"seconds": seconds}
+
+
+def reservation_guard(stage, rates, wall_seconds=None):
     if stage not in STAGES:
         raise ValueError("Unknown bounded stage")
     required = ("cpu_hour_cost", "mem_gib_hour_cost", "egress_gib_cost")
@@ -102,7 +114,7 @@ def reservation_guard(stage, rates):
     values = {key: Decimal(str(rates[key])) for key in required}
     if any(not value.is_finite() or value < 0 for value in values.values()):
         raise ValueError("Live rates must be finite and nonnegative")
-    spec = SPEC[stage]
+    spec = resource_spec(stage, wall_seconds)
     hourly = spec["cpu"] * values["cpu_hour_cost"] + spec["memory_gib"] * values["mem_gib_hour_cost"]
     if spec["gpu"]:
         hourly += values["gpu_hour_cost_l4"]
@@ -184,14 +196,15 @@ def validate_job(job):
         ("seed", 20261006, 0, 2**31 - 1),
         ("eval_every", 100, 1, 1000),
         ("save_every", 100, 1, 1000),
-        ("max_new_tokens", 192, 1, 192),
+        ("max_new_tokens", 128, 1, 128),
         ("limit", 10000, 1, 10000),
     ):
         value = job.get(key, default)
         if type(value) is not int or not lower <= value <= upper:
             raise ValueError(f"{key} exceeds the bounded runner")
-    seconds = job.get("max_seconds", SPEC[stage]["seconds"] - 180)
-    if type(seconds) is not int or not 1 <= seconds <= SPEC[stage]["seconds"] - 180:
+    spec = resource_spec(stage, job.get("wall_seconds"))
+    seconds = job.get("max_seconds", spec["seconds"] - 180)
+    if type(seconds) is not int or not 1 <= seconds <= spec["seconds"] - 180:
         raise ValueError("Runtime must leave 180 seconds for checkpoint/cleanup")
     learning_rate = Decimal(str(job.get("learning_rate", "0.001")))
     if not learning_rate.is_finite() or not Decimal("0.00001") <= learning_rate <= Decimal("0.01"):
@@ -211,6 +224,16 @@ def validate_job(job):
             raise ValueError("Final test requires the actual completed validation freeze protocol")
         if "limit" in job:
             raise ValueError("Frozen final test cannot limit its records")
+    if job.get("resume_evaluation"):
+        validate_descriptor(job["resume_evaluation"])
+        if (
+            stage not in ("validation", "freeze", "test")
+            or job["resume_evaluation"]["path"] != "outputs.jsonl"
+            or job["resume_evaluation"]["stage"] not in (("validation", "freeze") if stage == "freeze" else (stage,))
+        ):
+            raise ValueError("Evaluation resume must name the exact prior same-split raw outputs")
+        if not re.fullmatch(r"[a-f0-9]{64}", job["resume_evaluation"].get("receipt_sha256", "")):
+            raise ValueError("Evaluation resume also needs exact evaluation-receipt.json SHA")
     if stage == "freeze" and "limit" in job:
         raise ValueError("Final validation freeze must evaluate its entire fixed split")
     if stage == "release":
@@ -313,13 +336,14 @@ def reserve_entry(ledger, run_id, batch_id, revision, manifest_sha, job, job_sha
     prior = ledger_total(ledger)
     if any(entry.get("run_id") == run_id for entry in ledger["reservations"]):
         raise ValueError("Each attempt needs a fresh run ID; prior reservations are never reused")
-    logical_sha = canonical_sha({"batch_id": batch_id, "manifest_sha256": manifest_sha, "job": job})
+    numerical_job = {key: value for key, value in job.items() if key not in ("wall_seconds", "max_seconds")}
+    logical_sha = canonical_sha({"batch_id": batch_id, "manifest_sha256": manifest_sha, "job": numerical_job})
     if any(
         entry.get("logical_job_sha256") == logical_sha and entry.get("status") == "completed"
         for entry in ledger["reservations"]
     ):
         raise ValueError("This exact job already completed; do not rerun successful numbers")
-    guard = reservation_guard(job["stage"], live["rates"])
+    guard = reservation_guard(job["stage"], live["rates"], job.get("wall_seconds"))
     amount = Decimal(guard["reserved_usd"])
     if prior + amount > TOTAL_CAP_USD:
         raise RuntimeError(f"Cumulative reservation {prior} + {amount} exceeds authorized $40")
@@ -384,9 +408,45 @@ def artifact_gate(batch_id, descriptor, manifest_sha, architecture=None):
     return path, execution
 
 
-def test_protocol_gate(path, job, manifest, source_hashes):
+def evaluation_resume_gate(path, job, protocol_sha=None):
+    receipt_path = path.with_name("evaluation-receipt.json")
+    expected_sha = job["resume_evaluation"]["receipt_sha256"]
+    if not receipt_path.is_file() or sha256(receipt_path) != expected_sha:
+        raise ValueError("Evaluation resume receipt differs from its pinned bytes")
+    receipt = json.loads(receipt_path.read_text())
+    if (
+        receipt.get("schema") != "selftrained-evaluation-journal-v1"
+        or receipt.get("split") != ("test" if job["stage"] == "test" else "validation")
+        or receipt.get("checkpoint_sha256") != job["checkpoint"]["sha256"]
+        or receipt.get("protocol_sha256") != protocol_sha
+        or type(receipt.get("completed_count")) is not int
+        or type(receipt.get("expected_count")) is not int
+        or not 0 <= receipt["completed_count"] <= receipt["expected_count"]
+        or (job["stage"] != "freeze" and receipt["completed_count"] == receipt["expected_count"])
+        or not re.fullmatch(r"[a-f0-9]{64}", receipt.get("conditions_sha256", ""))
+    ):
+        raise ValueError("Only unfinished rows under the same frozen checkpoint/protocol can resume")
+    raw = path.read_bytes()
+    size = receipt.get("output_byte_count")
+    if type(size) is not int or not 0 <= size <= len(raw):
+        raise ValueError("Evaluation receipt has invalid committed-prefix byte count")
+    prefix = raw[:size]
+    if hashlib.sha256(prefix).hexdigest() != receipt.get("outputs_sha256") or (prefix and not prefix.endswith(b"\n")):
+        raise ValueError("Evaluation committed raw prefix differs from actual bytes")
+    rows = [json.loads(line) for line in prefix.splitlines()]
+    ids = [row["record"]["id"] for row in rows]
+    if len(ids) != receipt["completed_count"] or len(ids) != len(set(ids)):
+        raise ValueError("Completed evaluation IDs are inconsistent or duplicated")
+    if hashlib.sha256("".join(value + "\n" for value in ids).encode()).hexdigest() != receipt.get(
+        "completed_ids_sha256"
+    ):
+        raise ValueError("Completed evaluation ID digest differs from actual raw prefix")
+    return receipt
+
+
+def test_protocol_gate(path, job, manifest, source_hashes, resume_path=None):
     protocol = json.loads(path.read_text())
-    if path.with_suffix(path.suffix + ".test-started.json").exists():
+    if path.with_suffix(path.suffix + ".test-started.json").exists() and resume_path is None:
         raise ValueError("This frozen final test already started; failed attempts are not silently retried")
     expected_data = {Path(item["path"]).name: item["sha256"] for item in manifest["records"]}
     if (
@@ -394,13 +454,15 @@ def test_protocol_gate(path, job, manifest, source_hashes):
         or protocol.get("test_once") is not True
         or protocol.get("checkpoint_sha256") != job["checkpoint"]["sha256"]
         or protocol.get("architecture") != job.get("architecture", "moe")
-        or protocol.get("max_new_tokens") != job.get("max_new_tokens", 192)
+        or protocol.get("max_new_tokens") != job.get("max_new_tokens", 128)
         or protocol.get("data_sha256") != expected_data
         or protocol.get("controls") != "all"
         or any(source_hashes.get(name) != value for name, value in protocol.get("code_sha256", {}).items())
         or not protocol.get("code_sha256")
     ):
         raise ValueError("Final test differs from its frozen checkpoint/data/code/generation protocol")
+    if resume_path is not None:
+        evaluation_resume_gate(resume_path, job, sha256(path))
     return protocol
 
 
@@ -442,13 +504,15 @@ def trainer_command(job, manifest, root, output, batch_id):
             "--split",
             "test" if job["stage"] == "test" else "validation",
         ]
-        command += ["--max-new-tokens", str(job.get("max_new_tokens", 192))]
+        command += ["--max-new-tokens", str(job.get("max_new_tokens", 128))]
         if "limit" in job:
             command += ["--limit", str(job["limit"])]
         if job["stage"] == "freeze":
             command += ["--freeze-protocol", str(output / "frozen.json")]
         if job["stage"] == "test":
             command += ["--protocol", str(artifact_path(batch_id, job["protocol"]))]
+        if job.get("resume_evaluation"):
+            command += ["--resume-output", str(artifact_path(batch_id, job["resume_evaluation"]))]
     return command
 
 
@@ -513,11 +577,18 @@ def register_modal():
             raise RuntimeError("Live shared ledger changed or disappeared since client probe; reread before reserving")
         if job["stage"] not in ("prepare", "release"):
             readiness(manifest, manifest_sha)
+        resume_path = None
+        if job.get("resume_evaluation"):
+            resume_path, _ = artifact_gate(
+                batch_id, job["resume_evaluation"], manifest_sha, job.get("architecture", "moe")
+            )
+            if job["stage"] in ("validation", "freeze"):
+                evaluation_resume_gate(resume_path, job)
         for field in ("resume", "init_checkpoint", "checkpoint", "protocol"):
             if job.get(field):
                 path, _ = artifact_gate(batch_id, job[field], manifest_sha, job.get("architecture", "moe"))
                 if field == "protocol":
-                    test_protocol_gate(path, job, manifest, source_hashes)
+                    test_protocol_gate(path, job, manifest, source_hashes, resume_path)
         if job["stage"] == "release":
             from scripts.selftrained.hf_transport import approved_public_files
 
@@ -579,6 +650,7 @@ def register_modal():
             "job": job,
             "started_at": datetime.now(UTC).isoformat(),
             "status": "running",
+            "resource_spec": resource_spec(stage, job.get("wall_seconds")),
         }
         write_json(output / "execution.json", receipt)
         volume.commit()
@@ -629,7 +701,7 @@ def register_modal():
                 command = trainer_command(job, manifest, root, output, batch_id)
                 receipt["command"] = command
                 write_json(output / "execution.json", receipt)
-                seconds = job.get("max_seconds", SPEC[stage]["seconds"] - 180)
+                seconds = job.get("max_seconds", resource_spec(stage, job.get("wall_seconds"))["seconds"] - 180)
                 with (output / "runner.log").open("w") as stream:
                     process = subprocess.Popen(
                         command, stdout=stream, stderr=subprocess.STDOUT, env={**os.environ, "PYTHONUNBUFFERED": "1"}
@@ -660,7 +732,7 @@ def register_modal():
                         "inference-manifest.json",
                     )
                     if stage in TRAIN_STAGES
-                    else ("metrics.json", "outputs.jsonl")
+                    else ("metrics.json", "outputs.jsonl", "evaluation-receipt.json")
                 )
                 if any(not (output / name).is_file() for name in required):
                     raise RuntimeError(
@@ -671,6 +743,18 @@ def register_modal():
                     if training.get("steps") != job.get("steps", 300):
                         raise RuntimeError(
                             "Trainer stopped before requested stage steps; saved state retained without completion claim"
+                        )
+                else:
+                    evaluation = json.loads((output / "evaluation-receipt.json").read_text())
+                    metrics = json.loads((output / "metrics.json").read_text())
+                    if (
+                        evaluation.get("status") != "complete"
+                        or evaluation.get("completed_count") != evaluation.get("expected_count")
+                        or metrics.get("evaluation_complete") is not True
+                        or metrics.get("count") != evaluation.get("completed_count")
+                    ):
+                        raise RuntimeError(
+                            "Evaluation interrupted before all selected records; raw prefix and continuation receipt retained"
                         )
                 if stage == "freeze" and not (output / "frozen.json").is_file():
                     raise RuntimeError("Validation did not generate the frozen pre-test protocol")
@@ -813,7 +897,8 @@ def register_modal():
         elif job_value["stage"] == "release":
             receipt = release_remote.remote(*args)
         else:
-            receipt = gpu_remote.remote(job_value["stage"], *args)
+            wall_seconds = resource_spec(job_value["stage"], job_value.get("wall_seconds"))["seconds"]
+            receipt = gpu_remote.with_options(timeout=wall_seconds).remote(job_value["stage"], *args)
         write_json(output / "receipt.json", receipt)
         total = 0
         for item in receipt.get("files", []):
@@ -822,7 +907,7 @@ def register_modal():
                 continue
             total += item["bytes"]
             if total > MAX_REVIEW_BYTES:
-                raise ValueError("Raw review evidence exceeds 16 MiB; full evidence remains on private Volume")
+                raise ValueError("Raw review evidence exceeds 64 MiB; full evidence remains on private Volume")
             target = output / "raw" / path
             target.parent.mkdir(parents=True, exist_ok=True)
             with target.open("wb") as stream:

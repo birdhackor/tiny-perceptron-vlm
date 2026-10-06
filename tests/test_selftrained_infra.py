@@ -89,6 +89,12 @@ def test_completed_job_cannot_be_repeated_or_downgraded_by_failure_cleanup():
     assert ledger["reservations"][-1]["status"] == "completed"
     with pytest.raises(ValueError, match="already completed"):
         reserve(ledger, "repeat")
+    with pytest.raises(ValueError, match="already completed"):
+        reserve(
+            ledger,
+            "longer-timeout",
+            job={"schema_version": 1, "stage": "pretrain", "wall_seconds": 600, "max_seconds": 420},
+        )
 
 
 def test_cost_guard_uses_live_units_and_reserves_auxiliary_cpu_memory_egress_storage():
@@ -106,6 +112,21 @@ def test_cost_guard_uses_live_units_and_reserves_auxiliary_cpu_memory_egress_sto
     ):
         with pytest.raises((RuntimeError, ValueError)):
             runner.reservation_guard("pretrain", rates)
+
+
+def test_selected_wall_timeout_and_reservation_share_exact_profile():
+    live = RATES | {"egress_gib_cost": "0.04000"}
+    short = runner.reservation_guard("joint", live, 600)
+    long = runner.reservation_guard("freeze", live, 900)
+    assert short["resource_spec"]["seconds"] == 600 and short["reserved_usd"] == "0.22"
+    assert long["resource_spec"]["seconds"] == 900 and long["reserved_usd"] == "0.30"
+    ledger = historical_ledger()
+    entry = reserve(ledger, job={"schema_version": 1, "stage": "pretrain", "wall_seconds": 600, "max_seconds": 420})
+    assert entry["compute_guard"]["resource_spec"]["seconds"] == 600
+    with pytest.raises(ValueError, match="180 seconds"):
+        runner.validate_job({"schema_version": 1, "stage": "pretrain", "wall_seconds": 600, "max_seconds": 421})
+    with pytest.raises(ValueError, match="600 or 900"):
+        runner.validate_job({"schema_version": 1, "stage": "pretrain", "wall_seconds": 1200})
 
 
 def test_live_ledger_probe_is_read_only_client_api_and_preserves_raw_history(monkeypatch):
@@ -228,6 +249,40 @@ def test_prior_artifact_binds_dataset_manifest_and_dense_moe_architecture(tmp_pa
         runner.artifact_gate("batch", item, "c" * 64, "dense")
     with pytest.raises(ValueError, match="cannot share"):
         runner.artifact_gate("batch", item, "b" * 64, "moe")
+
+
+def test_partial_evaluation_resume_pins_raw_prefix_receipt_and_freeze_protocol(tmp_path):
+    output = tmp_path / "outputs.jsonl"
+    prefix = b'{"record":{"id":"frozen-case-1"},"trace":{"final_output":"answer"}}\n'
+    output.write_bytes(prefix + b"fragment without complete newline")
+    receipt = {
+        "schema": "selftrained-evaluation-journal-v1",
+        "split": "test",
+        "checkpoint_sha256": descriptor()["sha256"],
+        "protocol_sha256": "b" * 64,
+        "conditions_sha256": "c" * 64,
+        "completed_count": 1,
+        "expected_count": 2,
+        "output_byte_count": len(prefix),
+        "outputs_sha256": runner.hashlib.sha256(prefix).hexdigest(),
+        "completed_ids_sha256": runner.hashlib.sha256(b"frozen-case-1\n").hexdigest(),
+        "status": "interrupted",
+    }
+    receipt_path = output.with_name("evaluation-receipt.json")
+    receipt_path.write_text(json.dumps(receipt))
+    job = {
+        "stage": "test",
+        "checkpoint": descriptor(),
+        "resume_evaluation": descriptor("test", "outputs.jsonl") | {"receipt_sha256": runner.sha256(receipt_path)},
+    }
+    assert runner.evaluation_resume_gate(output, job, "b" * 64) == receipt
+    with pytest.raises(ValueError, match="same frozen"):
+        runner.evaluation_resume_gate(output, job, "d" * 64)
+    changed = receipt | {"completed_count": 2}
+    receipt_path.write_text(json.dumps(changed))
+    job["resume_evaluation"]["receipt_sha256"] = runner.sha256(receipt_path)
+    with pytest.raises(ValueError, match="unfinished"):
+        runner.evaluation_resume_gate(output, job, "b" * 64)
 
 
 def archive(tmp_path, members):
