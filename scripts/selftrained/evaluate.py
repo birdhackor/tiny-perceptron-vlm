@@ -298,9 +298,10 @@ def score_reply(record, output, trace):
 
 def code_fingerprints():
     root = Path(__file__).resolve().parents[2]
-    # backbone/attention/log-mel 也由本倉實作；不能只凍結外層wrapper。
+    # 明定執行邊界：包含重用 backbone/attention/log-mel 與公開 inference。
+    # Modal、發布、封裝與 jobs 屬操作流程，不放入最終測試的模型契約。
     names = [str(path.relative_to(root)) for path in sorted((root / "tiny_perceptron").rglob("*.py"))]
-    names.extend(("scripts/selftrained/evaluate.py", "scripts/selftrained/train.py"))
+    names.extend(("scripts/selftrained/train.py", "scripts/selftrained/evaluate.py", "scripts/selftrained/chat.py"))
     return {name: file_sha256(root / name) for name in names}
 
 
