@@ -34,6 +34,7 @@ CHECKPOINT_SCHEMA = "selftrained-random-v1"
 STAGES = ("pretrain", "sft", "vision", "ocr", "audio", "joint")
 SAMPLING_MODES = ("bucket", "task-family")
 LANGUAGE_OBJECTIVE_VERSION = "selftrained-language-objective-v1"
+NATIVE_LANGUAGE_OBJECTIVE_VERSION = "selftrained-language-objective-v2"
 TASK_FAMILIES = ("text", "tools", "vision", "ocr", "voice")
 # task-family tools cycle: 12/16 slots are numeric call/reply training.
 TOOL_TASK_MULTIPLICITIES = {
@@ -295,11 +296,15 @@ def set_trainable(model, stage, freeze_perception_backbones=False):
     return trainable
 
 
-def validate_loss_weights(stage, tool_loss_weight=1.0, numeric_run_loss_weight=1.0):
-    for name, value in (("tool_loss_weight", tool_loss_weight), ("numeric_run_loss_weight", numeric_run_loss_weight)):
+def validate_loss_weights(stage, tool_loss_weight=1.0, numeric_run_loss_weight=1.0, native_voice_loss_weight=1.0):
+    for name, value in (
+        ("tool_loss_weight", tool_loss_weight),
+        ("numeric_run_loss_weight", numeric_run_loss_weight),
+        ("native_voice_loss_weight", native_voice_loss_weight),
+    ):
         if type(value) not in (int, float) or not math.isfinite(value) or value < 1:
             raise ValueError(f"{name} 必須是 finite number >= 1，不能是 boolean")
-    weighted = tool_loss_weight != 1 or numeric_run_loss_weight != 1
+    weighted = tool_loss_weight != 1 or numeric_run_loss_weight != 1 or native_voice_loss_weight != 1
     if weighted and stage != "joint":
         raise ValueError("nondefault language loss weights 只可用於 joint")
     return weighted
@@ -308,7 +313,8 @@ def validate_loss_weights(stage, tool_loss_weight=1.0, numeric_run_loss_weight=1
 def language_objective_metadata(options):
     tool = options.get("tool_loss_weight", 1.0)
     numeric = options.get("numeric_run_loss_weight", 1.0)
-    validate_loss_weights(options.get("stage", "joint"), tool, numeric)
+    native = options.get("native_voice_loss_weight", 1.0)
+    validate_loss_weights(options.get("stage", "joint"), tool, numeric, native)
     policy = {
         "version": LANGUAGE_OBJECTIVE_VERSION,
         "training_only": True,
@@ -323,13 +329,31 @@ def language_objective_metadata(options):
         "weighted_reduction_dtype": "float32",
         "validation_and_selection": "original_unweighted_objective; validation_loss",
     }
-    return {"tool_loss_weight": tool, "numeric_run_loss_weight": numeric, "language_objective_policy": policy}
+    metadata = {"tool_loss_weight": tool, "numeric_run_loss_weight": numeric, "language_objective_policy": policy}
+    if native != 1:
+        policy.update(
+            version=NATIVE_LANGUAGE_OBJECTIVE_VERSION,
+            native_one_branch="exact_existing_v1_scalar_graph_metadata_and_logs",
+            native_voice_rows={
+                "split": "train",
+                "tasks": ["voice_qa", "voice_topic_continuation"],
+                "augmentation": "key_absent",
+                "excluded": ["evaluation_only", "supervision.protocol_fixture"],
+            },
+            native_row_scope="all_existing_supervised_assistant_targets_including_public_history_confirmations",
+            combination="tool_row_multiplier_times_numeric_multiplier_times_native_voice_row_multiplier; ignored_labels_zero",
+        )
+        metadata["native_voice_loss_weight"] = native
+    return metadata
 
 
 def checkpoint_language_objective(source):
     options = source.get("training_options", {})
     metadata = language_objective_metadata({**options, "stage": source.get("stage", "joint")})
-    if any(key in source and source[key] != metadata[key] for key in ("tool_loss_weight", "numeric_run_loss_weight")):
+    if any(
+        key in source and source[key] != metadata.get(key, 1.0)
+        for key in ("tool_loss_weight", "numeric_run_loss_weight", "native_voice_loss_weight")
+    ):
         raise ValueError("checkpoint language objective coefficients 與 training_options 不符")
     policies = [
         value
@@ -338,7 +362,11 @@ def checkpoint_language_objective(source):
     ]
     if any(value != metadata["language_objective_policy"] for value in policies):
         raise ValueError("checkpoint language objective version/policy 不同")
-    if not policies and (metadata["tool_loss_weight"] != 1 or metadata["numeric_run_loss_weight"] != 1):
+    if not policies and (
+        metadata["tool_loss_weight"] != 1
+        or metadata["numeric_run_loss_weight"] != 1
+        or metadata.get("native_voice_loss_weight", 1) != 1
+    ):
         raise ValueError("nondefault checkpoint 缺少 language objective version/policy")
     # A legacy missing policy/coefficients represents the original 1/1 objective only.
     return metadata
@@ -358,6 +386,16 @@ def genuine_tool_loss_row(record):
     )
 
 
+def native_voice_loss_row(record):
+    return (
+        record.get("split") == "train"
+        and record.get("task") in ("voice_qa", "voice_topic_continuation")
+        and "augmentation" not in record
+        and not record.get("evaluation_only", False)
+        and not record.get("supervision", {}).get("protocol_fixture", False)
+    )
+
+
 def numeric_run_loss_mask(labels, tokenizer):
     valid = labels != -100
     digit_ids = [tokenizer.character_ids[c] for c in "0123456789" if c in tokenizer.character_ids]
@@ -371,7 +409,9 @@ def numeric_run_loss_mask(labels, tokenizer):
     return (digits | boundary | minus) & valid
 
 
-def language_loss_weights(labels, records, tokenizer, tool_loss_weight, numeric_run_loss_weight):
+def language_loss_weights(
+    labels, records, tokenizer, tool_loss_weight, numeric_run_loss_weight, native_voice_loss_weight=1.0
+):
     if labels.ndim != 2 or labels.shape[0] != len(records):
         raise ValueError("records 與 already-shifted labels 的 batch dimension 不同")
     row_weights = torch.tensor(
@@ -380,16 +420,28 @@ def language_loss_weights(labels, records, tokenizer, tool_loss_weight, numeric_
         device=labels.device,
     )[:, None]
     numeric = torch.where(numeric_run_loss_mask(labels, tokenizer), numeric_run_loss_weight, 1.0).float()
-    return row_weights * numeric * (labels != -100).float()
+    weights = row_weights * numeric * (labels != -100).float()
+    if native_voice_loss_weight != 1:
+        native_rows = torch.tensor(
+            [native_voice_loss_weight if native_voice_loss_row(record) else 1.0 for record in records],
+            dtype=torch.float32,
+            device=labels.device,
+        )[:, None]
+        weights = weights * native_rows
+    return weights
 
 
-def weighted_language_loss(output, labels, records, tokenizer, tool_loss_weight=1.0, numeric_run_loss_weight=1.0):
-    if tool_loss_weight == 1 and numeric_run_loss_weight == 1:
+def weighted_language_loss(
+    output, labels, records, tokenizer, tool_loss_weight=1.0, numeric_run_loss_weight=1.0, native_voice_loss_weight=1.0
+):
+    if tool_loss_weight == 1 and numeric_run_loss_weight == 1 and native_voice_loss_weight == 1:
         return output.get("language_loss", output.get("loss"))
     logits = output["logits"]
     if logits.shape[:2] != labels.shape:
         raise ValueError("logits 必須與 existing already-shifted labels 對齊")
-    weights = language_loss_weights(labels, records, tokenizer, tool_loss_weight, numeric_run_loss_weight)
+    weights = language_loss_weights(
+        labels, records, tokenizer, tool_loss_weight, numeric_run_loss_weight, native_voice_loss_weight
+    )
     mass = weights.sum(dtype=torch.float32)
     if not bool(torch.isfinite(mass) & (mass > 0)):
         raise ValueError("沒有 finite positive supervised token mass")
@@ -419,10 +471,63 @@ def validate_weighted_source(source, args):
         raise ValueError("nondefault 新 joint 必須 init own joint selected_validation_best；不能從 latest 改 objective")
 
 
+def validate_native_source(source_path, source, args):
+    """Bind the loaded selected checkpoint to its actual completed Volume source metadata."""
+    from scripts.selftrained.modal_runner import native_joint_source_gate
+
+    evidence = native_joint_source_gate(source_path, args.architecture, target_job=vars(args))
+    training, inference, job = evidence["training"], evidence["inference"], evidence["job"]
+    old = source["training_options"]
+    source_metadata = checkpoint_language_objective(source)
+    if (
+        source_metadata
+        != language_objective_metadata({"stage": "joint", "tool_loss_weight": 4, "numeric_run_loss_weight": 4})
+        or source["step"] != inference["selected_step"]
+        or source["preprocess_version"] != inference.get("preprocess_version")
+        or source["stage_history"] != training["stage_history"]
+        or any(
+            source[key] != training[key]
+            for key in ("schema", "config", "data_sha256", "asset_sha256", "tokenizer_sha256", "origin")
+        )
+        or any(training.get(key) != value for key, value in source_metadata.items())
+    ):
+        raise ValueError("native loaded selected checkpoint differs from completed4/4 metadata")
+    for name, default in (
+        ("batch_size", 16),
+        ("seed", 20261006),
+        ("learning_rate", 0.001),
+        ("weight_decay", 0.01),
+        ("perception_weight", 1.0),
+        ("router_weight", 0.01),
+        ("freeze_perception_backbones", False),
+        ("sampling_mode", "bucket"),
+        ("context", 512),
+        ("steps", 300),
+        ("eval_every", 100),
+        ("save_every", 100),
+    ):
+        expected = job.get(name, default)
+        if name in ("learning_rate", "weight_decay", "perception_weight", "router_weight"):
+            expected = float(expected)
+        if old.get(name, default) != expected or (name in training and training[name] != expected):
+            raise ValueError(f"native source checkpoint/receipt/execution options differ: {name}")
+        if name not in ("steps", "eval_every", "save_every") and getattr(args, name) != old.get(name, default):
+            raise ValueError(f"native fresh stage must preserve source {name}")
+    return evidence["binding"]
+
+
 def objective(
-    model, encoder, records, stage, perception_weight, router_weight, tool_loss_weight=1.0, numeric_run_loss_weight=1.0
+    model,
+    encoder,
+    records,
+    stage,
+    perception_weight,
+    router_weight,
+    tool_loss_weight=1.0,
+    numeric_run_loss_weight=1.0,
+    native_voice_loss_weight=1.0,
 ):
-    weighted = validate_loss_weights(stage, tool_loss_weight, numeric_run_loss_weight)
+    weighted = validate_loss_weights(stage, tool_loss_weight, numeric_run_loss_weight, native_voice_loss_weight)
     batch = encoder.batch(records, pretrain=stage == "pretrain")
     if stage in ("vision", "ocr", "audio"):
         batch["labels"] = None
@@ -432,7 +537,13 @@ def objective(
     language_loss = unweighted_language_loss
     if weighted:
         language_loss = weighted_language_loss(
-            output, batch["labels"], records, encoder.tokenizer, tool_loss_weight, numeric_run_loss_weight
+            output,
+            batch["labels"],
+            records,
+            encoder.tokenizer,
+            tool_loss_weight,
+            numeric_run_loss_weight,
+            native_voice_loss_weight,
         )
     if stage in ("vision", "ocr", "audio"):
         if head_loss is None:
@@ -458,6 +569,41 @@ def objective(
         detail.pop("language_loss")
         detail["weighted_language_loss"] = float(language_loss.detach())
         detail["unweighted_language_loss"] = float(unweighted_language_loss.detach())
+    if native_voice_loss_weight != 1:
+        labels = batch["labels"]
+        weights = language_loss_weights(
+            labels, records, encoder.tokenizer, tool_loss_weight, numeric_run_loss_weight, native_voice_loss_weight
+        )
+        ce = torch.nn.functional.cross_entropy(
+            output["logits"].float().reshape(-1, output["logits"].shape[-1]),
+            labels.reshape(-1),
+            ignore_index=-100,
+            reduction="none",
+        ).reshape_as(labels)
+        detail["tool_numeric_language_loss"] = float(
+            weighted_language_loss(
+                output, labels, records, encoder.tokenizer, tool_loss_weight, numeric_run_loss_weight
+            ).detach()
+        )
+        detail["total_weighted_language_mass"] = float(weights.sum())
+        for name, native_group in (("native_voice", True), ("augmented_voice", False)):
+            eligible = [
+                native_voice_loss_row(record)
+                if native_group
+                else (
+                    record.get("split") == "train"
+                    and record.get("task") in ("voice_qa", "voice_topic_continuation")
+                    and "augmentation" in record
+                    and not record.get("evaluation_only", False)
+                    and not record.get("supervision", {}).get("protocol_fixture", False)
+                )
+                for record in records
+            ]
+            mask = torch.tensor(eligible, device=labels.device)[:, None] & labels.ne(-100)
+            count = int(mask.sum())
+            detail[f"{name}_target_tokens"] = count
+            detail[f"{name}_unweighted_language_loss"] = float(ce[mask].mean().detach()) if count else None
+            detail[f"{name}_weighted_mass"] = float(weights[mask].sum())
     return loss, detail
 
 
@@ -516,6 +662,12 @@ def parser():
         help="joint training only；ASCII digits、next stopping target、leading minus multiplier，finite >= 1",
     )
     result.add_argument(
+        "--native-voice-loss-weight",
+        type=float,
+        default=1.0,
+        help="optional new joint only；native train voice rows without augmentation key；default preserves V1",
+    )
+    result.add_argument(
         "--freeze-perception-backbones",
         action="store_true",
         help="joint only：固定三種感知 backbone/head（含 Vision.projection），只訓練 LM 與 bridges",
@@ -536,7 +688,24 @@ def parser():
 
 def main(argv=None):
     args = parser().parse_args(argv)
-    weighted = validate_loss_weights(args.stage, args.tool_loss_weight, args.numeric_run_loss_weight)
+    native_weight = args.native_voice_loss_weight
+    weighted = validate_loss_weights(args.stage, args.tool_loss_weight, args.numeric_run_loss_weight, native_weight)
+    if native_weight == 1:
+        # Preserve all old serialized args/options keys, explicit native1 included.
+        del args.native_voice_loss_weight
+    elif (
+        (args.tool_loss_weight, args.numeric_run_loss_weight, native_weight) != (4, 1, 4)
+        or args.steps > 4000
+        or args.batch_size != 16
+        or args.context != 512
+        or args.learning_rate != 0.0002
+        or not args.freeze_perception_backbones
+        or args.sampling_mode != "task-family"
+        or args.max_tokens is not None
+    ):
+        raise ValueError(
+            "native voice candidate requires fixedtool4/numeric1/native4, <=4000 steps, batch16/context512/LR0.0002 and frozen task-family"
+        )
     objective_metadata = language_objective_metadata(vars(args))
     args.language_objective_policy = objective_metadata["language_objective_policy"]
     if args.resume and args.init_checkpoint:
@@ -574,8 +743,15 @@ def main(argv=None):
         raise ValueError("模態資產指紋不同")
     if weighted:
         validate_weighted_source(source, args)
+    native_source_binding = None
+    if native_weight != 1 and args.init_checkpoint:
+        native_source_binding = validate_native_source(source_path, source, args)
     if args.resume:
         validate_resume_language_objective(source, vars(args))
+        if native_weight != 1:
+            for name in ("eval_every", "save_every"):
+                if source["training_options"].get(name, 100) != getattr(args, name):
+                    raise ValueError(f"native exact resume 改變 {name}")
     config_values = (
         dict(source["config"]) if source else (json.loads(Path(args.config).read_text()) if args.config else {})
     )
@@ -646,6 +822,9 @@ def main(argv=None):
                     "target_tokens": 0,
                 },
             }
+            if native_source_binding is not None:
+                initialization["source_integrity"] = native_source_binding
+                initialization["source_completed_steps"] = native_source_binding["source_completed_steps"]
             history[-1] = {**history[-1], "new_joint_initialization": initialization}
             origin = {**origin, "new_joint_initialization": initialization}
     output_dir = Path(args.output_dir)
@@ -739,6 +918,7 @@ def main(argv=None):
             args.router_weight,
             args.tool_loss_weight,
             args.numeric_run_loss_weight,
+            native_weight,
         )
         if not torch.isfinite(loss):
             raise FloatingPointError(f"step={step} loss 非有限")

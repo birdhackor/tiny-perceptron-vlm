@@ -216,11 +216,35 @@ def validate_job(job):
     freeze = job.get("freeze_perception_backbones", False)
     if type(freeze) is not bool or (freeze and stage != "joint"):
         raise ValueError("freeze_perception_backbones must be boolean and is available only for joint training")
-    for key in ("tool_loss_weight", "numeric_run_loss_weight"):
+    for key in ("tool_loss_weight", "numeric_run_loss_weight", "native_voice_loss_weight"):
         if key in job:
             value = job[key]
             if type(value) not in (int, float) or not math.isfinite(value) or value < 1 or stage != "joint":
                 raise ValueError(f"{key} must be a finite number >= 1 and is available only for joint training")
+    if job.get("native_voice_loss_weight", 1) != 1:
+        if (
+            job["native_voice_loss_weight"] != 4
+            or job.get("tool_loss_weight", 1) != 4
+            or job.get("numeric_run_loss_weight", 1) != 1
+            or job.get("steps", 300) > 4000
+            or job.get("batch_size", 16) != 16
+            or job.get("context", 512) != 512
+            or learning_rate != Decimal("0.0002")
+            or sampling != "task-family"
+            or freeze is not True
+            or spec["seconds"] != 900
+            or seconds > 720
+            or job.get("eval_every", 100) != 1000
+            or job.get("save_every", 100) != 1000
+        ):
+            raise ValueError(
+                "native voice candidate is fixedtool4/numeric1/native4, <=4000 steps, batch16/context512/LR0.0002, frozen task-family, eval/save1000, wall900/max720"
+            )
+        descriptor = job.get("init_checkpoint") or job.get("resume") or {}
+        if descriptor.get("stage") != "joint" or (job.get("init_checkpoint") and descriptor.get("path") != "best.pt"):
+            raise ValueError(
+                "native voice must init own completed selected joint best, or exact same-objective joint resume"
+            )
     if job.get("resume") and job.get("init_checkpoint"):
         raise ValueError("Resume and fresh-stage initialization are mutually exclusive")
     for field in ("resume", "init_checkpoint", "checkpoint"):
@@ -477,6 +501,302 @@ def artifact_gate(batch_id, descriptor, manifest_sha, architecture=None):
     return path, execution
 
 
+def native_objective_metadata(native=4, numeric=1):
+    """Pure JSON canonical policy for control preflight; must match the trainer exactly."""
+    policy = {
+        "version": "selftrained-language-objective-v1",
+        "training_only": True,
+        "legacy_default_branch": "reuse_original_language_loss_scalar_and_graph",
+        "tool_rows": ["tool_call", "tool_reply:supervision.replay_kind=actual_executor"],
+        "excluded_rows": ["evaluation_only", "supervision.protocol_fixture"],
+        "row_scope": "all_existing_supervised_assistant_targets_in_eligible_row",
+        "numeric_targets": "ASCII_digits_union_immediate_supervised_nondigit_boundary_or_EOS_union_minus_if_next_supervised_digit",
+        "alignment": "RecordEncoder_already_shifted_labels; ignored_gap_breaks_adjacency",
+        "combination": "tool_row_multiplier_times_numeric_multiplier; ignored_labels_zero",
+        "normalization": "sum(weight_times_token_CE)/sum(weight)",
+        "weighted_reduction_dtype": "float32",
+        "validation_and_selection": "original_unweighted_objective; validation_loss",
+    }
+    metadata = {"tool_loss_weight": 4, "numeric_run_loss_weight": numeric, "language_objective_policy": policy}
+    if native != 1:
+        policy.update(
+            version="selftrained-language-objective-v2",
+            native_one_branch="exact_existing_v1_scalar_graph_metadata_and_logs",
+            native_voice_rows={
+                "split": "train",
+                "tasks": ["voice_qa", "voice_topic_continuation"],
+                "augmentation": "key_absent",
+                "excluded": ["evaluation_only", "supervision.protocol_fixture"],
+            },
+            native_row_scope="all_existing_supervised_assistant_targets_including_public_history_confirmations",
+            combination="tool_row_multiplier_times_numeric_multiplier_times_native_voice_row_multiplier; ignored_labels_zero",
+        )
+        metadata["native_voice_loss_weight"] = native
+    return metadata
+
+
+def native_target_source_options_gate(training, source_job, target_job, manifest=None, resume=False):
+    """Compare inherited target options before reservation; no torch or private checkpoint load."""
+    if training.get("config", {}).get("architecture") != source_job.get("architecture", "moe") or training.get(
+        "config", {}
+    ).get("max_length") != source_job.get("context", 512):
+        raise ValueError("native source config/options differ before reserve")
+    for name, default in (
+        ("architecture", "moe"),
+        ("batch_size", 16),
+        ("seed", 20261006),
+        ("learning_rate", 0.001),
+        ("weight_decay", 0.01),
+        ("perception_weight", 1.0),
+        ("router_weight", 0.01),
+        ("freeze_perception_backbones", False),
+        ("sampling_mode", "bucket"),
+        ("context", 512),
+    ):
+        actual, wanted = source_job.get(name, default), target_job.get(name, default)
+        if name in ("learning_rate", "weight_decay", "perception_weight", "router_weight"):
+            actual, wanted = Decimal(str(actual)), Decimal(str(wanted))
+        recorded = training.get(name, source_job.get(name, default))
+        if name in ("learning_rate", "weight_decay", "perception_weight", "router_weight"):
+            recorded = Decimal(str(recorded))
+        if actual != wanted or recorded != actual:
+            raise ValueError(f"native target/source execution/receipt options differ before reserve: {name}")
+    if resume:
+        for name in ("eval_every", "save_every"):
+            if target_job.get(name, 100) != source_job.get(name, 100):
+                raise ValueError(f"native exact resume changes {name} before reserve")
+        if target_job.get("steps", 300) < training["steps"]:
+            raise ValueError("native resume target steps precede source saved steps")
+    if manifest is not None:
+        records = {Path(item["path"]).name: item["sha256"] for item in manifest["records"]}
+        assets = {item["path"]: item["sha256"] for item in manifest.get("assets", [])}
+        if (
+            training["data_sha256"] != records
+            or any(assets.get(name) != digest for name, digest in training["asset_sha256"].items())
+            or any(
+                training["config"].get(key) != value
+                for key, value in manifest["model_config"].items()
+                if key not in ("vocab_size", "architecture")
+            )
+        ):
+            raise ValueError("native target frozen data/assets/config differ before reserve")
+
+
+def native_joint_source_gate(path, architecture, descriptor=None, manifest_sha=None, target_job=None, manifest=None):
+    """Native fresh init binds actual same-directory Volume receipts; no checkpoint deserialization."""
+    from scripts.selftrained.hf_transport import verify_file
+
+    path = Path(path)
+    if path.name != "best.pt" or path.is_symlink() or not path.is_file():
+        raise ValueError("native fresh source must be actual selected best.pt")
+    root = path.parent
+    execution = json.loads((root / "execution.json").read_text())
+    receipt = json.loads((root / "receipt.json").read_text())
+    if (
+        execution.get("status") != "completed"
+        or execution.get("returncode") != 0
+        or execution.get("stage") != "joint"
+        or any(
+            receipt.get(key) != execution.get(key)
+            for key in ("status", "revision", "stage", "run_id", "manifest_sha256", "job")
+        )
+        or (manifest_sha is not None and execution.get("manifest_sha256") != manifest_sha)
+    ):
+        raise ValueError("native source needs its actual completed matching execution/receipt")
+    job = execution["job"]
+    if (
+        job.get("stage") != "joint"
+        or job.get("architecture", "moe") != architecture
+        or job.get("tool_loss_weight", 1) != 4
+        or job.get("numeric_run_loss_weight", 1) != 4
+        or job.get("native_voice_loss_weight", 1) != 1
+        or Decimal(str(job.get("learning_rate", "0.001"))) != Decimal("0.0002")
+        or job.get("batch_size", 16) != 16
+        or job.get("context", 512) != 512
+        or job.get("freeze_perception_backbones") is not True
+        or job.get("sampling_mode") != "task-family"
+    ):
+        raise ValueError(
+            "native source must be the own completed reviewed4/4 joint with unchanged LR/batch/context/freeze/family"
+        )
+    recorded = receipt.get("files", [])
+    entries = {item["path"]: item for item in recorded}
+    if len(entries) != len(recorded):
+        raise ValueError("native source receipt repeats a recorded raw path")
+    required = (
+        "best.pt",
+        "execution.json",
+        "train-receipt.json",
+        "inference-manifest.json",
+        "model-config.json",
+        "tokenizer.json",
+        "model.safetensors",
+    )
+    if any(name not in entries for name in required):
+        raise ValueError("native source is missing its recorded selected checkpoint/metadata")
+    paths = {name: verify_file(root, entries[name]) for name in required}
+    selected_sha = entries["best.pt"]["sha256"]
+    if descriptor is not None and (
+        descriptor.get("sha256") != selected_sha
+        or descriptor.get("stage") != "joint"
+        or descriptor.get("path") != "best.pt"
+        or descriptor.get("run_id") != execution.get("run_id")
+    ):
+        raise ValueError("native source differs from its exact selected descriptor")
+    training = json.loads(paths["train-receipt.json"].read_text())
+    inference = json.loads(paths["inference-manifest.json"].read_text())
+    config = json.loads(paths["model-config.json"].read_text())
+    tokenizer = json.loads(paths["tokenizer.json"].read_text())
+    tokenizer_sha = hashlib.sha256(json.dumps(tokenizer, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+    if (
+        training.get("stage") != "joint"
+        or training.get("architecture") != architecture
+        or training.get("completed_requested_steps") is not True
+        or training.get("interrupted") is not False
+        or training.get("selected_checkpoint_available") is not True
+        or training.get("inference_exported") is not True
+        or training.get("test_used_for_selection") is not False
+        or type(training.get("steps")) is not int
+        or training["steps"] != job.get("steps", 300)
+        or type(inference.get("selected_step")) is not int
+        or not 0 < inference["selected_step"] <= training["steps"]
+        or inference.get("selected_checkpoint_sha256") != selected_sha
+        or inference.get("stage") != "joint"
+        or inference.get("selection") != "validation_loss"
+        or training.get("origin", {}).get("kind") != "all-neural-weights-random"
+        or training.get("origin") != inference.get("origin")
+        or config.get("architecture") != architecture
+        or training.get("config") != config
+        or training.get("tokenizer_sha256") != tokenizer_sha
+        or inference.get("files")
+        != {name: entries[name]["sha256"] for name in ("model.safetensors", "model-config.json", "tokenizer.json")}
+        or any(
+            training.get(key) != inference.get(key)
+            for key in (
+                "schema",
+                "data_sha256",
+                "asset_sha256",
+                "tokenizer_sha256",
+                "freeze_perception_backbones",
+                "sampling_mode",
+                "tool_loss_weight",
+                "numeric_run_loss_weight",
+                "language_objective_policy",
+            )
+        )
+        or training.get("tool_loss_weight") != 4
+        or training.get("numeric_run_loss_weight") != 4
+        or training.get("native_voice_loss_weight", 1) != 1
+        or inference.get("native_voice_loss_weight", 1) != 1
+        or training.get("language_objective_policy") != native_objective_metadata(1, 4)["language_objective_policy"]
+        or training.get("seed") != job.get("seed", 20261006)
+    ):
+        raise ValueError("native source selected export and completed training identity/options differ")
+    native_target_source_options_gate(training, job, job if target_job is None else target_job, manifest)
+    return {
+        "training": training,
+        "inference": inference,
+        "job": job,
+        "binding": {
+            "source_checkpoint_sha256": selected_sha,
+            "source_run_id": execution["run_id"],
+            "source_revision": execution["revision"],
+            "source_manifest_sha256": execution["manifest_sha256"],
+            "source_execution_sha256": sha256(root / "execution.json"),
+            "source_receipt_sha256": sha256(root / "receipt.json"),
+            "source_train_receipt_sha256": entries["train-receipt.json"]["sha256"],
+            "source_inference_manifest_sha256": entries["inference-manifest.json"]["sha256"],
+            "source_selected_step": inference["selected_step"],
+            "source_completed_steps": training["steps"],
+        },
+    }
+
+
+def native_resume_source_gate(path, target_job, descriptor=None, manifest_sha=None, manifest=None):
+    """A pinned incomplete V2 branch may resume; V1 or changed options/policy may not reserve."""
+    from scripts.selftrained.hf_transport import verify_file
+
+    path = Path(path)
+    if path.name not in ("latest.pt", "best.pt") or path.is_symlink() or not path.is_file():
+        raise ValueError("native resume needs its actual full saved checkpoint")
+    root = path.parent
+    execution = json.loads((root / "execution.json").read_text())
+    receipt = json.loads((root / "receipt.json").read_text())
+    if (
+        execution.get("stage") != "joint"
+        or execution.get("status") not in ("failed", "completed")
+        or any(
+            receipt.get(key) != execution.get(key)
+            for key in ("status", "revision", "stage", "run_id", "manifest_sha256", "job")
+        )
+        or (manifest_sha is not None and execution.get("manifest_sha256") != manifest_sha)
+    ):
+        raise ValueError("native resume needs matching actual source execution/receipt")
+    recorded = receipt.get("files", [])
+    entries = {item["path"]: item for item in recorded}
+    if len(entries) != len(recorded) or any(
+        name not in entries for name in (path.name, "execution.json", "train-receipt.json")
+    ):
+        raise ValueError("native resume source lacks its actual recorded checkpoint/receipt")
+    for name in (path.name, "execution.json", "train-receipt.json"):
+        verify_file(root, entries[name])
+    if descriptor is not None and (
+        descriptor.get("sha256") != entries[path.name]["sha256"]
+        or descriptor.get("run_id") != execution.get("run_id")
+        or descriptor.get("stage") != "joint"
+        or descriptor.get("path") != path.name
+    ):
+        raise ValueError("native resume descriptor differs from actual saved source SHA")
+    training = json.loads((root / "train-receipt.json").read_text())
+    job = execution["job"]
+    expected = native_objective_metadata()
+    if (
+        training.get("schema") != "selftrained-random-v1"
+        or training.get("stage") != "joint"
+        or training.get("architecture") != target_job.get("architecture", "moe")
+        or training.get("config", {}).get("architecture") != target_job.get("architecture", "moe")
+        or training.get("origin", {}).get("kind") != "all-neural-weights-random"
+        or training.get("test_used_for_selection") is not False
+        or type(training.get("steps")) is not int
+        or not 0 < training["steps"] <= job.get("steps", 300)
+        or any(training.get(key) != value for key, value in expected.items())
+        or any(job.get(key, 1) != value for key, value in expected.items() if key != "language_objective_policy")
+        or any(target_job.get(key, 1) != value for key, value in expected.items() if key != "language_objective_policy")
+    ):
+        raise ValueError("native exact resume source/target objective/full policy differs before reserve")
+    if path.name == "best.pt":
+        if "inference-manifest.json" not in entries:
+            raise ValueError("native selected resume lacks exact selected provenance")
+        inference = json.loads(verify_file(root, entries["inference-manifest.json"]).read_text())
+        if inference.get("selected_checkpoint_sha256") != entries[path.name]["sha256"] or any(
+            inference.get(key) != value for key, value in expected.items()
+        ):
+            raise ValueError("native selected resume objective/SHA differs")
+    native_target_source_options_gate(training, job, target_job, manifest, resume=True)
+    return {
+        "source_checkpoint_sha256": entries[path.name]["sha256"],
+        "source_steps": training["steps"],
+        "objective": expected,
+    }
+
+
+def native_resume_preflight_required(job, source_execution, path):
+    """Source V2 must still be guarded when target omits or resets its native coefficient."""
+    if (
+        job.get("native_voice_loss_weight", 1) != 1
+        or source_execution.get("job", {}).get("native_voice_loss_weight", 1) != 1
+    ):
+        return True
+    training_path = Path(path).parent / "train-receipt.json"
+    if training_path.is_file():
+        try:
+            training = json.loads(training_path.read_text())
+        except (OSError, ValueError):
+            return False  # Keep unrelated V1 legacy resume behavior unchanged.
+        return training.get("language_objective_policy", {}).get("version") == "selftrained-language-objective-v2"
+    return False
+
+
 def release_sources_gate(batch_id, release, manifest_sha, manifest):
     from scripts.selftrained.hf_transport import approved_batch_exports, validate_batch_release
 
@@ -660,7 +980,7 @@ def trainer_command(job, manifest, root, output, batch_id, public_model_dir=None
             command += ["--sampling-mode", job["sampling_mode"]]
         if job.get("freeze_perception_backbones", False):
             command += ["--freeze-perception-backbones"]
-        for flag in ("tool_loss_weight", "numeric_run_loss_weight"):
+        for flag in ("tool_loss_weight", "numeric_run_loss_weight", "native_voice_loss_weight"):
             if flag in job:
                 command += ["--" + flag.replace("_", "-"), str(job[flag])]
         for field in ("resume", "init_checkpoint"):
@@ -774,6 +1094,17 @@ def register_modal():
                 path, source_execution = artifact_gate(
                     batch_id, job[field], manifest_sha, job.get("architecture", "moe")
                 )
+                if field == "init_checkpoint" and job.get("native_voice_loss_weight", 1) != 1:
+                    native_joint_source_gate(
+                        path,
+                        job.get("architecture", "moe"),
+                        job[field],
+                        manifest_sha,
+                        target_job=job,
+                        manifest=manifest,
+                    )
+                if field == "resume" and native_resume_preflight_required(job, source_execution, path):
+                    native_resume_source_gate(path, job, job[field], manifest_sha, manifest)
                 if field == "protocol":
                     evaluation_public_lineage_gate(source_execution, job)
                     test_protocol_gate(path, job, manifest, source_hashes, resume_path)
