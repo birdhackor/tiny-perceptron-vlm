@@ -66,7 +66,7 @@ def test_remote_basename_helper_import_requires_both_image_search_paths(tmp_path
     assert loaded.stdout.strip() == "36.20"
 
 
-def test_cuda_recipe_uses_locked_selftrained_extra_without_pip_in_uv_environment(monkeypatch):
+def test_cuda_recipe_uses_locked_selftrained_extra_without_pip_in_uv_environment(tmp_path, monkeypatch):
     project = tomllib.loads((ROOT / "pyproject.toml").read_text())
     assert project["project"]["optional-dependencies"]["selftrained"] == ["safetensors==0.8.0"]
     recipes = []
@@ -90,7 +90,7 @@ def test_cuda_recipe_uses_locked_selftrained_extra_without_pip_in_uv_environment
             return self
 
         def __getattr__(self, name):
-            assert name in ("env", "workdir", "add_local_dir")
+            assert name in ("env", "workdir", "add_local_dir", "add_local_file")
             return lambda *args, **kwargs: self
 
     modal = SimpleNamespace(
@@ -101,6 +101,9 @@ def test_cuda_recipe_uses_locked_selftrained_extra_without_pip_in_uv_environment
     )
     monkeypatch.setitem(sys.modules, "modal", modal)
     monkeypatch.setenv("SELFTRAINED_MODAL_PHASE", "execute")
+    asset = tmp_path / "dataset.tar.gz"
+    asset.write_bytes(b"image recipe fixture")
+    monkeypatch.setenv("SELFTRAINED_ASSET_FILE", str(asset))
     runner.register_modal()
     assert len(recipes) == 2 and recipes[1].locked
 
@@ -142,7 +145,7 @@ def test_shared_history_survives_failures_batches_and_retry():
 
 
 def test_refuses_empty_stale_exhausted_and_bad_ledgers_without_mutation():
-    for ledger in ({}, historical_ledger("9.83"), historical_ledger("39.99"), historical_ledger("NaN")):
+    for ledger in ({}, historical_ledger("9.83"), historical_ledger("54.99"), historical_ledger("NaN")):
         original = deepcopy(ledger)
         with pytest.raises((RuntimeError, ValueError)):
             reserve(ledger)
@@ -151,6 +154,27 @@ def test_refuses_empty_stale_exhausted_and_bad_ledgers_without_mutation():
     ledger["reserved_total_usd"] = "10.00"
     reserve(ledger)
     assert ledger["reserved_total_usd"] == "36.49"
+
+
+def test_authorized_cap_increase_keeps_live_failed_reservations_and_still_refuses_over_cap():
+    ledger = historical_ledger("36.49")
+    ledger["reservations"].append(
+        {"run_id": "gha-37409271685-1", "reserved_usd": "0.22", "status": "failed-or-cancelled"}
+    )
+    ledger["reserved_total_usd"] = "36.71"
+    original = deepcopy(ledger["reservations"])
+    assert runner.TOTAL_CAP_USD == Decimal("55.00")
+    entry = reserve(ledger)
+    assert ledger["budget_usd"] == "55.00"
+    assert ledger["reservations"][:-1] == original
+    assert ledger["reserved_total_usd"] == "37.00"
+    assert entry["reserved_usd"] == "0.29"
+    for total in ("54.99", "55.01"):
+        exhausted = historical_ledger(total)
+        unchanged = deepcopy(exhausted)
+        with pytest.raises(RuntimeError, match="55.00"):
+            reserve(exhausted)
+        assert exhausted == unchanged
 
 
 def test_completed_job_cannot_be_repeated_or_downgraded_by_failure_cleanup():
@@ -190,14 +214,24 @@ def test_selected_wall_timeout_and_reservation_share_exact_profile():
     live = RATES | {"egress_gib_cost": "0.04000"}
     short = runner.reservation_guard("joint", live, 600)
     long = runner.reservation_guard("freeze", live, 900)
+    extended = runner.reservation_guard("joint", live, 1800)
     assert short["resource_spec"]["seconds"] == 600 and short["reserved_usd"] == "0.22"
     assert long["resource_spec"]["seconds"] == 900 and long["reserved_usd"] == "0.30"
+    assert extended["resource_spec"]["seconds"] == 1800 and extended["reserved_usd"] == "0.54"
+    assert Decimal(extended["bounded_compute_usd"]) == Decimal("1802") * Decimal("0.95860") / Decimal("3600")
+    assert runner.resource_spec("prepare")["seconds"] == 300
+    assert runner.resource_spec("release")["seconds"] == 600
+    runner.validate_job({"schema_version": 1, "stage": "pretrain", "wall_seconds": 1800, "max_seconds": 1620})
+    with pytest.raises(ValueError, match="180 seconds"):
+        runner.validate_job({"schema_version": 1, "stage": "pretrain", "wall_seconds": 1800, "max_seconds": 1621})
+    with pytest.raises(RuntimeError, match="per-attempt"):
+        runner.reservation_guard("joint", live | {"gpu_hour_cost_l4": "10"}, 1800)
     ledger = historical_ledger()
     entry = reserve(ledger, job={"schema_version": 1, "stage": "pretrain", "wall_seconds": 600, "max_seconds": 420})
     assert entry["compute_guard"]["resource_spec"]["seconds"] == 600
     with pytest.raises(ValueError, match="180 seconds"):
         runner.validate_job({"schema_version": 1, "stage": "pretrain", "wall_seconds": 600, "max_seconds": 421})
-    with pytest.raises(ValueError, match="600 or 900"):
+    with pytest.raises(ValueError, match="600, 900 or 1800"):
         runner.validate_job({"schema_version": 1, "stage": "pretrain", "wall_seconds": 1200})
 
 
@@ -218,7 +252,7 @@ def test_live_ledger_probe_is_read_only_client_api_and_preserves_raw_history(mon
     )
     monkeypatch.setitem(sys.modules, "modal", modal)
     evidence = runner.read_live_ledger()
-    assert evidence["remaining_reserved_budget_usd"] == "2.88"
+    assert evidence["remaining_reserved_budget_usd"] == "17.88"
     assert evidence["ledger"]["reservations"][0]["status"] == "failed"
     assert evidence["remote_container_started"] is False
     assert evidence["ledger_written"] is False
@@ -447,6 +481,34 @@ def test_data_archive_checks_bytes_hash_and_member_paths(tmp_path):
         file, package = archive(tmp_path, members)
         with pytest.raises(ValueError):
             transport.unpack_verified_archive(file, tmp_path / "bad", package)
+
+
+def test_local_gpu_archive_uses_identical_record_paths_and_hashes_without_volume_reads(tmp_path, monkeypatch):
+    records, pixels = b'{"split":"train"}\n', b"actual asset bytes"
+    file, package = archive(
+        tmp_path, [("train.jsonl", records, tarfile.REGTYPE), ("images/item.png", pixels, tarfile.REGTYPE)]
+    )
+    record = {"path": "train.jsonl", "bytes": len(records), "sha256": runner.hashlib.sha256(records).hexdigest()}
+    asset = {"path": "images/item.png", "bytes": len(pixels), "sha256": runner.hashlib.sha256(pixels).hexdigest()}
+    manifest = {"package": package, "records": [record], "assets": [asset], "model_config": {}}
+
+    def volume_read_forbidden(*args):
+        raise AssertionError("GPU assets must be checked locally, not through the Volume")
+
+    monkeypatch.setattr(runner, "data_root", volume_read_forbidden)
+    root, timing = runner.local_readiness(manifest, "a" * 64, file, tmp_path / "local")
+    assert (root / record["path"]).read_bytes() == records and (root / asset["path"]).read_bytes() == pixels
+    assert timing["status"] == "complete" and timing["record_files_verified"] == timing["asset_files_verified"] == 1
+    assert timing["archive_sha256"] == package["sha256"] and timing["total_seconds"] >= 0
+    train = module("train")
+    command = runner.trainer_command({"stage": "pretrain"}, manifest, root, tmp_path / "out", "batch")
+    parsed = train.parser().parse_args(command[2:])
+    assert parsed.records == [str(root / "train.jsonl")] and parsed.asset_dir == str(root)
+    changed = manifest | {"assets": [asset | {"sha256": "f" * 64}]}
+    with pytest.raises(ValueError, match="Size/hash mismatch"):
+        runner.local_readiness(changed, "a" * 64, file, tmp_path / "changed")
+    with pytest.raises(FileNotFoundError):
+        runner.local_readiness(manifest, "a" * 64, tmp_path / "missing.tar.gz", tmp_path / "missing")
 
 
 def test_public_release_rejects_resume_checkpoint_and_unreviewed_bytes(tmp_path):
