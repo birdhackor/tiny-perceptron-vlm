@@ -3,6 +3,7 @@
 import copy
 import json
 import signal
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -556,3 +557,50 @@ def test_split_groups_must_stay_together(corpus):
     path.write_text("\n".join(json.dumps(r) for r in records))
     with pytest.raises(ValueError, match="跨 split"):
         read_records([path])
+
+
+@pytest.mark.parametrize(
+    "shared_path,before,after",
+    [
+        (
+            "tiny_perceptron/attention.py",
+            "key_positions[None, :] <= query_positions[:, None]",
+            "key_positions[None, :] < query_positions[:, None]",
+        ),
+        ("tiny_perceptron/multimodal.py", "clamp(min=1e-8).log()", "clamp(min=1e-4).log()"),
+    ],
+)
+def test_protocol_binds_shared_attention_logmel_and_inference_sources(
+    tmp_path, monkeypatch, shared_path, before, after
+):
+    repository = Path(evaluate.__file__).resolve().parents[2]
+    snapshot = tmp_path / "runtime"
+    paths = list((repository / "tiny_perceptron").rglob("*.py"))
+    paths += [repository / "scripts/selftrained" / name for name in ("train.py", "evaluate.py", "chat.py")]
+    for source in paths:
+        destination = snapshot / source.relative_to(repository)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(source.read_bytes())
+    monkeypatch.setattr(evaluate, "__file__", str(snapshot / "scripts/selftrained/evaluate.py"))
+    original = evaluate.code_fingerprints()
+    for dependency in (
+        "tiny_perceptron/model.py",
+        "tiny_perceptron/modern.py",
+        "tiny_perceptron/data.py",
+        "tiny_perceptron/multimodal.py",
+        "tiny_perceptron/attention.py",
+        "tiny_perceptron/selftrained/inference.py",
+        "scripts/selftrained/chat.py",
+    ):
+        assert dependency in original
+    operations = snapshot / "scripts/selftrained/modal_runner.py"
+    operations.write_text("# 操作收據變動不改模型執行契約。\n", encoding="utf-8")
+    assert evaluate.code_fingerprints() == original
+    dependency = snapshot / shared_path
+    source = dependency.read_text(encoding="utf-8")
+    assert before in source
+    dependency.write_text(source.replace(before, after), encoding="utf-8")
+    current = evaluate.code_fingerprints()
+    assert original[shared_path] != current[shared_path]
+    with pytest.raises(ValueError, match="code_sha256"):
+        evaluate.validate_protocol({"code_sha256": original}, {"code_sha256": current})
