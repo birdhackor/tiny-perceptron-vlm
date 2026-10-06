@@ -1,0 +1,57 @@
+name: Publish course
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: course-pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+      - name: Fetch the exact LFS datasets cited by factual reviews
+        run: git lfs pull --include="assets/training/ultrafeedback-dpo-v1.tar.gz,assets/training/selftrained-v2.tar.gz" --exclude=""
+      - uses: astral-sh/setup-uv@v10.2.0
+      - run: uv sync --frozen --extra cpu --group notebook --group site
+      - run: .venv/bin/python scripts/build_course.py --check
+      - name: Require an independent reader review of every current section
+        run: .venv/bin/python scripts/check_course_reviews.py
+      - name: Require a separate factual review with current evidence for every section
+        run: .venv/bin/python scripts/check_technical_reviews.py
+      - name: Check this review round and all source introductions
+        run: .venv/bin/python docs/review-tools/check_review_round.py
+      - name: Register notebook kernel
+        run: .venv/bin/python -m ipykernel install --sys-prefix --name tiny-perceptron --display-name "Tiny Perceptron"
+      - name: Execute every lesson in an independent CPU kernel
+        # Jupyter選取TCP連接埠到kernel綁定之間有空窗；runner並行啟動曾發生衝突。
+        run: .venv/bin/python scripts/check_notebooks.py --mode kernel --workers 1
+      - name: Build Zensical website with verified outputs
+        run: .venv/bin/python scripts/export_course.py --executed outputs/notebooks --require-reading-times --revision "$GITHUB_SHA"
+      - name: Check links and lesson downloads
+        run: .venv/bin/python scripts/check_site.py
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: outputs/site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5
