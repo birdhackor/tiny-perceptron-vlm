@@ -3,6 +3,10 @@
 import importlib.util
 import io
 import json
+import os
+import pickle
+import shutil
+import subprocess
 import sys
 import tarfile
 from copy import deepcopy
@@ -31,6 +35,33 @@ RATES = {
     "gpu_hour_cost_l4": "0.80000",
     "egress_gib_cost": "0.00",
 }
+
+
+def test_remote_basename_helper_import_requires_both_image_search_paths(tmp_path, monkeypatch):
+    # Modal cloudpickle stores these global helpers as ordinary module refs;
+    # stdlib pickle exercises the same import behavior without cloud access.
+    source = ROOT / "scripts/selftrained/modal_runner.py"
+    spec = importlib.util.spec_from_file_location("modal_runner", source)
+    imported = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, "modal_runner", imported)
+    spec.loader.exec_module(imported)
+    payload = tmp_path / "helper.pickle"
+    payload.write_bytes(pickle.dumps(imported.ledger_total, protocol=4))
+    image_root = tmp_path / "repo"
+    scripts = image_root / "scripts/selftrained"
+    scripts.mkdir(parents=True)
+    shutil.copyfile(source, scripts / "modal_runner.py")
+    code = "import pickle,sys; f=pickle.load(open(sys.argv[1],'rb')); print(f({'reserved_total_usd':'36.20','reservations':[{'reserved_usd':'36.20'}]}))"
+    env = {"PATH": os.environ.get("PATH", ""), "PYTHONPATH": str(image_root)}
+    failed = subprocess.run(
+        [sys.executable, "-c", code, str(payload)], cwd=tmp_path, env=env, capture_output=True, text=True
+    )
+    assert failed.returncode != 0 and "No module named 'modal_runner'" in failed.stderr
+    env["PYTHONPATH"] = str(image_root) + os.pathsep + str(scripts)
+    loaded = subprocess.run(
+        [sys.executable, "-c", code, str(payload)], cwd=tmp_path, env=env, capture_output=True, text=True, check=True
+    )
+    assert loaded.stdout.strip() == "36.20"
 
 
 def historical_ledger(total="36.20"):
