@@ -1,0 +1,309 @@
+OWN PRIOR REPORT TOP-LEVEL KEYS/TYPES {"schema_version": "int", "review_stage": "str", "lesson_id": "str", "source": "str", "source_sha256": "str", "reviewer_task": "str", "reviewer_context": "str", "author_tasks": "list", "verdict": "str", "figure_sha256": "dict", "reviewed_on": "str", "frozen_input": "dict", "read_scope": "str", "claims": "list", "sources": "list", "artifacts": "list", "issues": "list", "checks": "dict"}
+CURRENT T.2 RAW SECTION ## T.2 先讓一組資料走過模型
+
+模型還沒更新前，先讓一批材料進去，確認它能算出有限代價，參數也收到更新方向。這像開工前先試機器的通路；它不是能力考試。
+
+下面三行分別檢查文字接續（text）、助手示範回答（sft）與圖片問答（vision），選一條即可。沒有 `--train` 時，工具只做前向與反向，不更新、不保存訓練權重。
+
+```bash
+python scripts/train.py --task text --device cpu
+python scripts/train.py --task sft --device cpu
+python scripts/train.py --task vision --device cpu
+```
+
+前向用目前參數預測，反向計算代價對參數的敏感度；真正調整要由更新工具執行。
+
+先看報告的幾個欄位：
+
+| 欄位 | 這一步要確認什麼 |
+| --- | --- |
+| `mode` | 應為 `dry-run-no-weight-update` |
+| `task`、`device` | 與命令選擇相符 |
+| `loss` | 是有限數字，沒有 NaN 或無窮大 |
+| `grad_norm` | 有限且大於零，表示至少有參數收到非零梯度 |
+| `effective_tokens` | 若入口有統計，確認有效計分位置大於零 |
+
+這個圖片入口未統計最後一欄，可能寫 `null`；它表示未提供數量，不能讀成零個目標。`grad_norm` 大於零也沒有證明每個參數都有梯度。要查特定零件，回到[5.1](chapters/05.md#5.1)或[10.7 的回答位置](chapters/10.md#10.7)看逐項檢查。
+
+選一條命令，把模式、代價和梯度大小記下來。能解釋「通路已工作，但尚未更新」後，才進入訓練。
+
+
+CURRENT NECESSARY 5.1 SLICE ## 5.1 訓練迴圈真的正常嗎？
+
+「狗看貓，」是一條固定短句。我們把句號、狗、看、貓、逗號依序編成0、1、2、3、4；給模型「狗看貓」，要求三個位置分別接「看、貓、逗號」。先只練這一道題：如果連它的代價都降不下來，就值得檢查更新流程，再擴大資料。
+
+下面用已組好的TinyLM，字表5項、每位置8個特徵、最多8位置。X是[1,2,3]，下一項答案Y是[2,3,4]。AdamW是依梯度調參數的工具，此處衰減設0，先觀察清梯度、算代價、求梯度、更新四步。
+
+```python
+import torch
+from tiny_perceptron.model import TinyLM, ModelConfig, masked_loss
+
+torch.manual_seed(42)
+model = TinyLM(ModelConfig(vocab_size=5, width=8, max_length=8))
+x = torch.tensor([[1, 2, 3]])
+y = torch.tensor([[2, 3, 4]])
+optimizer = torch.optim.AdamW(model.parameters(), lr=0.03, weight_decay=0.0)
+before = masked_loss(model(x)["logits"], y).item()
+for step in range(40):
+    optimizer.zero_grad()
+    loss = masked_loss(model(x)["logits"], y)
+    loss.backward()
+    if step == 0:
+        print("第一步embedding梯度大小", model.embedding.weight.grad.norm().item())
+    optimizer.step()
+after = masked_loss(model(x)["logits"], y).item()
+print("固定例子代價", before, "→", after)
+assert after < before
+```
+
+`model.parameters()` 交給優化器模型全部可調數字。每次先清舊梯度，再前向算新預測與loss、`backward` 求導、`step` 更新，四步順序與 [1.12](01.md#1.12)、[1.13](01.md#1.13) 對上。最後重新算更新後代價，應明顯低於開始；精確小數依PyTorch環境而異。
+
+`model.embedding`是輸入編號查向量的工具，`embedding.weight`是它保存的可調數字表：本例有5列，每列8個數，詳見[2.1的查表](02.md#2.1)。`.grad`保存這張表各格收到的更新訊號；`.norm()`把訊號各格平方加總再開根，得到一個大小。第一步這個大小應為正，說明答案代價已對字向量表產生影響。
+
+梯度大小大於0，只說這張表收到訊號；代價下降才說明更新改善了固定題。若代價不動，依序看優化器是否拿到對的參數、step是否執行、梯度是否在更新前被清掉。固定題刻意允許記憶；新題改善需要另留資料。
+
+練習把答案y的三格都改成-100。這個工具約定-100表示忽略答案，所以三格都忽略等於沒有學習目標。先預測 `masked_loss` 會直接報錯「所有labels都被忽略」，再執行核對；這次不應顯示成功下降的報告。流程拒絕空目標，才能避免把沒有訓練假裝成訓練完成。
+
+
+NECESSARY CONTEXT DIFF --- prior-5.1-necessary-slice
++++ current-5.1-necessary-slice
+@@ -30,7 +30,7 @@
+ 
+ `model.embedding`是輸入編號查向量的工具，`embedding.weight`是它保存的可調數字表：本例有5列，每列8個數，詳見[2.1的查表](02.md#2.1)。`.grad`保存這張表各格收到的更新訊號；`.norm()`把訊號各格平方加總再開根，得到一個大小。第一步這個大小應為正，說明答案代價已對字向量表產生影響。
+ 
+-梯度為正只說這張表收到訊號，代價下降再說更新改善了固定題。若代價不動，依序看優化器是否拿到對的參數、step是否執行、梯度是否在更新前被清掉。固定題刻意允許記憶；新題改善需要另留資料。
++梯度大小大於0，只說這張表收到訊號；代價下降才說明更新改善了固定題。若代價不動，依序看優化器是否拿到對的參數、step是否執行、梯度是否在更新前被清掉。固定題刻意允許記憶；新題改善需要另留資料。
+ 
+ 練習把答案y的三格都改成-100。這個工具約定-100表示忽略答案，所以三格都忽略等於沒有學習目標。先預測 `masked_loss` 會直接報錯「所有labels都被忽略」，再執行核對；這次不應顯示成功下降的報告。流程拒絕空目標，才能避免把沒有訓練假裝成訓練完成。
+ 
+
+CURRENT CONTEXT NECESSARY AST CALLS [{"method": "backward", "fence_line": 13, "expression": "loss.backward()"}, {"method": "step", "fence_line": 16, "expression": "optimizer.step()"}, {"method": "norm", "fence_line": 15, "expression": "model.embedding.weight.grad.norm()"}]
+OWN MEASUREMENT TOP-LEVEL KEYS/TYPES {"environment": "dict", "original_train_sha256": "str", "offline_environment": "dict", "records": "list", "bounded_variation": "dict", "scope": "str"}
+OWN PRIOR RAW MEASUREMENT POINTERS {
+  "/environment": {
+    "python": "3.13.5",
+    "torch": "2.14.1+cpu",
+    "torch_git_version": "5c4886908584029761b579af026dcfb627c84070",
+    "cuda_build": "None",
+    "device": "cpu",
+    "cpu_threads_per_command": "main sets min(4, current_threads)"
+  },
+  "/original_train_sha256": "b5fac95d20691f28bca8c0e9d01b63eef1b52667e79f15eb90927c645f3b529e",
+  "/bounded_variation": {
+    "loss": 1.0,
+    "parameter_before": 2.0,
+    "parameter_after_backward_and_clip": 2.0,
+    "gradient_before_clipping": 2.0,
+    "returned_total_norm": 2.0,
+    "unused_parameter_gradient": null
+  },
+  "/records/0/task": "text",
+  "/records/0/command_argv": [
+    "/workspace/tiny-perceptron-vlm/.venv/bin/python",
+    "scripts/train.py",
+    "--task",
+    "text",
+    "--device",
+    "cpu"
+  ],
+  "/records/0/exit_code": 0,
+  "/records/0/entry": {
+    "step": 1,
+    "loss": 5.752984046936035,
+    "effective_tokens": 111,
+    "grad_norm": 1.026832938194275
+  },
+  "/records/0/observations/optimizer_step_calls": 0,
+  "/records/0/observations/save_checkpoint_calls": 0,
+  "/records/0/observations/torch_save_calls": 0,
+  "/records/0/observations/changed_parameter_tensors": 0,
+  "/records/0/observations/gradient_norm": {
+    "parameter_tensors": 17,
+    "with_gradient": 17,
+    "without_gradient": 0,
+    "with_nonzero_gradient": 17,
+    "manual_float64_l2_before_clipping": 1.0268329500062614,
+    "reported_float32_l2_before_clipping": 1.026832938194275
+  },
+  "/records/0/observations/scored_positions_in_batch": 111,
+  "/records/1/task": "sft",
+  "/records/1/command_argv": [
+    "/workspace/tiny-perceptron-vlm/.venv/bin/python",
+    "scripts/train.py",
+    "--task",
+    "sft",
+    "--device",
+    "cpu"
+  ],
+  "/records/1/exit_code": 0,
+  "/records/1/entry": {
+    "step": 1,
+    "loss": 5.465846538543701,
+    "effective_tokens": 8,
+    "grad_norm": 2.765058994293213
+  },
+  "/records/1/observations/optimizer_step_calls": 0,
+  "/records/1/observations/save_checkpoint_calls": 0,
+  "/records/1/observations/torch_save_calls": 0,
+  "/records/1/observations/changed_parameter_tensors": 0,
+  "/records/1/observations/gradient_norm": {
+    "parameter_tensors": 17,
+    "with_gradient": 17,
+    "without_gradient": 0,
+    "with_nonzero_gradient": 17,
+    "manual_float64_l2_before_clipping": 2.765059824862742,
+    "reported_float32_l2_before_clipping": 2.765058994293213
+  },
+  "/records/1/observations/scored_positions_in_batch": 8,
+  "/records/2/task": "vision",
+  "/records/2/command_argv": [
+    "/workspace/tiny-perceptron-vlm/.venv/bin/python",
+    "scripts/train.py",
+    "--task",
+    "vision",
+    "--device",
+    "cpu"
+  ],
+  "/records/2/exit_code": 0,
+  "/records/2/entry": {
+    "step": 1,
+    "loss": 5.961961269378662,
+    "effective_tokens": null,
+    "grad_norm": 1.8985438346862793
+  },
+  "/records/2/observations/optimizer_step_calls": 0,
+  "/records/2/observations/save_checkpoint_calls": 0,
+  "/records/2/observations/torch_save_calls": 0,
+  "/records/2/observations/changed_parameter_tensors": 0,
+  "/records/2/observations/gradient_norm": {
+    "parameter_tensors": 34,
+    "with_gradient": 26,
+    "without_gradient": 8,
+    "with_nonzero_gradient": 26,
+    "manual_float64_l2_before_clipping": 1.8985441444777962,
+    "reported_float32_l2_before_clipping": 1.8985438346862793
+  },
+  "/records/2/observations/scored_positions_in_batch": 28
+}
+CURRENT INSPECTION ENVIRONMENT {"python": "3.13.5", "python_executable": "/workspace/tiny-perceptron-vlm/.venv/bin/python", "torch_distribution": "2.14.1+cpu", "torch_git_version": "5c4886908584029761b579af026dcfb627c84070", "cuda_build": "None", "inspection_kind": "CPU metadata, bytes, AST and JSON only; original model/CLI runs deliberately not replayed"}
+PRESERVED ORIGINAL AUTHORITY official-sources/torch__nn__utils__clip_grad.py--_get_total_norm.txt @_no_grad
+def _get_total_norm(
+    tensors: _tensor_or_tensors,
+    norm_type: float = 2.0,
+    error_if_nonfinite: bool = False,
+    foreach: bool | None = None,
+) -> torch.Tensor:
+    r"""Compute the norm of an iterable of tensors.
+
+    The norm is computed over the norms of the individual tensors, as if the norms of
+    the individual tensors were concatenated into a single vector.
+
+    Args:
+        tensors (Iterable[Tensor] or Tensor): an iterable of Tensors or a
+            single Tensor that will be normalized
+        norm_type (float): type of the used p-norm. Can be ``'inf'`` for
+            infinity norm.
+        error_if_nonfinite (bool): if True, an error is thrown if the total
+            norm of :attr:`tensors` is ``nan``, ``inf``, or ``-inf``.
+            Default: ``False``
+        foreach (bool): use the faster foreach-based implementation.
+            If ``None``, use the foreach implementation for CUDA and CPU native tensors and silently
+            fall back to the slow implementation for other device types.
+            Default: ``None``
+
+    Returns:
+        Total norm of the tensors (viewed as a single vector).
+    """
+    if isinstance(tensors, torch.Tensor):
+        tensors = [tensors]
+    else:
+        tensors = list(tensors)
+    norm_type = float(norm_type)
+    if len(tensors) == 0:
+        return torch.tensor(0.0)
+    first_device = tensors[0].device
+    grouped_tensors: dict[
+        tuple[torch.device, torch.dtype], tuple[list[list[Tensor]], list[int]]
+    ] = _group_tensors_by_device_and_dtype(  # pyrefly: ignore [bad-assignment]
+        [tensors]  # type: ignore[list-item]
+    )  # type: ignore[assignment]
+
+    norms: list[Tensor] = []
+    for (device, _), ([device_tensors], _) in grouped_tensors.items():
+        if (foreach is None and _has_foreach_support(device_tensors, device)) or (
+            foreach and _device_has_foreach_support(device)
+        ):
+            norms.extend(torch._foreach_norm(device_tensors, norm_type))
+        elif foreach:
+            raise RuntimeError(
+                f"foreach=True was passed, but can't use the foreach API on {device.type} tensors"
+            )
+        else:
+            norms.extend(
+                [torch.linalg.vector_norm(g, norm_type) for g in device_tensors]
+            )
+
+    total_norm = torch.linalg.vector_norm(
+        torch.stack([norm.to(first_device) for norm in norms]), norm_type
+    )
+
+    if error_if_nonfinite and torch.logical_or(total_norm.isnan(), total_norm.isinf()):
+        raise RuntimeError(
+            f"The total norm of order {norm_type} for gradients from "
+            "`parameters` is non-finite, so it cannot be clipped. To disable "
+            "this error and scale the gradients by the non-finite norm anyway, "
+            "set `error_if_nonfinite=False`"
+        )
+    return total_norm
+
+PRESERVED ORIGINAL AUTHORITY official-sources/torch__nn__utils__clip_grad.py--clip_grad_norm_.txt @_no_grad
+def clip_grad_norm_(
+    parameters: _tensor_or_tensors,
+    max_norm: float,
+    norm_type: float = 2.0,
+    error_if_nonfinite: bool = False,
+    foreach: bool | None = None,
+) -> torch.Tensor:
+    r"""Clip the gradient norm of an iterable of parameters.
+
+    The norm is computed over the norms of the individual gradients of all parameters,
+    as if the norms of the individual gradients were concatenated into a single vector.
+    Gradients are modified in-place.
+
+    This function is equivalent to :func:`torch.nn.utils.get_total_norm` followed by
+    :func:`torch.nn.utils.clip_grads_with_norm_` with the ``total_norm`` returned by ``get_total_norm``.
+
+    Args:
+        parameters (Iterable[Tensor] or Tensor): an iterable of Tensors or a
+            single Tensor that will have gradients normalized
+        max_norm (float): max norm of the gradients
+        norm_type (float, optional): type of the used p-norm. Can be ``'inf'`` for
+            infinity norm. Default: 2.0
+        error_if_nonfinite (bool, optional): if True, an error is thrown if the total
+            norm of the gradients from :attr:`parameters` is ``nan``,
+            ``inf``, or ``-inf``. Default: False
+        foreach (bool, optional): use the faster foreach-based implementation.
+            If ``None``, use the foreach implementation for CUDA and CPU native tensors and silently
+            fall back to the slow implementation for other device types.
+            Default: ``None``
+
+    Returns:
+        Total norm of the parameter gradients (viewed as a single vector).
+    """
+    if isinstance(parameters, torch.Tensor):
+        parameters = [parameters]
+    else:
+        is_generator = isinstance(parameters, types.GeneratorType)
+        # prevent generators from being exhausted
+        parameters = list(parameters)
+        if is_generator and len(parameters) == 0:
+            warnings.warn(
+                "`parameters` is an empty generator, no gradient clipping will occur.",
+                stacklevel=3,
+            )
+    grads = [p.grad for p in parameters if p.grad is not None]
+    total_norm = _get_total_norm(grads, norm_type, error_if_nonfinite, foreach)
+    _clip_grads_with_norm_(parameters, max_norm, total_norm, foreach)
+    return total_norm
+
+INSPECTION FINAL {"primary_sha256": "ca8dd78a47909aeac6a194e0c2ae6e7a81b2f72aeb2b35df6f6d08ff19de23b2", "necessary_context_section_sha256": "da9beb62d3f126b3b95740bc56d1fe20c9c3cc99261a69078ea6f4c5ada49332", "necessary_slice_sha256": "602fedcbc4026f14de31f37a1f4eb3fa475cd013607d1a2f9b355285d4d6eef1", "prior_artifacts_verified": 32, "runtime_sources_verified": 5, "inspection_sha256": "5af26ddf3bb7eb8dbea16761c89395f7d27104dd7e0da85c1f800605cdb78f2b"}
