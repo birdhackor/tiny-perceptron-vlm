@@ -1,0 +1,48 @@
+## 19.7 計算器算對，為什麼助理還可能答錯？
+
+舊合成任務曾請求「0+1」，工具回1，助理卻答0，整題仍失敗。工具迴圈有三件要連續完成的事：模型選對工具與參數，程式真正執行，把真結果回填後由同一模型再回答。直接把程式的結果送到畫面，只驗收了計算器，省略了模型讀結果。
+
+![工具往返的期待路徑示意：模型請求、程式計算、回填結果與模型再回答依次發生；真正驗收時每一步留下實際輸出。](../figures/rewrite-19-tool-roundtrip.svg)
+
+以下人工給出請求，工具則真的執行。協定仍是舊短格式，不把生成文字交給 `eval`：
+
+```python
+from tiny_perceptron.capstone import calculator_runtime, parse_action
+
+trace = {"raw": "TOOL:calculator:1+2", "eos": True}
+action = parse_action(trace)
+print("解析後的請求", action)
+for available in (True, False):
+    result = calculator_runtime(action, available=available)
+    print("計算器可用", available, "實際執行結果", result)
+print("還沒有模型讀回結果，也沒有最終模型答案")
+```
+
+解析得到 calculator、a=1、b=2；可用時執行器回結果3，關閉時回錯誤。這段沒有模型的第一或第二次生成。把工具名換成 unknown，解析與獲準執行也是兩個關卡。
+
+共同成品要保存模型原始請求、合法性檢查、真執行結果、回填訊息與第二次模型回答。新對話可用 tool 角色回填並帶呼叫對應；現有 `run_assistant` 的舊局部實作則把「原題、計算器回報、請回答」放成新 user 前文。兩者都要揭露，不能把短格式說成已實現完整工具角色協定。
+
+判分時先查請求參數，再查正常工具結果，最後查模型是否據此作答。可另外在測試用回放中替換返回值，觀察回答是否跟著變；這是讀回依賴檢查，正常答對率仍使用真計算器結果。工具關閉的題目則要能說明未執行，而不是產生看似有效的呼叫就算完成。
+
+<details>
+<summary>補充：舊工具迴圈的真生成與讀回失敗</summary>
+
+SFT驗證中的「4+4等於多少？」真的走完了這條迴圈：模型先產生`TOOL:calculator:4+4`，程式實際回傳`8`，同一模型讀回結果後產生`DIRECT:8`，兩次生成都正常結束。這裡的最後8是模型生成的內容，沒有用程式結果冒充模型回答。
+
+工具關閉時是否不執行、獨立提供結果後能否讀回，另有自己的題組；不能把回填題加進完整工具迴圈的題數。數字家族雖與訓練分開，問法仍是固定模板，這些觀察不代表任意自然語言計算題都能正確選工具。[SFT完整紀錄](https://github.com/birdhackor/tiny-perceptron-vlm/blob/1df335318bda03fd771807f66976953231d5a00b/docs/course-experiments/capstone-evidence/sft/validation.json)保留請求、執行結果與兩次生成，可逐項核對。
+
+joint共同訓練版與後續DPO分支在同一份驗證中也保留了這些工具行為。DPO是用[好壞回答配對](13.md#13.2)做偏好訓練的方法。這裡沒有觀察到新增圖音輸入破壞固定題型的工具流程，但圖音能力仍需分開檢查。定版後的各項工具分母統一見[19.12](19.md#19.12)。
+
+最後檢查真的出現了驗證沒看到的讀回失敗。推薦joint對12個計算請求都產生正確工具名、數字與順序，程式也全部執行成功，最後同一模型卻只答對10／12。兩次失敗如下，兩次最後生成都有EOS，所以不是只差一個結束符號。
+
+| 原問題 | 模型請求／工具真結果 | 模型讀回後生成 | 結果 |
+| --- | --- | --- | --- |
+| 0+1等於多少？ | `TOOL:calculator:0+1`／`1` | `DIRECT:0` | 工具正確，回答錯誤 |
+| 請算1加0。 | `TOOL:calculator:1+0`／`1` | `DIRECT:111` | 工具正確，回答錯誤 |
+
+這兩次失敗能區分「知道這類題該用工具」與「可靠讀回結果」：工具請求及執行正確，不保證模型最後答對。
+
+[正式逐題工具紀錄](https://github.com/birdhackor/tiny-perceptron-vlm/blob/1df335318bda03fd771807f66976953231d5a00b/docs/course-experiments/capstone-evidence/deployment/test-joint.json)保留請求、實際結果與最後生成；[原始資料](https://github.com/birdhackor/tiny-perceptron-vlm/blob/1df335318bda03fd771807f66976953231d5a00b/docs/course-experiments/capstone-evidence/deployment/data.json)可按`id`查問句。這仍是固定加法模板的工具策略，不是模型已會校準所有任務的不確定性。
+
+</details>
+
