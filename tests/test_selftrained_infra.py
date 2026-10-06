@@ -745,8 +745,12 @@ def test_joint_freeze_backbones_reaches_actual_trainer_cli(tmp_path, monkeypatch
     train = module("train")
     monkeypatch.setattr(runner, "artifact_path", lambda batch, item: tmp_path / item["path"])
     manifest = {"records": [{"path": "records/text.jsonl"}], "model_config": {}}
-    job = {"schema_version": 1, "stage": "joint", "init_checkpoint": descriptor("audio"),
-           "freeze_perception_backbones": True}
+    job = {
+        "schema_version": 1,
+        "stage": "joint",
+        "init_checkpoint": descriptor("audio"),
+        "freeze_perception_backbones": True,
+    }
     runner.validate_job(job)
     parsed = train.parser().parse_args(runner.trainer_command(job, manifest, tmp_path, tmp_path / "out", "batch")[2:])
     assert parsed.freeze_perception_backbones is True
@@ -768,8 +772,12 @@ def test_joint_family_sampling_reaches_actual_trainer_and_default_stays_bucket(t
     train = module("train")
     monkeypatch.setattr(runner, "artifact_path", lambda batch, item: tmp_path / item["path"])
     manifest = {"records": [{"path": "records/text.jsonl"}], "model_config": {}}
-    job = {"schema_version": 1, "stage": "joint", "init_checkpoint": descriptor("audio"),
-           "sampling_mode": "task-family"}
+    job = {
+        "schema_version": 1,
+        "stage": "joint",
+        "init_checkpoint": descriptor("audio"),
+        "sampling_mode": "task-family",
+    }
     runner.validate_job(job)
     parsed = train.parser().parse_args(runner.trainer_command(job, manifest, tmp_path, tmp_path / "out", "batch")[2:])
     assert parsed.sampling_mode == "task-family"
@@ -778,7 +786,9 @@ def test_joint_family_sampling_reaches_actual_trainer_and_default_stays_bucket(t
     assert parsed.sampling_mode == "bucket"
 
 
-@pytest.mark.parametrize("stage,mode", [("audio", "task-family"), ("pretrain", "task-family"), ("joint", "anything"), ("joint", None)])
+@pytest.mark.parametrize(
+    "stage,mode", [("audio", "task-family"), ("pretrain", "task-family"), ("joint", "anything"), ("joint", None)]
+)
 def test_sampling_policy_rejects_unknown_or_nonjoint_modes(stage, mode):
     job = {"schema_version": 1, "stage": stage, "sampling_mode": mode}
     if stage != "pretrain":

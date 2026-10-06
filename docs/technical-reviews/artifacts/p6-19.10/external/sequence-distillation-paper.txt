@@ -1,0 +1,655 @@
+                                                                      Sequence-Level Knowledge Distillation
+
+
+                                                            Yoon Kim                                         Alexander M. Rush
+                                                    yoonkim@seas.harvard.edu                             srush@seas.harvard.edu
+
+
+
+                                                                                        Harvard University
+arXiv:1606.07947v1 [cs.CL] 25 Jun 2016
+
+
+
+
+                                                                Abstract                          the whole system can be directly trained end-to-end
+                                                                                                  on a large set of supervised data.
+                                              Neural machine translation (NMT) offers a
+                                              novel alternative formulation of translation
+                                                                                                     While both simple and surprisingly accurate,
+                                              that is potentially simpler than statistical ap-    NMT systems typically need to be very high capac-
+                                              proaches. However to reach competitive per-         ity in order to perform well: Sutskever et al. (2014)
+                                              formance, NMT models need to be exceed-             used a 4-layer LSTM with 1000 hidden units per
+                                              ingly large. In this paper we consider applying     layer (herein 4 × 1000) and Zhou et al. (2016) ob-
+                                              knowledge distillation approaches (Bucila et        tained state-of-the-art results on English → French
+                                              al., 2006; Hinton et al., 2015) that have proven    with a 16-layer LSTM with 512 units per layer. The
+                                              successful for reducing the size of neural mod-
+                                                                                                  sheer size of the models requires cutting-edge hard-
+                                              els in other domains to the problem of NMT.
+                                              We demonstrate that standard knowledge dis-         ware for training and makes using the models on
+                                              tillation applied to word-level prediction can      standard setups very challenging.
+                                              be effective for NMT, and also introduce two           This issue of excessively large networks has been
+                                              novel sequence-level versions of knowledge          observed in several other domains, with much fo-
+                                              distillation that further improve performance,      cus on fully-connected and convolutional networks
+                                              and somewhat surprisingly, seem to elimi-
+                                                                                                  for multi-class classification. Researchers have par-
+                                              nate the need for beam search (even when ap-
+                                              plied on the original teacher model). Our best
+                                                                                                  ticularly noted that large networks seem to be nec-
+                                              student model runs 10 times faster than its         essary for training, but learn redundant representa-
+                                              state-of-the-art teacher with only a decrease of    tions in the process (Denil et al., 2013). Therefore
+                                              0.2 BLEU. It is also significantly better than      compressing deep models into smaller networks has
+                                              a baseline model trained without knowledge          been an active area of research. As deep learning
+                                              distillation: by 4.2/1.7 BLEU with greedy de-       systems obtain better results on NLP tasks, compres-
+                                              coding/beam search.                                 sion also becomes an important practical issue with
+                                                                                                  applications such as running deep learning models
+                                         1   Introduction                                         for speech and translation locally on cell phones.
+                                         Neural machine translation (NMT) (Kalchbrenner              Existing compression methods generally fall into
+                                         and Blunsom, 2013; Cho et al., 2014; Sutskever et        two categories: (1) pruning and (2) knowledge distil-
+                                         al., 2014) is a deep learning-based method for trans-    lation.1 Pruning methods (LeCun et al., 1990; Has-
+                                         lation that has recently shown promising results as      sibi and Stork, 1993; He et al., 2014; Han et al.,
+                                         an alternative to statistical approaches. NMT sys-       2016; Mariet and Sra, 2016), zero-out weights based
+                                         tems directly model the probability of the next-word        1
+                                                                                                       There has also been work on reducing the memory footprint
+                                         in the target sentence, simply by conditioning a re-     of models through quantization of weights (Chen et al., 2015;
+                                         current neural network on the source sentence and        Han et al., 2016; Courbariaux et al., 2016) as a postprocessing
+                                         previously generated target words. Under this setup,     step.
+on an importance criterion: LeCun et al. (1990) use       2     Background
+(a diagonal approximation to) the Hessian to iden-
+                                                          For notation we denote vectors with bold lower-case
+tify weights whose removal minimally impact the
+                                                          (e.g. hi , b), matrices with bold upper-case (e.g. W,
+objective function, while Han et al. (2016) remove
+                                                          U), and sets with cursive upper-case (e.g. V, T ). We
+weights based on thresholding their absolute val-
+                                                          assume words are represented by their indices.
+ues. Knowledge distillation approaches (Bucila et
+al., 2006; Ba and Caruana, 2014; Li et al., 2014;         2.1    Sequence-to-Sequence with Attention
+Hinton et al., 2015; Romero et al., 2015; Mou et
+                                                          We begin by describing our baseline NMT model,
+al., 2015) learn a smaller student network to mimic
+                                                          which was proposed by Luong et al. (2015) and
+the original teacher network by minimizing the loss
+                                                          achieved state-of-the-art results on English → Ger-
+(typically L2 or cross-entropy) between the student
+                                                          man translation. Let s = [s1 , . . . , sI ] and t =
+and teacher output.
+                                                          [t1 , . . . , tJ ] be (random variable sequences repre-
+   In this work, we investigate knowledge distilla-       senting) the source/target sentence, with I and J re-
+tion in the context of neural machine translation,        spectively being the source/target lengths. Machine
+with the goal of reducing the test-time computa-          translation involves finding the most probable target
+tion burden (as opposed to memory footprint). We          sentence given the source:
+note that NMT differs from previous work which
+has mainly explored non-recurrent models in set-                               argmax p(t | s)
+tings where the prediction is a single class. For                                t∈T
+NMT, while the model is trained on multi-class pre-
+                                                          where T is the set of all possible sequences. NMT
+diction at the word-level, it is tasked with predicting
+                                                          models parameterize p(t | s) with an encoder neural
+complete sequence outputs conditioned on previous
+                                                          network which reads the source sentence and a de-
+decisions. With this difference in mind, we experi-
+                                                          coder neural network which produces a distribution
+ment with standard knowledge distillation for NMT
+                                                          over the target sentence (one word at a time) given
+and also propose two new versions of the approach
+                                                          the source.
+that attempt to approximately match the sequence-
+level (as opposed to word-level) distribution of the      Encoder In attention-based models (Bahdanau et
+teacher network. This sequence-level approximation        al., 2015; Luong et al., 2015), the encoder reads the
+leads to a simple training procedure wherein the stu-     source sentence and outputs a sequence of vectors
+dent network is trained on the output of beam search      (one vector for each time step) to be attended to
+from the teacher network.                                 during decoding. Concretely, we use a Long Short-
+   To examine these approaches we run experiments         Term Memory (LSTM) (Hochreiter and Schmidhu-
+to compress a large state-of-the-art 4 × 1000 LSTM        ber, 1997) network to obtain the hidden states hsi ∈
+model. With sequence-level knowledge distillation         Rn for each time step i,
+we are able to learn a 2 × 500 LSTM that roughly
+matches the performance of the full system. We see                        hsi = LSTM(hsi−1 , xsi )
+similar results compressing a 2×500 model down to
+                                                          where xsi ∈ Rm is the word embedding for si ,
+2 × 100 on a smaller data set. Furthermore, we find
+                                                          the i-th word in the source sentence. Output of
+that our proposed approach has other benefits, such
+                                                          the encoder is the sequence of hidden state vectors
+as not requiring any beam search at test-time. As a
+                                                          [hs1 , . . . , hsI ]. Initial hidden state of the encoder is
+result we are able to perform greedy decoding on the
+                                                          set to zero (i.e. hs0 ← 0).
+2 × 500 model 10 times faster than beam search on
+the 4 × 1000 model, with comparable performance.          Decoder The decoder is another LSTM that pro-
+Our student models can even be run efficiently on a       duces a distribution over the next target word con-
+standard smart phone. We have released all code for       ditioned on the source vectors [hs1 , . . . , hsI ] and the
+the models described in this paper.2                      previous target words t<j = [t1 , . . . tj−1 ]. Let
+   2
+       https://github.com/harvardnlp/seq2seq-attn                         htj = LSTM(htj−1 , xtj )
+be the hidden state of the target sentence at the j-      matching the probabilities either via L2 on the log
+th time step (with xtj being the word embedding for       scale (Ba and Caruana, 2014) or by cross-entropy
+tj ). The current target hidden state htj is combined     (Li et al., 2014; Hinton et al., 2015).
+with each of the source vectors to produce attention         Concretely, assume we are learning a multi-class
+weights as follows,                                       classifier over a data set of examples of the form
+                                                          (x, y) with possible classes V. The usual training
+              uj,i = htj · Wα hsi                         criteria is to minimize NLL for each example from
+                           exp uj,i                       the training data,
+              αj,i = P
+                         k∈[1,I] exp uj,k                                     |V|
+                                                                                    1{y = k} log p(y = k | x; θ)
+                                                                              X
+where Wα are learnable parameters. The source                LNLL (θ) = −
+                                                                              k=1
+vectors are multiplied with the respective attention
+weights, summed, and interacted with the current          where 1{·} is the indicator function and p the
+decoder hidden state htj to produce a context vector      distribution from our model (parameterized by θ).
+cj ,                                                      This objective can be seen as minimizing the cross
+                       X                                  entropy between the degenerate data distribution
+               vj =             αj,i hsi                  (which has all of its probability mass on one class)
+                      i∈[1,I]                             and the model distribution p(y | x; θ).
+               cj = tanh(W[vj ; htj ])                       In knowledge distillation, we assume access to
+                                                          a learned teacher distribution q(y | x; θT ), possibly
+   Probability distribution over the next word is ob-     trained over the same data set. Instead of minimiz-
+tained by applying an affine transformation to cj fol-    ing cross entropy with the observed data, we instead
+lowed by a softmax,                                       minimize the cross entropy with the teacher’s prob-
+                                                          ability distribution,
+      p(tj+1 | s, t<j+1 ) = softmax(Ucj + b)                                           |V|
+                                                                                       X
+                                                                   LKD (θ; θT ) = −          q(y = k | x; θT )×
+where tj is the random variable for the j-th word in
+                                                                                       k=1
+the target sentence, whose support is the vocabulary
+set V. Finally, as in Luong et al. (2015) we feed cj as                             log p(y = k | x; θ)
+additional input to the decoder for the next time step    where θT parameterizes the teacher distribution and
+by concatenating it with xtj , so the decoder equation    remains fixed. Note the cross entropy setup is iden-
+is modified to,                                           tical, but the target distribution is no longer a sparse
+                                                          distribution.3 Training on q(y | x; θT ) is attractive
+           htj = LSTM(htj−1 , [xtj ; cj−1 ])              since it gives more information about other classes
+                                                          for a given data point (e.g. similarity between
+The decoder hidden state is initialized with the final
+                                                          classes) and has less variance in gradients (Hinton
+hidden state of the encoder (i.e. ht0 ← hsI ).
+                                                          et al., 2015).
+2.2   Knowledge Distillation                                 Since the latter objective has no direct term for
+                                                          the training data, it is common practice to interpolate
+Knowledge distillation describes a class of meth-
+                                                          between the two losses,
+ods for training a smaller student network to per-
+form better by learning from a larger teacher net-               L(θ; θT ) = (1 − α)LNLL (θ) + αLKD (θ; θT )
+work (in addition to learning from the training data
+                                                          where α is mixture parameter combining the one-hot
+set). We generally assume that the teacher has pre-
+                                                          distribution and the teacher distribution.
+viously been trained, and that we are estimating pa-         3
+rameters for the student.                                       In some cases the entropy of the teacher/student distribu-
+                                                          tion is increased by annealing it with a temperature term τ > 1
+   Knowledge distillation suggests training by                                                      1
+matching the student’s predictions to the teacher’s                            p̃(y | x) ∝ p(y | x) τ
+predictions. For classification this usually means        After testing τ ∈ {1, 1.5, 2} we found that τ = 1 worked best.
+Figure 1: Overview of the different knowledge distillation approaches. In word-level knowledge distillation (left) cross entropy
+is minimized between the student/teacher distributions (yellow) for each word in the actual target sequence (ECD), as well as
+between the student distribution and the degenerate data distribution, which has all of its probabilitiy mass on one word (black). In
+sequence-level knowledge distillation (center) the student network is trained on the output from beam search of the teacher network
+that had the highest score (ACF). In sequence-level interpolation (right) the student is trained on the output from beam search of
+the teacher network that had the highest sim with the target sequence (ECE).
+
+
+3     Knowledge Distillation for NMT                                actions at the sequence-level. The sequence distri-
+                                                                    bution is particularly important for NMT, because
+The large sizes of neural machine translation sys-
+                                                                    wrong predictions can propagate forward at test-
+tems make them an ideal candidate for knowledge
+                                                                    time.
+distillation approaches. In this section we explore
+                                                                       First, consider the sequence-level distribution
+three different ways this technique can be applied to
+                                                                    specified by the model over all possible sequences
+NMT.
+                                                                    t∈T,
+                                                                                            J
+3.1    Word-Level Knowledge Distillation                                         p(t | s) =
+                                                                                            Y
+                                                                                              p(tj | s, t<j )
+NMT systems are trained directly to minimize word                                                j=1
+NLL, LWORD-NLL , at each position. Therefore if we                  with J ∈ N. The sequence-level negative log-
+have a teacher model, standard knowledge distilla-                  likelihood for NMT then involves matching the one-
+tion for multi-class cross entropy can be applied. We               hot distribution over all complete sequences,
+define this distillation for a sentence as,
+                                                                                                1{t = y} log p(t | s)
+                                                                                             X
+                                                                             LSEQ-NLL = −
+                       |V|
+                     J X
+                     X                                                                           t∈T
+ LWORD-KD = −                     q(tj = k | s, t<j ) ×                            |V|
+                                                                                 J X
+                                                                                           1{yj = k} log p(tj = k | s, t<j )
+                                                                                 X
+                     j=1 k=1
+                                                                         = −
+                                  log p(tj = k | s, t<j )                        j=1 k=1
+                                                                         = LWORD-NLL
+and the student can be trained to optimize the mix-
+ture of LWORD-KD and LWORD-NLL . In the context of                  where y = [y1 , . . . , yJ ] is the observed sequence.
+NMT, we refer to this approach as word-level knowl-                 Of course, this just shows that from a negative log
+edge distillation and illustrate this in Figure 1 (left).           likelihood perspective, minimizing word-level NLL
+                                                                    and sequence-level NLL are equivalent.
+3.2    Sequence-Level Knowledge Distillation                           But now consider the case of sequence-level
+Word-level knowledge distillation allows transfer of                knowledge distillation. As before, we can simply
+these local word distributions. Ideally however, we                 replace the distribution from the data with a prob-
+would like the student model to mimic the teacher’s                 ability distribution derived from our teacher model.
+However, instead of using a single word prediction,                 To summarize, sequence-level knowledge distil-
+we use q(t | s) to represent the teacher’s sequence              lation suggests to: (1) train a teacher model, (2) run
+distribution, over the sample space of all possible              beam search over the training set with this model, (3)
+sequences,                                                       train the student network with cross entropy on this
+                       X                                         new dataset. Step (3) is identical to the word-level
+        LSEQ-KD = −       q(t | s) log p(t | s)                  NLL process except now on the newly-generated
+                          t∈T                                    data set. This is shown in Figure 1 (center).
+Interestingly, LSEQ-KD is inherently different from              3.3    Sequence-Level Interpolation
+LWORD-KD , as the sum is over an exponential num-
+                                                                 Next we consider integrating the training data back
+ber of terms.
+                                                                 into the process, such that we train the student
+   Despite its intractability, we posit that this
+                                                                 model as a mixture of our sequence-level teacher-
+sequence-level objective is worthwhile. It allows
+                                                                 generated data (LSEQ-KD ) with the original training
+the teacher the chance to assign probabilities to
+                                                                 data (LSEQ-NLL ),
+complete sequences and therefore transfer a broader
+range of knowledge. We thus consider an approxi-                           L = (1 − α)LSEQ-NLL + αLSEQ-KD
+mation of this objective.                                                     = −(1 − α) log p(y | s)
+   Our simplest approximation is to replace the                                     X
+teacher distribution q with its mode,                                           −α     q(t | s) log p(t | s)
+                                                                                       t∈T
+                  q(t | s) ∼ 1{t = ŷ}                           where y is the gold target sequence.
+where ŷ = argmaxt∈T q(t | s). Observing that                      Since the second term is intractable, we could
+finding the mode is itself intractable, we use beam              again apply the mode approximation from the pre-
+search to find an approximation. The loss is then                vious section,
+                                                                       L = −(1 − α) log p(y | s) − α log p(ŷ | s)
+                           1{t = ŷ} log p(t | s)
+                      X
+     LSEQ-KD ≈ −
+                          t∈T                                    and train on both observed (y) and teacher-
+                  = − log p(t = ŷ | s)                          generated (ŷ) data. However, this process is non-
+                                                                 ideal for two reasons: (1) unlike for standard knowl-
+where ŷ is now the output from running beam search              edge distribution, it doubles the size of the train-
+with the teacher model.                                          ing data (2) it requires training on both the teacher-
+   Using the mode seems like a poor approximation                generated sequence and the true sequence, condi-
+for the teacher distribution q(t | s), as we are ap-             tioned on the same source input. The latter concern
+proximating an exponentially-sized distribution with             is particularly problematic since we observe that y
+a single sample. However, previous results showing               and ŷ are often quite different.
+the effectiveness of beam search decoding for NMT                   As an alternative, we propose a single-sequence
+lead us to belief that a large portion of q’s mass lies          approximation that is more attractive in this setting.
+in a single output sequence. In fact, in experiments             This approach is inspired by local updating (Liang
+we find that with beam of size 1, q(ŷ | s) (on aver-            et al., 2006) and hope/fear training (Chiang, 2012),
+age) accounts for 1.3% of the distribution for Ger-              which are commonly-used methods for discrimina-
+man → English, and 2.3% for Thai → English (Ta-                  tive training in statistical machine translation (al-
+ble 1).4                                                         though to our knowledge not for knowledge distilla-
+   4
+     Additionally there are simple ways to better approximate    tion). These approaches suggest selecting a training
+q(t | s). One way would be to consider a K-best list from beam   increase the training set by a factor of K. A beam of size
+search and renormalizing the probabilities,                      5 captures 2.8% of the distribution for German → English,
+                                 q(t | s)                        and 3.8% for Thai → English. Another alternative is to use a
+                 q(t | s) ∼ P                                    Monte Carlo estimate and sample from the teacher model (since
+                                t∈TK q(t | s)
+                                                                 LSEQ-KD = Et∼q(t | s) [ − log p(t | s) ]). However in practice we
+where TK is the K-best list from beam search. This would         found the mode to work well.
+sequence which is close to y and has high probabil-
+ity under the teacher model,
+
+              ỹ = argmax sim(t, y)q(t | s)
+                       t∈T
+
+where sim is a function measuring closeness (e.g.
+Jaccard similarity or BLEU (Papineni et al., 2002)).
+Following local updating, we can approximate this
+sequence by running beam search and choosing
+
+                  ỹ ≈ argmax sim(t, y)
+                           t∈TK
+
+where TK is the K-best list from beam search.
+                                                                       Figure 2: Visualization of sequence-level interpolation on an
+We take sim to be smoothed sentence-level BLEU
+                                                                       example training sentence with a German → English model:
+(Chen and Cherry, 2014).
+                                                                       Bis 15 Tage vor Anreise sind Zimmer-Annullationen
+   We justify training on ỹ from a knowledge distil-
+                                                                       kostenlos. We run beam search and plot the final hidden state
+lation perspective with the following generative pro-
+                                                                       of the hypotheses using t-SNE and show the corresponding
+cess: suppose that there is a true target sequence
+                                                                       (smoothed) probabilities with contours. In the above example,
+(which we do not observe) that is first generated
+                                                                       the sentence that is at the top of the beam after beam search
+from the underlying data distribution D. And further
+                                                                       (green) is quite far away from gold (red), so we train the model
+suppose that the target sequence that we observe (y)
+                                                                       on a sentence that is on the beam but had the highest sim to
+is a noisy version of the unobserved true sequence:
+                                                                       gold (purple).
+i.e. (i) t ∼ D, (ii) y ∼ (t), where (t) is, for ex-
+ample, a noise function that independently replaces
+each element in t with a random element in V with                      framework in Figure 1 (right) and visualize the dis-
+some small probability.5 In such a case, ideally the                   tribution over a real example in Figure 2.
+student’s distribution should match the mixture dis-
+tribution,                                                             4       Experimental Setup
+
+           DSEQ-Inter ∼ (1 − α)D + αq(t | s)                           To test out these approaches, we conduct two sets of
+                                                                       NMT experiments: high resource (English → Ger-
+   The key difference with the previous setting is                     man) and low resource (Thai → English).
+that, due to the noise assumption, D now has sig-                         The English-German data comes from WMT
+nificant probability mass around a neighborhood of                     2014.6 The training set has 4m sentences and we
+y (not just at y), and, with the correct noise distri-                 take newstest2012/newstest2013 as the dev set and
+bution, this neighborhood corresponds to high val-                     newstest2014 as the test set. We keep the top 50k
+ues of sim. Therefore, the argmax of the noisy                         most frequent words, and replace the rest with UNK.
+mixture distribution is likely something other than y                  The teacher model is a 4 × 1000 LSTM (as in Lu-
+(the observed sequence) or ŷ (the output from beam                    ong et al. (2015)) and we train two student models:
+search). We can see that ỹ is a natural approxima-                    2 × 300 and 2 × 500. The Thai-English data comes
+tion to the argmax of this mixture distribution be-                    from IWSLT 2015.7 There are 90k sentences in the
+tween D and q(t | s) for some α. We illustrate this                    training set and we take 2010/2011/2012 data as the
+   5                                                                   dev set and 2012/2013 as the test set. We take the top
+     While we employ a simple (unrealistic) noise function for
+illustrative purposes, the generative story is quite plausible if we   25k most frequent words. Size of the teacher model
+consider a more elaborate noise function which includes addi-          is 2 × 500 (which performed better than 4 × 1000,
+tional sources of noise such as phrase reordering, replacement         3 × 750, 2 × 750 models). The student model is
+of words with synonyms, etc. One could view translation hav-           2 × 100.
+ing two sources of variance that should be modeled separately:
+                                                                           6
+variance due to the source sentence (t ∼ D), and variance due                  http://statmt.org/wmt14
+                                                                           7
+to the individual translator (y ∼ (t)).                                       https://sites.google.com/site/iwsltevaluation2015/mt-track
+   Other training details include: parameter initial-   include a word-level cross-entropy term between the
+ization over a uniform distribution with support        teacher/student (Seq-KD + Word-KD in Table 1), or
+[−0.1, 0.1]; gradient norm constraint at 5; training    fine-tune towards sequence-level interpolation start-
+for 13 epochs with learning rate equal to 1 that de-    ing from the baseline (Baseline + Seq-Inter in Table
+cays by half starting on epoch 9 (or the first epoch    1).
+at which loss does not improve on dev); early stop-
+ping on dev; dropout with probability 0.3 on the        5       Results and Discussion
+4 × 1000 and 2 × 500 models. We evaluate on tok-
+enized BLEU with multi-bleu.perl.                       Results of our experiments are shown in Table
+   We experiment with the following variations:         1. We find that while word-level knowledge dis-
+                                                        tillation (Word-KD) does improve upon the base-
+  • Word-Level Knowledge Distillation (Word-            line, sequence-level knowledge distillation (Seq-
+    KD): Student is trained on the original data and    KD) does better on English → German and per-
+    additionally trained to minimize the cross en-      forms similarly on Thai → English. Combining
+    tropy of the teacher distribution at the word-      them (Seq-KD + Word-KD) results in further gains
+    level. We tested α ∈ {0.5, 0.9} and found           for the 2 × 300 and 2 × 100 models (although not
+    α = 0.5 to work better.                             for the 2 × 500 model), indicating that these meth-
+                                                        ods provide orthogonal means of transferring knowl-
+  • Sequence-Level Knowledge Distillation               edge from the teacher to the student: Word-KD is
+    (Seq-KD): Student is trained on the teacher-        transferring knowledge at the the local (i.e. word)
+    generated data, which is the result of running      level while Seq-KD is transferring knowledge at the
+    beam search and taking the highest-scoring          global (i.e. sequence) level.
+    sequence with the teacher model. We use beam            Sequence-level interpolation (Seq-Inter), in addi-
+    size K = 5 (we did not see improvements with        tion to improving models trained via Word-KD and
+    a larger beam).                                     Seq-KD, also improves upon the original teacher
+                                                        model that was trained on the actual data but fine-
+  • Sequence-Level Interpolation (Seq-Inter):
+                                                        tuned towards Seq-Inter data (Teacher Baseline +
+    Student is trained on the sequence on the
+                                                        Seq-Inter). In fact, greedy decoding with this fine-
+    teacher’s beam that had the highest BLEU
+                                                        tuned model has similar performance (19.6) as beam
+    (beam size K = 35). We further adopt a fine-
+                                                        search with the original model (19.5), allowing
+    tuning approach where we begin training from
+                                                        for faster decoding even with an identically-sized
+    a pretrained model (either on original data or
+                                                        model.
+    Seq-KD data) and train with a smaller learn-
+                                                            We hypothesize that sequence-level knowledge
+    ing rate (0.1). We found that fine-tuning from a
+                                                        distillation is effective because it allows the student
+    pretrained model resulted in slightly better per-
+                                                        network to model parts of the teacher distribution
+    formance than training on Seq-Inter data from
+                                                        that are reachable (i.e. around the teacher’s mode)
+    scratch.
+                                                        instead of ‘wasting’ parameters on trying to fit the
+The teacher model had a tendency to erroneously         actual target sequence (which may be too hard).8 We
+produce consecutive UNK tokens on some sentences        confirm that this is indeed the case: student models
+and therefore we discard sentences that had more        trained on original data (baseline/Word-KD) have
+than 25% UNK tokens on the teacher-generated data       substantially lower perplexity (calculated on the test
+(which corresponded to approximately 1% of the          set) than Seq-KD models (Table 1: PPL), indicat-
+corpus). For English-German we generate Seq-Inter       ing that baseline models are able to assign higher
+data on a smaller portion of the training set (∼ 50%)   probabilities to reference translations. However, the
+for efficiency.                                         probability mass that Seq-KD models assign to the
+   Note that the above methods are complementary            8
+                                                             Difficulty of training on reference translations has also been
+and can be combined with each other. For exam-          observed in discriminative statistical machine translation (Liang
+ple, we can train on teacher-generated data but still   et al., 2006)
+ Model                                       Params       PPL        BLEUK=1      ∆K=1     BLEUK=5       ∆K=5      p(t = ŷ)
+ English → German (WMT 2014)
+ Teacher Baseline (4 × 1000)                  221 m        6.7          17.7        −         19.5         −            1.3%
+    Seq-Inter                                 221 m       10.4          19.6      (+1.9)      19.8       (+0.3)         8.2%
+ Student Baseline (2 × 500)                     84 m       8.2          14.7        −         17.6         −           0.9%
+    Word-KD                                     84 m       8.0          13.9      (−0.8)      17.7       (+0.1)        1.0%
+    Seq-KD                                      84 m      22.7          18.9      (+4.2)      19.0       (+1.4)       16.9%
+    Seq-Inter                                   84 m      11.3          18.5      (+3.6)      18.7       (+1.1)        5.7%
+    Word-KD + Seq-Inter                         84 m      11.8          18.3      (+3.6)      18.5       (+0.9)        6.3%
+    Seq-KD + Seq-Inter                          84 m      15.8          18.9      (+4.2)      19.3       (+1.7)        7.6%
+    Seq-KD + Word-KD                            84 m      10.9          18.7      (+4.0)      18.9       (+1.3)        4.1%
+    Seq-KD + Word-KD + Seq-Inter                84 m      14.8          18.8      (+4.1)      19.2       (+1.6)        7.1%
+ Student Baseline (2 × 300)                     49 m      10.3          14.1        −         16.9         −           0.6%
+    Word-KD                                     49 m      10.9          14.9      (+0.8)      17.6       (+0.7)        0.7%
+    Seq-KD                                      49 m      64.4          18.1      (+4.0)      18.1       (+1.2)       14.8%
+    Seq-Inter                                   49 m      13.0          17.6      (+3.5)      17.9       (+1.0)       10.0%
+    Word-KD + Seq-Inter                         49 m      14.5          17.8      (+3.7)      18.0       (+1.1)        4.3%
+    Seq-KD + Seq-Inter                          49 m      40.8          18.2      (+4.1)      18.5       (+1.6)        5.6%
+    Seq-KD + Word-KD                            49 m      44.1          17.9      (+3.8)      18.8       (+1.9)        3.1%
+    Seq-KD + Word-KD + Seq-Inter                49 m      97.1          18.5      (+4.4)      18.9       (+2.0)        5.9%
+
+ Thai → English (IWSLT 2015)
+ Teacher Baseline (2 × 500)                     47 m      22.9          14.3        −         15.7         −            2.3%
+    Seq-Inter                                   47 m      55.1          15.6      (+1.3)      16.0       (+0.3)         6.8%
+ Student Baseline (2 × 100)                      8m       37.0          10.6        −         12.7         −            1.4%
+    Word-KD                                      8m       35.3          11.8      (+1.2)      13.6       (+0.9)         1.4%
+    Seq-KD                                       8m      125.4          12.8      (+2.2)      13.4       (+0.7)         6.9%
+    Seq-Inter                                    8m       52.8          12.9      (+2.3)      13.1       (+0.4)         2.5%
+    Word-KD + Seq-Inter                          8m       58.7          13.0      (+2.4)      13.7       (+1.0)         3.2%
+    Seq-KD + Seq-Inter                           8m      106.4          13.6      (+3.0)      14.0       (+1.3)         3.9%
+    Seq-KD + Word-KD                             8m       67.4          13.7      (+3.1)      14.2       (+1.5)         3.1%
+    Seq-KD + Word-KD + Seq-Inter                 8m      117.4          14.2      (+3.6)      14.4       (+1.7)         3.2%
+Table 1: Results on English-German (newstest2014) and English-Thai (2012/2013) test sets. Params: number of parameters in the
+model; PPL: perplexity on the test set; BLEUK=1 : BLEU score with beam size K = 1 (i.e. greedy decoding); ∆K=1 : BLEU gain
+over the baseline model without any knowledge distillation with greedy decoding; BLEUK=5 : BLEU score with beam size K = 5;
+∆K=5 : BLEU gain over the baseline model without any knowledge distillation with beam size K = 5; p(t = ŷ): Probability of
+output sequence from greedy decoding (averaged over the test set).
+
+
+greedily-decoded sequence is much higher (Table                      ber is 0.9% for the baseline. This also explains the
+1: p(t = ŷ)). For example, on English → Ger-                        success of greedy decoding for Seq-KD models—
+man we find that perplexity of the 2 × 500 base-                     since we are only modeling around the teacher’s
+line model is 8.2 while perplexity for the corre-                    mode, the student’s distribution is less multimodal
+sponding Seq-KD model is 22.7, despite the fact                      and therefore the argmax is much easier to find.
+that Seq-KD model does significantly better for both                 Seq-Inter offers a compromise between the two: the
+greedy (+4.2) and beam search (+1.4) decoding.                       2 × 500 student model trained on Seq-KD and fine-
+The (approximate) argmax from greedy decoding                        tuned with Seq-Inter (Seq-KD + Seq-Inter) has a
+for the Seq-KD model accounts for 16.9% of the to-                   perplexity of 15.8, in between the baseline (8.2) and
+tal probability mass while the corresponding num-                    Seq-KD (22.7) models. The greedily-decoded se-
+        Model Size       GPU      CPU      Android                   network’s top-most hidden layer at each time
+        Greedy
+                                                                     step to the teacher network’s top-most hidden
+                                                                     layer as a pretraining step, noting that Romero
+        4 × 1000        425.5     15.0           −                   et al. (2015) obtained improvements with a
+        2 × 500        1051.3     63.6          8.8
+                                                                     similar technique on feed-forward models. We
+        2 × 300        1267.8    104.3         15.8
+                                                                     found this to give comparable results to stan-
+        Beam = 5                                                     dard knowledge distillation and hence did not
+        4 × 1000        101.9       7.9          −                   pursue this further.
+        2 × 500         181.9      22.1         1.9
+        2 × 300         189.1      38.4         3.4                • Number of parameters for the student mod-
+Table 2: Number of source words translated per second across         els (Table 1: Params) is still somewhat large,
+the GPU (GeForce GTX Titan X), CPU, and cell phone (Sam-             as majority of the parameters is dominated by
+sung Galaxy 6). We were unable to run the 4 × 1000 models on         the input word embeddings, which scale lin-
+the cell phone.                                                      early with the embedding size (versus RNN
+                                                                     parameters which scale quadratically with the
+                                                                     hidden dimension size). For instance, on the
+quence in this scenario accounts for 7.6% of the total
+                                                                     2 × 500 English → German model the input
+mass, which is also in between the baseline (0.9%)
+                                                                     word embeddings account for approximately
+and Seq-KD (16.9%). Hence Seq-Inter models are
+                                                                     60% (50m) of all the parameters. There have
+indeed learning a mixture distribution between the
+                                                                     been promising recent results on eliminating
+teacher and the data distribution, as originally hy-
+                                                                     word embeddings completely and obtaining
+pothesized.
+                                                                     word representations directly from characters
+5.1    Decoding Speed                                                with character composition models, which have
+                                                                     many fewer parameters than word embedding
+Computational complexity for beam search grows
+                                                                     lookup tables (Ling et al., 2015a; Kim et al.,
+linearly with beam size. Therefore, the fact that
+                                                                     2016; Ling et al., 2015b; Jozefowicz et al.,
+sequence-level knowledge distillation allows for
+                                                                     2016; Costa-Jussa and Fonollosa, 2016). For
+greedy decoding is significant, with practical im-
+                                                                     example Jozefowicz et al. (2016) compress a
+plications for running NMT systems across var-
+                                                                     state-of-the-art language model by a factor of
+ious devices. To test the speed gains, we run
+                                                                     20 by replacing input/output word embeddings
+the teacher/student models on GPU, CPU, and cell
+                                                                     with a character model. Combining such meth-
+phone, and check the average number of source
+                                                                     ods with knowledge distillation to further re-
+words translated per second (Table 2). We use a
+                                                                     duce the memory footprint of NMT systems re-
+GeForce GTX Titan X for the GPU and a Samsung
+                                                                     mains an avenue for future work.
+Galaxy 6 smart phone. We find that we can run the
+student model 10 times faster with greedy decoding             6    Conclusion
+than the teacher model with beam search (1051.3 vs
+101.9 words/sec), with little loss in performance.             In this work we have investigated existing knowl-
+                                                               edge distillation methods for NMT (which work
+5.2    Further Observations                                    at the word-level) and introduced two sequence-
+We report on some further experiments and observa-             level variants of knowledge distillation. We demon-
+tions:                                                         strate that our method is effective, providing im-
+                                                               provements over the baseline model without any
+   • We tried training very small student models
+                                                               knowledge distillation as well as over models trained
+     (1 × 100, 2 × 50) and found that performance
+                                                               with word-level knowledge distillation. We observe
+     degraded considerably compared to the teacher
+                                                               that the methods are complementary and combining
+     model.
+                                                               them results in further improvements.
+   • For models trained with word-level knowledge                 We also find that models trained with sequence-
+     distillation, we also tried regressing the student        level knowledge distillation seem to not require
+ beam search during inference, indicating significant         [Cho et al.2014] Kyunghyun Cho, Bart van Merrienboer,
+ practical implications for deploying NMT systems                 Caglar Gulcehre, Dzmitry Bahdanau, Fethi Bougares,
+ in the wild. Our method can even be used to improve              Holger Schwenk, and Yoshua Bengio. 2014. Learning
+ the original teacher model and likewise eliminates               Phrase Representations using RNN Encoder-Decoder
+                                                                  for Statistical Machine Translation. In Proceedings of
+ the need to beam search with the teacher model.
+                                                                  EMNLP.
+    We have chosen to focus on translation as this            [Costa-Jussa and Fonollosa2016] Marta R. Costa-Jussa
+ domain has generally required the largest capac-                 and Jose A.R. Fonollosa. 2016. Character-based Neu-
+ ity deep learning models, but sequence-to-sequence               ral Machine Translation. arXiv:1603.00810.
+ framework has been successfully applied to a wide            [Courbariaux et al.2016] Matthieu Courbariaux, Itay
+ range of tasks including parsing (Vinyals et al.,                Hubara, Daniel Soudry, Ran El-Yaniv, and Yoshua
+ 2015a), summarization (Rush et al., 2015), dialogue              Bengio. 2016. Binarized Neural Networks: Training
+ (Vinyals and Le, 2015; Serban et al., 2016; Li et                Neural Networks with Weights and Activations
+                                                                  Constrained to +1 or −1. arXiv:1602.02830.
+ al., 2016), NER/POS-tagging (Gillick et al., 2016),
+                                                              [Denil et al.2013] Misha Denil, Babak Shakibi, Laurent
+ image captioning (Vinyals et al., 2015b; Xu et al.,
+                                                                  Dinh, Marc’Aurelio Ranzato, and Nando de Freitas.
+ 2015), and video generation (Srivastava et al., 2015).           2013. Predicting Parameters in Deep Learning. In
+ We anticipate that methods described in this paper               Proceedings of NIPS.
+ can be used to similarly train smaller models in other       [Gillick et al.2016] Dan Gillick, Cliff Brunk, Oriol
+ domains.                                                         Vinyals, and Amarnag Subramanya. 2016. Multilin-
+    Finally, much existing work on compressing deep               gual Language Processing from Bytes. In Proceedings
+ learning models has focused on either pruning or                 of NAACL.
+ knowledge distillation, but not both. It would be            [Han et al.2016] Song Han, Huizi Mao, and William J.
+                                                                  Dally. 2016. Deep Compression: Compressing Deep
+ interesting to see if knowledge distillation can be
+                                                                  Neural Networks with Pruning, Trained Quantization
+ combined with pruning methods to further compress                and Huffman Coding. In Proceedings of ICLR.
+ deep learning models.                                        [Hassibi and Stork1993] Babak Hassibi and David G.
+                                                                  Stork. 1993. Second order derivatives for network
+                                                                  pruning: Optimal brain surgeon. In Proceedings of
+ References                                                       NIPS.
+                                                              [He et al.2014] Tianxing He, Yuchen Fan, Yanmin Qian,
+[Ba and Caruana2014] Lei Jimma Ba and Rich Caruana.
+                                                                  Tian Tan, and Kai Yu. 2014. Reshaping Deep Neu-
+    2014. Do Deep Nets Really Need to be Deep? In
+                                                                  ral Network for Fast Decoding by Node-Pruning. In
+    Proceedings of NIPS.
+                                                                  Proceedings of ICASSP.
+[Bahdanau et al.2015] Dzmitry Bahdanau, Kyunghyun             [Hinton et al.2015] Geoffrey Hinton, Oriol Vinyals, and
+    Cho, and Yoshua Bengio. 2015. Neural Machine                  Jeff Deam. 2015. Distilling the Knowledge in a Neu-
+    Translation by Jointly Learning to Align and Translate.       ral Network. arXiv:1503.0253.
+    In Proceedings of ICLR.
+                                                              [Hochreiter and Schmidhuber1997] Sepp Hochreiter and
+[Bucila et al.2006] Cristian Bucila, Rich Caruana, and            J´’urgen Schmidhuber. 1997. Long Short-Term Mem-
+    Alexandru Niculescu-Mizil. 2006. Model Compres-               ory. Neural Computation, 9:1735–1780.
+    sion. In Proceedings of KDD.                              [Jozefowicz et al.2016] Rafal Jozefowicz, Oriol Vinyals,
+[Chen and Cherry2014] Boxing Chen and Colin Cherry.               Mike Schuster, Noam Shazeer, and Yonghui Wu.
+    2014. A Systematic Comparison of Smoothing Tech-              2016. Exploring the Limits of Language Modeling.
+    niques for Sentence-Level BLEU. In Proceedings of             arXiv:1602.02410.
+    the Ninth Workshop on Statistical Machine Transla-        [Kalchbrenner and Blunsom2013] Nal Kalchbrenner and
+    tion.                                                         Phil Blunsom. 2013. Recurrent Continuous Transla-
+[Chen et al.2015] Wenlin Chen, James T. Wilson, Stephen           tion Models. In Proceedings of EMNLP.
+    Tyree, Kilian Q. Weinberger, and Yixin Chen. 2015.        [Kim et al.2016] Yoon Kim, Yacine Jernite, David Son-
+    Compressing Neural Networks with the Hashing                  tag, and Alexander M. Rush. 2016. Character-Aware
+    Trick. In Proceedings of ICML.                                Neural Language Models. In Proceedings of AAAI.
+[Chiang2012] David Chiang. 2012. Hope and Fear                [LeCun et al.1990] Yann LeCun, John S. Denker, and
+    for Discriminative Training of Statistical Translation        Sara A. Solla. 1990. Optimal Brain Damage. In Pro-
+    Models. In JMLR.                                              ceedings of NIPS.
+[Li et al.2014] Jinyu Li, Rui Zhao, Jui-Ting Huang, and     [Vinyals and Le2015] Oriol Vinyals and Quoc Le. 2015.
+    Yifan Gong. 2014. Learning Small-Size DNN with              A Neural Conversational Model.
+    Output-Distribution-Based Criteria. In Proceedings of   [Vinyals et al.2015a] Oriol Vinyals, Lukasz Kaiser, Terry
+    INTERSPEECH.                                                Koo, Slave Petrov, Ilya Sutskever, and Geoffrey Hin-
+[Li et al.2016] Jiwei Li, Michael Galley, Chris Brockett,       ton. 2015a. Grammar as a Foreign Language.
+    Jianfeg Gao, and Bill Dolan. 2016. A Diversity-         [Vinyals et al.2015b] Oriol Vinyals, Alexander Toshev,
+    Promoting Objective Function for Neural Conversa-           Samy Bengio, and Dumitru Erhan. 2015b. Show and
+    tional Models. In Proceedings of NAACL 2016.                Tell: A Neural Image Caption Generator.
+[Liang et al.2006] Percy Liang, Alexandre Bouchard-         [Xu et al.2015] Kelvin Xu, Jimma Ba, Ryan Kiros,
+    Cote, Dan Klein, and Ben Taskar. 2006. An End-to-           Kyunghyun Cho, Aaron Courville, Ruslan Salakhutdi-
+    End Discriminative Approach to Machine Translation.         nov, Richard Zemel, and Yoshua Bengio. 2015. Show,
+    In Proceedings of COLING-ACL.                               Attend and Tell: Neural Image Caption Generation
+[Ling et al.2015a] Wang Ling, Tiago Lui, Luis Marujo,           with Visual Attention. In Proceedings of ICML.
+    Ramon Fernandez Astudillo, Silvio Amir, Chris Dyer,     [Zhou et al.2016] Jie Zhou, Ying Cao, Xuguang Wang,
+    Alan W Black, and Isabel Trancoso. 2015a. Finding           Peng Li, and Wei Xu. 2016. Deep Recurrent Models
+    Function in Form: Composition Character Models for          with Fast-Forward Connections for Neural Machine
+    Open Vocabulary Word Representation. In Proceed-            Translation. In Proceedings of TACL.
+    ings of EMNLP.
+[Ling et al.2015b] Wang Ling, Isabel Trancoso, Chris
+    Dyer, and Alan W Black. 2015b. Character-based
+    Neural Machine Translation. arXiv:1511.04586.
+[Luong et al.2015] Minh-Thang Luong, Hieu Pham, and
+    Christopher D. Manning. 2015. Effective Approaches
+    to Attention-based Neural Machine Translation. In
+    Proceedings of ACL.
+[Mariet and Sra2016] Zelda Mariet and Suvrit Sra. 2016.
+    Diversity Networks. In Proceedings of ICLR.
+[Mou et al.2015] Lili Mou, Ge Li, Yan Xu, Lu Zhang, and
+    Zhi Jin. 2015. Distilling Word Embeddings: An En-
+    coding Approach. arXiv:1506.04488.
+[Papineni et al.2002] Kishore Papineni, Slim Roukos,
+    Todd Ward, and Wei-Jing Zhu. 2002. BLEU: A
+    Method for Automatic Evaluation of Machine Trans-
+    lation. In Proceedings of ICML.
+[Romero et al.2015] Adriana Romero, Nicolas Ballas,
+    Samira Ebrahimi Kahou, Antoine Chassang, Carlo
+    Gatta, and Yoshua Bengio. 2015. FitNets: Hints for
+    Thin Deep Nets. In Proceedings of ICLR.
+[Rush et al.2015] Alexander M. Rush, Sumit Chopra, and
+    Jason Weston. 2015. A Neural Attention Model for
+    Abstractive Sentence Summarization. In Proceedings
+    of EMNLP.
+[Serban et al.2016] Iulian V. Serban, Allesandro Sordoni,
+    Yoshua Bengio, Aaron Courville, and Joelle Pineau.
+    2016. Building End-to-End Dialogue Systems Using
+    Generative Hierarchical Neural Network Models. In
+    Proceedings of AAAI.
+[Srivastava et al.2015] Nitish Srivastava, Elman Mansi-
+    mov, and Ruslan Salakhutdinov. 2015. Unsupervised
+    Learning of Video Representations using LSTMs.
+    Proceedings of ICML.
+[Sutskever et al.2014] Ilya Sutskever, Oriol Vinyals, and
+    Quoc Le. 2014. Sequence to Sequence Learning with
+    Neural Networks.
+
