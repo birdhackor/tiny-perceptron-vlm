@@ -6,6 +6,7 @@ import json
 import os
 import pickle
 import shutil
+import struct
 import subprocess
 import sys
 import tarfile
@@ -476,3 +477,202 @@ def test_public_release_rejects_resume_checkpoint_and_unreviewed_bytes(tmp_path)
     item["redistribution_approved"] = False
     with pytest.raises(ValueError, match="redistribution"):
         transport.approved_public_files(tmp_path, release, "a" * 40, "b" * 64)
+
+
+def batch_exports(tmp_path):
+    manifest_sha = "b" * 64
+    manifest = {
+        "records": [{"path": "records.jsonl", "sha256": "c" * 64}],
+        "assets": [{"path": "images/image.png", "sha256": "d" * 64}],
+    }
+    release = {
+        "repo_id": transport.PUBLIC_MODEL_REPO,
+        "private": False,
+        "prefix": "selftrained/v1",
+        "manifest_sha256": manifest_sha,
+        "exports": [],
+    }
+    sources = {}
+    for name, (architecture, stage) in transport.EXPORT_STAGES.items():
+        source = tmp_path / "batch" / stage / name
+        source.mkdir(parents=True)
+        (source / "best.pt").write_bytes(b"private selected checkpoint " + name.encode())
+        config = {"architecture": architecture, "max_length": 512, "vocab_size": 2}
+        (source / "model-config.json").write_text(json.dumps(config))
+        (source / "tokenizer.json").write_text('{"characters":["a"]}')
+        header = json.dumps({"weight": {"dtype": "F32", "shape": [1], "data_offsets": [0, 4]}}).encode()
+        header += b" " * (-len(header) % 8)
+        (source / "model.safetensors").write_bytes(struct.pack("<Q", len(header)) + header + struct.pack("<f", 1.0))
+        execution = {
+            "status": "completed",
+            "revision": "a" * 40,
+            "manifest_sha256": manifest_sha,
+            "stage": stage,
+            "run_id": name,
+            "job": {"architecture": architecture, "steps": 600},
+        }
+        (source / "execution.json").write_text(json.dumps(execution))
+        receipt = {
+            "architecture": architecture,
+            "stage": stage,
+            "data_sha256": {"records.jsonl": "c" * 64},
+            "asset_sha256": {"images/image.png": "d" * 64},
+            "completed_requested_steps": True,
+            "selected_checkpoint_available": True,
+            "inference_exported": True,
+            "test_used_for_selection": False,
+            "origin": {"kind": "all-neural-weights-random"},
+            "steps": 600,
+            "config": config,
+            "selection": "validation_loss (teacher-forced; not generation success)",
+        }
+        (source / "train-receipt.json").write_text(json.dumps(receipt))
+        inference = {
+            "selected_checkpoint_sha256": transport.digest(source / "best.pt"),
+            "files": {
+                filename: transport.digest(source / filename)
+                for filename in ("model.safetensors", "model-config.json", "tokenizer.json")
+            },
+            "stage": stage,
+            "selection": "validation_loss",
+            "origin": receipt["origin"],
+        }
+        (source / "inference-manifest.json").write_text(json.dumps(inference))
+        export = {
+            "name": name,
+            "architecture": architecture,
+            "revision": execution["revision"],
+            "source": {
+                "stage": stage,
+                "run_id": name,
+                "path": "best.pt",
+                "sha256": transport.digest(source / "best.pt"),
+            },
+            "execution_sha256": transport.digest(source / "execution.json"),
+            "train_receipt_sha256": transport.digest(source / "train-receipt.json"),
+            "files": [
+                {
+                    "path": filename,
+                    "bytes": (source / filename).stat().st_size,
+                    "sha256": transport.digest(source / filename),
+                    "kind": "inference" if filename.endswith(".safetensors") else "metadata",
+                    "license": "MIT",
+                    "redistribution_approved": True,
+                }
+                for filename in sorted(transport.SAFE_EXPORT_FILES)
+            ],
+        }
+        release["exports"].append(export)
+        sources[name] = {"directory": source, "execution": execution}
+    return sources, release, manifest_sha, manifest
+
+
+def test_batch_release_binds_all_four_actual_sources_before_cloud_access(tmp_path, monkeypatch):
+    sources, release, manifest_sha, manifest = batch_exports(tmp_path)
+    approved = transport.approved_batch_exports(sources, release, manifest_sha, manifest)
+    assert len(approved) == 4 and sum(len(item["files"]) for item in approved) == 16
+    monkeypatch.setattr(runner, "EXPERIMENTS", tmp_path)
+    assert runner.release_sources_gate("batch", release, manifest_sha, manifest).keys() == sources.keys()
+    runner.validate_job({"schema_version": 1, "stage": "release", "release": release})
+    changed = deepcopy(release)
+    changed["exports"][0]["revision"] = "e" * 40
+    with pytest.raises(ValueError, match="immutable execution"):
+        transport.approved_batch_exports(sources, changed, manifest_sha, manifest)
+    changed = deepcopy(release)
+    changed["exports"][0]["files"][0]["path"] = "latest.pt"
+    with pytest.raises(ValueError, match="four reviewed safe"):
+        transport.approved_batch_exports(sources, changed, manifest_sha, manifest)
+    with pytest.raises(ValueError, match="frozen manifest"):
+        transport.approved_batch_exports(sources, release, "e" * 64, manifest)
+    total = sum(file["bytes"] for item in approved for file in item["files"])
+    monkeypatch.setattr(transport, "MAX_RELEASE_BYTES", total - 1)
+    with pytest.raises(ValueError, match="complete four-export batch"):
+        transport.approved_batch_exports(sources, release, manifest_sha, manifest)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("completed_requested_steps", False),
+        ("test_used_for_selection", True),
+        ("data_sha256", {"records.jsonl": "e" * 64}),
+    ],
+)
+def test_batch_release_rejects_completed_provenance_mutations_even_with_new_review_hash(tmp_path, field, value):
+    sources, release, manifest_sha, manifest = batch_exports(tmp_path)
+    export = release["exports"][0]
+    path = sources[export["name"]]["directory"] / "train-receipt.json"
+    receipt = json.loads(path.read_text())
+    receipt[field] = value
+    path.write_text(json.dumps(receipt))
+    export["train_receipt_sha256"] = transport.digest(path)
+    with pytest.raises(ValueError, match="completed from-random"):
+        transport.approved_batch_exports(sources, release, manifest_sha, manifest)
+
+
+def test_batch_publish_is_one_parent_bound_commit_and_can_verify_existing_bytes(tmp_path, monkeypatch):
+    import huggingface_hub
+
+    sources, release, manifest_sha, manifest = batch_exports(tmp_path)
+    commits, downloads = [], []
+    existing = []
+    public_files = {}
+    for export in release["exports"]:
+        for file in export["files"]:
+            public_path = f"{release['prefix']}/{export['name']}/{file['path']}"
+            local = tmp_path / "public" / export["name"] / file["path"]
+            local.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(sources[export["name"]]["directory"] / file["path"], local)
+            public_files[public_path] = local
+
+    class API:
+        def __init__(self, token):
+            assert token == "offline-fixture"
+
+        def repo_info(self, repo_id, repo_type):
+            assert repo_id == transport.PUBLIC_MODEL_REPO and repo_type == "model"
+            return SimpleNamespace(private=False, sha="e" * 40)
+
+        def list_repo_tree(self, *args, **kwargs):
+            assert kwargs["revision"] == "e" * 40 and kwargs["recursive"]
+            return iter(existing)
+
+        def create_commit(self, **kwargs):
+            assert kwargs["parent_commit"] == "e" * 40
+            commits.append(kwargs)
+            return SimpleNamespace(oid="f" * 40, commit_url="https://huggingface.co/offline/commit/" + "f" * 40)
+
+    def download(repo_id, path, **kwargs):
+        assert repo_id == transport.PUBLIC_MODEL_REPO and kwargs["revision"] == "e" * 40
+        downloads.append(path)
+        return str(public_files[path])
+
+    monkeypatch.setattr(huggingface_hub, "HfApi", API)
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", download)
+    receipt = transport.publish_batch_inference(
+        sources, release, manifest_sha, manifest, "offline-fixture", tmp_path / "stage"
+    )
+    assert receipt["new_commit_created"] and receipt["commit_sha"] == "f" * 40
+    assert len(commits) == 1 and len(commits[0]["operations"]) == 16
+    assert all(not operation.path_in_repo.endswith(".pt") for operation in commits[0]["operations"])
+    for export in release["exports"]:
+        for file in export["files"]:
+            existing.append(
+                SimpleNamespace(
+                    path=f"{release['prefix']}/{export['name']}/{file['path']}",
+                    size=file["bytes"],
+                    lfs={"sha256": file["sha256"]} if file["path"].endswith(".safetensors") else None,
+                )
+            )
+    recovered = transport.publish_batch_inference(
+        sources, release, manifest_sha, manifest, "offline-fixture", tmp_path / "recover"
+    )
+    assert recovered["recovered_existing_revision"] and not recovered["new_commit_created"]
+    assert recovered["commit_sha"] == "e" * 40 and len(commits) == 1 and len(downloads) == 12
+    metadata = next(path for path in public_files if path.endswith("model-config.json"))
+    public_files[metadata].write_bytes(b"changed published bytes")
+    with pytest.raises(ValueError, match="reviewed safe bytes"):
+        transport.publish_batch_inference(
+            sources, release, manifest_sha, manifest, "offline-fixture", tmp_path / "tampered"
+        )
+    assert len(commits) == 1

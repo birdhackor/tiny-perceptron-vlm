@@ -237,9 +237,10 @@ def validate_job(job):
     if stage == "freeze" and "limit" in job:
         raise ValueError("Final validation freeze must evaluate its entire fixed split")
     if stage == "release":
-        validate_descriptor(job.get("source", {}))
-        if not job.get("release"):
-            raise ValueError("Release needs exact reviewed public allowlist")
+        from scripts.selftrained.hf_transport import validate_batch_release
+
+        for export in validate_batch_release(job.get("release", {})):
+            validate_descriptor(export["source"], checkpoint=True)
     return job
 
 
@@ -425,6 +426,17 @@ def artifact_gate(batch_id, descriptor, manifest_sha, architecture=None):
     if architecture and execution.get("job", {}).get("architecture", "moe") != architecture:
         raise ValueError("Dense and MoE cannot share checkpoints")
     return path, execution
+
+
+def release_sources_gate(batch_id, release, manifest_sha, manifest):
+    from scripts.selftrained.hf_transport import approved_batch_exports, validate_batch_release
+
+    sources = {}
+    for export in validate_batch_release(release):
+        path, execution = artifact_gate(batch_id, export["source"], manifest_sha, export["architecture"])
+        sources[export["name"]] = {"directory": path.parent, "execution": execution}
+    approved_batch_exports(sources, release, manifest_sha, manifest)
+    return sources
 
 
 def evaluation_resume_gate(path, job, protocol_sha=None):
@@ -614,10 +626,7 @@ def register_modal():
                 if field == "protocol":
                     test_protocol_gate(path, job, manifest, source_hashes, resume_path)
         if job["stage"] == "release":
-            from scripts.selftrained.hf_transport import approved_public_files
-
-            source_path, execution = artifact_gate(batch_id, job["source"], manifest_sha)
-            approved_public_files(source_path.parent, job["release"], execution["revision"], manifest_sha)
+            release_sources_gate(batch_id, job["release"], manifest_sha, manifest)
         ledger = json.loads(LEDGER.read_text())
         entry = reserve_entry(ledger, run_id, batch_id, revision, manifest_sha, job, job_sha, live, source_hashes)
         write_json(LEDGER, ledger)
@@ -708,14 +717,14 @@ def register_modal():
                     },
                 )
             elif stage == "release":
-                from scripts.selftrained.hf_transport import publish_inference
+                from scripts.selftrained.hf_transport import publish_batch_inference
 
-                source_path, source_execution = artifact_gate(batch_id, job["source"], manifest_sha)
-                result = publish_inference(
-                    source_path.parent,
+                sources = release_sources_gate(batch_id, job["release"], manifest_sha, manifest)
+                result = publish_batch_inference(
+                    sources,
                     job["release"],
-                    source_execution["revision"],
                     manifest_sha,
+                    manifest,
                     os.environ["HF_TOKEN"],
                     output / "public-staging",
                 )
