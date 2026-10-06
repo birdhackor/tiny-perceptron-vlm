@@ -49,6 +49,42 @@ def test_only_reads_exact_metadata_allowlist_and_preserves_raw_bytes(tmp_path, m
     assert not any(path.endswith((".pt", ".safetensors")) for path in calls)
 
 
+def test_interrupted_validation_reads_journal_metrics_and_raw_prefix_without_completed_receipt(tmp_path, monkeypatch):
+    prefix = "selftrained/selftrained-v2/validation/gha-37426148065-1/"
+    values = {
+        "execution.json": b'{"status":"running","stage":"validation"}\n',
+        "evaluation-receipt.json": b'{"status":"interrupted","completed_count":1}\n',
+        "metrics.json": b'{"evaluation_complete":false,"count":1}\n',
+        "outputs.jsonl": b'{"record":{"id":"fixture-completed-row"}}\n{"uncommitted-tail":',
+    }
+    calls = []
+    fake_sdk(monkeypatch, {prefix + name: raw for name, raw in values.items()}, calls)
+    output = tmp_path / "out"
+    receipt = inspection.inspect_attempt("selftrained-v2", "validation", "gha-37426148065-1", output, "a" * 40)
+    assert calls == [prefix + name for name in inspection.FILES]
+    observed = {item["path"]: item for item in receipt["files"]}
+    assert observed["receipt.json"]["status"] == "absent"
+    assert receipt["status"] == "complete" and receipt["mode"] == "metadata"
+    assert receipt["total_downloaded_bytes"] == sum(map(len, values.values()))
+    for name, raw in values.items():
+        assert (output / name).read_bytes() == raw
+        assert observed[name] == {
+            "path": name,
+            "status": "present",
+            "bytes": len(raw),
+            "sha256": hashlib.sha256(raw).hexdigest(),
+        }
+    assert not any(receipt[key] for key in ("remote_container_started", "gpu_used", "ledger_written", "weights_read"))
+    assert not any(path.endswith((".pt", ".safetensors")) or path.endswith("budget.json") for path in calls)
+    monkeypatch.setattr(inspection, "MAX_BYTES", receipt["total_downloaded_bytes"] - 1)
+    calls.clear()
+    with pytest.raises(ValueError, match="64 MiB"):
+        inspection.inspect_attempt("selftrained-v2", "validation", "gha-37426148065-1", tmp_path / "bounded", "a" * 40)
+    failed = json.loads((tmp_path / "bounded/inspection-receipt.json").read_text())
+    assert failed["status"] == "failed" and failed["error_type"] == "ValueError"
+    assert calls[-1] == prefix + "outputs.jsonl"
+
+
 @pytest.mark.parametrize(
     "batch,stage,run,revision",
     [
@@ -212,7 +248,7 @@ def test_safe_weight_tamper_and_total_allowance_are_fail_closed(tmp_path, monkey
         )
     assert calls[-1] == PREFIX + "model.safetensors" and not any(path.endswith(".pt") for path in calls)
     contents, pin = completed_safe_source()
-    metadata_size = sum(len(contents[PREFIX + name]) for name in inspection.FILES)
+    metadata_size = sum(len(contents.get(PREFIX + name, b"")) for name in inspection.FILES)
     monkeypatch.setattr(inspection, "MAX_BYTES", metadata_size)
     calls.clear()
     fake_sdk(monkeypatch, contents, calls)
