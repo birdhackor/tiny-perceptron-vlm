@@ -6,6 +6,8 @@
 
 原理入口是[20.1 的輸入分工](../../../course/chapters/20.md#20.1)，成品的能力及限制集中在[20.13](../../../course/chapters/20.md#20.13)。這份操作指引先帶你走一條完整路線，不要求先重新訓練模型。
 
+第19章另有[自行訓練v2的CPU操作](../../selftrained/v2-public-cpu-commands.md)，其文字核心與圖片／聲音入口從隨機權重開始，任務更有限。兩條路各用自己的權重與環境；v2的固定成績及限制見[19.12](../../../course/chapters/19.md#19.12)。
+
 ## 1. 取得程式，確認 Python
 
 以下使用Linux的Bash終端機、Git與Python 3.12。先執行`git --version`確認Git已安裝；若找不到命令，依[Git官方安裝指引](https://git-scm.com/downloads)安裝後再繼續。先把本版放在新的`tiny-perceptron-natural`資料夾，保留原有專案與練習：

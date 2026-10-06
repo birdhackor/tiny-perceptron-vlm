@@ -10,7 +10,9 @@
 | --- | --- | --- |
 | 讀正文、看圖與結果 | [閱讀指南](../course/README.md) | 不必安裝Python，也不必租GPU。 |
 | 修改一節短程式 | 選定教材小節的Colab入口，或[本機暖身](../course/first-steps.md#W.1) | 小實驗用CPU即可；Notebook中的程式格要按順序執行。 |
+| 試用自行訓練的v2小助理 | [公開CPU操作](selftrained/v2-public-cpu-commands.md) | 使用 `.venv` 的 `cpu`、`selftrained` 配套，匿名下載固定推論權重。 |
 | 重做小模型的正式訓練 | [訓練操作](../course/training.md) | 先讀對應概念，再看該項資料、步數與設備設定。 |
+| 從隨機權重重做v2 | [本機stage訓練指引](selftrained/TRAINING.md) | 取得固定LFS資料，逐段接自己的checkpoint；全量CPU訓練與短程式不同。 |
 | 試用照片與語音助理 | [學生操作指引](natural-assistant/v4/STUDENT.md) | 需要另外取得完整圖文模型和語音辨識器；這比短程式大得多。 |
 | 微調照片與語音助理 | [LoRA訓練指引](natural-assistant/v4/TRAINING.md) | 使用自己的NVIDIA GPU，按固定資料與配方建立候選，再做驗收。 |
 
@@ -31,6 +33,14 @@ uv run --extra cpu --group notebook jupyter lab
 第一行準備CPU版套件與Notebook工具；第二行核對環境的基本運算；第三行開啟JupyterLab。環境檢查能跑通，還不代表某個模型已學會任務，模型品質要另看留出題的結果。
 
 `uv run`會先同步環境。安裝時若選了`--extra cpu`，執行時也帶同一個extra，才不會切回另一套PyTorch。另一種方式是啟用`.venv`後直接用那套`python`；啟用方式與kernel選擇見暖身指南。
+
+第19章v2也使用這套環境，另加 `selftrained`，提供safe權重的讀取配套：
+
+```bash
+uv sync --frozen --extra cpu --extra selftrained
+```
+
+[CPU操作頁](selftrained/v2-public-cpu-commands.md)保留文字、圖片、指定區域讀字、計算工具及語音後續對話的實際命令。所選validation示範完成8次chat呼叫與1次history append，確認公開下載、載入與介面可用；這不是未知題成功率，也不是全量訓練重跑。能力結果見[19.12](../course/chapters/19.md#19.12)。
 
 第20章另使用Python3.12、PyTorch2.8.0與`requirements-natural.txt`中的固定配套。請按[學生操作指引第2節](natural-assistant/v4/STUDENT.md#2-建立專用環境選擇-cpu-或-nvidia-gpu)建立`.venv-natural`，並使用`.venv-natural/bin/python`。這套成品環境不沿用前面小模型的`uv.lock`。
 
@@ -63,10 +73,12 @@ uv run --extra cu126 python scripts/check_env.py
 
 例如，[聲音入門](../course/chapters/12.md#12.1)先從波形理解聲音，再逐步看時間與頻率。這些局部實驗不等於已訓練一般語音辨識器。第20章的Whisper先把錄音轉成文字，再交給圖文模型聊天，分工見[20.1](../course/chapters/20.md#20.1)。
 
+第19章v2由自行訓練的聲音入口直接提供特徵給同一文字核心，沒有執行Whisper或其他ASR。它只學地址、App與卡片三種銀行客服主題，再產生文字回答；沒有一般逐字聽寫或語音輸出。OCR同樣限於12個已知字、使用者提供的一個連續1–4字區域，Sans與Serif兩種字型都已出現在訓練中。
+
 檔案格式能否讀取與模型能力也要分開。成品目前接受的圖片、音訊格式及上限列在學生操作指引；選短而清楚的WAV錄音開始，會比較容易核對「聽到什麼」與「回答什麼」。
 
 ## 5. 資料與權重按需要取得
 
-讀課文不需要先下載完整資料。開始一項訓練前，先讀[訓練資料入口](../assets/training/README.md)或[第20章資料說明](natural-assistant/v4/DATA.md)，確認用途、授權與切分；只試用成品時，則取得[公開成品配套](natural-assistant/v4/STUDENT.md#3-讀取公開清單再下載選定配套)。
+讀課文不需要先下載完整資料。開始一項訓練前，先讀[訓練資料入口](../assets/training/README.md)或[第20章資料說明](natural-assistant/v4/DATA.md)，確認用途、授權與切分。第19章v2按[CPU操作頁](selftrained/v2-public-cpu-commands.md)取得固定權重和示範素材；第20章則取得自己的[公開成品配套](natural-assistant/v4/STUDENT.md#3-讀取公開清單再下載選定配套)。
 
 資料、權重、套件和運算中間結果各自占空間。壓縮包不大，不代表解包後或載入模型後也同樣小；小小的LoRA修正檔也仍需要完整底座參與計算。檔案如何保存與核對，接著讀[教材資產存放](asset-storage.md)。

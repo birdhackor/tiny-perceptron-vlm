@@ -1,6 +1,8 @@
 # 從隨機初始化執行 V2 本機訓練
 
-這份操作指引使用本機 stage wrapper，依序執行自己的 pretrain、SFT、vision、OCR、audio、joint、weighted joint，以及 MoE native joint。每一段都呼叫既有 `train.py`，保留完整 checkpoint 與真實執行 sidecars；不需要作者的私人 Modal Volume 或原始 GHA run ID。
+這份指引帶你重做第19章的有限助理：先練習接續文字，再學問答格式；分別教圖片、讀字與聲音入口後，讓入口和文字核心共同練習。後段接的是你自己前段的權重，不是另一個成熟模型。各段的圖解與承接理由見[19.4](../../course/chapters/19.md#19.4)。
+
+本機訓練入口 `train_local_stage.py` 會先核對材料，再呼叫 `train.py` 執行一段訓練。每次保存完整檢查點（權重與訓練進度）及執行紀錄，供下一段或中斷後接續使用；不需要作者的私人 Modal 儲存空間或 GitHub 工作編號。命令中的 `stage` 就是這次要練的階段。
 
 所有神經網路模組從 PyTorch 隨機初始化開始。字元 tokenizer 只由 train 資料建立，後續 stage 沿用自己的 tokenizer 與權重。公開 pretrain/SFT/joint 的 safetensors 是推論輸出，沒有 optimizer、RNG 或 sampler 狀態；目前 trainer 沒有將公開 safe export 當作 training init 的載入器。
 
@@ -46,7 +48,9 @@ PY
 
 ## 手動執行 stage
 
-以下從 repository 根目錄執行。`--` 前是 wrapper 的參數，之後是現有 trainer 的完整參數名稱；不接受縮寫。Wrapper 提供 `--records`、`--asset-dir`、`--config` 與 `--export-inference`，不用自行加這四項。先執行自己的 MoE pretrain：
+以下從 repository 根目錄執行。`--` 前是訓練入口的參數，之後是 `train.py` 的完整參數名稱；不接受縮寫。入口提供 `--records`、`--asset-dir`、`--config` 與 `--export-inference`，不用自行加這四項。
+
+先做 `pretrain`：使用固定資料包中的訓練短文，練習預測下一個字。字表只從訓練份建立，後段沿用它；這一段尚未教圖片或聲音，也不是完整聊天訓練。
 
 ```bash
 uv run --frozen --extra cpu --extra selftrained python scripts/selftrained/train_local_stage.py \
@@ -59,7 +63,7 @@ uv run --frozen --extra cpu --extra selftrained python scripts/selftrained/train
   --learning-rate 0.001 --eval-every 250 --save-every 250 --device cpu
 ```
 
-後續 stage 保留相同 manifest/data、architecture、batch16、context512 與 seed20261006，使用新 output directory 並以 `--init-checkpoint` 接自己的前段 `best.pt`。例如 SFT：
+接著做 `sft`：使用固定包中的問答示範，讓文字核心練習依問題、對話歷史與格式要求作答；只在助理答案位置計算代價，資料表示見[19.5](../../course/chapters/19.md#19.5)。後續階段保留相同 manifest/data、architecture、batch16、context512 與 seed20261006，使用新 output directory，並以 `--init-checkpoint` 接自己的前段 `best.pt`。以下接的是你剛才訓練出的文字權重：
 
 ```bash
 uv run --frozen --extra cpu --extra selftrained python scripts/selftrained/train_local_stage.py \
@@ -73,7 +77,11 @@ uv run --frozen --extra cpu --extra selftrained python scripts/selftrained/train
   --init-checkpoint checkpoints/selftrained-local/moe-pretrain/best.pt --device cpu
 ```
 
-依序調整 stage、output directory、下表參數與 own source 路徑。這些步數和 solver 設定來自 [v2-jobs](v2-jobs/) 的實際訓練 jobs；本機不使用那些 jobs 裡的私人 Volume checkpoint descriptors。
+再按下表依序練 `vision`、`ocr`、`audio` 三個入口：材料分別是三類服飾圖、12個已知字元的字卡，以及三種銀行客服主題錄音；任務是分類商品、辨識字序和判別有限語音主題。這時先練入口本身，不把分類正確率當成完整助理的作答率。[19.6](../../course/chapters/19.md#19.6)說明它們怎樣把特徵交給同一文字核心。
+
+`joint` 才把文字、圖片、讀字、聲音和計算工具題混合起來，練習由共享文字核心生成回答。後面的 `weighted` 與 `native` 都沿用共同訓練：前者加重工具與連續數字的指定答案位置，後者調整數字權重並加重直接接收聲音的回答。它們改的是訓練代價中不同位置的分量，不是新增 ASR 聽寫器；感知骨幹與分類頭保持固定，文字核心和接頭繼續更新。
+
+依序調整 stage、output directory、下表參數與自己的來源路徑。這些步數和更新設定來自 [v2-jobs](v2-jobs/) 的實際訓練工作；本機不使用其中的私人儲存空間路徑。
 
 | Output directory 尾段 | `--stage` | `--steps` | `--learning-rate` | `--eval-every` / `--save-every` | 自己的 `--init-checkpoint` | 額外參數 |
 | --- | --- | ---: | ---: | ---: | --- | --- |
@@ -88,7 +96,7 @@ uv run --frozen --extra cpu --extra selftrained python scripts/selftrained/train
 
 Dense 使用 `--architecture dense` 與對應 `dense-*` 目錄，保留自己的完整前段 chain；本輪 frozen final Dense 停在 weighted joint，不承接 MoE 的 checkpoint。
 
-MoE native 的完整指令為：
+完成自己的 weighted 段後，再用它選定的 `best.pt` 啟動 MoE native 段。這段讓直接接收音訊的回答位置得到較大分量，仍由文字核心輸出文字；它沒有改成一般語音辨識。完整指令為：
 
 ```bash
 uv run --frozen --extra cpu --extra selftrained python scripts/selftrained/train_local_stage.py \

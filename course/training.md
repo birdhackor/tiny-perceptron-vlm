@@ -35,7 +35,7 @@ python scripts/fetch_training_assets.py --asset tinystories
 
 模型還沒更新前，先讓一批材料進去，確認它能算出有限代價，參數也收到更新方向。這像開工前先試機器的通路；它不是能力考試。
 
-下面三行分別檢查文字接續（text）、助手示範回答（sft）與圖片問答（vision），選一條即可。沒有 `--train` 時，工具只做前向與反向，不更新、不保存訓練權重。
+下面三行分別檢查文字接續（text）、助手示範回答（sft）與圖片問答（vision），選一條即可。這三條命令先用程式內建的小材料：文字是顏色與形狀短文，對話是兩個小整數相加的問答，圖片是程式畫出的圓或方塊。要讀自己的資料檔時，再加上 `--data` 和檔案路徑。沒有 `--train` 時，工具只做前向與反向，不更新、不保存訓練權重。
 
 ```bash
 python scripts/train.py --task text --device cpu
@@ -538,7 +538,7 @@ SHA-256是檔案指紋，Git commit是程式版本；兩者讓你取得同一份
 <details>
 <summary>共同成品、成熟模型與完整歷史紀錄</summary>
 
-[第19章](chapters/19.md)追蹤我們自行訓練的共同模型及各階段載入的起點權重，也稱父權重，階段接續見[19.4](chapters/19.md#19.4)；其能力表和交付指引與局部實驗分開。[第20章](chapters/20.md)是沿用成熟Qwen／Whisper的延伸，專用操作見[重訓指引](../docs/natural-assistant/v4/TRAINING.md)，上游能力不算成我們從零學會。
+[第19章](chapters/19.md)追蹤我們自行訓練的共同模型及各階段載入的起點權重，也稱父權重，階段接續見[19.4](chapters/19.md#19.4)。v2已完成訓練、公開推論權重與固定最後測試；[19.12](chapters/19.md#19.12)列出能力及未達標項目，[公開CPU操作](../docs/selftrained/v2-public-cpu-commands.md)提供試用，[本機訓練指引](../docs/selftrained/TRAINING.md)用Git LFS保存的固定資料逐段接自己的訓練檢查點，不需要作者的私有雲端儲存空間。其結果與局部實驗分開。[第20章](chapters/20.md)是沿用成熟Qwen／Whisper的延伸，專用操作見[重訓指引](../docs/natural-assistant/v4/TRAINING.md)，上游能力不算成我們從零學會。
 
 完整歷史結果在[實驗紀錄](../docs/course-experiments/README.md)。RAG、工具與推理報告保存各自的原始輸入、輸出及分母。工具要留實際執行結果，以及把結果放回對話後模型生成的回答；只生成請求文字，還沒有完成操作。
 

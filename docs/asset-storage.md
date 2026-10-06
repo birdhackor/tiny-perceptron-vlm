@@ -36,9 +36,10 @@ LFS不會讓檔案本身變小。保存不同內容的版本需要更多儲存�
 | 資料範圍 | 壓縮後大小 | 用途 |
 | --- | ---: | --- |
 | 基礎自然資料，8個分來源包 | 30,854,837 bytes，約30.85 MB | [30組正式小型實驗](course-experiments/README.md)。 |
+| 第19章自行訓練v2，1個包 | 67,862,431 bytes，約67.86 MB | [有限多模態主線的訓練與驗收](selftrained/TRAINING.md)。 |
 | 第20章照片、中文讀字與語音，3個包 | 146,543,309 bytes，約146.54 MB | [自然助理的微調與驗收](natural-assistant/v4/DATA.md)。 |
 
-兩列是不同資料範圍，不能只看`--asset all`就以為會取得第20章。第20章另有自己的清單與下載入口。其語音錄音用來驗證聽寫與聊天，沒有進入本課的LoRA更新。
+三列是不同資料範圍，`fetch_training_assets.py --asset all`只取基礎8包。v2的 `assets/training/selftrained-v2.tar.gz` 由[固定manifest](selftrained/v2-manifest.json)指定Git版本、包指紋與全部8,962個檔案，含12個JSONL與8,950個其他檔案（包含圖片、錄音與來源說明）；訓練／驗證／最後測試共有28,876／2,435／3,734題，題數不等於獨立素材數。下載與核對步驟見[本機訓練指引](selftrained/TRAINING.md)。第20章另有自己的清單與下載入口；其語音錄音用來驗證聽寫與聊天，沒有進入本課的LoRA更新。
 
 這些數字是壓縮包的實際大小；解包後另有檔案與容器成本。模型權重、Python套件及運算記憶體不包含在表中。完整外部資料集可能更大，本課只發布有明確用途、來源與授權的固定子集。
 
@@ -46,7 +47,9 @@ LFS不會讓檔案本身變小。保存不同內容的版本需要更多儲存�
 
 推論像拿做好的模型回答問題，只需要配對的模型設定、權重與輸入處理工具。續訓則像從上次下課的地方繼續學習，還要保存更新器、步數、隨機狀態與資料進度；只拿到推論權重，不足以保證接著更新的每一步相同。
 
-[公開課程模型庫](https://huggingface.co/birdhackor/tiny-perceptron-course-models)中的小模型由[推論清單](course-experiments/public-models.json)指定版本與載入方式；[第19章整合權重](course-experiments/capstone-public.json)另有配套清單。它們由本課模型類別讀取，不是每份都能直接交給通用聊天介面。[5.7](../course/chapters/05.md#5.7)介紹如何接續小模型，第20章的實際續訓步驟在[LoRA訓練指引](natural-assistant/v4/TRAINING.md)。
+[公開課程模型庫](https://huggingface.co/birdhackor/tiny-perceptron-course-models)保留[各章歷史推論清單](course-experiments/public-models.json)與[舊合成整合清單](course-experiments/capstone-public.json)。第19章v2另固定於HF revision `979cdfacc588ad0536f1c64fff96f264571cf054` 下的 `selftrained/v2/`：MoE pretrain、MoE SFT、MoE joint、Dense joint四組輸出，共16個檔案，採MIT授權。每組包括 `model.safetensors`、`model-config.json`、`tokenizer.json` 與 `inference-manifest.json`，由本課自訂PyTorch類別和[chat入口](selftrained/v2-public-cpu-commands.md)讀取。
+
+v2公開檔案沒有optimizer、RNG或sampler狀態，目前trainer也不把它們當成新訓練段的起點。自己重做用[本機stage wrapper](selftrained/TRAINING.md)，從隨機初始化開始，後續接自己的 `best.pt`；同段精確續訓則接自己的 `latest.pt`。不需要作者的私人Volume。[5.7](../course/chapters/05.md#5.7)介紹接續小模型，第20章另用自己的[LoRA訓練指引](natural-assistant/v4/TRAINING.md)。
 
 完整訓練備份可以保存到自己的私有模型庫；公開時選定需要的推論里程碑，附上能力與限制。Hugging Face的儲存政策與帳戶方案見[官方說明](https://huggingface.co/docs/hub/storage-limits)，不要把公開模型庫當成無限制的私人備份。
 

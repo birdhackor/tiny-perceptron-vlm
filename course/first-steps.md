@@ -36,7 +36,7 @@ jupyter lab notebooks
 
 往後若教材寫 `python ...` 或 `.venv/bin/python ...`，也可把 Python 的路徑換成 `.\.venv\Scripts\python.exe`，其後的參數保持相同。
 
-兩組指令做的是同樣三件事。第一行檢查 Python 與 PyTorch 能否使用；看到 `compute` 那列為 `OK（cpu）`，且套件沒有「未安裝」或最後的紅色錯誤，才表示 CPU 計算檢查完成。第二行登記工作頁要用的執行環境，第三行啟動 JupyterLab，終端機會提供瀏覽器網址。開啟 `01/1.1.ipynb`，選 **Tiny Perceptron**，點進一個程式框並按 **Shift+Enter**。一個框叫 cell；負責執行它的程序叫 kernel，可想成工作桌：上一格取過的名字還留在桌上，後面才能使用。
+兩組指令做的是同樣三件事。第一行檢查 Python 與 PyTorch 能否使用；看到 `compute` 那列為 `OK`（括號中的裝置名稱依電腦而異），且套件沒有「未安裝」或最後的紅色錯誤，就表示計算環境可以使用。第二行登記工作頁要用的執行環境，第三行啟動 JupyterLab，終端機會提供瀏覽器網址。開啟 `01/1.1.ipynb`，選 **Tiny Perceptron**，點進一個程式框並按 **Shift+Enter**。一個框叫 cell；負責執行它的程序叫 kernel，可想成工作桌：上一格取過的名字還留在桌上，後面才能使用。
 
 要試讀暖身中的短程式，可以在 Colab 用上方「＋程式碼」新增程式框；JupyterLab 則用工具列的「＋」。把暖身的整段程式貼入新框，先跑完「準備本節的工具」程式框，再選新框按 Shift+Enter。貼入時保留每行開頭的空格，它們可能是 Python 分辨重複動作範圍的縮排。
 

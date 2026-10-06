@@ -6,7 +6,17 @@
 
 ## 取得依賴、資料和公開權重
 
-所有命令都從 repository 根目錄執行。
+先安裝 [Git](https://git-scm.com/downloads)、[Git LFS](https://git-lfs.com/) 與 [uv](https://docs.astral.sh/uv/getting-started/installation/)。第一次使用時，取得包含本頁程式的 `selftrained-v2` 分支，再進入專案根目錄：
+
+```sh
+GIT_LFS_SKIP_SMUDGE=1 git clone --branch selftrained-v2 https://github.com/birdhackor/tiny-perceptron-vlm.git
+cd tiny-perceptron-vlm
+git lfs install --local
+```
+
+`GIT_LFS_SKIP_SMUDGE=1` 讓這次 clone 先取得程式與資料指標，下一段才下載需要的資料包。Windows PowerShell 先執行 `$env:GIT_LFS_SKIP_SMUDGE="1"`，再執行不帶前綴的 `git clone`。若已有專案，先確認其中有 `scripts/selftrained/chat.py` 與本頁列出的示範輸入；想重新取得完整配套時，另選新目錄 clone，保留原來的工作。
+
+以下所有命令都從包含 `pyproject.toml` 的專案根目錄執行。`uv sync` 準備 CPU 推論的工具；`git lfs pull` 只下載本頁需要的 V2 資料包。
 
 ```sh
 uv sync --extra cpu --extra selftrained

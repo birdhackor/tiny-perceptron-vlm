@@ -1,10 +1,14 @@
 # 小小感知機：教學大綱與設計理由
 
-這份大綱保留教學設計與研究取捨。目前有20章與A／B／C三條支線，共266份逐課Notebook；加上閱讀指南、暖身、訓練操作與名詞頁，共292個編號小節。從[教材入口](../course/README.md)開始閱讀，正文、圖解與同節Notebook使用同一份來源。
+這份大綱保留教學設計與研究取捨。目前有20章與A／B／C三條支線，共283份逐課Notebook；加上閱讀指南、暖身、訓練操作與名詞頁，共309個編號小節。從[教材入口](../course/README.md)開始閱讀，正文、圖解與同節Notebook使用同一份來源。
 
-先前30組正式實驗與CUDA Flash補驗保留各自的配置、成績與限制；本輪另補有限候選PPO與同底座MoE整合實驗，兩批證據在[實驗紀錄](course-experiments/README.md)分開查閱。整合模型已完成接續訓練與[部署評估](course-experiments/results/capstone_deployment.json)，推薦聯合任務階段，DPO保留作對照；兩者都通過78／90題，仍有未學會的項目。[較小Dense學生](course-experiments/results/capstone_student.json)也完成示範／蒸餾比較，通過62／90與61／90題，蒸餾版4-bit重載後仍61／90；這份配方的蒸餾沒有提高任務總分。獨立審閱狀態以[目前進度](course-experiments/progress.json)為準。親手試整合模型前，先按[19.11](../course/chapters/19.md#19.11)取得指定推論檔；重跑操作見[訓練指南](../course/training.md)。
+第19章主線v2已完成從隨機初始化的文字、視覺、OCR、語音及接頭訓練，MoE共5,447,107參數，Dense共2,288,067參數。兩版使用同一固定資料包的28,876題訓練、2,435題validation；凍結公開權重後，各做一次3,734題最後測試，仍未通過全部原定能力判準。完整成績與任務範圍見[19.12](../course/chapters/19.md#19.12)及[固定結果](selftrained/results/v2-final-public-results.json)，試用見[公開CPU操作](selftrained/v2-public-cpu-commands.md)，自己重做見[本機訓練指引](selftrained/TRAINING.md)。最後MoE段完成4,000步、選第1,000步；Dense段完成10,000步、選第1,000步，選定步數不等於總完成步數。
 
-前19章的推論權重已分兩批公開：[各章實驗清單](course-experiments/public-models.json)保留原30組／120份權重，[第19章清單](course-experiments/capstone-public.json)提供8份成品階段／量化檔與3份Dense學生檔。兩批存放在同一個Hugging Face倉庫，各用自己的固定版本、檔案指紋與下載入口；不能混用格式或把11份新增檔當作11項新能力。第20章另有[固定公開清單](natural-assistant/v4/public-release.json)，本版指定Qwen3-VL-2B-Instruct底座與Whisper-large-v3-turbo，不加LoRA修正。先依[20.2](../course/chapters/20.md#20.2)試用，操作與資源見[學生指引](natural-assistant/v4/STUDENT.md)，能力與限制見[20.13](../course/chapters/20.md#20.13)。
+v2的MoE pretrain、MoE SFT、MoE joint與Dense joint四組推論輸出已公開，共16個配對檔案、MIT授權，固定在[HF revision 979cdf…](https://huggingface.co/birdhackor/tiny-perceptron-course-models/tree/979cdfacc588ad0536f1c64fff96f264571cf054/selftrained/v2)。公開safe權重不含optimizer／RNG／sampler；重做主線接自己的完整checkpoint，不需要作者私人Volume。
+
+既有局部實驗和舊合成整合也保留：30組正式實驗、CUDA Flash補驗、有限候選PPO與舊同底座MoE的配置、成績及限制在[歷史實驗紀錄](course-experiments/README.md)。舊[部署評估](course-experiments/results/capstone_deployment.json)中的joint與DPO各78／90題，舊[Dense學生](course-experiments/results/capstone_student.json)的示範／蒸餾各62／90與61／90題；這些是局部機制和歷史輔助證據，不是v2最後測試。[各章實驗清單](course-experiments/public-models.json)保留原30組／120份權重，[舊整合清單](course-experiments/capstone-public.json)保留8份階段／量化檔與3份Dense學生檔，各沿用自己的固定版本與指紋。
+
+第20章另有[固定公開清單](natural-assistant/v4/public-release.json)，本版指定Qwen3-VL-2B-Instruct底座與Whisper-large-v3-turbo，不加LoRA修正。先依[20.2](../course/chapters/20.md#20.2)試用，操作與資源見[學生指引](natural-assistant/v4/STUDENT.md)，能力與限制見[20.13](../course/chapters/20.md#20.13)。它延伸已有上游能力，與自行訓練主線各自驗收。
 
 共同基礎：**猜下一個字 → 理解上下文 → Attention → 可訓練、可驗證的 Dense Transformer → 文字對話**。先用字元 tokenizer，BPE 可回讀；之後按問題進入行為、多模態、架構、效率與壓縮單元。
 
@@ -12,7 +16,7 @@
 
 排序原則：驗證從第一次訓練開始；先在7.11看到同一模型接續對話訓練，再在7.17–7.18比較一般文字、示範、偏好與回饋，解釋常見預訓練／後訓練分工。之後用具體範例理解個性、遵循與安全；圖片和音訊接在已有的文字介面上。第13章先比較同題兩篇回答，再選擇直接偏好更新，或先教評分員、理解PPO的分步路線。現代Dense與MoE放在相鄰的架構單元，效率、量化與蒸餾各自從小實驗入手。
 
-第19章最後把已學零件接到同一個小世界助理：先看試用問題，再追蹤資料、父權重、預訓練、SFT、聯合任務、工具與DPO分支，接著量測、量化、蒸餾和交付。前面章節仍可換模型或跳讀；本章才要求逐階段核對同一底座的來源。採MoE是為了實際展示選專家與整合，不假定它在小型硬體上必然比Dense省時或省記憶體。全部專家仍要儲存，路由開銷也要量測；推薦成品與較小學生依各自能力表選擇，失敗照樣保留。
+第19章最後把已學零件接到同一個有限任務助理：先看試用問題，再追蹤資料、父權重、預訓練、SFT、模態入口、聯合任務、工具與交付。前面章節仍可換模型或跳讀；本章才要求逐階段核對同一底座的來源。採MoE是為了實際展示選專家與整合，不假定它在小型硬體上必然比Dense省時或省記憶體。全部專家仍要儲存，路由開銷也要量測；v2的top-2 MoE用兩個FFN，Dense用一個，最後目標與選定歷史也不同，不能當成同參數、同計算的受控比較。量化、蒸餾及DPO的舊小世界分支保留各自配方與結果。
 
 參考近兩年公開課後，補入資料去重、評估有效性、微調遺忘、圖文對比學習與視覺 token 預算；另外提供上下文／RAG、工具使用、推理驗證三個跳讀單元。來源與查證限制見 [近期公開課對照](public-course-review-2025-2026.md)。
 
@@ -121,7 +125,7 @@ X是模型收到的輸入，Y是對應的下一步答案。可讀前文的遮罩
 | 模型何時該選工具？ | B章的選擇、呼叫、結果回填與第二次回答 |
 | 教過的零件能組成真正的小助理嗎？ | 19章的自行訓練整合；20章另作成熟模型延伸 |
 
-主線成品的神經權重從隨機初始化開始；有限任務允許較小的模型，不能用成熟模型的能力代替驗收。三類模態共享語言核心與對話紀錄，但各自需要適合的素材、特徵序列與訓練訊號。視覺目標限於已知商品和已知中文字；語音目標限於有限的真人需求，不宣稱開放式逐字聽寫。具體資料來源與留出規則見[本輪範圍](course-revision-20261005/outline.md)。
+主線成品的神經權重從隨機初始化開始；有限任務允許較小的模型，不能用成熟模型的能力代替驗收。三類模態共享語言核心與對話紀錄，但各自需要適合的素材、特徵序列與訓練訊號。v2視覺限三類服飾和公開兩格位置，OCR限12個已知繁體字與一個提供的連續1–4字區域，Sans／Serif兩種字型都已見於訓練。語音限地址、App與卡片三種銀行客服主題，直接由聲音特徵產生文字回答，不宣稱開放式逐字聽寫。錄音切分不等於說話者隔離，speaker ID未知。具體資料與留出規則見[固定資料清單](selftrained/v2-manifest.json)與[19.12](../course/chapters/19.md#19.12)。
 
 ## 4. 實作與驗收原則
 

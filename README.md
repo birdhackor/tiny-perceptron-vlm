@@ -16,7 +16,7 @@
 
 用幾個字看懂運作後，[7.17](course/chapters/07.md#7.17)解釋為什麼常先預訓練，再做後訓練；[第13章](course/chapters/13.md)逐步介紹偏好回饋、獎勵模型、PPO與DPO。指令遵循分開檢查內容、指定範圍、格式與停止；長上下文則分開討論容納長度、位置表示、計算成本與資訊使用。
 
-[第19章整合專題](course/chapters/19.md#19.1)把自行訓練的文字、圖片、聲音與工具使用組成一位小助理。任務限於明確教過的情境：商品與空間關係、已知中文字卡、有限真人語音需求，以及共用對話紀錄和計算器。MoE是否划算仍由總參數、每次計算與硬體量測判斷。教材先交代任務與介面；擴充成品的訓練、逐題驗收與權重在工程階段完成後交付，不把設計目標當成已測能力。舊版合成小世界的權重與逐題報告保留於[固定實驗](docs/course-experiments/README.md)。
+[第19章整合專題](course/chapters/19.md#19.1)把自行訓練的文字、圖片、聲音與工具使用組成一位小助理。v2 的文字核心、視覺／語音入口與接頭都由本專案從零訓練，已完成訓練、公開推論權重及兩版各3,734題的固定最後測試。MoE共5,447,107參數，Dense共2,288,067參數；兩版仍未通過全部原定能力判準。任務限於三類服飾與兩格位置、12個已知中文字的指定連續1–4字區域、三種銀行客服語音主題，以及有限文字對話和計算器。完整成績與限制見[19.12](course/chapters/19.md#19.12)，先試用可走[公開CPU操作](docs/selftrained/v2-public-cpu-commands.md)。舊版合成小世界的權重、配方與逐題報告保留於[固定實驗](docs/course-experiments/README.md)，不是本版成品的成績。
 
 [第20章](course/chapters/20.md#20.1)是成熟模型的應用延伸：Qwen3-VL處理圖文，Whisper先把語音轉成文字。它另有[操作](docs/natural-assistant/v4/STUDENT.md)、[資料](docs/natural-assistant/v4/DATA.md)與[訓練](docs/natural-assistant/v4/TRAINING.md)指引。上游模型的能力與自行訓練主線分開驗收。
 
@@ -60,7 +60,11 @@ python scripts/train.py --task text --data data/generated/toy-text/train.jsonl
 
 已設定 Modal 與 Hugging Face 帳號時，可手動執行 GitHub Actions 的 **GPU training smoke test**，驗證 GPU 權重更新、HF checkpoint 上傳與下載續訓。帳號設定、時間限制與結果判讀見 [GPU 操作說明](docs/gpu-training.md)。
 
-想先觀察訓練後的模型，可下載[公開學生權重](https://huggingface.co/birdhackor/tiny-perceptron-course-models)：30組實驗共120份存檔，包含不同尺寸與教師／學生等比較版本。[下載清單](docs/course-experiments/public-models.json)只列已發布的固定版本，下載程式逐檔核對指紋；模型卡說明每份權重的用途、資料許可與實際成績。例如在上面已安裝的 CPU 環境中：
+想先觀察第19章的v2成品，可按[公開CPU操作](docs/selftrained/v2-public-cpu-commands.md)安裝 `cpu` 和 `selftrained` 配套，匿名取得[固定HF版本](https://huggingface.co/birdhackor/tiny-perceptron-course-models/tree/979cdfacc588ad0536f1c64fff96f264571cf054/selftrained/v2)。該版有MoE pretrain、MoE SFT、MoE joint與Dense joint四組推論輸出，共16個配對檔案，採MIT授權。MoE joint選用最後一段第1,000步，該段實際完成4,000步；Dense joint選用第1,000步，該段完成10,000步。這些是依驗證選出的權重，成功示範不代表最後測試全部通過。
+
+要自己從隨機初始化重做，使用[本機訓練指引](docs/selftrained/TRAINING.md)和[固定v2資料清單](docs/selftrained/v2-manifest.json)：Git LFS資料包67,862,431 bytes，含8,962個檔案，訓練／驗證／測試題數為28,876／2,435／3,734。各段接自己的完整checkpoint，不需要作者的私人Volume；公開safe權重只供推論，不能精確續訓。
+
+各章的局部比較仍可下載[公開學生權重](https://huggingface.co/birdhackor/tiny-perceptron-course-models)：原30組實驗共120份存檔，包含不同尺寸與教師／學生等比較版本。[原下載清單](docs/course-experiments/public-models.json)保留固定版本與檔案指紋；[舊合成整合清單](docs/course-experiments/capstone-public.json)另保留11份階段、量化及Dense學生檔。例如在上面已安裝的 CPU 環境中：
 
 ```bash
 python scripts/fetch_course_models.py --list
