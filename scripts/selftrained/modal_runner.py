@@ -8,6 +8,7 @@ container. Actual work requires separate reserve and execute invocations.
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import subprocess
@@ -215,6 +216,11 @@ def validate_job(job):
     freeze = job.get("freeze_perception_backbones", False)
     if type(freeze) is not bool or (freeze and stage != "joint"):
         raise ValueError("freeze_perception_backbones must be boolean and is available only for joint training")
+    for key in ("tool_loss_weight", "numeric_run_loss_weight"):
+        if key in job:
+            value = job[key]
+            if type(value) not in (int, float) or not math.isfinite(value) or value < 1 or stage != "joint":
+                raise ValueError(f"{key} must be a finite number >= 1 and is available only for joint training")
     if job.get("resume") and job.get("init_checkpoint"):
         raise ValueError("Resume and fresh-stage initialization are mutually exclusive")
     for field in ("resume", "init_checkpoint", "checkpoint"):
@@ -654,6 +660,9 @@ def trainer_command(job, manifest, root, output, batch_id, public_model_dir=None
             command += ["--sampling-mode", job["sampling_mode"]]
         if job.get("freeze_perception_backbones", False):
             command += ["--freeze-perception-backbones"]
+        for flag in ("tool_loss_weight", "numeric_run_loss_weight"):
+            if flag in job:
+                command += ["--" + flag.replace("_", "-"), str(job[flag])]
         for field in ("resume", "init_checkpoint"):
             if job.get(field):
                 command += ["--" + field.replace("_", "-"), str(artifact_path(batch_id, job[field]))]

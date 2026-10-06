@@ -33,6 +33,7 @@ from tiny_perceptron.selftrained.dataset import (  # noqa: E402
 CHECKPOINT_SCHEMA = "selftrained-random-v1"
 STAGES = ("pretrain", "sft", "vision", "ocr", "audio", "joint")
 SAMPLING_MODES = ("bucket", "task-family")
+LANGUAGE_OBJECTIVE_VERSION = "selftrained-language-objective-v1"
 TASK_FAMILIES = ("text", "tools", "vision", "ocr", "voice")
 # task-family tools cycle: 12/16 slots are numeric call/reply training.
 TOOL_TASK_MULTIPLICITIES = {
@@ -270,6 +271,7 @@ def export_inference(output_dir, *, required=False):
         "tokenizer_sha256": checkpoint["tokenizer_sha256"],
         "freeze_perception_backbones": checkpoint.get("training_options", {}).get("freeze_perception_backbones", False),
         "sampling_mode": checkpoint.get("training_options", {}).get("sampling_mode", "bucket"),
+        **checkpoint_language_objective(checkpoint),
         "selection": "validation_loss",
     }
     (output_dir / "inference-manifest.json").write_text(
@@ -293,13 +295,145 @@ def set_trainable(model, stage, freeze_perception_backbones=False):
     return trainable
 
 
-def objective(model, encoder, records, stage, perception_weight, router_weight):
+def validate_loss_weights(stage, tool_loss_weight=1.0, numeric_run_loss_weight=1.0):
+    for name, value in (("tool_loss_weight", tool_loss_weight), ("numeric_run_loss_weight", numeric_run_loss_weight)):
+        if type(value) not in (int, float) or not math.isfinite(value) or value < 1:
+            raise ValueError(f"{name} 必須是 finite number >= 1，不能是 boolean")
+    weighted = tool_loss_weight != 1 or numeric_run_loss_weight != 1
+    if weighted and stage != "joint":
+        raise ValueError("nondefault language loss weights 只可用於 joint")
+    return weighted
+
+
+def language_objective_metadata(options):
+    tool = options.get("tool_loss_weight", 1.0)
+    numeric = options.get("numeric_run_loss_weight", 1.0)
+    validate_loss_weights(options.get("stage", "joint"), tool, numeric)
+    policy = {
+        "version": LANGUAGE_OBJECTIVE_VERSION,
+        "training_only": True,
+        "legacy_default_branch": "reuse_original_language_loss_scalar_and_graph",
+        "tool_rows": ["tool_call", "tool_reply:supervision.replay_kind=actual_executor"],
+        "excluded_rows": ["evaluation_only", "supervision.protocol_fixture"],
+        "row_scope": "all_existing_supervised_assistant_targets_in_eligible_row",
+        "numeric_targets": "ASCII_digits_union_immediate_supervised_nondigit_boundary_or_EOS_union_minus_if_next_supervised_digit",
+        "alignment": "RecordEncoder_already_shifted_labels; ignored_gap_breaks_adjacency",
+        "combination": "tool_row_multiplier_times_numeric_multiplier; ignored_labels_zero",
+        "normalization": "sum(weight_times_token_CE)/sum(weight)",
+        "weighted_reduction_dtype": "float32",
+        "validation_and_selection": "original_unweighted_objective; validation_loss",
+    }
+    return {"tool_loss_weight": tool, "numeric_run_loss_weight": numeric, "language_objective_policy": policy}
+
+
+def checkpoint_language_objective(source):
+    options = source.get("training_options", {})
+    metadata = language_objective_metadata({**options, "stage": source.get("stage", "joint")})
+    if any(key in source and source[key] != metadata[key] for key in ("tool_loss_weight", "numeric_run_loss_weight")):
+        raise ValueError("checkpoint language objective coefficients 與 training_options 不符")
+    policies = [
+        value
+        for value in (options.get("language_objective_policy"), source.get("language_objective_policy"))
+        if value is not None
+    ]
+    if any(value != metadata["language_objective_policy"] for value in policies):
+        raise ValueError("checkpoint language objective version/policy 不同")
+    if not policies and (metadata["tool_loss_weight"] != 1 or metadata["numeric_run_loss_weight"] != 1):
+        raise ValueError("nondefault checkpoint 缺少 language objective version/policy")
+    # A legacy missing policy/coefficients represents the original 1/1 objective only.
+    return metadata
+
+
+def validate_resume_language_objective(source, options):
+    if checkpoint_language_objective(source) != language_objective_metadata(options):
+        raise ValueError("resume 改變 language objective coefficients/version/policy；請 init-checkpoint 開始新 joint")
+
+
+def genuine_tool_loss_row(record):
+    supervision = record.get("supervision", {})
+    if record.get("evaluation_only", False) or supervision.get("protocol_fixture", False):
+        return False
+    return record["task"] == "tool_call" or (
+        record["task"] == "tool_reply" and supervision.get("replay_kind") == "actual_executor"
+    )
+
+
+def numeric_run_loss_mask(labels, tokenizer):
+    valid = labels != -100
+    digit_ids = [tokenizer.character_ids[c] for c in "0123456789" if c in tokenizer.character_ids]
+    digits = torch.isin(labels, torch.tensor(digit_ids, dtype=labels.dtype, device=labels.device)) & valid
+    boundary = torch.zeros_like(valid)
+    boundary[:, 1:] = valid[:, 1:] & digits[:, :-1] & ~digits[:, 1:]
+    minus = torch.zeros_like(valid)
+    minus_id = tokenizer.character_ids.get("-")
+    if minus_id is not None:
+        minus[:, :-1] = valid[:, :-1] & (labels[:, :-1] == minus_id) & digits[:, 1:]
+    return (digits | boundary | minus) & valid
+
+
+def language_loss_weights(labels, records, tokenizer, tool_loss_weight, numeric_run_loss_weight):
+    if labels.ndim != 2 or labels.shape[0] != len(records):
+        raise ValueError("records 與 already-shifted labels 的 batch dimension 不同")
+    row_weights = torch.tensor(
+        [tool_loss_weight if genuine_tool_loss_row(record) else 1.0 for record in records],
+        dtype=torch.float32,
+        device=labels.device,
+    )[:, None]
+    numeric = torch.where(numeric_run_loss_mask(labels, tokenizer), numeric_run_loss_weight, 1.0).float()
+    return row_weights * numeric * (labels != -100).float()
+
+
+def weighted_language_loss(output, labels, records, tokenizer, tool_loss_weight=1.0, numeric_run_loss_weight=1.0):
+    if tool_loss_weight == 1 and numeric_run_loss_weight == 1:
+        return output.get("language_loss", output.get("loss"))
+    logits = output["logits"]
+    if logits.shape[:2] != labels.shape:
+        raise ValueError("logits 必須與 existing already-shifted labels 對齊")
+    weights = language_loss_weights(labels, records, tokenizer, tool_loss_weight, numeric_run_loss_weight)
+    mass = weights.sum(dtype=torch.float32)
+    if not bool(torch.isfinite(mass) & (mass > 0)):
+        raise ValueError("沒有 finite positive supervised token mass")
+    ce = torch.nn.functional.cross_entropy(
+        logits.float().reshape(-1, logits.shape[-1]), labels.reshape(-1), ignore_index=-100, reduction="none"
+    ).reshape_as(labels)
+    return (ce * weights).sum(dtype=torch.float32) / mass
+
+
+def validate_weighted_source(source, args):
+    if source is None or source.get("origin", {}).get("kind") != "all-neural-weights-random":
+        raise ValueError("nondefault joint 必須承接 own random-initialized checkpoint")
+    checkpoint_language_objective(source)
+    if not args.freeze_perception_backbones or args.sampling_mode != "task-family":
+        raise ValueError("nondefault joint 必須保留 frozen perception backbones 與 task-family sampling")
+    old = source.get("training_options", {})
+    if (
+        old.get("freeze_perception_backbones", False) != args.freeze_perception_backbones
+        or old.get("sampling_mode", "bucket") != args.sampling_mode
+    ):
+        raise ValueError("nondefault joint 必須保留 source backbone/sampling options")
+    if source["config"]["max_length"] != args.context:
+        raise ValueError("nondefault joint 必須保留 source context/config")
+    if args.init_checkpoint and (
+        source.get("stage") != "joint" or source.get("checkpoint_kind") != "selected_validation_best"
+    ):
+        raise ValueError("nondefault 新 joint 必須 init own joint selected_validation_best；不能從 latest 改 objective")
+
+
+def objective(
+    model, encoder, records, stage, perception_weight, router_weight, tool_loss_weight=1.0, numeric_run_loss_weight=1.0
+):
+    weighted = validate_loss_weights(stage, tool_loss_weight, numeric_run_loss_weight)
     batch = encoder.batch(records, pretrain=stage == "pretrain")
     if stage in ("vision", "ocr", "audio"):
         batch["labels"] = None
     output = model(**batch)
     head_loss, head_metrics = perception_loss(output.get("perception", []), records)
-    language_loss = output.get("language_loss", output.get("loss"))
+    unweighted_language_loss = output.get("language_loss", output.get("loss"))
+    language_loss = unweighted_language_loss
+    if weighted:
+        language_loss = weighted_language_loss(
+            output, batch["labels"], records, encoder.tokenizer, tool_loss_weight, numeric_run_loss_weight
+        )
     if stage in ("vision", "ocr", "audio"):
         if head_loss is None:
             raise ValueError(f"{stage} 沒有實際感知監督")
@@ -313,13 +447,18 @@ def objective(model, encoder, records, stage, perception_weight, router_weight):
         aux = output.get("aux_loss")
         if aux is not None:
             loss = loss + router_weight * aux
-    return loss, {
+    detail = {
         "language_loss": float(language_loss.detach()) if language_loss is not None else None,
         "perception_loss": float(head_loss.detach()) if head_loss is not None else None,
         "tokens": int(batch["attention_mask"].sum()),
         "target_tokens": int((batch["labels"] != -100).sum()) if batch["labels"] is not None else 0,
         "head_metrics": head_metrics,
     }
+    if weighted:
+        detail.pop("language_loss")
+        detail["weighted_language_loss"] = float(language_loss.detach())
+        detail["unweighted_language_loss"] = float(unweighted_language_loss.detach())
+    return loss, detail
 
 
 @torch.no_grad()
@@ -365,6 +504,18 @@ def parser():
     result.add_argument("--perception-weight", type=float, default=1.0)
     result.add_argument("--router-weight", type=float, default=0.01)
     result.add_argument(
+        "--tool-loss-weight",
+        type=float,
+        default=1.0,
+        help="joint training only；genuine tool rows 的 existing assistant targets multiplier，finite >= 1",
+    )
+    result.add_argument(
+        "--numeric-run-loss-weight",
+        type=float,
+        default=1.0,
+        help="joint training only；ASCII digits、next stopping target、leading minus multiplier，finite >= 1",
+    )
+    result.add_argument(
         "--freeze-perception-backbones",
         action="store_true",
         help="joint only：固定三種感知 backbone/head（含 Vision.projection），只訓練 LM 與 bridges",
@@ -385,8 +536,13 @@ def parser():
 
 def main(argv=None):
     args = parser().parse_args(argv)
+    weighted = validate_loss_weights(args.stage, args.tool_loss_weight, args.numeric_run_loss_weight)
+    objective_metadata = language_objective_metadata(vars(args))
+    args.language_objective_policy = objective_metadata["language_objective_policy"]
     if args.resume and args.init_checkpoint:
         raise ValueError("resume 與 init-checkpoint 不能同時使用")
+    if weighted and not (args.resume or args.init_checkpoint):
+        raise ValueError("nondefault joint 必須 init own selected joint checkpoint 或 exact same-objective resume")
     if args.stage != "joint" and (args.freeze_perception_backbones or args.sampling_mode != "bucket"):
         raise ValueError("freeze-perception-backbones / task-family sampling 只可用於 joint")
     if min(args.steps, args.batch_size, args.context, args.eval_every, args.save_every, args.threads) < 1:
@@ -416,6 +572,10 @@ def main(argv=None):
         raise ValueError("資料指紋不同；請建立新實驗而非沿用 frozen stage")
     if source and source["asset_sha256"] != asset_hashes:
         raise ValueError("模態資產指紋不同")
+    if weighted:
+        validate_weighted_source(source, args)
+    if args.resume:
+        validate_resume_language_objective(source, vars(args))
     config_values = (
         dict(source["config"]) if source else (json.loads(Path(args.config).read_text()) if args.config else {})
     )
@@ -439,6 +599,7 @@ def main(argv=None):
     sampler = BalancedSampler(records, args.seed, mode=args.sampling_mode)
     step, token_count, target_token_count, best_val = 0, 0, 0, math.inf
     history = list(source.get("stage_history", [])) if source else []
+    origin = source.get("origin") if source else {"kind": "all-neural-weights-random", "seed": args.seed}
     if args.resume:
         if source["stage"] != args.stage or source["config"] != dataclasses.asdict(config):
             raise ValueError("resume 必須使用相同 stage/config")
@@ -467,6 +628,26 @@ def main(argv=None):
                 else "explicit_init_checkpoint",
             }
         )
+        if weighted:
+            initialization = {
+                "source_stage": source["stage"],
+                "loaded_step": source["step"],
+                "source_checkpoint_sha256": file_sha256(source_path),
+                "source_checkpoint_kind": source["checkpoint_kind"],
+                "source_language_objective": checkpoint_language_objective(source),
+                "new_language_objective": objective_metadata,
+                "reset_state": {
+                    "optimizer": "new",
+                    "rng": "fresh_stage_seed_not_source_rng",
+                    "sampler_draws": 0,
+                    "family_draws": 0,
+                    "stage_step": 0,
+                    "tokens": 0,
+                    "target_tokens": 0,
+                },
+            }
+            history[-1] = {**history[-1], "new_joint_initialization": initialization}
+            origin = {**origin, "new_joint_initialization": initialization}
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     metrics_path = output_dir / "metrics.jsonl"
@@ -476,6 +657,8 @@ def main(argv=None):
     if args.resume and selected_checkpoint is None and source["step"] == source.get("best_step"):
         selected_checkpoint = source
     if selected_checkpoint is not None:
+        if args.resume:
+            validate_resume_language_objective(selected_checkpoint, vars(args))
         atomic_checkpoint(output_dir / "best.pt", selected_checkpoint)
 
     def request_stop(signum, frame):
@@ -505,8 +688,9 @@ def main(argv=None):
             "asset_sha256": asset_hashes,
             "preprocess_version": PREPROCESS_VERSION,
             "training_options": vars(args),
+            **objective_metadata,
             "stage_history": history,
-            "origin": source.get("origin") if source else {"kind": "all-neural-weights-random", "seed": args.seed},
+            "origin": origin,
         }
         if include_selected:
             result["selected_checkpoint"] = selected_checkpoint
@@ -546,7 +730,16 @@ def main(argv=None):
             sampler.load_state_dict(before_sample)
             break
         optimizer.zero_grad(set_to_none=True)
-        loss, detail = objective(model, encoder, batch_records, args.stage, args.perception_weight, args.router_weight)
+        loss, detail = objective(
+            model,
+            encoder,
+            batch_records,
+            args.stage,
+            args.perception_weight,
+            args.router_weight,
+            args.tool_loss_weight,
+            args.numeric_run_loss_weight,
+        )
         if not torch.isfinite(loss):
             raise FloatingPointError(f"step={step} loss 非有限")
         loss.backward()
@@ -604,6 +797,7 @@ def main(argv=None):
         "trainable_parameters": sum(p.numel() for p in parameters),
         "freeze_perception_backbones": args.freeze_perception_backbones,
         "sampling_mode": args.sampling_mode,
+        **objective_metadata,
         "sampler_policy": sampler.policy(),
         "comparison": {
             "per_expert_ffn_hidden": config.ffn_hidden,
