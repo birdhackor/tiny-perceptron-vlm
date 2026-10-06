@@ -23,6 +23,9 @@ def repository(tmp_path):
     git(tmp_path, "init", "--initial-branch=work")
     git(tmp_path, "config", "user.name", "Publication test")
     git(tmp_path, "config", "user.email", "test@example.invalid")
+    # Match the checkout's LF contract even when Git inherits core.autocrlf.
+    (tmp_path / ".gitattributes").write_text("* text=auto eol=lf\n", encoding="utf-8", newline="\n")
+    git(tmp_path, "add", ".gitattributes")
     return tmp_path
 
 
@@ -48,7 +51,7 @@ def recipe():
 def commit(root, path, value, message="fixture"):
     target = root / path
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps(value) + "\n")
+    target.write_text(json.dumps(value) + "\n", encoding="utf-8", newline="\n")
     git(root, "add", "--", path)
     git(root, "commit", "-m", message)
     return git(root, "rev-parse", "HEAD")
@@ -112,7 +115,7 @@ def test_publication_verifies_actual_archive_and_committed_native_pointer(reposi
     path = repository / value["archive"]["path"]
     path.parent.mkdir(parents=True)
     pointer = f"version https://git-lfs.github.com/spec/v1\noid sha256:{value['archive']['sha256']}\nsize {value['archive']['bytes']}\n"
-    path.write_text(pointer)
+    path.write_text(pointer, encoding="utf-8", newline="\n")
     git(repository, "add", "--", value["archive"]["path"])
     git(repository, "commit", "-m", "exact pointer")
     revision = git(repository, "rev-parse", "HEAD")
@@ -126,7 +129,8 @@ def test_publication_verifies_actual_archive_and_committed_native_pointer(reposi
 
 def test_missing_pointer_bootstrap_uploads_native_local_lfs_object_without_commit(repository, monkeypatch):
     # Keep real local Git/LFS staging. Replace only the external push operation.
-    (repository / ".gitattributes").write_text("/assets/training/*.tar.gz filter=lfs diff=lfs merge=lfs -text\n")
+    with (repository / ".gitattributes").open("a", encoding="utf-8", newline="\n") as attributes:
+        attributes.write("/assets/training/*.tar.gz filter=lfs diff=lfs merge=lfs -text\n")
     git(repository, "add", ".gitattributes")
     git(repository, "commit", "-m", "LFS attribute")
     output = repository / "outputs/selftrained/data-publish"
@@ -165,7 +169,9 @@ def test_existing_wrong_pointer_is_rejected_before_upload(repository):
     path = repository / value["archive"]["path"]
     path.parent.mkdir(parents=True)
     path.write_text(
-        f"version https://git-lfs.github.com/spec/v1\noid sha256:{'f' * 64}\nsize {value['archive']['bytes']}\n"
+        f"version https://git-lfs.github.com/spec/v1\noid sha256:{'f' * 64}\nsize {value['archive']['bytes']}\n",
+        encoding="utf-8",
+        newline="\n",
     )
     git(repository, "add", "--", value["archive"]["path"])
     git(repository, "commit", "-m", "wrong pointer")
