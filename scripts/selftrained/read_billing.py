@@ -17,7 +17,8 @@ def main():
     observed = datetime.now(UTC)
     this_month = observed.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     last_month = (this_month - timedelta(days=1)).replace(day=1)
-    billing = modal.Workspace.from_context().billing
+    workspace = modal.Workspace.from_context()
+    billing = workspace.billing
     summaries = []
     for cycle in (last_month, this_month):
         value = billing.summary(cycle=cycle)
@@ -38,7 +39,11 @@ def main():
     today = complete_hour.replace(hour=0)
     args.output_dir.mkdir(parents=True, exist_ok=True)
     (args.output_dir / "workspace-billing-summary.json").write_text(
-        json.dumps({"observed_at": observed.isoformat(), "summaries": summaries}, indent=2) + "\n",
+        json.dumps(
+            {"observed_at": observed.isoformat(), "workspace_name": workspace.name, "summaries": summaries},
+            indent=2,
+        )
+        + "\n",
         encoding="utf-8",
     )
     print(json.dumps({"observed_at": observed.isoformat(), "summaries": summaries}), flush=True)
@@ -65,6 +70,7 @@ def main():
         "schema_version": 1,
         "observed_at": observed.isoformat(),
         "source": "Official modal.Workspace.billing.summary/report; modal==1.6.0",
+        "workspace_name": workspace.name,
         "scope": "Authenticated workspace, including other projects; not a course-only invoice",
         "summaries": summaries,
         "report_start": last_month.isoformat(),
