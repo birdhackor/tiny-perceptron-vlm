@@ -23,6 +23,190 @@ EXPORT_STAGES = {
     "dense-joint": ("dense", "joint"),
 }
 SAFE_EXPORT_FILES = {"model.safetensors", "model-config.json", "tokenizer.json", "inference-manifest.json"}
+PUBLIC_EVALUATION_PREFIXES = {
+    "selftrained/v2/moe-joint": "moe",
+    "selftrained/v2/dense-joint": "dense",
+}
+# The V2 export contract is fixed; control images validate it with stdlib only.
+PUBLIC_EVALUATION_PREPROCESS = "gray-crops32-ocr-letterbox-full-logmel40-v2"
+PUBLIC_TOKENIZER_SPECIALS = [
+    f"<{name}>" for name in ("pad", "bos", "eos", "user", "assistant", "system", "tool", "image", "ocr", "audio", "unk")
+]
+
+
+def unique_json_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("Duplicate public inference metadata key")
+        result[key] = value
+    return result
+
+
+def validate_public_evaluation(value, architecture):
+    """A public evaluation may recover only four reviewed V2 inference files."""
+    if architecture not in ("moe", "dense"):
+        raise ValueError("Public evaluation architecture must be moe or dense")
+    if not isinstance(value, dict) or set(value) != {"repo_id", "revision", "prefix", "files"}:
+        raise ValueError("Public evaluation needs the exact immutable four-file descriptor")
+    if value["repo_id"] != PUBLIC_MODEL_REPO:
+        raise ValueError("Public evaluation must use the authorized model repository")
+    if not isinstance(value["revision"], str) or not re.fullmatch(r"[a-f0-9]{40}", value["revision"]):
+        raise ValueError("Public evaluation requires an immutable full HF commit")
+    if not isinstance(value["prefix"], str) or PUBLIC_EVALUATION_PREFIXES.get(value["prefix"]) != architecture:
+        raise ValueError("Public evaluation prefix must be the authorized V2 architecture's joint export")
+    files = value["files"]
+    if not isinstance(files, list) or len(files) != 4:
+        raise ValueError("Public evaluation requires exactly four safe inference files")
+    seen, total = set(), 0
+    for item in files:
+        if not isinstance(item, dict) or set(item) != {"path", "sha256", "bytes"}:
+            raise ValueError("Public evaluation file needs only its fixed path, SHA and bytes")
+        if not isinstance(item["path"], str) or item["path"] not in SAFE_EXPORT_FILES or item["path"] in seen:
+            raise ValueError("Public evaluation may download only the unique four safe files")
+        if not isinstance(item["sha256"], str) or not re.fullmatch(r"[a-f0-9]{64}", item["sha256"]):
+            raise ValueError("Each public inference file needs exact SHA-256")
+        if type(item["bytes"]) is not int or item["bytes"] <= 0:
+            raise ValueError("Public inference files need positive bounded byte counts")
+        total += item["bytes"]
+        seen.add(item["path"])
+    if total > MAX_RELEASE_BYTES:
+        raise ValueError("Public evaluation exceeds the 128 MiB download allowance")
+    return {item["path"]: item for item in files}
+
+
+def public_evaluation_identity(root, public, checkpoint, manifest, architecture, training=None):
+    """Validate metadata against the frozen data/config and trusted private lineage.
+
+    This helper needs no torch or checkpoint deserialization. The caller verifies
+    payload bytes separately; control containers read only three small JSON files.
+    """
+    files = validate_public_evaluation(public, architecture)
+    if checkpoint.get("stage") != "joint" or checkpoint.get("path") != "best.pt":
+        raise ValueError("Public evaluation requires a selected private joint checkpoint lineage")
+    inference = json.loads(
+        verify_file(root, files["inference-manifest.json"]).read_text(), object_pairs_hook=unique_json_object
+    )
+    config = json.loads(verify_file(root, files["model-config.json"]).read_text(), object_pairs_hook=unique_json_object)
+    if not isinstance(inference, dict) or not isinstance(config, dict):
+        raise ValueError("Public inference metadata/config must be JSON objects")
+    tokenizer = json.loads(verify_file(root, files["tokenizer.json"]).read_text(), object_pairs_hook=unique_json_object)
+    if not isinstance(tokenizer, dict) or set(tokenizer) != {"type", "specials", "characters"}:
+        raise ValueError("Public tokenizer must have the exact character vocabulary schema")
+    characters = tokenizer["characters"]
+    if (
+        tokenizer["type"] != "selftrained_char_v1"
+        or tokenizer["specials"] != PUBLIC_TOKENIZER_SPECIALS
+        or not isinstance(characters, list)
+        or any(not isinstance(char, str) or len(char) != 1 for char in characters)
+        or characters != sorted(set(characters))
+        or type(config.get("vocab_size")) is not int
+        or config["vocab_size"] != len(PUBLIC_TOKENIZER_SPECIALS) + len(characters)
+    ):
+        raise ValueError("Public tokenizer vocabulary/role IDs differ from its exact model config")
+    tokenizer_sha = hashlib.sha256(json.dumps(tokenizer, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+    records = {Path(item["path"]).name: item["sha256"] for item in manifest["records"]}
+    assets = {item["path"]: item["sha256"] for item in manifest.get("assets", [])}
+    asset_hashes = inference.get("asset_sha256", {})
+    if (
+        inference.get("schema") != "selftrained-random-v1"
+        or inference.get("preprocess_version") != PUBLIC_EVALUATION_PREPROCESS
+        or inference.get("selected_checkpoint_sha256") != checkpoint["sha256"]
+        or inference.get("stage") != "joint"
+        or inference.get("origin", {}).get("kind") != "all-neural-weights-random"
+        or inference.get("selection") != "validation_loss"
+        or inference.get("files")
+        != {name: item["sha256"] for name, item in files.items() if name != "inference-manifest.json"}
+        or inference.get("data_sha256") != records
+        or not isinstance(asset_hashes, dict)
+        or not asset_hashes
+        or any(assets.get(path) != value for path, value in asset_hashes.items())
+        or inference.get("tokenizer_sha256") != tokenizer_sha
+        or config.get("architecture") != architecture
+        or any(
+            config.get(key) != value
+            for key, value in manifest["model_config"].items()
+            if key not in ("vocab_size", "architecture")
+        )
+    ):
+        raise ValueError("Public safe export differs from the selected random checkpoint or frozen data/config")
+    if training is not None and (
+        training.get("config") != config
+        # Current genuine receipts omit this field; never require a fabricated
+        # value or claim a direct comparison with absent training metadata.
+        or training.get("preprocess_version", PUBLIC_EVALUATION_PREPROCESS) != PUBLIC_EVALUATION_PREPROCESS
+        or training.get("data_sha256") != records
+        or training.get("asset_sha256") != asset_hashes
+        or training.get("tokenizer_sha256") != inference["tokenizer_sha256"]
+        or training.get("architecture") != architecture
+        or training.get("stage") != "joint"
+        or training.get("origin", {}).get("kind") != "all-neural-weights-random"
+        or training.get("completed_requested_steps") is not True
+        or training.get("selected_checkpoint_available") is not True
+        or training.get("inference_exported") is not True
+        or training.get("test_used_for_selection") is not False
+    ):
+        raise ValueError("Public safe export differs from the completed trusted training receipt")
+    return {
+        "weight_source": "safe_export",
+        "checkpoint_sha256": files["model.safetensors"]["sha256"],
+        "safe_weights_sha256": files["model.safetensors"]["sha256"],
+        "inference_manifest_sha256": files["inference-manifest.json"]["sha256"],
+        "selected_checkpoint_sha256": checkpoint["sha256"],
+    }
+
+
+def download_public_evaluation(public, destination, checkpoint, manifest, architecture):
+    """Fetch only pinned public files with authentication explicitly disabled."""
+    files = validate_public_evaluation(public, architecture)
+    from huggingface_hub import get_hf_file_metadata, hf_hub_download, hf_hub_url
+
+    destination = Path(destination)
+    if destination.is_symlink():
+        raise ValueError("Public safe export destination may not be a symlink")
+    destination.mkdir(parents=True, exist_ok=True)
+    if any(path.name not in SAFE_EXPORT_FILES or path.is_symlink() for path in destination.iterdir()):
+        raise ValueError("Public safe export destination contains unexpected files or links")
+    # Check immutable commit and advertised byte count before any payload fetch.
+    for name, item in files.items():
+        url = hf_hub_url(
+            public["repo_id"],
+            filename=f"{public['prefix']}/{name}",
+            revision=public["revision"],
+            repo_type="model",
+            endpoint="https://huggingface.co",
+        )
+        metadata = get_hf_file_metadata(url, token=False)
+        if metadata.size != item["bytes"] or metadata.commit_hash != public["revision"]:
+            raise ValueError("Public HF file metadata differs from the pinned commit/bytes")
+    for name, item in files.items():
+        target = destination / name
+        if target.exists():
+            verify_file(destination, item)
+            continue
+        source = Path(
+            hf_hub_download(
+                repo_id=public["repo_id"],
+                filename=f"{public['prefix']}/{name}",
+                revision=public["revision"],
+                repo_type="model",
+                token=False,
+                endpoint="https://huggingface.co",
+            )
+        )
+        if not source.is_file() or source.stat().st_size != item["bytes"] or digest(source) != item["sha256"]:
+            raise ValueError("Actual public HF file differs from pinned bytes/SHA")
+        shutil.copyfile(source, target)
+        verify_file(destination, item)
+    identity = public_evaluation_identity(destination, public, checkpoint, manifest, architecture)
+    return {
+        "public_export": public,
+        "authentication": "disabled",
+        "weight_source": "safe_export",
+        "files": list(files.values()),
+        "total_bytes": sum(item["bytes"] for item in files.values()),
+        **identity,
+    }
 
 
 def digest(path):
