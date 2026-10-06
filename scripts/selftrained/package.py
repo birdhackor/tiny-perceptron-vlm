@@ -2,8 +2,8 @@
 """Verify and reproducibly package the frozen selftrained data recipe.
 
 This CLI is standard-library-only and never uploads anything. Reconstruction
-executes only the three checksum-pinned, committed project data producers. A
-local first freeze uses already existing files; it cannot overwrite a freeze.
+executes checksum-pinned, committed project data producers or the fixed V2
+orchestrator. A local first freeze uses existing files; it cannot overwrite a freeze.
 """
 
 from __future__ import annotations
@@ -32,6 +32,14 @@ PRODUCERS = (
     "scripts/selftrained/prepare_vision_ocr.py",
     "scripts/selftrained/prepare_voice.py",
     "scripts/selftrained/prepare_text_tools.py",
+)
+V2_PIPELINE = "selftrained-v2"
+V2_ORCHESTRATOR = "scripts/selftrained/prepare_v2.py"
+V2_PRODUCERS = PRODUCERS + (
+    "scripts/selftrained/augment_text_tools_v2.py",
+    "scripts/selftrained/augment_ocr_v2.py",
+    "scripts/selftrained/augment_voice_v2.py",
+    V2_ORCHESTRATOR,
 )
 BLOCKED_PRODUCER_ARGS = frozenset(
     (
@@ -173,11 +181,16 @@ def load_recipe(path: Path) -> dict:
     producers = recipe.get("producers")
     if not isinstance(producers, list):
         raise PackageError("producers must be a list")
+    v2 = recipe.get("reconstruction_pipeline") == V2_PIPELINE
+    if "reconstruction_pipeline" in recipe and not v2:
+        raise PackageError("unknown reconstruction pipeline")
+    if v2 and [item.get("path") for item in producers if isinstance(item, dict)] != list(V2_PRODUCERS):
+        raise PackageError("V2 must pin all seven reviewed sources in their exact fixed order")
     seen_producers = set()
     for producer in producers:
         if not isinstance(producer, dict) or set(producer) != {"path", "sha256", "args"}:
             raise PackageError("producer entries need exactly path/sha256/args")
-        if producer["path"] not in PRODUCERS or producer["path"] in seen_producers:
+        if producer["path"] not in (V2_PRODUCERS if v2 else PRODUCERS) or producer["path"] in seen_producers:
             raise PackageError("producer must be a unique project data generator")
         seen_producers.add(producer["path"])
         if not valid_sha(producer["sha256"]):
@@ -185,12 +198,16 @@ def load_recipe(path: Path) -> dict:
         arguments = producer["args"]
         if not isinstance(arguments, list) or len(arguments) > 100:
             raise PackageError("producer args must be a bounded string list")
+        if v2 and arguments:
+            raise PackageError("V2 reconstruction sources must have empty args; only the fixed orchestrator executes")
         for argument in arguments:
             if not isinstance(argument, str) or len(argument) > 4096 or "\0" in argument:
                 raise PackageError("invalid producer argument")
             if argument.split("=", 1)[0] in BLOCKED_PRODUCER_ARGS:
                 raise PackageError("producers must use default directories without research or verify-only flags")
-            if argument.startswith("-") and argument.split("=", 1)[0] not in ALLOWED_PRODUCER_FLAGS[producer["path"]]:
+            if argument.startswith("-") and argument.split("=", 1)[0] not in ALLOWED_PRODUCER_FLAGS.get(
+                producer["path"], frozenset()
+            ):
                 raise PackageError("producer flags must use explicit allowed names, without argparse abbreviations")
     return recipe
 
@@ -335,10 +352,13 @@ def package_recipe(
     installed = {}
     executed = []
     if reconstruct:
-        if [producer["path"] for producer in recipe["producers"]] != list(PRODUCERS):
+        v2 = recipe.get("reconstruction_pipeline") == V2_PIPELINE
+        required_producers = V2_PRODUCERS if v2 else PRODUCERS
+        if [producer["path"] for producer in recipe["producers"]] != list(required_producers):
             raise PackageError("reconstruct requires committed vision/OCR, voice, then text/tools producers")
         installed = verify_versions(recipe)
-        for producer in recipe["producers"]:
+        executable_producers = [recipe["producers"][-1]] if v2 else recipe["producers"]
+        for producer in executable_producers:
             subprocess.run([sys.executable, str(root / producer["path"]), *producer["args"]], cwd=root, check=True)
             executed.append(producer["path"])
     unpacked_bytes = verify_sources(recipe, root)
@@ -377,6 +397,7 @@ def package_recipe(
             "source_files_verified": len(recipe["source_files"]),
             "producer_sha256_verified": len(recipe["producers"]),
             "producers_executed": executed,
+            "reconstruction_pipeline": recipe.get("reconstruction_pipeline", "selftrained-v1"),
             "reconstructed": reconstruct,
             "first_local_freeze": freeze_recipe,
             "runtime_python_version": platform.python_version(),
@@ -393,7 +414,7 @@ def package_recipe(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument("--recipe", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     mode = parser.add_mutually_exclusive_group()
