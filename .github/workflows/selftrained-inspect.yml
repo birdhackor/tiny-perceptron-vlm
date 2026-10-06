@@ -1,0 +1,69 @@
+name: Inspect private assistant attempt through read-only Volume SDK
+
+on:
+  push:
+    branches: [natural-assistant-v4]
+    paths: [.github/workflows/selftrained-inspect.yml]
+  workflow_dispatch:
+    inputs:
+      batch_id:
+        type: string
+        default: selftrained-v1
+        description: Existing private experiment batch
+      stage:
+        type: choice
+        options: [pretrain, sft, vision, ocr, audio, joint, validation, freeze, test, prepare, release]
+        default: pretrain
+        description: Existing attempt stage
+      run_id:
+        type: string
+        default: gha-37409271685-1
+        description: Existing immutable attempt; no new run is created
+
+permissions:
+  contents: read
+
+# Inspection cannot reserve or mutate the shared ledger and can run while GPU
+# work is active. It has a separate read-only concurrency group.
+concurrency:
+  group: tiny-perceptron-selftrained-inspect
+  cancel-in-progress: false
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      MODAL_TOKEN_ID: ${{ vars.MODAL_TOKEN_ID }}
+      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+      MODAL_ENVIRONMENT: ${{ vars.MODAL_ENVIRONMENT || 'main' }}
+      INSPECT_BATCH: ${{ inputs.batch_id || 'selftrained-v1' }}
+      INSPECT_STAGE: ${{ inputs.stage || 'pretrain' }}
+      INSPECT_RUN: ${{ inputs.run_id || 'gha-37409271685-1' }}
+      INSPECT_OUTPUT: outputs/selftrained/inspection-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          lfs: false
+          fetch-depth: 1
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - name: Use existing Modal client bindings
+        run: |
+          set -euo pipefail
+          test -n "$MODAL_TOKEN_ID"
+          test -n "$MODAL_TOKEN_SECRET"
+          python -m pip install modal==1.6.0
+      - name: Read only the bounded allowlist from the exact private attempt
+        run: |
+          python scripts/selftrained/inspect_attempt.py \
+            --batch-id "$INSPECT_BATCH" --stage "$INSPECT_STAGE" --run-id "$INSPECT_RUN" \
+            --revision "$GITHUB_SHA" --output-dir "$INSPECT_OUTPUT"
+      - name: Preserve raw metadata and read-only inspection receipt
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: selftrained-inspection-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.INSPECT_OUTPUT }}
+          if-no-files-found: error
