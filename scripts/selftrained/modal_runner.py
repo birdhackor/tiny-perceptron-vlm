@@ -22,9 +22,9 @@ ROOT = Path(__file__).resolve().parents[2]
 COURSE = Path("/course")
 LEDGER = COURSE / "budget.json"
 EXPERIMENTS = COURSE / "selftrained"
-TOTAL_CAP_USD = Decimal("40.00")
+TOTAL_CAP_USD = Decimal("55.00")
 HISTORY_FLOOR_USD = Decimal("9.84")
-MAX_JOB_USD = Decimal("0.50")
+MAX_JOB_USD = Decimal("1.00")
 MAX_EGRESS_GIB = Decimal("0.25")
 BUILD_STORAGE_ALLOWANCE_USD = Decimal("0.04")
 CONTROL_SECONDS = 180
@@ -87,7 +87,7 @@ def ledger_total(ledger):
     if total < HISTORY_FLOOR_USD:
         raise RuntimeError("Ledger precedes confirmed $9.84 history; reconcile before running")
     if total > TOTAL_CAP_USD:
-        raise RuntimeError("Shared conservative reservation total already exceeds authorized $40")
+        raise RuntimeError(f"Shared conservative reservation total already exceeds authorized ${TOTAL_CAP_USD}")
     return total
 
 
@@ -96,8 +96,8 @@ def resource_spec(stage, wall_seconds=None):
         raise ValueError("Unknown bounded stage")
     spec = dict(SPEC[stage])
     seconds = spec["seconds"] if wall_seconds is None else wall_seconds
-    if type(seconds) is not int or (spec["gpu"] and seconds not in (600, 900)):
-        raise ValueError("GPU wall_seconds must be exactly 600 or 900")
+    if type(seconds) is not int or (spec["gpu"] and seconds not in (600, 900, 1800)):
+        raise ValueError("GPU wall_seconds must be exactly 600, 900 or 1800")
     if not spec["gpu"] and seconds != spec["seconds"]:
         raise ValueError("CPU stage wall_seconds must match its fixed resource timeout")
     return spec | {"seconds": seconds}
@@ -347,7 +347,7 @@ def reserve_entry(ledger, run_id, batch_id, revision, manifest_sha, job, job_sha
     guard = reservation_guard(job["stage"], live["rates"], job.get("wall_seconds"))
     amount = Decimal(guard["reserved_usd"])
     if prior + amount > TOTAL_CAP_USD:
-        raise RuntimeError(f"Cumulative reservation {prior} + {amount} exceeds authorized $40")
+        raise RuntimeError(f"Cumulative reservation {prior} + {amount} exceeds authorized ${TOTAL_CAP_USD}")
     entry = {
         "run_id": run_id,
         "batch_id": batch_id,
@@ -363,7 +363,7 @@ def reserve_entry(ledger, run_id, batch_id, revision, manifest_sha, job, job_sha
         "status": "reserved",
         "billing_before": live,
         "compute_guard": guard,
-        "scope": "Existing original $10 + authorized $30 course ledger; all history and failed reservations retained",
+        "scope": "Existing original $10 + authorized $30 + $15 course ledger; all history and failed reservations retained",
     }
     ledger["reservations"].append(entry)
     ledger.update(budget_usd=str(TOTAL_CAP_USD), reserved_total_usd=str(prior + amount))
@@ -413,6 +413,35 @@ def readiness(manifest, manifest_sha):
     for item in manifest.get("assets", []):
         verify_file(root, item)
     return root
+
+
+def local_readiness(manifest, manifest_sha, archive="/package/dataset.tar.gz", destination=None):
+    """Verify the exact prepared archive on local disk, avoiding per-file Volume I/O."""
+    from scripts.selftrained.hf_transport import unpack_verified_archive, verify_file
+
+    root = Path(destination) if destination is not None else Path("/tmp/selftrained-data") / manifest_sha
+    started = time.monotonic()
+    print(json.dumps({"event": "local_archive_verification_started", "manifest_sha256": manifest_sha}), flush=True)
+    unpack_verified_archive(archive, root, manifest["package"])
+    unpacked = time.monotonic()
+    for item in [*manifest["records"], *manifest.get("assets", [])]:
+        verify_file(root, item)
+    finished = time.monotonic()
+    timing = {
+        "status": "complete",
+        "storage": "ephemeral-local-verified-git-lfs-archive",
+        "root": str(root),
+        "manifest_sha256": manifest_sha,
+        "archive_sha256": manifest["package"]["sha256"],
+        "archive_bytes": manifest["package"]["bytes"],
+        "record_files_verified": len(manifest["records"]),
+        "asset_files_verified": len(manifest.get("assets", [])),
+        "archive_verify_unpack_seconds": unpacked - started,
+        "all_file_hash_seconds": finished - unpacked,
+        "total_seconds": finished - started,
+    }
+    print(json.dumps({"event": "local_data_readiness_complete", **timing}), flush=True)
+    return root, timing
 
 
 def artifact_gate(batch_id, descriptor, manifest_sha, architecture=None):
@@ -573,10 +602,11 @@ def register_modal():
         .add_local_dir(ROOT / "scripts/selftrained", "/repo/scripts/selftrained", ignore=["**/__pycache__/**"])
     )
     image, prepare_image = control, control
-    if phase == "prepare":
+    if phase in ("prepare", "execute"):
         asset = Path(os.environ["SELFTRAINED_ASSET_FILE"])
         if not asset.is_file() or asset.suffixes[-2:] != [".tar", ".gz"]:
-            raise ValueError("Prepare requires the exact already verified Git LFS package")
+            raise ValueError("Execution requires the exact already verified Git LFS package")
+    if phase == "prepare":
         prepare_image = control.add_local_file(asset, "/package/dataset.tar.gz")
     if phase == "execute":
         image = (
@@ -592,6 +622,7 @@ def register_modal():
             .workdir("/repo")
             .add_local_dir(ROOT / "tiny_perceptron", "/repo/tiny_perceptron", ignore=["**/__pycache__/**"])
             .add_local_dir(ROOT / "scripts/selftrained", "/repo/scripts/selftrained", ignore=["**/__pycache__/**"])
+            .add_local_file(asset, "/package/dataset.tar.gz")
         )
 
     @app.function(
@@ -730,7 +761,14 @@ def register_modal():
                 )
                 write_json(output / "hf-receipt.json", result)
             else:
-                root = readiness(manifest, manifest_sha)
+                receipt["data_readiness"] = {
+                    "status": "verifying",
+                    "storage": "ephemeral-local-verified-git-lfs-archive",
+                    "archive_sha256": manifest["package"]["sha256"],
+                }
+                write_json(output / "execution.json", receipt)
+                volume.commit()
+                root, receipt["data_readiness"] = local_readiness(manifest, manifest_sha)
                 command = trainer_command(job, manifest, root, output, batch_id)
                 receipt["command"] = command
                 write_json(output / "execution.json", receipt)
