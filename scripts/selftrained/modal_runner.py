@@ -569,8 +569,7 @@ def register_modal():
     if phase == "execute":
         image = (
             modal.Image.debian_slim(python_version="3.13")
-            .uv_sync(str(ROOT), extras=["cu126"], uv_version="0.12.22", extra_options="--no-dev")
-            .pip_install("safetensors==0.8.0")
+            .uv_sync(str(ROOT), extras=["cu126", "selftrained"], uv_version="0.12.22", extra_options="--no-dev")
             .env(
                 {
                     "PYTHONPATH": "/repo:/repo/scripts/selftrained",

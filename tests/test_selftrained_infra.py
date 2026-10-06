@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import tomllib
 from copy import deepcopy
 from decimal import Decimal
 from pathlib import Path
@@ -62,6 +63,45 @@ def test_remote_basename_helper_import_requires_both_image_search_paths(tmp_path
         [sys.executable, "-c", code, str(payload)], cwd=tmp_path, env=env, capture_output=True, text=True, check=True
     )
     assert loaded.stdout.strip() == "36.20"
+
+
+def test_cuda_recipe_uses_locked_selftrained_extra_without_pip_in_uv_environment(monkeypatch):
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text())
+    assert project["project"]["optional-dependencies"]["selftrained"] == ["safetensors==0.8.0"]
+    recipes = []
+
+    class Image:
+        def __init__(self):
+            self.locked = False
+            recipes.append(self)
+
+        def pip_install(self, *packages):
+            if self.locked:
+                raise RuntimeError("uv_sync environments have no pip module")
+            return self
+
+        def uv_sync(self, directory, **options):
+            self.locked = True
+            self.options = options
+            assert Path(directory) == ROOT
+            assert options["extras"] == ["cu126", "selftrained"]
+            assert options["extra_options"] == "--no-dev"
+            return self
+
+        def __getattr__(self, name):
+            assert name in ("env", "workdir", "add_local_dir")
+            return lambda *args, **kwargs: self
+
+    modal = SimpleNamespace(
+        App=lambda name: SimpleNamespace(function=lambda **kwargs: lambda function: function),
+        Image=SimpleNamespace(debian_slim=lambda **kwargs: Image()),
+        Volume=SimpleNamespace(from_name=lambda *args, **kwargs: None),
+        Secret=SimpleNamespace(from_name=lambda *args, **kwargs: None),
+    )
+    monkeypatch.setitem(sys.modules, "modal", modal)
+    monkeypatch.setenv("SELFTRAINED_MODAL_PHASE", "execute")
+    runner.register_modal()
+    assert len(recipes) == 2 and recipes[1].locked
 
 
 def historical_ledger(total="36.20"):
