@@ -33,7 +33,7 @@ tags:
 
 選定權重依validation比較保存，步數是該段中的位置，不是整條訓練歷史的累計步數。pretrain和SFT是中間里程碑，下面的最後測試表只評最後兩組joint權重，不能套到前兩組。
 
-MoE最後段的tool／numeric／native-voice loss weight為4／1／4，Dense最後段為4／4／1；兩版的選定歷史也不同。完整12段baseline以及最後目標分支的來源見[訓練索引](https://github.com/birdhackor/tiny-perceptron-vlm/blob/selftrained-v2/docs/selftrained/v2-training-stage-index.json)和[最後權重選擇](https://github.com/birdhackor/tiny-perceptron-vlm/blob/selftrained-v2/docs/selftrained/results/v2-final-training-source-selection.json)。
+MoE最後段的tool／numeric／native-voice loss weight為4／1／4，Dense最後段為4／4／1；兩版的選定歷史也不同。完整12段baseline以及最後目標分支的來源見[訓練索引](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/selftrained/v2-training-stage-index.json)和[最後權重選擇](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/selftrained/results/v2-final-training-source-selection.json)。
 
 ## 模型與有限任務
 
@@ -62,13 +62,13 @@ MoE每層保存4個專家FFN、每token選2個；Dense每層使用1個同hidden 
 
 v2資料清單固定SHA-256為 `3443e3d32ff1e63f8126c2327011be541238765824623af9c8fdcff6b056cb1b`。Git LFS包為程式庫commit `08761dac87a6ef360db95883d9bcd338c44fe76d` 的 `assets/training/selftrained-v2.tar.gz`，壓縮大小67,862,431 bytes，解包內容127,161,811 bytes，包SHA-256為 `0976073a3bc7c331a65cedb4c31d54f5c6e9a5014ff2443698a8e2b8cad7e78a`。
 
-包內12個JSONL與8,950個其他檔案（包含圖片、錄音與來源說明），共8,962個固定檔案，逐檔指紋在[manifest](https://github.com/birdhackor/tiny-perceptron-vlm/blob/selftrained-v2/docs/selftrained/v2-manifest.json)。訓練／validation／test各28,876／2,435／3,734題；錄音各62／15／30段。問法、格式與衍生材料可能共享來源，題數不是獨立素材數；錄音沒有已知speaker ID，不宣稱不同側由不同說話者錄製。
+包內12個JSONL與8,950個其他檔案（包含圖片、錄音與來源說明），共8,962個固定檔案，逐檔指紋在[manifest](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/selftrained/v2-manifest.json)。訓練／validation／test各28,876／2,435／3,734題；錄音各62／15／30段。問法、格式與衍生材料可能共享來源，題數不是獨立素材數；錄音沒有已知speaker ID，不宣稱不同側由不同說話者錄製。
 
 本課原創文字與工具題採MIT；Fashion-MNIST由Han Xiao、Kashif Rasul、Roland Vollgraf與Zalando Research提供，採MIT；[PolyAI MInDS-14](https://huggingface.co/datasets/PolyAI/minds14/tree/40ce77cb32a384e4d50a568e1ec39ac804019d33)中文錄音採CC BY 4.0；Noto CJK Sans／Serif字型採SIL OFL 1.1。包內保留來源、固定版本、授權及修改說明。公開模型權重的MIT授權不會取代原始資料或字型授權。
 
 ## 最後測試：完成執行仍有未達標能力
 
-配置與公開safe權重先在2,435題validation側凍結，MoE和Dense再各做**一次完整3,734題test**；沒有用test繼續選版或訓練。完整原分母、判準、配對控制與評估完整性見[19.12能力卡](https://github.com/birdhackor/tiny-perceptron-vlm/blob/selftrained-v2/course/chapters/19.md#19.12)、[固定結果JSON](https://github.com/birdhackor/tiny-perceptron-vlm/blob/selftrained-v2/docs/selftrained/results/v2-final-public-results.json)及[完整性審閱](https://github.com/birdhackor/tiny-perceptron-vlm/blob/selftrained-v2/docs/selftrained/results/v2-final-public-results-integrity-review.json)。
+配置與公開safe權重先在2,435題validation側凍結，MoE和Dense再各做**一次完整3,734題test**；沒有用test繼續選版或訓練。完整原分母、判準、配對控制與評估完整性見[19.12能力卡](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/course/chapters/19.md#19.12)、[固定結果JSON](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/selftrained/results/v2-final-public-results.json)及[完整性審閱](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/selftrained/results/v2-final-public-results-integrity-review.json)。
 
 | test用途與判準 | MoE | Dense |
 | --- | ---: | ---: |
@@ -96,14 +96,14 @@ OCR字元錯誤率CER是錯誤編輯數除以目標字元數，MoE為7.32%，Den
 先安裝Git LFS與[uv](https://docs.astral.sh/uv/getting-started/installation/)，取得含v2程式與操作頁的版本；在repo根目錄執行：
 
 ```bash
-GIT_LFS_SKIP_SMUDGE=1 git clone --branch selftrained-v2 https://github.com/birdhackor/tiny-perceptron-vlm.git
+GIT_LFS_SKIP_SMUDGE=1 git clone --branch main https://github.com/birdhackor/tiny-perceptron-vlm.git
 cd tiny-perceptron-vlm
 git lfs install --local
 uv sync --frozen --extra cpu --extra selftrained
 git lfs pull --include="assets/training/selftrained-v2.tar.gz" --exclude=""
 ```
 
-依[公開CPU命令](https://github.com/birdhackor/tiny-perceptron-vlm/blob/selftrained-v2/docs/selftrained/v2-public-cpu-commands.md)先用checksum-bound helper解開示範資料，再執行文字示範：
+依[公開CPU命令](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/selftrained/v2-public-cpu-commands.md)先用checksum-bound helper解開示範資料，再執行文字示範：
 
 ```bash
 uv run --extra cpu --extra selftrained python scripts/selftrained/chat.py \
@@ -123,7 +123,7 @@ uv run --extra cpu --extra selftrained python scripts/selftrained/chat.py \
 
 ## 從隨機權重重做自己的訓練
 
-[本機訓練指引](https://github.com/birdhackor/tiny-perceptron-vlm/blob/selftrained-v2/docs/selftrained/TRAINING.md)使用 `scripts/selftrained/train_local_stage.py`，核對整個固定資料包後，依序執行自己的pretrain、SFT、vision、OCR、audio、joint與最後weighted／native分支。後段載入自己的selected `best.pt`；中斷後同段exact resume載入自己的 `latest.pt`，恢復optimizer、RNG、sampler與步數。每次attempt保存實際指令、檔案指紋、日誌和真實execution／training receipts，不需要作者私人Volume或原GHA run ID。
+[本機訓練指引](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/selftrained/TRAINING.md)使用 `scripts/selftrained/train_local_stage.py`，核對整個固定資料包後，依序執行自己的pretrain、SFT、vision、OCR、audio、joint與最後weighted／native分支。後段載入自己的selected `best.pt`；中斷後同段exact resume載入自己的 `latest.pt`，恢復optimizer、RNG、sampler與步數。每次attempt保存實際指令、檔案指紋、日誌和真實execution／training receipts，不需要作者私人Volume或原GHA run ID。
 
 公開safetensors只供推論，沒有optimizer、RNG或sampler；目前trainer也沒有公開safe權重的training-init載入器。從它們推論，不能叫作精確續訓。全量配方與一個batch的教學smoke不同；本機wrapper工程驗證用width16合成CPU資料檢查成功、失敗、中斷及續訓契約，沒有重跑全量production training或另證模型能力。正文或圖解改版不要求重訓全書；實作、資料或能力宣稱改變時才驗收相應任務。
 
@@ -137,9 +137,9 @@ uv run --extra cpu --extra selftrained python scripts/selftrained/chat.py \
 
 ## 原各章權重與舊合成整合索引
 
-原30組正式局部實驗共120份模型存檔仍在本庫。下載由[public-models.json](https://github.com/birdhackor/tiny-perceptron-vlm/blob/selftrained-v2/docs/course-experiments/public-models.json)固定各組revision、配對檔案、大小與SHA-256；使用 `scripts/fetch_course_models.py` 和對應實驗入口。完整recipe、原始評估及proof保留在[歷史實驗紀錄](https://github.com/birdhackor/tiny-perceptron-vlm/blob/selftrained-v2/docs/course-experiments/README.md)。局部機制與歷史結果各有用途，不是v2成品的能力證明。
+原30組正式局部實驗共120份模型存檔仍在本庫。下載由[public-models.json](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/course-experiments/public-models.json)固定各組revision、配對檔案、大小與SHA-256；使用 `scripts/fetch_course_models.py` 和對應實驗入口。完整recipe、原始評估及proof保留在[歷史實驗紀錄](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/course-experiments/README.md)。局部機制與歷史結果各有用途，不是v2成品的能力證明。
 
-舊合成整合另保留[course-integration-v2權重](https://huggingface.co/birdhackor/tiny-perceptron-course-models/tree/33c6898f0676fccc4f5f6114e3b93a4f9ebaeaed/course/course-integration-v2)：8份階段／量化檔及3份Dense學生檔，配對[capstone-public.json](https://github.com/birdhackor/tiny-perceptron-vlm/blob/selftrained-v2/docs/course-experiments/capstone-public.json)。舊328k文字底座是合成小世界的局部機制與歷史輔助材料，不是上面的5,447,107參數v2 MoE。舊joint與DPO各78/90、舊Dense示範／蒸餾各62/90與61/90的結果仍保留，不換成新版最後測試分數。
+舊合成整合另保留[course-integration-v2權重](https://huggingface.co/birdhackor/tiny-perceptron-course-models/tree/33c6898f0676fccc4f5f6114e3b93a4f9ebaeaed/course/course-integration-v2)：8份階段／量化檔及3份Dense學生檔，配對[capstone-public.json](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/course-experiments/capstone-public.json)。舊328k文字底座是合成小世界的局部機制與歷史輔助材料，不是上面的5,447,107參數v2 MoE。舊joint與DPO各78/90、舊Dense示範／蒸餾各62/90與61/90的結果仍保留，不換成新版最後測試分數。
 
 下列入口各連到原固定版本的模型卡與檔案：
 
@@ -178,6 +178,6 @@ uv run --extra cpu --extra selftrained python scripts/selftrained/chat.py \
 
 ## 授權
 
-本課程式、教材、自製圖解及四組v2推論輸出採[MIT](https://github.com/birdhackor/tiny-perceptron-vlm/blob/selftrained-v2/LICENSE)。原各章模型卡保留自己的資料許可、再散佈限制與實際訓練範圍；不同資料包不可統一改稱MIT。第20章配套說明採MIT，上游Qwen／Whisper和來源照片、文件、錄音保留各自授權。
+本課程式、教材、自製圖解及四組v2推論輸出採[MIT](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/LICENSE)。原各章模型卡保留自己的資料許可、再散佈限制與實際訓練範圍；不同資料包不可統一改稱MIT。第20章配套說明採MIT，上游Qwen／Whisper和來源照片、文件、錄音保留各自授權。
 
 Copyright (c) 2026 birdhackor.

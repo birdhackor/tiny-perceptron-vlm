@@ -6,10 +6,10 @@
 
 ## 取得依賴、資料和公開權重
 
-先安裝 [Git](https://git-scm.com/downloads)、[Git LFS](https://git-lfs.com/) 與 [uv](https://docs.astral.sh/uv/getting-started/installation/)。第一次使用時，取得包含本頁程式的 `selftrained-v2` 分支，再進入專案根目錄：
+先安裝 [Git](https://git-scm.com/downloads)、[Git LFS](https://git-lfs.com/) 與 [uv](https://docs.astral.sh/uv/getting-started/installation/)。第一次使用時，取得包含本頁程式的 `main` 分支，再進入專案根目錄：
 
 ```sh
-GIT_LFS_SKIP_SMUDGE=1 git clone --branch selftrained-v2 https://github.com/birdhackor/tiny-perceptron-vlm.git
+GIT_LFS_SKIP_SMUDGE=1 git clone --branch main https://github.com/birdhackor/tiny-perceptron-vlm.git
 cd tiny-perceptron-vlm
 git lfs install --local
 ```
