@@ -68,6 +68,8 @@
 
 使用 `outputs/natural-my-v4` 保存自己的工作。若這個名稱已用過，換成新的實驗名稱，並同步改後面的輸出與 adapter 路徑。先把完整命令保存為腳本，再執行，之後才知道用了哪種設定。
 
+這份配方的 `--steps 2077` 指2,077次參數更新，不是只讀2,077題。`--gradient-accumulation 2` 讓每次更新先累積兩題的答案梯度，因此完整跑完會讀取4,154筆練習：2,077道訓練題各讀兩次。學習率固定為0.00003，控制每次更新的步幅；它與概念小例子使用的步幅分開。第1,039與2,077次更新後另保存候選，用驗證題比較，最後測試不參與挑選。
+
 ```bash
 mkdir -p outputs/natural-my-v4
 cat > outputs/natural-my-v4/train.sh <<'BASH'
@@ -92,7 +94,7 @@ bash outputs/natural-my-v4/train.sh
 
 `cat`把開頭`<<'BASH'`與結尾`BASH`之間的內容保存為`train.sh`；最後的`bash`才執行這份腳本，不是再訓練第二次。
 
-學習率控制每次更新的步幅，這份完整配方固定為0.00003；它與概念小例子追蹤一步更新時使用的步幅分開。這份配方已完成2,077次更新，每次累積兩題的答案梯度再更新；實際讀取4,154筆練習，2,077道訓練題各讀兩次。第1,039與2,077次更新後另保存不可覆寫的候選檢查點；它們用同一份驗證題比較，最後測試不參與挑選。種子42固定本次資料排序與隨機起點；訓練長度上限是`--max-tokens 2048`。你自己的執行是否完成，仍按下一節的紀錄核對。
+完成後應保留兩份不可覆寫的候選檢查點，供第6步驗證比較。種子42固定本次資料排序與隨機起點；訓練長度上限是`--max-tokens 2048`。你自己的執行是否完成，仍按下一節的紀錄核對。
 
 LoRA 加在語言注意力的 q、v 投影，rank 為 8，alpha 為 16；底座仍參與前向計算，只有修正參數進入更新器。視覺底座與 ASR 不因這個步驟重新訓練。這種做法保留原權重，把可更新範圍縮小；能否維持舊用途並完成新用途，仍要在後面驗收。
 
@@ -124,12 +126,12 @@ LoRA 加在語言注意力的 q、v 投影，rank 為 8，alpha 為 16；底座�
 
 遇到時間上限或中斷，先讀最近完整檢查點的 `completed_steps`，未保存的更新不能恢復。只在未到目標總步數時續訓，保持相同底座、資料、rank、累積方式、種子與學習率，並另開 `resumed` 輸出目錄。
 
-下面從目前最近保存的`train/adapter`恢復。第一段讀取真實進度，只要求保存尚未經過的1,039／2,077步候選；已保存的舊候選不會覆寫：
+下面從目前最近保存的`train/adapter`恢復。第一段讀取真實進度，只要求保存尚未經過的1,039／2,077步候選；已保存的舊候選不會覆寫。`&&` 讓下一條訓練指令只在進度檢查成功後執行；檢查失敗就不啟動訓練：
 
 ```bash
 PENDING_CHECKPOINTS=$(
   .venv-natural/bin/python -c 'import json; from pathlib import Path; n = json.loads(Path("outputs/natural-my-v4/train/adapter/training.json").read_text())["completed_steps"]; assert 0 <= n < 2077, "先確認尚未完成2,077步"; print(",".join(str(step) for step in (1039, 2077) if step > n))'
-)
+) && \
 .venv-natural/bin/python scripts/natural_assistant.py train \
   --output outputs/natural-my-v4/resumed \
   --manifest docs/natural-assistant/v4/manifest.json \
@@ -158,6 +160,10 @@ PENDING_CHECKPOINTS=$(
 
 用 `validation` 比較同一底座關閉與開啟 LoRA 的結果。圖片、題目、歷史、處理預算與生成設定相同，才能知道差別來自哪個候選。這一刻還不讀最後 `test`。
 
+下面的 `--adapter` 指定先載入哪份LoRA；本例先載入1,039步候選。兩個 `--comparison-adapter` 則各用「名稱=路徑」列出要比較的候選：第一個必須指向已載入的同一路徑，第二個再載入2,077步候選。程式也會關閉LoRA，取得原底座的回答，因此總共比較三份配置，不是把兩份修正疊在一起。
+
+這一步只生成回答，不做參數更新。命令沿用共用介面的 `--learning-rate 0.00003`，但驗證不使用它更新權重，也不靠它改變生成；生成設定另由 `--max-new-tokens` 等選項固定。
+
 ```bash
 .venv-natural/bin/python scripts/natural_assistant.py validation \
   --output outputs/natural-my-v4/validation \
@@ -178,7 +184,7 @@ PENDING_CHECKPOINTS=$(
   --max-seconds 3300
 ```
 
-這一步只讀取權重並生成回答，不執行更新。生成不抽樣：每一步取當下機率最高的下一個token，最多新增384個token。這些是固定驗證設定，不是每題一定會寫滿384個。
+生成不抽樣：每一步取當下機率最高的下一個token，最多新增384個token。這些是固定驗證設定，不是每題一定會寫滿384個。
 
 這條命令一次產生三份候選：原底座、1,039步修正、2,077步修正。輸出保存`generations-base.json`、`generations-adapter-step-001039.json`、`generations-adapter-step-002077.json`與`result.json`；語音逐字稿另存`transcripts.json`，三個聊天候選共用同一份真正ASR結果。先看是否完成全部所求題目，再按用途閱讀回答。僅保存部分結果，就不是整份驗證已完成。
 

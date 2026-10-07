@@ -2,6 +2,7 @@
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import re
 import subprocess
@@ -39,6 +40,14 @@ def main():
     parser.add_argument("--stage", choices=("reader", "all"), default="all")
     parser.add_argument("--output", type=Path, help="通過後才保存版本與身分核對紀錄")
     args = parser.parse_args()
+    if (ROOT / "docs/course-reviews-active.json").exists():
+        spec = importlib.util.spec_from_file_location(
+            "active_grouped_review", Path(__file__).resolve().with_name("phase7_review.py")
+        )
+        active = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(active)
+        if active.route_active(ROOT, args.stage, args.output):
+            return
     baseline = json.loads(BASELINE.read_bytes())
     additions = json.loads(ADDITIONS.read_bytes())
     expected = expected_inventory(baseline, additions)

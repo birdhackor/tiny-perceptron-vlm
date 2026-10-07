@@ -262,7 +262,9 @@ PKU-SafeRLHF 起步包標示 CC-BY-NC-4.0；它與本課原創盒子題的授權
 
 視覺留出兩張向右偏移的藍色圖，方形、圓形各一張；同位置的紅、綠圖仍用於訓練，留出的是未見過的顏色與位置組合。方形類別 0、圓形 1；音訊留出 180Hz 低音類別 0、1000Hz 高音 1。查看最後JSON：本次命令有`--train`，`mode`應為`train`；若是`dry-run-no-weight-update`，表示只檢查通路，尚未完成這次訓練。`holdout_examples`應為2，`holdout_accuracy`要等於1才接續；0.5只是答對一題，保存檔存在不能代替檢查。
 
-取得 T.4 的 `attributes.pt` 與兩個編碼器後，選圖片、聲音或聯合路線：
+取得 T.4 的 `attributes.pt` 與兩個編碼器後，先選要開放哪些參數更新。下面的 `--freeze` 指定本工具的凍結方案，不是照名稱凍結那個零件：`projector` 只更新接頭；這個命令列工具的 `partial` 另允許首末文字區塊更新，`none` 則開放所有零件。開放更新也要有本次輸入帶來的梯度，沒用到的入口不會因此自動學習。
+
+接著選圖片、聲音或聯合路線：
 
 ```bash
 .venv/bin/python scripts/train.py --task vision --checkpoint checkpoints/attributes.pt --vision-encoder checkpoints/vision-encoder.pt --freeze projector --train --steps 500 --output checkpoints/vision.pt
@@ -270,9 +272,9 @@ PKU-SafeRLHF 起步包標示 CC-BY-NC-4.0；它與本課原創盒子題的授權
 .venv/bin/python scripts/train.py --task joint --checkpoint checkpoints/attributes.pt --vision-encoder checkpoints/vision-encoder.pt --audio-encoder checkpoints/audio-encoder.pt --freeze partial --train --steps 500 --output checkpoints/joint.pt
 ```
 
-`projector` 只更新接頭；這個 CLI 的 `partial` 另允許首末文字區塊更新，`none` 則開放所有零件。開放更新也要有本次輸入帶來的梯度，沒用到的入口不會因此自動學習。
+接著製作素材，再請模型回答。未指定圖片或音訊檔案時，`--color`與`--shape`用來畫出合成圖片，大小依載入的圖片入口決定；`--frequency`則製作該音高、採樣率16kHz的單音波形。模型收到圖片像素或聲音數字，加上`--prompt`的問題文字；製作素材的形狀名稱沒有被放進答案。輸出JSON的`input_sources`會另外記下素材怎麼產生，供你核對。
 
-用明確題目檢查實際回答：
+下面三題分別問形狀、音高，以及兩者：
 
 ```bash
 .venv/bin/python scripts/infer_modal.py checkpoints/vision.pt --color blue --shape circle --prompt "shape?" --tokens 16

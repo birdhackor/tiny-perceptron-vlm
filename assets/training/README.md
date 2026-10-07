@@ -50,7 +50,7 @@ python scripts/fetch_training_assets.py --asset all
 | UltraFeedback | `dpo` | [13.1–13.2：同題兩份回答](../../course/chapters/13.md#13.1)、[T.7：偏好訓練](../../course/training.md#T.7) |
 | PKU安全比較 | `safety` | [9.4：安全回應](../../course/chapters/09.md#9.4)、[T.5：拆開訓練目標](../../course/training.md#T.5) |
 | Fashion-MNIST／FSDD | `real_modal` | [10.5：圖片入口](../../course/chapters/10.md#10.5)、[12.2：取樣率](../../course/chapters/12.md#12.2)、[T.6：圖片與聲音訓練](../../course/training.md#T.6) |
-| GSM8K | `distillation`、`reasoning` | [T.10：教師與學生](../../course/training.md#T.10)、[B.1：可檢查步驟](../../course/chapters/0B.md#B.1) |
+| GSM8K | `distillation`、`reasoning` | [T.10：教師與學生](../../course/training.md#T.10)、[C.1：可檢查的中間步驟](../../course/chapters/0C.md#C.1) |
 
 各來源的實際轉換實作由實驗清單中的 `module` 與 `function` 指到 `scripts/course_experiments/`。這些配方會依任務整理輸入與標註；圖片不能只當類別字串，錄音也不能略過取樣率轉換。
 

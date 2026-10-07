@@ -267,12 +267,26 @@ def render_page(content, page_id, estimates, inventory, routes=()):
                 label = html.escape(group["label"])
                 rows.append(f"<li>{label}：約 {format_range(minutes, total=True)}</li>")
         if rows:
+            course_group = next(group for group in inventory["groups"] if group["id"] == "canonical_course")
+            course_minutes = total_range(course_group["page_ids"], estimates)
+            summary = "閱讀路線與時間"
+            if course_minutes is not None:
+                summary = "全教材約 " + format_range(course_minutes, total=True) + " · AI 估計"
             pieces.append(
-                '<div class="reading-time-totals"><p>閱讀總量 · AI 估計</p><ul>' + "".join(rows) + "</ul></div>"
+                '<details class="reading-time-method"><summary>'
+                + summary
+                + '</summary><div class="reading-time-totals"><p>閱讀總量 · AI 估計</p><ul>'
+                + "".join(rows)
+                + "</ul></div><p>"
+                + METHOD
+                + "</p></details>"
             )
-        pieces.append(
-            '<details class="reading-time-method"><summary>閱讀時間怎麼估？</summary><p>' + METHOD + "</p></details>"
-        )
+        else:
+            pieces.append(
+                '<details class="reading-time-method"><summary>閱讀時間怎麼估？</summary><p>'
+                + METHOD
+                + "</p></details>"
+            )
     if not pieces:
         return content
     banner = "\n\n" + "\n\n".join(pieces) + "\n\n"
