@@ -11,7 +11,7 @@
 安裝 Git LFS 與 uv 後取得 repository。以下以 CPU 環境示範；正式全量訓練可依 README 的硬體說明改用 `cu126` 或 `cu130`，後續 `uv run` 要沿用同一個 extra。完整配方不是一個 batch 的教學 smoke test，CPU 執行所需時間會較長。
 
 ```bash
-GIT_LFS_SKIP_SMUDGE=1 git clone --branch selftrained-v2 https://github.com/birdhackor/tiny-perceptron-vlm.git
+GIT_LFS_SKIP_SMUDGE=1 git clone --branch main https://github.com/birdhackor/tiny-perceptron-vlm.git
 cd tiny-perceptron-vlm
 git lfs install --local
 uv sync --frozen --extra cpu --extra selftrained
