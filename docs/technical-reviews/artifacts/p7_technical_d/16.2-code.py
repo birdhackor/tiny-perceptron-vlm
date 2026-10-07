@@ -1,0 +1,6 @@
+import torch
+from tiny_perceptron.model import TinyLM,ModelConfig
+model=TinyLM(ModelConfig(width=8)).eval();prefix=torch.tensor([[1,2,3,4]])
+with torch.no_grad():
+ prefill=model(prefix);decode=model(torch.tensor([[5]]),cache=prefill['cache'])
+print('prefill分數',tuple(prefill['logits'].shape));print('decode分數',tuple(decode['logits'].shape));print('第一層K形狀',tuple(prefill['cache'][0][0].shape),tuple(decode['cache'][0][0].shape))

@@ -1,6 +1,7 @@
 """檢查每節是否由獨立讀者審閱，並核對審閱版本與目前正文。"""
 
 import hashlib
+import importlib.util
 import json
 import re
 from pathlib import Path
@@ -39,6 +40,14 @@ def sections(source):
 
 
 def main():
+    if (ROOT / "docs/course-reviews-active.json").exists():
+        spec = importlib.util.spec_from_file_location(
+            "active_grouped_review", Path(__file__).resolve().parents[1] / "docs/review-tools/phase7_review.py"
+        )
+        active = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(active)
+        if active.route_active(ROOT, "reader"):
+            return
     sources = sorted((ROOT / "course/chapters").glob("*.md"))
     sources += [ROOT / "course" / name for name in FRONT_MATTER]
     failures, seen, reviewers = [], set(), set()

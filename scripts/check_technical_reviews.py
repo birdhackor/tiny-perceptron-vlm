@@ -2,6 +2,7 @@
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import re
 from collections import defaultdict
@@ -362,6 +363,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--lesson", action="append", help="先核對一節；可重複，發布時省略以核對全部小節")
     args = parser.parse_args()
+    if (ROOT / "docs/course-reviews-active.json").exists():
+        spec = importlib.util.spec_from_file_location(
+            "active_grouped_review", Path(__file__).resolve().parents[1] / "docs/review-tools/phase7_review.py"
+        )
+        active = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(active)
+        if active.route_active(ROOT, "technical"):
+            return
     result = check(lessons=args.lesson)
     if result["failures"]:
         print("\n".join(result["failures"]))

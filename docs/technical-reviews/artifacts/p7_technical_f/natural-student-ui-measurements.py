@@ -1,0 +1,10 @@
+"""Own original UI timers/unit accounting; excludes review status/check conclusions."""
+import json,hashlib
+from pathlib import Path
+b=Path('docs/natural-assistant/evidence/v4-research/student-selected-public-ui/actual-ui');r=json.loads((b/'report.json').read_text());br=json.loads((b/'browser/report.json').read_text());obs=[json.loads(x) for x in (b/'observer.jsonl').read_text().splitlines()];resources=[e for e in obs if e['kind']=='process_resources'];assert len(resources)==1;rss=resources[0]['maximum_resident_set_kib'];assert rss==r['server_cpu_resources']['maximum_resident_set_kib'];assert r['torch_threads']==5 and r['torch_interop_threads']==1
+p=Path('/workspace/tiny-perceptron-vlm/outputs/natural-v4/student-base-cache/hf');snapshots=[]
+for d in p.glob('models--*/snapshots/*'):
+ files=[x for x in d.rglob('*') if x.is_file()];snapshots.append({'revision':d.name,'files':len(files),'bytes':sum(x.stat().st_size for x in files)})
+size=sum(x['bytes'] for x in snapshots);n=sum(x['files'] for x in snapshots);assert n==23 and size==5889111977
+manifest=json.loads(Path('docs/natural-assistant/v4/public-release.json').read_text());selected=[{'path':x['path'],'bytes':x['bytes'],'sha256':x['sha256']} for x in manifest['files']];assert len(selected)==2 and sum(x['bytes'] for x in selected)==9262
+print(json.dumps({'public_config_files':selected,'snapshots':snapshots,'model_file_bytes':size,'model_file_GiB':size/1024**3,'server_max_rss_kib':rss,'server_max_rss_GiB':rss/1024**2,'start_to_ready_seconds':r['ready_seconds'],'four_browser_chat_seconds':br['chat_seconds'],'first_ASR_browser_seconds_including_load':br['asr_seconds_including_load'],'complete_job_seconds':r['wall_seconds'],'browser_job_seconds_distinct':br['wall_seconds'],'torch_threads':r['torch_threads'],'interop_threads':r['torch_interop_threads'],'scope':'Original timer fields personally traced to executed harness; original observer RSS and current exact pinned snapshot stat; no fresh model/UI run, no status/infrastructure_checks verdict adopted'},indent=2))

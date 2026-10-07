@@ -1,0 +1,4 @@
+from tiny_perceptron.model import TinyLM,ModelConfig
+configs=[('教師',ModelConfig(width=16,layers=2)),('學生',ModelConfig(width=8,layers=1))]
+for name,config in configs:
+ model=TinyLM(config);parameters=sum(p.numel() for p in model.parameters());print(name,'寬度',config.width,'層數',config.layers,'參數',parameters,'FP32數字bytes',parameters*4)

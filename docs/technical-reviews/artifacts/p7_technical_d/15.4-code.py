@@ -1,0 +1,7 @@
+import torch
+prob=torch.tensor([[0.1,0.7,0.2],[0.6,0.3,0.1]])
+for k in (2,1):
+ weights,chosen=prob.topk(k,dim=-1)
+ print('k',k,'expert索引',chosen.tolist())
+ print('原比例',weights.tolist())
+ print('保留比例總和',weights.sum(-1).tolist())

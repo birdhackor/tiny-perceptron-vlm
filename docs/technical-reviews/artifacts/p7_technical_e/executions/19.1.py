@@ -1,0 +1,4 @@
+import subprocess,json,importlib.metadata
+cmd=['.venv/bin/python','scripts/selftrained/chat.py','--model-dir','outputs/p7-technical-e-cache/moe-joint','--asset-dir','outputs/selftrained-v2/data','--repo','birdhackor/tiny-perceptron-course-models','--revision','979cdfacc588ad0536f1c64fff96f264571cf054','--prefix','selftrained/v2/moe-joint','--manifest-sha256','f27856892b0c46ca81ba43bfadf7051ed6bd31d848e4868a05147e5799df1e5e','--messages','docs/selftrained/examples/v2/text.messages.json','--task','text','--device','cpu','--max-new-tokens','128','--threads','2','--output','docs/technical-reviews/artifacts/p7_technical_e/executions/19.1-result.json']
+print('actual_command',json.dumps(cmd));print('versions',{n:importlib.metadata.version(n) for n in ['torch','safetensors','huggingface-hub']},flush=True)
+r=subprocess.run(cmd,text=True,capture_output=True);print(r.stdout);print(r.stderr);print('cli_exit_code',r.returncode);raise SystemExit(r.returncode)

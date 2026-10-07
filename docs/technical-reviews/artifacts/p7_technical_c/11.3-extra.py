@@ -1,0 +1,10 @@
+import pathlib,hashlib
+print('targets',int((out['labels']!=-100).sum()),'shapes',tuple(out['logits'].shape),tuple(out['labels'].shape))
+frozen=MultiModalLM(TinyLM(ModelConfig(width=8))); frozen.requires_grad_(False)
+o=frozen(ids,labels,image=scene()); l=masked_loss(o['logits'],o['labels']); print('all frozen',sum(p.numel() for p in frozen.parameters() if p.requires_grad),l.requires_grad)
+try:l.backward()
+except RuntimeError as e:print('expected backward error',str(e))
+late=MultiModalLM(TinyLM(ModelConfig(width=8)));late.requires_grad_(False);late.image_projector.requires_grad_(True)
+o=late(ids,labels,image=scene());late.requires_grad_(False);l=masked_loss(o['logits'],o['labels']);print('late loss grad',l.requires_grad);l.backward();print('late backward completed')
+p=pathlib.Path('docs/course-experiments/results/projector.json');raw=p.read_bytes();pathlib.Path('docs/technical-reviews/artifacts/p7_technical_c/originals/projector-raw.json').write_bytes(raw);r=json.loads(raw)['results'];print('projector rawsha',hashlib.sha256(raw).hexdigest());print('history train',{k:r['training'][k] for k in ['steps','weights_changed','nonzero_gradient_seen','initial_loss','final_loss']})
+s=r['test']['samples'];print('test recount',sum(x['generated']==x['target'] for x in s),len(s),'eos',sum(x['eos'] for x in s));print('targets/generated',[(x['target'],x['generated']) for x in s])

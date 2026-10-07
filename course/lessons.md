@@ -84,6 +84,9 @@
 | 7.17 為什麼先大量讀文章，再練習當助理？ | [閱讀](../course/chapters/07.md#7.17) | [開啟](../notebooks/07/7.17.ipynb) |
 | 7.18 後訓練有哪些不同教法？ | [閱讀](../course/chapters/07.md#7.18) | [開啟](../notebooks/07/7.18.ipynb) |
 | 7.19 回答能寫多長，和前文能放多少，有何不同？ | [閱讀](../course/chapters/07.md#7.19) | [開啟](../notebooks/07/7.19.ipynb) |
+| 7.20 下一個之外，還能一起練習預測什麼？ | [閱讀](../course/chapters/07.md#7.20) | [開啟](../notebooks/07/7.20.ipynb) |
+| 7.21 未來答案該對到哪一格？ | [閱讀](../course/chapters/07.md#7.21) | [開啟](../notebooks/07/7.21.ipynb) |
+| 7.22 為什麼有些MTP分支串成一條鏈？ | [閱讀](../course/chapters/07.md#7.22) | [開啟](../notebooks/07/7.22.ipynb) |
 | 8.1 「有趣的回答」要符合什麼要求？ | [閱讀](../course/chapters/08.md#8.1) | [開啟](../notebooks/08/8.1.ipynb) |
 | 8.2 只改提示，回答為什麼可能改變？ | [閱讀](../course/chapters/08.md#8.2) | [開啟](../notebooks/08/8.2.ipynb) |
 | 8.3 示範回答如何把寫法教進權重？ | [閱讀](../course/chapters/08.md#8.3) | [開啟](../notebooks/08/8.3.ipynb) |
@@ -208,6 +211,7 @@
 | 16.11 編譯有何代價與收益？ | [閱讀](../course/chapters/16.md#16.11) | [開啟](../notebooks/16/16.11.ipynb) |
 | 16.12 滑動窗口省下什麼，也限制了什麼？ | [閱讀](../course/chapters/16.md#16.12) | [開啟](../notebooks/16/16.12.ipynb) |
 | 16.13 分塊處理，是否代表看不到其他塊？ | [閱讀](../course/chapters/16.md#16.13) | [開啟](../notebooks/16/16.13.ipynb) |
+| 16.14 先草擬幾個token，再核對，能省下什麼？ | [閱讀](../course/chapters/16.md#16.14) | [開啟](../notebooks/16/16.14.ipynb) |
 | 17.1 數字個數相同，為什麼空間不同？ | [閱讀](../course/chapters/17.md#17.1) | [開啟](../notebooks/17/17.1.ipynb) |
 | 17.2 整數格子如何代表0.7這樣的小數？ | [閱讀](../course/chapters/17.md#17.2) | [開啟](../notebooks/17/17.2.ipynb) |
 | 17.3 每個權重只差0.2，輸出也只差0.2嗎？ | [閱讀](../course/chapters/17.md#17.3) | [開啟](../notebooks/17/17.3.ipynb) |
