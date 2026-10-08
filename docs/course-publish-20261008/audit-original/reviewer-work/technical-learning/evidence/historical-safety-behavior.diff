@@ -1,0 +1,62 @@
+--- recorded
++++ frozen
+@@ -10,8 +10,9 @@
+ import torch
+ 
+ from tiny_perceptron.alignment import LoRALinear, dpo_loss, sequence_log_probability
+-from tiny_perceptron.data import pad_batch, render_chat
++from tiny_perceptron.data import ByteTokenizer, pad_batch, render_chat
+ from tiny_perceptron.model import masked_loss
++from tiny_perceptron.tokenization import generation_report
+ from tiny_perceptron.training import save_checkpoint
+ 
+ from .common import evaluate_lm, fit, fit_lm, load_lm, new_lm, seed, split_records, text_examples, write_json
+@@ -41,17 +42,22 @@
+ 
+ def _style_metrics(report, rows):
+     """規則只評這組明示模板，並保留每題原文讓讀者重查。"""
+-    rows_by_style = {}
++    rows_by_style, tok = {}, ByteTokenizer()
+     for row, sample in zip(rows, report["samples"], strict=True):
+         text = sample["generated"]
++        # decoder 可能隱藏控制 ID；即使可見模板正確，實際輸出仍不能算成功。
++        invalid = (
++            bool(sample.get("invalid_special_tokens"))
++            or not generation_report(tok, sample["generated_ids"])["valid_answer_tokens"]
++        )
+         style = row.get("style", "concise")
+         metrics = rows_by_style.setdefault(
+             style, {"records": 0, "content_correct": 0, "style_correct": 0, "json_valid": 0}
+         )
+         metrics["records"] += 1
+         if "a" not in row:
+-            metrics["content_correct"] += int(sample["exact"])
+-            metrics["style_correct"] += int(sample["exact"])
++            metrics["content_correct"] += int(sample["exact"] and not invalid)
++            metrics["style_correct"] += int(sample["exact"] and not invalid)
+             sample["family"] = row["family"]
+             sample["kind"] = "clarification"
+             continue
+@@ -59,7 +65,12 @@
+         if style == "json":
+             try:
+                 parsed = json.loads(text)
+-                valid = isinstance(parsed, dict) and set(parsed) == {"answer"} and type(parsed["answer"]) is int
++                valid = (
++                    isinstance(parsed, dict)
++                    and set(parsed) == {"answer"}
++                    and type(parsed["answer"]) is int
++                    and not invalid
++                )
+                 content = valid and parsed["answer"] == value
+             except (json.JSONDecodeError, TypeError):
+                 valid = content = False
+@@ -71,6 +82,8 @@
+         else:
+             content = text.strip() == str(value)
+             style_correct = text.strip().isdigit()
++        content = content and not invalid
++        style_correct = style_correct and not invalid
+         metrics["content_correct"] += int(content)
+         metrics["style_correct"] += int(style_correct)
+         sample.update(

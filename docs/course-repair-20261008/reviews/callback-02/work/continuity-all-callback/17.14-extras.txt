@@ -1,0 +1,33 @@
+選讀 1
+<details>
+<summary>補充：既有實驗、來源與完整測量範圍</summary>
+
+[Jacob等人的模擬量化原文第3節](https://arxiv.org/abs/1712.05877v1)也分開浮點訓練圖與低位元推論圖；我們只採其中「先體驗捨入誤差」的思路，沒有複製其整數推論引擎。[STE原文第4節](https://arxiv.org/abs/1308.3432v1)把直接傳梯度稱為有偏的估計，正好提醒我們：有梯度是能更新的條件，品質改善另靠結果證明。
+
+正式流程從[T.4的直接SFT底座](../training.md#T.4)各複製一份，以相同初始化、相同抽題索引、seed42、batch16與學習率0.003，分別做350次普通FP32微調與350次weight-only QAT。兩支都實際完成350次optimizer更新、各讀39,348個回答與EOS目標。QAT針對每個輸出列以最大絕對值除7求scale，捨入至-7至7、反量化後前向，反向則採上述STE；和最後`QuantizedLinear`的規則相同。這與上方單向量、共用一把刻度的CPU例子不同，正式模型使用逐列刻度。
+
+表中的PTQ是post-training quantization（訓練後量化）：先完成普通浮點訓練或微調，再把固定權重轉成低位元表示；PTQ4表示四位元版本。QAT則在訓練時就模擬量化誤差。[17.9](17.md#17.9)示範了PTQ的轉換流程。NLL（Negative Log-Likelihood，負對數似然）是把標準答案與EOS各位置的負對數代價取平均，計算方法可回看[5.1](05.md#5.1)；越小表示這批目標的平均預測代價越低，還不是模型自己生成時的答對率。
+
+| 共同底座的支線 | 額外更新 | 測試答對／10題 | 測試回答NLL／69目標 |
+| --- | ---: | ---: | ---: |
+| 原FP32 | 0 | 5 | 0.5058 |
+| 原版直接PTQ4 | 0 | 4 | 0.5262 |
+| 普通FP32微調 | 350 | 6 | 0.4896 |
+| 普通微調後PTQ4 | 350 | 6 | 0.4066 |
+| QAT浮點主權重 | 350 | 4 | 0.5398 |
+| QAT後正式packed4 | 350 | 4 | 0.5979 |
+
+公平的QAT對照是兩支都有350次更新的packed版，而不是只和零次更新的直接PTQ比。驗證五題上，QAT後packed4與普通微調後PTQ4各答對2/5；按相同36個回答與EOS目標計算，前者NLL是0.5273，後者是1.1811。最後十題的排序卻反過來：QAT後packed4的NLL是0.5979，普通微調後PTQ4是0.4066，QAT還少答對兩題。驗證卷上較低的代價，沒有在這份最後考卷維持同樣優勢。因此不能用「預先適應」保證成功，也不能看過最後題再改設定把失敗藏掉。六版測試都EOS10/10且無非法控制ID，停止正常仍不等於答案正確。
+
+在一筆完整帶標準答案前文的測試輸入上，QAT模擬forward與重新載入的packed4最大logit差為0；這檢查部署規則對上，沒有證明模型答對。還要分清「保存數字」與「保存計算方式」：`qat_float.pt`只保留浮點主權重，普通FP32載入不會自動啟用fake quant；真正打包後的部署檔是`model.pt`。完整條件與產物可查[QAT實報](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/course-experiments/results/qat.json)。
+
+已有[T.4直接SFT實驗](../training.md#T.4)的`model.pt`與`dataset.json`時，下列指令從同一底座重做普通微調、QAT與打包比較，再試用QAT部署檔。這是重做全流程的入口；正式L4數字不等於你CPU重跑的時間：
+
+```bash
+.venv/bin/python -m scripts.course_experiments.run --experiment qat --device cpu
+.venv/bin/python scripts/infer.py outputs/course-experiments/course-v1/qat/model.pt --chat --prompt "color=red;shape=square;pitch=high;describe" --tokens 24 --json
+```
+
+這題標準答案是`square`，正式QAT部署版卻答`circle`，普通微調後PTQ答`square`。同樣的四位元儲存仍可能保存不同決策；兩支的tensor bytes相同，檔案bytes的差還包含metadata，不能當成QAT減少參數的證據。
+
+</details>

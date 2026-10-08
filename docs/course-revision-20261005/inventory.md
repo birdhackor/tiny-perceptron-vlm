@@ -4,7 +4,7 @@
 
 讀者設定：數學不錯的高中生，或有基礎數學能力的大學生；Python 只依入門教材提供的程度。目標是第一次順序閱讀能理解，也能用小問題檢查自己的理解。局部教學可以換用較簡單的模型；最終從零整合成品才需要追蹤同一份小 MoE 的接續。
 
-方法依據：[clear-tutorial/SKILL.md](../../.agents/skills/clear-tutorial/SKILL.md)、[10.5 問題示範](../../.agents/skills/clear-tutorial/references/review-example-10-5.md)、[審閱順序](../../.agents/skills/clear-tutorial/references/review-protocol.md)。本輪採作者盤點方式；沒有把專家掃讀稱為初學者盲讀驗收。
+方法依據：[clear-tutorial/SKILL.md](../../.agents/skills/clear-tutorial/SKILL.md)、[10.5 問題示範](../reader-reviews/skill-history/clear-tutorial-3c0f3254/references/review-example-10-5.md)、[審閱順序](../../.agents/skills/clear-tutorial/references/review-protocol.md)。本輪採作者盤點方式；沒有把專家掃讀稱為初學者盲讀驗收。
 
 ## 1. 已查看的範圍與本輪結論的界線
 

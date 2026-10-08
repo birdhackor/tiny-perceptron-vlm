@@ -1,0 +1,312 @@
+{"page_id": "5.10", "phase": "main", "source_sha256": "3203ce0118929357e07a341a0674a3efaa625dd17f1c6376ff02da3b6ca129ba", "characters_delivered": 1070, "scope": "delivery, not automatic pass"}
+## 5.10 用來選模型的分數能當最後成績嗎？
+
+兩設定在驗證題得0.7與0.8，我們選0.8那個。這份分數已參與決策，不能再當定案方法在完全獨立考卷上的成績；反覆用模擬試卷挑讀書方法，也會逐漸迎合那份卷子。
+
+訓練資料更新權重，驗證資料選設定，測試資料等方法定案才計分。區別是用途，不只是檔名；下面只執行選設定這件事。
+
+```python
+candidates = [
+    {"lr": 0.001, "validation": 0.7},
+    {"lr": 0.01, "validation": 0.8},
+]
+selected = candidates[0]
+for candidate in candidates[1:]:
+    if candidate["validation"] > selected["validation"]:
+        selected = candidate
+print("選擇的設定", selected)
+print("test仍封存，尚未計算最終成績")
+```
+
+輸入兩份假設實驗記錄，lr是學習率、validation是驗證成功比例；這些分數為講解選擇規則而指定，並不是模型測量。先拿第一份當目前最佳，迴圈比較後續候選。`if` 只在條件成立時執行縮排行；0.8大於0.7，所以更新selected。輸出選lr0.01、validation0.8，第二行明確說test還沒評，程式沒有憑空捏造test值。
+
+一次選擇也會受隨機波動影響，候選越多，越容易恰好挑到對這份驗證樣本特別幸運的結果。這個「挑最高」的偏差不能靠只報最優數字消除。應保留各候選記錄、選擇規則與嘗試數量，最終在同一份封存test上報告定案方法，再依 [5.15](#5.15) 看不同種子波動。
+
+候選越多，越容易挑到特別適合驗證樣本的一次。保存試過哪些設定、用何指標選；看完test再調參，這份test也加入開發循環。分組應先於切窗口，同故事前半教過、後半評，不宜當獨立新故事；自己的留出成績也不等於官方測試成績。
+
+練習在candidates加一份 `{"lr": 0.1, "validation": 0.6}`，先預測選擇仍為0.01，再執行核對。然後把新增記錄的validation改成0.9，選擇會改，但test行仍應保持「尚未計算」。程式挑到更高驗證數，不等於它已經提供更好的獨立成績。
+
+
+[原位置選讀折疊區：補充：實作約定與原始紀錄；完成全組正文並保存main notes後補讀]
+
+
+
+{"page_id": "13.4", "phase": "main", "source_sha256": "50e044724ecf2aee5757ef218cceeb2f2884cfa2ddce48c619a3a1edd5d789e8", "characters_delivered": 1176, "scope": "delivery, not automatic pass"}
+## 13.4 固定參考在比較什麼？
+
+對同題兩篇答案，原模型的log分數是較佳−4、較差−3，差距−1；更新中的模型變成−3、−3，差距0。它相對原差距改善了`0−(−1)=1`，但兩候選現在只是同分，尚未保證較佳勝出。
+
+正在更新、之後實際作答的模型叫**策略模型（policy）**；保留原起點、不跟著更新的副本叫**參考模型（reference）**。直接偏好最佳化（Direct Preference Optimization，DPO）會用它作固定基準，關注相對偏好如何改變。
+
+下面用三個不同操作建立固定參考：`deepcopy`複製一份獨立參數，讓策略更新不會改到它；`eval()`切到評估行為；`requires_grad_(False)`停止追蹤參考參數的梯度。後兩項各有作用，不能代替獨立複製。這個隨機小模型只檢查副本與凍結，沒有偏好訓練。
+
+```python
+import copy
+import torch
+from tiny_perceptron.model import TinyLM, ModelConfig
+
+policy = TinyLM(ModelConfig(width=8))
+reference = copy.deepcopy(policy).eval().requires_grad_(False)
+before = reference.embedding.weight.clone()
+with torch.no_grad():
+    policy.embedding.weight.add_(0.1)
+scores = reference(torch.tensor([[1, 2]]))["logits"]
+print("參考未跟著改", torch.equal(before, reference.embedding.weight))
+print("參考不記梯度", scores.requires_grad)
+```
+
+人為給policy的嵌入加0.1後，第一行應為`True`：reference沒變；第二行為`False`：參考輸出不需梯度。沒有偏好訓練發生。
+
+正式使用時通常保留完成示範微調的起點。參考未必每題都答對，它提供原行為的基準，並非真值裁判。策略與參考最初相同，因此相對差距最初為0，即使原模型更偏向錯答。參考全程固定，也不能放進策略更新器。
+
+練習把`copy.deepcopy(policy)`改成`policy`。兩個名稱將指向同一對象，凍結也會連policy凍結；手動加0.1後，第一行變`False`。獨立複製與凍結各有作用，缺一項都不能替代固定參考。
+
+
+[原位置選讀折疊區：補充：來源、完整設定與既有實測紀錄；完成全組正文並保存main notes後補讀]
+
+
+
+{"page_id": "13.5", "phase": "main", "source_sha256": "322165e1e1b3d7f5e26caef6e8d637e720ef1e198b41bccfda83a23e83c9d0ae", "characters_delivered": 1040, "scope": "delivery, not automatic pass"}
+## 13.5 DPO如何把一對偏好變成更新方向？
+
+沿用較佳−4、較差−3的策略log分數，固定參考也相同。先算相對差距：
+
+`margin=(策略較佳−策略較差)−(參考較佳−參考較差)`。
+
+本例margin為0。DPO用`L=−log(sigmoid(beta×margin))`作代價；beta是正的縮放係數。`sigmoid(z)=1/(1+exp(−z))`把差距轉到0與1之間，0變0.5，較大正值接近1。因此相對更偏向較佳答案，代價就降低。
+
+```python
+import torch
+from tiny_perceptron.alignment import dpo_loss
+
+chosen = torch.tensor([-4.0], requires_grad=True)
+rejected = torch.tensor([-3.0], requires_grad=True)
+loss = dpo_loss(chosen, rejected, torch.tensor([-4.0]), torch.tensor([-3.0]), beta=0.1)
+loss.backward()
+print("代價", round(loss.item(), 4))
+print("較佳梯度", round(chosen.grad.item(), 4))
+print("較差梯度", round(rejected.grad.item(), 4))
+```
+
+程式給的是四個log機率分數，不是裁判星等。beta0.1、margin0時，代價約0.6931，較佳分數梯度−0.05、較差+0.05。`backward()`只算敏感程度，沒有更新任何語言網路。
+
+用學習率0.1做紙上下降，舊值減去學習率乘梯度：較佳變−3.995，較差變−3.005；差距從−1變−0.99，相對改善0.01。真模型則透過共同權重改變每步機率，不能獨立隨意改每篇分數。
+
+候選排序與實際回答還要分開測。保存實驗中，`4+2=?`的正確候選6比錯候選7有更高整段機率，模型自由生成卻回答8。它並未被限制只能選這兩篇，因此「這一對排對」仍不是「回答算對」。
+
+練習把策略較佳分數改−5，參考保持不變。margin變−1，代價上升，較佳梯度仍為負，下降方向仍是提高相對偏好。
+
+
+[原位置選讀折疊區：補充：來源、完整設定與既有實測紀錄；完成全組正文並保存main notes後補讀]
+
+
+
+{"page_id": "14.2", "phase": "main", "source_sha256": "3f7fc5680bb82b843629ad4f22a1917e93ce103503b90249ebc65ba655498c87", "characters_delivered": 1462, "scope": "delivery, not automatic pass"}
+## 14.2 正規化能否簡化？
+
+同一位置的三個特徵是 `[2,2,2]`。我們想控制它的數值尺度，卻有兩種可能的答案：先拿掉共同平均，會得到 `[0,0,0]`；只按共同大小縮小，會接近 `[1,1,1]`。前者抹掉「一起偏向正值」的資訊，後者保留它，因此兩種正規化不是同一個規則少做一行運算。這裡的特徵是同一位置向量的各項數字；尺度沿這三項計算，不把其他時間位置混進來，做法可回顧[4.3](04.md#4.3)。
+
+LayerNorm先算平均，逐項減掉平均，再除以標準差。對 `[2,2,2]` 而言，平均是2，減完得到全零；雖然標準差也是零，分母的小常數能避免除以零。**均方根正規化（RMSNorm）**採用另一規則：把每項平方，求平均，再開平方根，所得稱為均方根（Root Mean Square，RMS）。此例平方都是4，均方根為2，直接用原數字除以2便得到 `[1,1,1]`。它保留共同偏移，不先搬到平均零。
+
+圖中的卡片 `[1,2,3]` 表示同一位置的三個特徵。上下兩塊分別列出先減平均再除標準差，以及直接除均方根的結果。完整層還可學習逐項縮放：gamma是每項乘上的係數，beta是每項加上的偏移；標準LayerNorm可有兩者，常見RMSNorm只有gamma。這裡都固定gamma為1，LayerNorm的beta為0，先看兩條規則本身。
+
+![沿同一位置的特徵調整尺度，兩種規則輸出形狀相同](../figures/rewrite-14-normalization.svg)
+
+下列輸入每一列代表一個位置，三欄代表三項特徵。`mean(..., keepdim=True)`保留一欄，方便將同一個分母除到該列三個數字上。`-1`指定最後一個軸，也就是三個特徵；`(3,)`則告訴LayerNorm對最後三項特徵做正規化。`eps`是避免全零輸入除以零的小常數，並不是要把正常數字改成零。
+
+```python
+import torch
+import torch.nn.functional as F
+
+x = torch.tensor([[2.0, 2.0, 2.0], [1.0, 2.0, 3.0]])
+eps = 1e-5
+ln = F.layer_norm(x, (3,), eps=eps)
+rms = x / torch.sqrt(x.square().mean(-1, keepdim=True) + eps)
+print("LN", ln.round(decimals=4))
+print("RMS", rms.round(decimals=4))
+```
+
+LN第一列為全零，第二列約 `[-1.2247,0,1.2247]`：1和3位於平均2的兩側。RMS第一列約全一，第二列約 `[0.4629,0.9258,1.3887]`，因為分母是 `sqrt(14/3)`，約2.1602。兩者形狀相同，數值與意義卻不同；把訓練好的LayerNorm直接換成RMSNorm，後面的權重未必能適應。省去平均與偏移可能簡化運算，但品質與速度需要在相同模型條件下量測。
+
+練習將 `x` 改成 `x + 10`，先預測哪一種輸出不變。重跑後比較：LayerNorm會消去新增的共同平均，RMSNorm只調尺度，因此通常改變。這能說明「正規化」這個名字並不保證各種方法等價。
+
+
+[原位置選讀折疊區：選讀：來源、量測條件與原始實報；完成全組正文並保存main notes後補讀]
+
+
+
+{"page_id": "15.1", "phase": "main", "source_sha256": "ca455683e18e7de892417b84202fd24e8f522dc64cd7bc864f28531ceb877511", "characters_delivered": 1508, "scope": "delivery, not automatic pass"}
+## 15.1 Dense 的計算方式是什麼？
+
+一句話有兩個token，和一句話有四個token，模型是否需要兩倍的權重？答案取決於我們是否分清「儲存規則」與「使用規則」。這裡的token是文字切分後的單位；每個單位進入模型時是一列特徵數字。在[一層模型](04.md#4.4)裡，注意力讓不同位置交換訊息，接著每個位置各自通過同一個小型前饋網路（Feed-Forward Network，FFN）。本節的材料是一張二列、每列兩項特徵的表；增加的是輸入列，先不要改處理它的權重。
+
+Dense在本章指每個token都使用同一組完整FFN，沒有先挑選某幾組權重。例如FFN先把兩個特徵擴成三個，經啟動函數，再收回兩個。第一張表有 `2×3=6` 個權重，第二張有 `3×2=6` 個，共12個。不論處理兩列還是四列，這兩張表都不會多一份；但四列要做四次相同種類的計算，因此工作量比兩列多。共享參數意味著用同一規則，並不是所有位置只計算一次。
+
+下列程式直接指定兩張表，不需訓練就能追蹤輸出。`relu`把負值改成零、保留正值，是兩次矩陣乘法之間的非線性步驟。這裡不加bias，也就是沒有額外常數，讓參數數量恰好符合上面的12。
+
+```python
+import torch
+
+up = torch.tensor([[1.0, 0.0, 1.0], [0.0, 1.0, 1.0]])
+down = torch.tensor([[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]])
+
+
+def ffn(x):
+    return torch.relu(x @ up) @ down
+
+
+x = torch.tensor([[1.0, 2.0], [2.0, 1.0]])
+for batch in (x, torch.cat([x, x], dim=0)):
+    print("輸出", ffn(batch).tolist())
+    print("token數", len(batch), "權重數", up.numel() + down.numel())
+```
+
+`@`的規則是每列輸入對上權重表的每一欄，同位置先相乘、再相加，產生該欄的一個結果。第一列 `[1,2]`乘up時，三欄分別算 `1×1+2×0=1`、`1×0+2×1=2`、`1×1+2×1=3`，得到 `[1,2,3]`。都為正所以relu不改它；再乘down，兩欄分別算 `1×1+2×0+3×1=4`、`1×0+2×1+3×1=5`，得到 `[4,5]`。第二列用同一規則得到 `[5,4]`。第一次輸出是這兩列，第二次則重複兩遍；兩次印出的權重數都為12。`torch.cat`沿列方向把輸入接起來，沒有複製模型；`numel`只數表中的元素，不數輸出與中間特徵。
+
+後續的Mixture of Experts（MoE，專家混合）會準備多組FFN，讓每個token只選其中少數組。現在這個Dense規則是比較基準：要知道MoE省掉什麼，先知道Dense對每列完整計算了哪些東西。不能從「Dense只存一套」推論它一定用較少計算，也不能從token增加推論參數跟著增加；輸入長度、參數容量、工作量是三個不同量。
+
+練習把兩個輸入各重複三遍，執行前預測共有六列輸出、仍然12個權重。核對後，再手算第一列結果。若增加的只是列數，FFN的每列規則保持不變；若要讓FFN變寬，則必須連兩張權重表的形狀一起改。
+
+
+[原位置選讀折疊區：選讀：來源、量測條件與原始實報；完成全組正文並保存main notes後補讀]
+
+
+
+{"page_id": "15.4", "phase": "main", "source_sha256": "fff189ef51054450ec907fe69a92119b835231ac60ae91095f0b958e3ab5a34a", "characters_delivered": 1448, "scope": "delivery, not automatic pass"}
+## 15.4 能只啟動少數 experts 嗎？
+
+如果有八位expert，讓每位都算完再混合，儲存和計算都比Dense增加。我們真正希望的是保留多套規則，但每個token只花其中少數幾套的計算成本。[router](15.md#15.3)依token特徵算出各expert分數，softmax轉成比例。現在只保留比例最大的k位，這叫top-k routing。先用 `[0.1,0.7,0.2]` 選出兩位，再確認沒有把第三位也算完；這兩步一起成立，才有少算的機會。
+
+例如三位的比例是 `[0.1,0.7,0.2]`。top-2選第1位和第2位（索引從0開始），對應比例0.7與0.2；top-1只選第1位。另一個token比例 `[0.6,0.3,0.1]`則top-2選第0與第1位。不同token可以走不同路，因此儲存的三套權重不代表每個token都執行三套。k是每個token要選幾位，不是整個batch（一起處理的一批輸入）只選幾位。
+
+```python
+import torch
+
+prob = torch.tensor([[0.1, 0.7, 0.2], [0.6, 0.3, 0.1]])
+for k in (2, 1):
+    weights, chosen = prob.topk(k, dim=-1)
+    print("k", k, "expert索引", chosen.tolist())
+    print("原比例", weights.tolist())
+    print("保留比例總和", weights.sum(-1).tolist())
+```
+
+輸入兩列代表兩個token，三欄代表三位expert。`topk`沿最後一軸挑最大的k項，回傳值與原欄索引；它不計算expert、也不重新正規化比例。k=2時索引為 `[[1,2],[0,1]]`，保留總和約0.9與0.9；k=1時為 `[[1],[0]]`，總和約0.7與0.6。注意 `tolist()`可能顯示0.699999等尾數，這是二進位浮點表示造成的，應看接近的數字。
+
+被選中的比例總和小於一，是因為未選的部分被拿掉了。下一節會決定如何合併與是否再除以保留總和。這裡先把兩件事分開：chosen是整數索引，決定要執行哪位；weights是連續數值，決定輸出乘多少。梯度描述微調數字對誤差的影響，詳見[W.6](../first-steps.md#W.6)。索引在微小改動下通常不變，跨過排名邊界時又突然跳到另一位，因此不能像一般連續運算那樣對「選誰」直接求梯度。保留的比例在選擇未換人的範圍內，仍隨分數連續改變，所以誤差能沿比例的微小變化回到router，告訴它怎樣調整分數。
+
+要讓稀疏路由真的省計算，實作必須先選擇，再只執行被選的expert。若先算三位輸出、最後只取兩位，輸出形式雖然像top-2，三位的計算成本卻已花掉。訓練與效能比較都應檢查實際執行路徑，而不是只看結果裡有幾個非零係數。
+
+練習把第一列改成 `[0.1,0.2,0.7]`，先預測top-2索引變成 `[2,1]`，數值仍是 `[0.7,0.2]`，再重跑核對。再把k改成3，確認所有比例保留、總和回到一。若遇到相同分數，不要假設各裝置一定選同一個索引順序；在比較實驗中應避免未說明的平手情況。
+
+
+[原位置選讀折疊區：選讀：來源、量測條件與原始實報；完成全組正文並保存main notes後補讀]
+
+
+
+{"page_id": "17.7", "phase": "main", "source_sha256": "86bd1d1e3f64c24b0492d3731f006137aaddb4cee30f1666cde7721946ef4250", "characters_delivered": 1209, "scope": "delivery, not automatic pass"}
+## 17.7 只量化權重時，輸入與運算用什麼？
+
+先固定兩列權重`[0.7,0.2]`、`[−0.7,1.2]`，輸入`[1,1]`，原輸出是`[0.9,0.5]`。將權重按每列4-bit刻度保存，輸入仍保留浮點數。這叫**只量化權重（weight-only quantization）**，暫時不用估每種輸入的中間特徵範圍。
+
+第一列刻度0.1，兩項精確；第二列刻度1.2/7，−0.7還原約−0.6857，所以壓縮輸出約`[0.9,0.5143]`。下面固定輸入，核對這個改變。
+
+```python
+import torch
+from torch import nn
+from tiny_perceptron.quantization import QuantizedLinear
+
+layer = nn.Linear(2, 2, bias=False)
+with torch.no_grad():
+    layer.weight.copy_(torch.tensor([[0.7, 0.2], [-0.7, 1.2]]))
+compressed = QuantizedLinear(layer, bits=4)
+x = torch.tensor([[1.0, 1.0]])
+print("儲存碼型別", compressed.values.dtype, "輸出型別", compressed(x).dtype)
+print("原輸出", layer(x).detach().round(decimals=4).tolist())
+print("壓縮輸出", compressed(x).round(decimals=4).tolist())
+print("壓縮buffer bytes", compressed.storage_bytes())
+```
+
+`QuantizedLinear`保存低位元碼與逐列scale。4個四位元值打包成2byte，兩個FP32 scale另佔8byte，合計10。沒有bias，讓計數只包含這兩部分。
+
+第一行存碼是`torch.uint8`，輸出是`torch.float32`。因為教材的forward先拆碼、乘scale還原浮點權重，再做普通浮點線性運算。**存成整數與用整數乘法是不同的事**，輸入和輸出在這裏都還是FP32。
+
+這些保存但不交給一般梯度更新的資料叫buffer。轉換版用於推理核對，不能直接當作沿用原更新器續訓的配方。每次還原也可能建立暫存浮點矩陣，所以存得小仍需另量執行記憶體與速度。
+
+練習只把bits改8。四碼各1byte，兩scale仍8byte，合計12；存碼變int8，輸出仍FP32。固定權重與輸入，才能比較位元數。
+
+
+[原位置選讀折疊區：補充：既有實驗、來源與完整測量範圍；完成全組正文並保存main notes後補讀]
+
+
+
+{"page_id": "18.8", "phase": "main", "source_sha256": "c729bfcc4a5fe1571ef53890ee8df101cd8a5050ce9808b6e528790ab30ad5b0", "characters_delivered": 1967, "scope": "delivery, not automatic pass"}
+## 18.8 如何學習整個分佈？
+
+學生第一名與教師一樣，是否就學會教師的分布？如果學生給貓、狗各50%，教師給80%、20%，第一名的平手處理可能選到貓，比例仍明顯不同。我們需要一個比較整個分布的誤差，而且它要說明「以誰的偏好當權重」。先固定[同欄身份](18.md#18.6)和同一前文，並讓[教師不更新](18.md#18.7)；我們要比較的是兩個候選比例整體的差，而不只數第一名是否一致。
+
+常用**Kullback–Leibler divergence（KL散度）**寫成 `KL(p||q)=Σ p_i(log p_i-log q_i)`，p是教師比例，q是學生比例，i逐一走過同一詞表的候選。以p=`[0.8,0.2]`、q=`[0.5,0.5]`，兩項約0.3760與-0.1833，總和0.1927。單項可以負，整體分布差非負；兩邊完全相同時是0。反過來KL(q||p)則以學生比例加權，是另一種誤差，不能隨意交換方向。
+
+兩邊要讀同一段已知回答前文、預測同一個下一token，這種用已知前文餵入的方式稱teacher forcing。不能讓教師自由生成「貓」的前文、學生生成「狗」的前文，再按位置盲比。同時只計算有效回答位置，提示與PAD不直接算KL。PAD是把較短序列補到共同長度的占位token，不是實際回答；這些位置的labels設為-100，讓本節函式不計它們的直接誤差。回顧[哪些位置應該學](07.md#7.3)。
+
+```python
+import torch
+from tiny_perceptron.alignment import distillation_kl
+
+student = torch.zeros(1, 3, 2, requires_grad=True)
+p = [0.8, 0.2]
+teacher = torch.tensor([[p, p, p]]).log().requires_grad_()
+labels = torch.tensor([[-100, 0, 1]])
+loss = distillation_kl(student, teacher, labels, temperature=1.0)
+loss.backward()
+print("KL", round(loss.item(), 4))
+print("學生分數梯度", student.grad.round(decimals=4).tolist())
+print("教師梯度", teacher.grad)
+```
+
+輸入形狀是一段、三位置、兩候選。`p`是兩個候選的機率清單；`[p,p,p]`把同一分布列在三個位置，再包一層`[[p,p,p]]`表示只有一段，所以建立的tensor是`(1,3,2)`。`.log()`逐格把機率轉成自然對數，最後設為可求梯度。學生零分數softmax後各0.5；教師log p的softmax還原p。labels第一項-100表示忽略，後兩項表示有效回答；這個KL函數只用labels決定哪些格有效，不按標準答案索引挑教師機率。輸出KL0.1927，學生第一位置梯度 `[0,0]`，其餘各 `[-0.15,0.15]`，因為只平均兩個有效位置。教師梯度None：故意給教師輸出requires_grad，用來驗證helper仍會斷開目標路徑。
+
+helper內部調用PyTorch `kl_div`時，先傳學生log機率，再傳教師機率，順序和公式字面p、q順序不同，勿憑引數位置猜方向。[蒸餾溫度](18.md#18.5)若不是1，兩邊先除T形成分布，這個helper還乘T²；外層不用再乘。忽略位置只沒有直接KL，作為前文仍能影響後續特徵與學生的間接學習。Hinton原文使用軟目標交叉熵，計算`CE(p,q)=−Σ p_i log q_i`。教師自身的熵是`H(p)=−Σ p_i log p_i`，用教師自己的機率衡量分布的不確定程度。本例約0.5004：把0.8與0.2各乘自己的負log再相加。由前面的KL式展開，可得`KL(p||q)=CE(p,q)−H(p)`；本例0.1927約等於0.6931−0.5004。教師固定時H(p)不隨學生q變動，扣掉這個常數不改變學生梯度，所以兩種誤差對學生的更新方向相同。這個代數關係沒有把forward KL變成[18.1提及的MiniLLM](18.md#18.1)的reverse KL。
+
+練習只把labels第一項-100改成0。先預測三格都有效，因各格分布相同，平均KL仍0.1927；每格梯度變 `[-0.1,0.1]`，再執行核對。有效格數改變分母與梯度，並不是把忽略位置隱藏成看不見的輸入。
+
+
+{"page_id": "18.9", "phase": "main", "source_sha256": "9420a96011edd75fa252331347f5f65370b769233744ce5884cce2c0b96b95b2", "characters_delivered": 1915, "scope": "delivery, not automatic pass"}
+## 18.9 標準答案和教師偏好怎麼一起學？
+
+學生有兩個待預測位置，真值分別是候選0、候選1，教師卻在兩格都偏好候選0。我們想保留真值的要求，又利用教師的候選關係，兩條學習路該各占多少？可以把[標準答案交叉熵](18.md#18.4)和[教師KL](18.md#18.8)一起作學生的學習目標，而不是選完一種就丟掉另一種。混合係數alpha介於0與1，決定教師訊號占多少份量；它不是教師可信度的自動測量。
+
+設CE是標準答案誤差，K是已包含T²尺度的蒸餾KL，使用 `L=(1-alpha)×CE+alpha×K`。alpha=0只學真值，alpha=1只學教師，中間值保留兩條路。以學生每格各給50%、教師每格給 `[0.8,0.2]`、標準答案兩格分別0與1，CE為0.6931，T=1時K為0.1927。alpha=0.5總誤差約0.4429，就是兩個誤差各一半。
+
+```python
+import torch
+from tiny_perceptron.alignment import distillation_loss, distillation_kl
+from tiny_perceptron.model import masked_loss
+
+student = torch.zeros(1, 2, 2, requires_grad=True)
+p = [0.8, 0.2]
+teacher = torch.tensor([[p, p]]).log()
+labels = torch.tensor([[0, 1]])
+ce = masked_loss(student, labels)
+k = distillation_kl(student, teacher, labels, temperature=1.0)
+print("CE/KL", round(ce.item(), 4), round(k.item(), 4))
+for alpha in (0.0, 0.5, 1.0):
+    loss = distillation_loss(student, teacher, labels, alpha=alpha, temperature=1.0)
+    print("alpha", alpha, "總誤差", round(loss.item(), 4))
+assert torch.allclose(distillation_loss(student, teacher, labels, alpha=0, temperature=1), ce)
+```
+
+輸入是一段文字、兩個位置，每個位置有兩個候選。`student`的形狀是`(1, 2, 2)`，零logits形成均勻分布。教師先用清單`p`保存兩候選的比例；`[[p, p]]`最外層只有一段，裡面放兩份相同的`p`，因此建成同樣的`(1, 2, 2)`形狀。`.log()`逐個比例取自然對數，讓後面的softmax得到指定比例。`masked_loss`按labels索引取標準答案的負log機率；`distillation_kl`則對整列候選比例比較。labels此時同時扮演真值與有效位置標記，沒有-100，所以兩格都算。程式沒有更新學生，只核對同一份分數的誤差組合。
+
+輸出第一行0.6931與0.1927，後面依序0.6931、0.4429、0.1927。最後assert檢查alpha=0確實退回普通CE。這個端點是很有用的程式契約，避免配方看似混合卻仍偷偷加入教師項。alpha=1的數字較小不代表學生答得更好，因為各行的目標已經不同；真正質量要用相同獨立評估比較。
+
+本例第二格標準答案是候選1，但教師仍偏好候選0。alpha越大，對這格真值的直接要求越弱，說明教師出錯時保留CE路徑的意義；具體哪個alpha有效，必須依驗證資料判斷，不是固定0.5永遠最佳。
+
+如果T不為1，teacher與student都用同樣T形成KL分布。本節的`distillation_kl`輔助函式已在內部乘T²，外層混合時不可再乘，否則把教師項又放大一次。記錄alpha、T與是否包含T²，才能讓其他人知道你訓練的實際目標。
+
+練習只在alpha列表增加0.25。先手算 `0.75×0.6931+0.25×0.1927≈0.5680`，再執行核對。接著比較這項的尺度，不要把降低總誤差當成新任務正確率；你改的是兩種指導之間的權重。
+
+
+[原位置選讀折疊區：選讀：正式實驗的固定混合目標；完成全組正文並保存main notes後補讀]
+
+
+

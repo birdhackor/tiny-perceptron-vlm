@@ -1302,6 +1302,13 @@ def check_active(root=ROOT, stage="all"):
         return None
     try:
         active = read_json(pointer)
+        if active.get("review_policy") == "tutorial_composite_v1":
+            spec = importlib.util.spec_from_file_location(
+                "active_composite_review", ROOT / "docs/review-tools/composite_review.py"
+            )
+            composite = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(composite)
+            return composite.check_active(root, active, stage)
         require(
             active.get("schema_version") == 1 and active.get("review_policy") == POLICY,
             "invalid active pointer; legacy fallback forbidden",
