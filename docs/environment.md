@@ -34,7 +34,7 @@ uv run --extra cpu --group notebook jupyter lab
 
 `uv run`會先同步環境。安裝時若選了`--extra cpu`，執行時也帶同一個extra，才不會切回另一套PyTorch。另一種方式是啟用`.venv`後直接用那套`python`；啟用方式與kernel選擇見暖身指南。
 
-第19章v2也使用這套環境，另加 `selftrained`，提供safe權重的讀取配套：
+第19章v2也使用這套環境，另加 `selftrained`，提供safetensors推論權重的讀取配套：
 
 ```bash
 uv sync --frozen --extra cpu --extra selftrained
@@ -73,7 +73,7 @@ uv run --extra cu126 python scripts/check_env.py
 
 例如，[聲音入門](../course/chapters/12.md#12.1)先從波形理解聲音，再逐步看時間與頻率。這些局部實驗不等於已訓練一般語音辨識器。第20章的Whisper先把錄音轉成文字，再交給圖文模型聊天，分工見[20.1](../course/chapters/20.md#20.1)。
 
-第19章v2由自行訓練的聲音入口直接提供特徵給同一文字核心，沒有執行Whisper或其他ASR。它只學地址、App與卡片三種銀行客服主題，再產生文字回答；沒有一般逐字聽寫或語音輸出。OCR同樣限於12個已知字、使用者提供的一個連續1–4字區域，Sans與Serif兩種字型都已出現在訓練中。
+第19章v2由自行訓練的聲音入口直接提供特徵給同一文字核心，沒有執行Whisper或其他ASR（自動語音辨識，也就是把語音轉成文字，見[12.11](../course/chapters/12.md#12.11)）。它只學地址、App與卡片三種銀行客服主題，再產生文字回答；沒有一般逐字聽寫或語音輸出。OCR（光學字元辨識，也就是從圖片讀字，見[11.12](../course/chapters/11.md#11.12)）同樣限於12個已知字、使用者提供的一個連續1–4字區域，Sans與Serif兩種字型都已出現在訓練中。
 
 檔案格式能否讀取與模型能力也要分開。成品目前接受的圖片、音訊格式及上限列在學生操作指引；選短而清楚的WAV錄音開始，會比較容易核對「聽到什麼」與「回答什麼」。
 

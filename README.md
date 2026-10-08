@@ -45,7 +45,7 @@ Windows PowerShell 啟用指令是 `.venv\Scripts\Activate.ps1`。選擇 **Tiny 
 | NVIDIA CUDA 13.0 相容硬體／驅動 | `uv sync --frozen --extra cu130 --group notebook` |
 | NVIDIA CUDA 12.6 相容硬體／驅動 | `uv sync --frozen --extra cu126 --group notebook` |
 
-各版本的顯卡與驅動限制、Colab和鏡像設定見[環境說明](docs/environment.md)。使用 extra 後，啟用 `.venv` 直接用 `python`，或每次 `uv run` 都帶相同 extra，避免更換 PyTorch。本機小節核驗使用CPU；前19章的正式GPU訓練另在Modal的NVIDIA L4、PyTorch 2.14.1+cu126上實測，版本與結果保存於[實驗報告](docs/course-experiments/README.md)。第20章另用Python 3.12與PyTorch 2.8.0的獨立環境；GPU訓練用CUDA 12.8配套，安裝步驟見[學生操作指引](docs/natural-assistant/v4/STUDENT.md)。Apple MPS已在macOS CI通過基本矩陣前向／反向與CPU比對；整套教材與正式模型訓練尚未在MPS驗證，範圍見[CI紀錄](docs/validation-artifacts/release-compatibility-ci.json)。
+各版本的顯卡、驅動與套件配套選擇見[環境說明](docs/environment.md)。Colab操作另見[W.1](course/first-steps.md#W.1)。使用 extra 後，啟用 `.venv` 直接用 `python`，或每次 `uv run` 都帶相同 extra，避免更換 PyTorch。本機小節核驗使用CPU；前19章的正式GPU訓練另在Modal的NVIDIA L4、PyTorch 2.14.1+cu126上實測，版本與結果保存於[實驗報告](docs/course-experiments/README.md)。第20章另用Python 3.12與PyTorch 2.8.0的獨立環境；GPU訓練用CUDA 12.8配套，安裝步驟見[學生操作指引](docs/natural-assistant/v4/STUDENT.md)。Apple MPS已在macOS CI通過基本矩陣前向／反向與CPU比對；整套教材與正式模型訓練尚未在MPS驗證，範圍見[CI紀錄](docs/validation-artifacts/release-compatibility-ci.json)。
 
 只想閱讀，可直接開啟線上教材。全站使用 [Zensical](https://zensical.org/) 建置，提供全文搜尋、章節目錄、頁內目錄、深淺色模式與程式碼複製；每節仍可下載 Notebook 或在 Colab 練習。SVG 可放大並保留靜態標註，支援系統減少動態效果。網站建置另需 `--group site`；本機閱讀與 GitHub Pages 操作見[教材發布](docs/publishing.md)。公式由 MathJax 連網排版。
 
@@ -56,13 +56,13 @@ python scripts/prepare_data.py --kind toy-text
 python scripts/train.py --task text --data data/generated/toy-text/train.jsonl
 ```
 
-預設只做一個 batch 的 forward/backward，不更新權重。正式訓練再明確加 `--train`；字元模型、多模態、風格與安全、偏好和蒸餾配方在[訓練操作](course/training.md)。[首批固定訓練資料](assets/training/README.md)以 Git LFS 發布，執行 `python scripts/fetch_training_assets.py --list` 查看並按需解包。原始快取與權重仍放在被 Git 忽略的 `data/`、`checkpoints/`；分工見[資產管理](docs/asset-storage.md)。
+預設只做一個 batch 的 forward/backward，不更新權重。正式訓練再明確加 `--train`；字元模型、多模態、風格與安全、偏好和蒸餾配方在[訓練操作](course/training.md)。[首批固定訓練資料](assets/training/README.md)以 Git LFS 發布，先用 `python scripts/fetch_training_assets.py --list` 查看名稱，再用 `python scripts/fetch_training_assets.py --asset NAME` 下載、核對並解包所選包；將`NAME`換成清單中的名稱。原始快取與權重仍放在被 Git 忽略的 `data/`、`checkpoints/`；分工見[資產管理](docs/asset-storage.md)。
 
 已設定 Modal 與 Hugging Face 帳號時，可手動執行 GitHub Actions 的 **GPU training smoke test**，驗證 GPU 權重更新、HF checkpoint 上傳與下載續訓。帳號設定、時間限制與結果判讀見 [GPU 操作說明](docs/gpu-training.md)。
 
 想先觀察第19章的v2成品，可按[公開CPU操作](docs/selftrained/v2-public-cpu-commands.md)安裝 `cpu` 和 `selftrained` 配套，匿名取得[固定HF版本](https://huggingface.co/birdhackor/tiny-perceptron-course-models/tree/979cdfacc588ad0536f1c64fff96f264571cf054/selftrained/v2)。該版有MoE pretrain、MoE SFT、MoE joint與Dense joint四組推論輸出，共16個配對檔案，採MIT授權。MoE joint選用最後一段第1,000步，該段實際完成4,000步；Dense joint選用第1,000步，該段完成10,000步。這些是依驗證選出的權重，成功示範不代表最後測試全部通過。
 
-要自己從隨機初始化重做，使用[本機訓練指引](docs/selftrained/TRAINING.md)和[固定v2資料清單](docs/selftrained/v2-manifest.json)：Git LFS資料包67,862,431 bytes，含8,962個檔案，訓練／驗證／測試題數為28,876／2,435／3,734。各段接自己的完整checkpoint，不需要作者的私人Volume；公開safe權重只供推論，不能精確續訓。
+要自己從隨機初始化重做，使用[本機訓練指引](docs/selftrained/TRAINING.md)和[固定v2資料清單](docs/selftrained/v2-manifest.json)：Git LFS資料包67,862,431 bytes，含8,962個檔案，訓練／驗證／測試題數為28,876／2,435／3,734。各段接自己的完整checkpoint，不需要作者的私人Volume；公開safetensors推論權重不含更新器等訓練狀態，不能精確續訓。
 
 各章的局部比較仍可下載[公開學生權重](https://huggingface.co/birdhackor/tiny-perceptron-course-models)：原30組實驗共120份存檔，包含不同尺寸與教師／學生等比較版本。[原下載清單](docs/course-experiments/public-models.json)保留固定版本與檔案指紋；[舊合成整合清單](docs/course-experiments/capstone-public.json)另保留11份階段、量化及Dense學生檔。例如在上面已安裝的 CPU 環境中：
 

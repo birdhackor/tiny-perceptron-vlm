@@ -1,0 +1,36 @@
+## 17.14 訓練時能先體驗量化誤差嗎？
+
+PTQ在權重固定後轉換；另一種做法在訓練期間就讓前向用量化後的數字，嘗試教模型適應格子誤差，叫**量化感知訓練（Quantization-Aware Training，QAT）**。它需要訓練數據與參數更新，和只收集範圍的校準不同。
+
+先用`[0.1,0.4,0.9]`看問題。4-bit對稱scale是0.9/7，碼`[1,3,7]`，還原約`[0.1286,0.3857,0.9]`。round在同一格內幾乎不隨小變化改變，直接梯度通常0，難教上游。
+
+QAT常用**模擬量化（fake quantization）**：前向確實用還原值，反向刻意近似成直接通過，叫**直通估計（straight-through estimator，STE）**。它不是round真正的導數。
+
+![訓練流程示意：浮點主權重、前向模擬、STE近似與最後打包是不同步驟](../figures/rewrite-17-qat-flow.svg)
+
+```python
+import torch
+from tiny_perceptron.quantization import fake_quantize
+
+x = torch.tensor([0.1, 0.4, 0.9], requires_grad=True)
+y = fake_quantize(x, bits=4)
+y.sum().backward()
+print("向前", y.detach().round(decimals=4).tolist())
+print("STE梯度", x.grad.tolist())
+hard = x.detach().clone().requires_grad_()
+scale = 0.9 / 7
+plain = (hard / scale).round() * scale
+plain.sum().backward()
+print("直接round梯度", hard.grad.tolist())
+```
+
+本工具以`x+(還原值−x).detach()`實現STE。前向x相消，留下還原值；反向括號項不追蹤，只走外面的x。`hard`先用`detach()`斷開舊求導關係、`clone()`複製相同數值，再用`requires_grad_()`開啟這份新張量的求導記錄，讓直接round的梯度另存在`hard.grad`。對y總和求導，所以STE梯度`[1,1,1]`，直接round則`[0,0,0]`。此程式只求梯度，沒有更新器`step()`，沒有訓練網路或輸出小文件。
+
+完整QAT仍保存可更新的浮點主權重，每次前向重做模擬；訓練後另轉成實際打包格式，再用部署版檢查。模擬和部署規則若不一致，適應的誤差可能對不上。
+
+有梯度只說明可以學，效果需要同起點、同資料、同更新預算的對照。既有一份比較用10道留出的顏色、形狀與音高屬性問答，按完整回答內容ID匹配判答對。同樣350次更新，普通微調後PTQ答對6／10，QAT後packed4答對4／10；這份小模型沒有因此更好。完整條件留在補充，不能將單向量梯度或「預先適應」當成品質保證。
+
+練習只將第一條代價`y.sum()`改`y.square().sum()`，STE梯度變成2y，約`[0.2571,0.7714,1.8]`。這分開了代價提供的訊號與STE近似傳遞規則。
+
+[選讀保留原位置，主文理解保存後另讀]
+

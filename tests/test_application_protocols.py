@@ -5,6 +5,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
+import torch
 
 from scripts.course_experiments import applications as app
 from tiny_perceptron.data import ByteTokenizer
@@ -64,6 +65,52 @@ def _record():
             {"role": "user", "content": "CALC:multiply(2,3)"},
         ],
     }
+
+
+class _ProtocolReplayModel(torch.nn.Module):
+    """只重播指定 token 以核對紀錄時序，不代表模型學會工具協議。"""
+
+    def __init__(self, replies):
+        super().__init__()
+        self.config = SimpleNamespace(max_length=384)
+        self.replies = iter(replies)
+        self.pending = None
+
+    def forward(self, ids, cache=None):
+        tokenizer = ByteTokenizer()
+        if cache is None:
+            self.pending = iter(tokenizer.encode(next(self.replies)) + [tokenizer.eos_id])
+        chosen = next(self.pending)
+        logits = torch.full((ids.shape[0], 1, tokenizer.vocab_size), -torch.inf)
+        logits[:, :, chosen] = 0
+        return {"logits": logits, "cache": True}
+
+
+def test_generation_snapshot_survives_later_list_and_message_edits():
+    messages = _record()["messages"]
+    before = copy.deepcopy(messages)
+    result = app._sample(_ProtocolReplayModel([""]), messages, SimpleNamespace(device="cpu"))
+    messages[0]["content"] = "changed after generation"
+    messages.append({"role": "user", "content": "TOOL_RESULT:6"})
+    assert result["messages"] == before
+    assert result["input_ids"] == app._prompt_ids(before, ByteTokenizer())
+    assert result["input_tokens"] == len(result["input_ids"])
+
+
+def test_real_sampler_keeps_each_tool_step_input_before_feedback():
+    model = _ProtocolReplayModel(['{"name":"multiply","arguments":{"a":2,"b":3}}', '{"done":true,"answer":6}'])
+    record = _record()
+    episode = app._tool_episode(model, record, SimpleNamespace(device="cpu"))
+    assert episode["status"] == "done" and episode["correct"]
+    first, second = (event["generation"] for event in episode["trace"])
+    assert first["messages"] == record["messages"]
+    assert second["messages"] == record["messages"] + [
+        {"role": "assistant", "content": first["samples"][0]["generated"]},
+        {"role": "user", "content": "TOOL_RESULT:6"},
+    ]
+    for generation in (first, second):
+        assert app._prompt_ids(generation["messages"], ByteTokenizer()) == generation["input_ids"]
+        assert generation["input_tokens"] == len(generation["input_ids"])
 
 
 def test_exponent_overflow_argument_never_executes_tool(monkeypatch):

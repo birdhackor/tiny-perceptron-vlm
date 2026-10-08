@@ -1,0 +1,32 @@
+## 7.2 模型怎麼知道輪到誰？
+
+要讓助手接著回答「1+1=?」，輸入應停在哪裡？不能把未知的「2」先放進去，也不能讓末尾只停在問題。先結束user段，再放assistant邊界，讓下一步正好預測回答首項。
+
+本字表BOS=1、user=3、EOS=2、assistant=4，普通問題bytes加8。這份生成前文叫prompt，下面逐項查看它的九個ID。
+
+```python
+from tiny_perceptron.data import ByteTokenizer
+
+tok = ByteTokenizer()
+question = "1+1=?"
+prompt = [tok.bos_id, tok.user_id] + tok.encode(question) + [tok.eos_id, tok.assistant_id]
+print(prompt)
+print("最後邊界", prompt[-1])
+assert prompt[-1] == tok.assistant_id
+```
+
+輸入問題字串。清單的 `+` 表示按順序相接，不是逐項數字相加，輸出應為 `[1,3,57,51,57,69,71,2,4]`，共有九個token。最後的 `prompt[-1]` 取末項4，檢查它確實是assistant標記。這裡沒有輸入正確答案2，因為生成時它尚未知；模型應由尾端位置的logits預測回答第一token。
+
+為什麼問題結尾EOS與回答開始assistant都要保留？EOS告訴前一段結束，assistant指定下一段角色。兩個標記的功能不同，但都是訓練裡學過的前文。若訓練時使用一種邊界順序，推論突然換另一種，模型會遇到未按同樣方式練過的結構，不能只因為字義看得懂就保證它會接對。
+
+問題EOS結束上一段，assistant指定下一段角色，兩個標記功能不同。歷史可以有完整舊回答，當前尾端卻只放回答起點；推論和訓練使用同樣格式。這份結構說明輪到誰，不提供算術正解，內容能力仍需新題檢查。
+
+練習只移除清單尾端的assistant ID，先預測末項變EOS2、模型當前位置對應問題結尾，而非我們指定的回答角色，再執行核對。原assert應失敗；這不是需要修掉的程序錯誤，而是檢查明確發現prompt不符合約定。恢復4後檢查再通過。
+
+<details>
+<summary>補充：實作約定與原始紀錄</summary>
+
+短程式沿用本課工具與原計算語義。安裝、長訓練與重做操作見[訓練配方](../training.md)，不需要先完成長配方才能閱讀這個例子。
+
+</details>
+

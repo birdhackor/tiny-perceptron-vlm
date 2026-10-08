@@ -1,0 +1,39 @@
+## B.1 模型怎麼要求程式幫忙？
+
+「123乘45」可以形成請求 `multiply(a=123,b=45)`，答案先留空，等工具算。只在回答裡寫「已使用計算器」沒有執行意義；模型要生成能被程式讀出的名稱與參數，外層再做運算。
+
+```python
+import json
+
+request = {"name": "multiply", "arguments": {"a": 123, "b": 45}}
+training_example = {"user": "123乘45", "assistant_tool_request": request}
+text = json.dumps(request, ensure_ascii=False)
+print("訓練例子", training_example)
+print("可傳遞的請求文字", text)
+print("目前只有請求，尚未執行乘法")
+```
+
+人工字典有name、arguments，`json.dumps`把欄位轉成可傳的JSON文字。`training_example`只展示示範，沒有訓練或呼叫工具。JSON是資料格式，寫出它不會讓Python自行執行。
+
+請求適合精確運算；問「乘法是什麼」則需要概念回答。示範兩者，才能教何時用工具。若把45錯寫成54，外層雖能合法計算6642，也不是原題答案。留下問題和原始請求，格式、選擇與參數錯誤才有辦法定位。
+
+真正訓練與驗收下方的舊局部模型用CALC／COPY固定協議，小數字0–9，沒有驗收正文123×45或一般中文提問。這個範圍與後面的自然語言選卡器分開，不把兩份模型拼成已跑過的共同助理。
+
+<details>
+<summary>補充：舊固定協議的模型與重做入口</summary>
+
+舊局部模型從隨機權重開始，以示範資料學習動作格式，沒有載入既有模型權重。訓練題是 `CALC:add(2,3)` 或 `CALC:multiply(2,3)` 這類0至9的兩數運算，另有 `COPY:3` 這類應直接回答的題目。COPY 是照抄給定數字，期待生成 `{"done":true,"answer":3}`，不呼叫工具。
+
+兩個運算與交換參數的版本共用同一對數字家族，例如2+3、3+2、2×3、3×2一起分配，不能跨訓練、驗證與最後檢查；COPY 每個數字另成家族。這只測固定 ASCII 協議與小數字。ASCII 是英文字母、數字和常見標點使用的基本字元編碼；本輪的 CALC／COPY 沒有測中文自然提問，也沒有驗收正文的123×45手寫示範。
+
+每一步請求與回填後的回答都由模型實際生成，沒有用資料集答案替它修參數。完整配方與原始結果見[實測報告](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/course-experiments/results/tools.json)。若要重做，可在已啟用專案環境的根目錄執行：
+
+```bash
+python scripts/course_experiments/run.py --experiment tools --device cpu
+```
+
+此入口使用CPU，輸出存於 `outputs/course-experiments/course-v1/tools/`。報告的舊正式成績來自 NVIDIA L4 顯示卡；閱讀短例並沒有另跑這份 CPU 實驗。
+
+</details>
+
+

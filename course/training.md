@@ -184,8 +184,8 @@ print("保存隨機起點；沒有更新參數")
 
 用同樣的資料、題號、生成上限比較前後。練習先指出平均代價是否改變，再從逐題回答找一個有意義的變化；不只挑一個變好的答案，也不以提高上限遮住結束問題。
 
-<details>
-<summary>故事、切詞與固定對話實驗</summary>
+<details id="fixed-sft-recipe" markdown="1">
+<summary>故事、切詞與固定對話實驗；T.10教師需先完成其中的固定SFT配方</summary>
 
 固定課程配方使用與上述小型 CPU 練習不同的設定，不要混用成績。按需要選一組：
 
@@ -229,8 +229,8 @@ python scripts/evaluate.py checkpoints/safety.pt --data data/generated/safety/va
 
 練習只替換「簡短」為「生動」，保留同一問題與格式。若多了比喻卻把答案數字改錯，就沒有完成目標。
 
-<details>
-<summary>固定風格、安全與 LoRA 比較</summary>
+<details id="fixed-style-recipe" markdown="1">
+<summary>固定風格、安全與 LoRA 比較；T.10教師需先完成其中的固定風格配方</summary>
 
 完整配方按依賴先後執行：
 
@@ -263,6 +263,8 @@ PKU-SafeRLHF 起步包標示 CC-BY-NC-4.0；它與本課原創盒子題的授權
 視覺留出兩張向右偏移的藍色圖，方形、圓形各一張；同位置的紅、綠圖仍用於訓練，留出的是未見過的顏色與位置組合。方形類別 0、圓形 1；音訊留出 180Hz 低音類別 0、1000Hz 高音 1。查看最後JSON：本次命令有`--train`，`mode`應為`train`；若是`dry-run-no-weight-update`，表示只檢查通路，尚未完成這次訓練。`holdout_examples`應為2，`holdout_accuracy`要等於1才接續；0.5只是答對一題，保存檔存在不能代替檢查。
 
 取得 T.4 的 `attributes.pt` 與兩個編碼器後，先選要開放哪些參數更新。下面的 `--freeze` 指定本工具的凍結方案，不是照名稱凍結那個零件：`projector` 只更新接頭；這個命令列工具的 `partial` 另允許首末文字區塊更新，`none` 則開放所有零件。開放更新也要有本次輸入帶來的梯度，沒用到的入口不會因此自動學習。
+
+本練習的聯合路線選`partial`，目的是讓接頭與首末文字區塊一起適應圖片、聲音兩種輸入；這是一組示範設定，效果仍以留出題核對。
 
 接著選圖片、聲音或聯合路線：
 
@@ -311,7 +313,7 @@ PKU-SafeRLHF 起步包標示 CC-BY-NC-4.0；它與本課原創盒子題的授權
 
 ## T.7 先檢查回答能力，再學較偏好的回答
 
-偏好資料讓同一題有兩篇候選，再指出較合適的一篇。例如 `0+5=?` 的候選 5 與 6，可以依真值選5。DPO直接用這種同題偏好更新模型，讓它比固定起點參考更偏向較合適的回答；固定參考不更新，也不是提供真值的老師，角色見[13.1](chapters/13.md#13.1)。
+偏好資料讓同一題有兩篇候選，再指出較合適的一篇。例如 `0+5=?` 的候選 5 與 6，可以依真值選5。DPO直接用這種同題偏好更新模型，讓它比固定起點參考更偏向較合適的回答；固定參考不更新，也不是提供真值的老師，角色見[13.4](chapters/13.md#13.4)。
 
 下面是本機小型練習：使用T.5自行訓練的`style.pt`，在程式產生的偏好材料上更新200步，再比較前後回答。它和後面下載外部偏好包的固定完整配方是兩套入口，結果由各自報告決定。
 
@@ -322,7 +324,7 @@ PKU-SafeRLHF 起步包標示 CC-BY-NC-4.0；它與本課原創盒子題的授權
 
 這裡用 T.5 的 `style.pt` 作起點，另保留不更新的參考副本。先看 `chosen`、`rejected` 是否符合自己的判準；參考是原回答傾向，不是真值老師。
 
-訓練前後用同一題生成：
+訓練前後用同一題生成；下方`--temperature 0`在本工具中表示每步直接選最高分候選，沿用[1.15的greedy規則](chapters/01.md#1.15)，讓前後比較固定選字方式：
 
 ```bash
 .venv/bin/python scripts/infer.py checkpoints/style.pt --chat --prompt "0+5=?" --tokens 32 --temperature 0
@@ -385,10 +387,17 @@ MoE每次選兩位專家，但全部專家權重仍需保存。同寬度不等�
 
 另一版在這兩個位置的平均預測代價較低，但兩版生成內容與結束相同；這沒有證明新題能力或速度改善。實際比較另記參數量、裝置與時間。品質、儲存和實際速度各有自己的單位，不能只用「比較快」替整個設計下結論。先在驗證側選設定，再使用尚未拿來選設定的最後測試，資料角色見[5.10](chapters/05.md#5.10)。
 
-<details>
-<summary>現代零件與效率的固定配方</summary>
+<details id="fixed-moe-recipe" markdown="1">
+<summary>現代零件與效率的固定配方；T.10教師需先完成其中的MoE配方</summary>
 
 按[T.1](training.md#T.1)取得TinyStories包後，可選`--experiment modern`或`--experiment moe`重做固定比較，零件分別見[14.2](chapters/14.md#14.2)與[15.4](chapters/15.md#15.4)。下面的效率組另依賴T.4的完整`sft/model.pt`和`dataset.json`；precision組沿用同一對話起點，對照FP32、BF16與FP16的計算精度，意義見[16.7](chapters/16.md#16.7)。`--device cuda`指定相容的NVIDIA GPU，是否支援某精度須看報告，未執行不能算通過：
+
+```bash
+.venv/bin/python -m scripts.course_experiments.run --experiment modern --device cuda
+.venv/bin/python -m scripts.course_experiments.run --experiment moe --device cuda
+```
+
+上述兩行各自重做一組，按需要選擇；T.10的MoE教師使用第二組輸出的`moe/model.pt`及`moe/dataset.json`。要另重做效率與精度比較，再執行：
 
 ```bash
 .venv/bin/python -m scripts.course_experiments.run --experiment efficiency --device cuda
@@ -478,7 +487,17 @@ for path in paths:
 
 先選較小的學生架構，再比較它只學真值、與另加教師機率的差別。兩支學生要共用起點、資料與更新安排；否則看到差異，也難知道是不是教師訊號帶來的。
 
-這套固定入口使用已完成的屬性、條件風格與MoE三種教師。先取得T.4完整`sft`、T.5完整`style`、T.8完整`moe`，保留各自的模型與資料切分，再執行：
+這套固定入口使用已完成的屬性、條件風格與MoE三種教師。此路線必須先打開並完成[T.4的固定對話配方](training.md#fixed-sft-recipe)、[T.5的固定風格配方](training.md#fixed-style-recipe)及[T.8的固定MoE配方](training.md#fixed-moe-recipe)中的`sft`、`style`、`moe`三組，不能用前面小練習的`checkpoints/attributes.pt`、`style.pt`或`moe.pt`替代。
+
+三組命令沿用預設輸出根目錄`outputs/course-experiments/course-v1/`。核對下列六個檔案都已產生：每份`model.pt`是該教師，配對的`dataset.json`保存它原本的訓練、驗證與測試切分，學生沿用這些切分比較：
+
+| 教師 | 模型檔 | 配對資料切分 |
+| --- | --- | --- |
+| 屬性問答 | `sft/model.pt` | `sft/dataset.json` |
+| 條件風格 | `style/model.pt` | `style/dataset.json` |
+| MoE文字 | `moe/model.pt` | `moe/dataset.json` |
+
+保留同一組的模型與資料，不用只含推論權重的下載包替代完整教師產物，再執行：
 
 ```bash
 .venv/bin/python scripts/fetch_training_assets.py --asset gsm8k
@@ -543,5 +562,7 @@ SHA-256是檔案指紋，Git commit是程式版本；兩者讓你取得同一份
 [第19章](chapters/19.md)追蹤我們自行訓練的共同模型及各階段載入的起點權重，也稱父權重，階段接續見[19.4](chapters/19.md#19.4)。v2已完成訓練、公開推論權重與固定最後測試；[19.12](chapters/19.md#19.12)列出能力及未達標項目，[公開CPU操作](../docs/selftrained/v2-public-cpu-commands.md)提供試用，[本機訓練指引](../docs/selftrained/TRAINING.md)用Git LFS保存的固定資料逐段接自己的訓練檢查點，不需要作者的私有雲端儲存空間。其結果與局部實驗分開。[第20章](chapters/20.md)是沿用成熟Qwen／Whisper的延伸，專用操作見[重訓指引](../docs/natural-assistant/v4/TRAINING.md)，上游能力不算成我們從零學會。
 
 完整歷史結果在[實驗紀錄](../docs/course-experiments/README.md)。RAG、工具與推理報告保存各自的原始輸入、輸出及分母。工具要留實際執行結果，以及把結果放回對話後模型生成的回答；只生成請求文字，還沒有完成操作。
+
+舊工具報告的`generation.messages`指向後續會變動的訊息列表，真正輸入的`input_ids`保存正確；閱讀逐步快照時，請一起核對[工具紀錄勘誤](../docs/course-repair-20261008/tool-trace-errata.md)，原JSON、檔案指紋及得分均保留。
 
 </details>

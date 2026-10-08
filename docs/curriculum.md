@@ -4,7 +4,7 @@
 
 第19章主線v2已完成從隨機初始化的文字、視覺、OCR、語音及接頭訓練，MoE共5,447,107參數，Dense共2,288,067參數。兩版使用同一固定資料包的28,876題訓練、2,435題validation；凍結公開權重後，各做一次3,734題最後測試，仍未通過全部原定能力判準。完整成績與任務範圍見[19.12](../course/chapters/19.md#19.12)及[固定結果](selftrained/results/v2-final-public-results.json)，試用見[公開CPU操作](selftrained/v2-public-cpu-commands.md)，自己重做見[本機訓練指引](selftrained/TRAINING.md)。最後MoE段完成4,000步、選第1,000步；Dense段完成10,000步、選第1,000步，選定步數不等於總完成步數。
 
-v2的MoE pretrain、MoE SFT、MoE joint與Dense joint四組推論輸出已公開，共16個配對檔案、MIT授權，固定在[HF revision 979cdf…](https://huggingface.co/birdhackor/tiny-perceptron-course-models/tree/979cdfacc588ad0536f1c64fff96f264571cf054/selftrained/v2)。公開safe權重不含optimizer／RNG／sampler；重做主線接自己的完整checkpoint，不需要作者私人Volume。
+v2的MoE pretrain、MoE SFT、MoE joint與Dense joint四組推論輸出已公開，共16個配對檔案、MIT授權，固定在[HF revision 979cdf…](https://huggingface.co/birdhackor/tiny-perceptron-course-models/tree/979cdfacc588ad0536f1c64fff96f264571cf054/selftrained/v2)。公開safetensors推論權重不含optimizer／RNG／sampler；重做主線接自己的完整checkpoint，不需要作者私人Volume。
 
 既有局部實驗和舊合成整合也保留：30組正式實驗、CUDA Flash補驗、有限候選PPO與舊同底座MoE的配置、成績及限制在[歷史實驗紀錄](course-experiments/README.md)。舊[部署評估](course-experiments/results/capstone_deployment.json)中的joint與DPO各78／90題，舊[Dense學生](course-experiments/results/capstone_student.json)的示範／蒸餾各62／90與61／90題；這些是局部機制和歷史輔助證據，不是v2最後測試。[各章實驗清單](course-experiments/public-models.json)保留原30組／120份權重，[舊整合清單](course-experiments/capstone-public.json)保留8份階段／量化檔與3份Dense學生檔，各沿用自己的固定版本與指紋。
 
@@ -40,7 +40,7 @@ v2的MoE pretrain、MoE SFT、MoE joint與Dense joint四組推論輸出已公開
 | 觀察 | 本教學的調整 |
 | --- | --- |
 | nanochat 將 tokenizer、pretraining、evaluation、SFT、inference 串成完整流程。 | 每階段都有可執行成果，新增獨立的文字 SFT 章，再進入多模態。 |
-| nanochat 的評估同時包含生成樣本、BPB 與任務分數；tokenizer 另有壓縮率比較。 | 早期固定提示詞與測試資料；換 tokenizer 時加入 BPB，避免直接比較不同切詞下的平均 token loss。 |
+| nanochat 的評估同時包含生成樣本、BPB 與任務分數；tokenizer 另有壓縮率比較。 | 早期固定提示詞與測試資料；換 tokenizer 時加入 BPB（bits per byte，每個原文UTF-8位元組的平均bit代價），以同一原文的byte數作共同分母，避免直接比較不同切詞下的平均 token loss。完整算例與計分邊界見[6.5](../course/chapters/06.md#6.5)。 |
 | nanochat 提供 CPU 示範，並以 depth 作為主要規模旋鈕。 | 提供小型預設配置，列出參數量、資料量、步數與資源需求；讀者初期只改一個變數。 |
 | nanochat 的成熟模型已整合多項架構與效能設計。 | 先完成可讀的初始 Transformer；第 14 章回到小模型比較單項架構選擇，第 16 章再由量測引出效能設計。 |
 | MiniMind-V 從既有 LLM 延伸，新增視覺編碼器、投影層與圖片佔位符替換。 | 先完成文字模型，再逐步引入視覺特徵、projector 與 embedding 序列組合；顯示每一步的 tensor shape。 |

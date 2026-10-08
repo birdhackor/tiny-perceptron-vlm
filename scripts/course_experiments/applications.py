@@ -90,7 +90,8 @@ def _sample(model, messages, ctx, count=1, tokens=32, temperature=0.0):
             }
         )
     return {
-        "messages": messages,
+        # 外層協議會繼續加入請求與工具回傳；此欄必須保留本次生成時的輸入。
+        "messages": copy.deepcopy(messages),
         "input_ids": prompt,
         "input_tokens": len(prompt),
         "samples": samples,
