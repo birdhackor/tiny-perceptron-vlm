@@ -37,10 +37,10 @@ GIT_LFS_SKIP_SMUDGE=1 git clone --branch main https://github.com/birdhackor/tiny
 
 ## 審閱輪次的保存規則
 
-`docs/course-reviews-active.json` 指向生效中的審閱輪次。發布流程每次都核對這一輪，下一輪沿用舊審閱的頁面也從這裡取得證據，所以生效中的輪次必須留在 `main`。
+`docs/course-reviews-active.json` 指向生效中的審閱輪次。發布流程每次 push 到 `main` 都核對這一輪，下一輪沿用舊審閱的頁面也從這裡取得證據，所以生效中的輪次必須留在 `main`。
 
 新一輪生效且發布檢查通過後，封存上一輪：
 
-1. 先把目前的 `main` 與所有 tag 推到私有封存 repo。
-2. 從 `main` 移除上一輪的目錄；課文、notebook、README、CI 或審閱準則仍引用的檔案留在原路徑。
-3. 重跑發布前的審閱檢查與全套測試，通過後再提交。只有移除的內容在歷史裡占用太多空間時，才重寫歷史。
+1. 從 `main` 移除上一輪的目錄；課文、notebook、README、CI、審閱準則或生效輪次仍引用的檔案留在原路徑。移除的內容仍保留在 Git 歷史裡。
+2. 重跑發布前的審閱檢查與全套測試，通過後再提交。
+3. 只有移除的內容在歷史裡占用太多空間時，才依 [AGENTS.md](../AGENTS.md#改寫-git-歷史) 的步驟重寫歷史。推到封存 repo 時使用新的 ref 名稱，不要覆寫封存 repo 已有的 ref。

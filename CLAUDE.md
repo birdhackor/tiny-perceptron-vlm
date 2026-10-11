@@ -30,3 +30,9 @@ uv run ruff check . && uv run ruff format .
 - 原始資料快取、權重、實驗輸出不進普通 Git；使用者授權的固定教學資料包僅放在
   `assets/training/*.tar.gz`，使用 Git LFS。來源、授權、SHA-256 manifest 與生成器使用普通 Git。
   `data/` 仍是本機忽略目錄；測試不能依賴網路。
+
+## Repo 維護準則
+
+容量、審閱輪次封存、凍結檔案與改寫歷史等共通準則寫在 AGENTS.md，各 agent 共用：
+
+@AGENTS.md

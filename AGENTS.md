@@ -1,0 +1,69 @@
+# AGENTS.md
+
+給所有 coding agent（Codex、Claude Code 等）與維護者的 repo 維護準則，補充 [CLAUDE.md](CLAUDE.md) 的專案原則；兩者衝突時先問作者。
+
+## 什麼能進普通 Git
+
+- 第三方全文（論文 PDF、網頁、外部程式碼或文件）不提交。審閱需要讀全文時，全文留在本機並加入 `.gitignore`；Git 只存收據：來源 URL、版本、讀取日期、原檔 SHA-256 與引用位置。需要原文佐證時，只保存支持主張的小段摘錄。
+- 單檔 ≥ 5 MiB，或一次提交新增 ≥ 20 MiB 時，先停下來和作者確認存放方式。提交前用下列指令看暫存區新增或修改的檔案大小，最後一行是合計：
+
+  ```bash
+  git diff --cached --name-only --diff-filter=AM -z | xargs -0 -r du -ch | sort -h | tail
+  ```
+
+- `git count-objects -vH` 的 `size-pack` 大約是 clone 要下載的量；[GitHub 建議](https://docs.github.com/en/repositories/working-with-files/managing-large-files/about-large-files-on-github) 整個 repo 小於 1 GB。
+- 設計下一輪審閱的工具與證據格式時：同一份證據只存一份，用路徑＋SHA-256 引用；截圖這類大型自製證據放在 Git 之外，只留 SHA-256 與取得方式。新格式上線前，照現行審閱工具與檢查規定的方式保存，不要為了省空間自行繞過。
+
+原因：內容一旦提交，就留在每個 clone 和整段歷史裡，事後只能改寫歷史才移得掉。2026-10 整理前，工作目錄有一半是逐位元組相同的副本，`.git` 約八成是審閱用的 PNG 截圖與論文 PDF。
+
+## 審閱輪次的保存週期
+
+- `docs/course-reviews-active.json` 指向的生效輪次必須留在 `main`：發布流程每次 push 到 `main` 都核對它，下一輪沿用舊審閱的頁面也從這裡取得證據。
+- 新一輪生效且發布檢查通過後，依 [審閱輪次的保存規則](docs/repository-archives.md#審閱輪次的保存規則) 封存上一輪。
+
+## 移除或搬移檔案前
+
+- 先找出下列來源對要移除檔案的引用：課文與 notebook 的連結（含 `blob/main/…` 與 tag 連結）、README、`.github/workflows` 呼叫的腳本、`scripts/` 裡寫死的路徑、`.agents/skills/` 的審閱準則，以及生效輪次的紀錄。被這些來源引用的檔案留在原路徑。其他歷史紀錄裡的路徑可以只在 Git 歷史或封存 repo 中有效，但要記在 [開發分支與歷史版本](docs/repository-archives.md)。
+- 不要只憑目錄名稱判斷用途。例如 `docs/natural-assistant/evidence/v4-research/` 看似審閱證據，實際是第 20 章資料準備腳本的輸入。
+- 在暫存副本實際移除後，跑下列三道發布審閱檢查與全套 `uv run pytest`，結果要與移除前相同（安裝時用了 `--extra` 的話，`uv run` 要帶同一個 `--extra`）：
+
+  ```bash
+  uv run python scripts/check_course_reviews.py
+  uv run python scripts/check_technical_reviews.py
+  uv run python docs/review-tools/check_review_round.py
+  ```
+
+## 凍結檔案
+
+- 生效輪次以 SHA-256 綁定實作檔、課文與部分文件。改到其中任何一個，發布檢查會回報類似 `current implementation drift` 或 `current source freeze stale` 的錯誤，網站就無法更新，直到重新審閱並更新凍結紀錄。
+- 提交任何修改前都跑上面三道檢查。新工具或新 CI 檢查優先做成新檔案；新增的腳本與 workflow 不受凍結影響，但新增的課文頁面仍要審閱。必須改凍結檔時，當成教材修改，走 [逐節審閱標準](docs/editorial-guide.md)。
+- 不要為了讓檢查通過而改寫既有審閱紀錄或其中的 hash；紀錄本身也以 SHA-256 封存。
+
+## 改寫 Git 歷史
+
+只在移除的內容於歷史中占用太多空間時才做，而且依序：
+
+1. 把所有分支（目前只有 `main`）與 tag 以新的 ref 名稱推到私有封存 repo `birdhackor/tiny-perceptron-vlm-archive`。封存 repo 已有的 ref 保存著更早的歷史，不要覆寫，也不要用 `--mirror` 推送：
+
+   ```bash
+   git push git@github.com:birdhackor/tiny-perceptron-vlm-archive.git \
+     'refs/heads/main:refs/heads/snapshot-<日期>' 'refs/tags/*:refs/tags/snapshot-<日期>/*'
+   ```
+
+   再用 `git ls-remote` 核對推上去的 hash 與原 repo 一致。
+2. 在暫存 clone 用 `git filter-repo` 預演：逐檔比對保留檔案的 blob 與 mode 不變，三道審閱檢查的輸出與全套測試結果和改寫前相同。
+3. 課文或 notebook 以 `git clone --branch <tag>` 引用的 tag 一起改寫並保留（可用 `git grep -n -e '--branch' -- course notebooks` 找出；目前是第 19 章的 `selftrained-v2`）。
+4. 推送時對每個 ref 用 `--force-with-lease=<ref>:<預期舊值>`，並加 `--atomic`。推完確認 Publish course 與 CI 通過，線上 `build-info.json` 的 `revision` 已更新。
+5. 更新 [開發分支與歷史版本](docs/repository-archives.md)。
+
+原因：repo 內的紀錄以完整 hash 引用大量 commit；改寫後，這些 hash 只在封存 repo 有效。
+
+## GitHub Actions
+
+- push 到 `main` 會觸發 Publish course 與 CI；`ci.yml` 的 push 沒有限制分支，推任何 tag 也會觸發 CI。
+- 其他 workflow 只能手動觸發，可能啟動 Modal 計費運算或發布到 Hugging Face。沒有作者明確同意，不要觸發。
+
+## 判斷失敗是否為回歸
+
+- 測試或 CI 失敗時，先在改動前的版本跑同一個測試，或查同一 commit 原本的 CI 結果，再判斷是否由這次修改造成。例如本機沒有 git-lfs 時，`tests/test_selftrained_data_publish.py` 有一項測試必然失敗；`selftrained-v2` 快照在 Windows 上本來就有測試失敗。
+- 專案腳本用 `uv run` 執行；macOS（Xcode）附的 Python 3.9 缺少審閱工具需要的 `datetime.UTC`。
