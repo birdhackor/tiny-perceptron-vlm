@@ -34,7 +34,9 @@ def audit(root=ROOT):
         ids = [f"{chapter}.{number}" for chapter, number in headings]
         expected = [f"{prefix}.{number}" for number in range(1, len(ids) + 1)]
         if ids != expected:
-            failures.append(f"{path.relative_to(root)}: 章內節號應依序為1至{len(ids)}，實際為{', '.join(ids)}")
+            failures.append(
+                f"{path.relative_to(root).as_posix()}: 章內節號應依序為1至{len(ids)}，實際為{', '.join(ids)}"
+            )
         chapters[prefix] = ids
     if not chapters:
         failures.append("沒有找到章節小節")
