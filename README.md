@@ -22,7 +22,7 @@
 
 第一次讀可以直接從[1.1](course/chapters/01.md#1.1)開始。Python、tensor、機率、矩陣與梯度有按需暖身；想動手時再開啟同一節Notebook。各章的訓練入口集中在[操作頁](course/training.md)，來源與實測證據見[驗證範圍](docs/validation.md)。
 
-Thinking effort（思考投入）、Looped Transformer（循環深度）及Jev式機率判斷已納入必修，分別見[7.23](course/chapters/07.md#7.23)、[14.11](course/chapters/14.md#14.11)與[9.11](course/chapters/09.md#9.11)。C.1–C.5接在第7章後。第19章擴成[三成品路線](course/chapters/19.md#19.13)：既有MoE助理、有限文字Looped解題器、獨立機率判斷服務，再接Auto effort；新增產品的實測與固定下載版本待正式驗收後回填，不改寫v2歷史結果。
+Thinking effort（思考投入）、Looped Transformer（循環深度）及Jev式機率判斷已納入必修，分別見[7.23](course/chapters/07.md#7.23)、[14.11](course/chapters/14.md#14.11)與[9.11](course/chapters/09.md#9.11)。C.1–C.5接在第7章後。第19章擴成[三成品路線](course/chapters/19.md#19.13)：既有MoE助理（A）、有限文字Looped解題器（B）、獨立機率判斷服務（C），再接Auto effort；B／C已完成NVIDIA L4訓練與凍結後的最後測試：B兩盒追蹤2928/2956、三數加法2/42；C的核心候選判斷全對，但換說法會出錯。固定下載與命令見[產品操作](docs/lesson-products/README.md)，完整分母、變化測試與限制見[19.20](course/chapters/19.md#19.20)。
 
 ## 安裝與開啟 Notebook
 

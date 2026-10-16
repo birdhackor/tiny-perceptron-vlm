@@ -1,0 +1,74 @@
+from pathlib import Path
+from collections import defaultdict,Counter
+from datetime import datetime
+import ast,hashlib,json,math,platform,subprocess,torch
+R=Path.cwd();commit='821a2c717f05ad7b57e08e88cd965e92ff0c1200';report_path=R/'outputs/lesson-products/final-report-v1.json';raw_path=R/'outputs/lesson-products/final-report-v1.predictions.jsonl';freeze_path=R/'docs/lesson-products/results/settings-freeze-v1.json';pre_path=R/'docs/lesson-products/results/pretest-freeze-record-v1.json';C=R/'outputs/lesson-products/products/c';torch.set_num_threads(2)
+def sha(p):
+ h=hashlib.sha256()
+ with p.open('rb') as f:
+  while chunk:=f.read(1024*1024):h.update(chunk)
+ return h.hexdigest()
+report=json.loads(report_path.read_text());freeze=json.loads(freeze_path.read_text());pre=json.loads(pre_path.read_text());manifest=json.loads((C/'artifact-manifest.json').read_text());cal=json.loads((C/'calibration.json').read_text());result={'reviewer_task':'/root/tech_20261016_19_16','reviewer_context':'informed_final_raw_recalculation','environment':{'python':platform.python_version(),'torch':torch.__version__,'device':'cpu','threads':2},'checks':{},'recomputed':{}}
+def check(k,v,details=None):assert v,(k,details);result['checks'][k]={'passed':True,'details':details}
+actual_raw_sha=sha(raw_path);check('raw_full_file_SHA_bytes_match_report',actual_raw_sha==report['predictions']['sha256'] and raw_path.stat().st_size==report['predictions']['bytes'] and raw_path.name==report['predictions']['file'],{'path':str(raw_path.relative_to(R)),'sha256':actual_raw_sha,'bytes':raw_path.stat().st_size})
+for path in (freeze_path,pre_path):assert path.read_bytes()==subprocess.check_output(['git','show',f'{commit}:{path.relative_to(R)}'])
+check('freeze_and_pretest_record_exact_committed_bytes',sha(freeze_path)==pre['settings_freeze_sha256']==report['settings_freeze_sha256']==manifest['settings_freeze_sha256'] and freeze['test_outcomes_observed'] is False and pre['test_outcomes_observed'] is False,{'pretest_commit':commit,'freeze_sha256':sha(freeze_path),'pretest_record_sha256':sha(pre_path)})
+for name,digest in freeze['products']['c'].items():assert sha(C/name)==digest==manifest['files'][name]['sha256'] and (C/name).stat().st_size==manifest['files'][name]['bytes']
+check('C_product_calibration_manifest_freeze_identity',cal==freeze['calibration'] and manifest['data_manifest_sha256']==freeze['data_manifest_sha256']==report['data_manifest_sha256'],{'C_calibration_sha256':sha(C/'calibration.json'),'temperatures':cal['temperatures'],'data_manifest_sha256':freeze['data_manifest_sha256']})
+source_bindings={}
+for name,digest in freeze['source_sha256s'].items():
+ p=R/'tiny_perceptron/lesson_products'/name;blob=subprocess.check_output(['git','show',f'{commit}:tiny_perceptron/lesson_products/{name}']);assert sha(p)==hashlib.sha256(blob).hexdigest()==digest;source_bindings[name]=digest
+src=(R/'tiny_perceptron/lesson_products/evaluation.py').read_text();tree=ast.parse(src);selector=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='select_settings');reads=[(n.args[1].value,n.args[2].value) for n in ast.walk(selector) if isinstance(n,ast.Call) and isinstance(n.func,ast.Name) and n.func.id=='read_dataset'];grid=ast.literal_eval(next(n.value for n in tree.body if isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id=='TEMPERATURES' for t in n.targets)))
+check('temperature_selection_committed_calibration_only_source_chain',reads==[('c','calibration'),('b','policy')] and list(grid)==cal['grid'] and 'metrics(cal_logits[indices], labels, t)["cross_entropy"]' in src and cal['selected_on']=='calibration only; minimize per-question mean CE' and all(t in grid for t in cal['temperatures'].values()),{'frozen_source_hashes':source_bindings,'selection_read_splits':reads,'fixed_grid':list(grid),'selected_temperatures':cal['temperatures'],'scope':'Source/provenance audit only; no calibration model rerun or new T search.'})
+marker_path=freeze_path.with_suffix('.test-started.json');start_path=report_path.with_suffix('.started.json');marker=json.loads(marker_path.read_text());start=json.loads(start_path.read_text());commit_time=datetime.fromisoformat(subprocess.check_output(['git','show','-s','--format=%cI',commit]).decode().strip());times=[datetime.fromisoformat(freeze['recorded_at']),datetime.fromisoformat(pre['recorded_at']),commit_time,datetime.fromisoformat(marker['recorded_at']),datetime.fromisoformat(start['recorded_at']),datetime.fromisoformat(report['recorded_at'])]
+check('committed_freeze_precedes_first_recorded_start_and_report',times==sorted(times) and marker['settings_freeze_sha256']==start['settings_freeze_sha256']==sha(freeze_path),{'timeline':[t.isoformat() for t in times],'marker_sha256':sha(marker_path),'start_record_sha256':sha(start_path),'scope':'Offline committed bytes and recorded timestamps checked; external remote push not independently queried.'})
+# Stream once, retain only C rows. No model, dataset generator, selection or evaluation function called.
+groups=defaultdict(list);all_line_counts=Counter();ids=set()
+with raw_path.open() as f:
+ for line in f:
+  row=json.loads(line);all_line_counts[(row['product'],row.get('split',''))]+=1
+  if row['product']!='c':continue
+  assert row['split'] in ('test','wording_shift');ids.add(row['id']);assert len(row['candidates'])==len(row['raw_scores']) and len(set(row['candidates']))==len(row['candidates']);assert row['gold'] in row['candidates'] and all(math.isfinite(v) for v in row['raw_scores']);groups[(row['split'],row['question'])].append(row)
+check('raw_C_row_integrity_counts',all(len(groups[(s,q)])==n for s in ('test','wording_shift') for q,n in [('choice',11797),('info',10890),('rubric',10890)]),{'C_rows':sum(len(v) for v in groups.values()),'unique_C_ids':len(ids),'counts':{f'{s}/{q}':len(rows) for (s,q),rows in groups.items()},'other_product_rows_skipped':sum(n for (p,s),n in all_line_counts.items() if p!='c')})
+def selected(row):return min(zip(row['candidates'],row['raw_scores']),key=lambda pair:(-pair[1],pair[0]))[0]
+def independent64(rows,temp):
+ ces=[];briers=[]
+ for row in rows:
+  z=[v/temp for v in row['raw_scores']];gold=row['candidates'].index(row['gold']);imax=max(range(len(z)),key=lambda i:z[i]);m=z[imax];w=[math.exp(x-m) for x in z];rest=math.fsum(x for j,x in enumerate(w) if j!=imax);den=1+rest;ces.append((m-z[gold])+math.log1p(rest));wrongmass=math.fsum(x for j,x in enumerate(w) if j!=gold)/den;briers.append(wrongmass**2+math.fsum((x/den)**2 for j,x in enumerate(w) if j!=gold))
+ return {'cross_entropy':math.fsum(ces)/len(rows),'brier':math.fsum(briers)/len(rows)}
+def explicit32(rows,temp):
+ maxc=max(len(row['candidates']) for row in rows);z=torch.full((len(rows),maxc),-float('inf'),dtype=torch.float32)
+ for i,row in enumerate(rows):z[i,:len(row['candidates'])]=torch.tensor(row['raw_scores'],dtype=torch.float32)
+ z=z/temp;y=torch.tensor([row['candidates'].index(row['gold']) for row in rows]);logp=torch.log_softmax(z,dim=-1);ce=-logp[torch.arange(len(rows)),y].mean();p=torch.softmax(z,dim=-1);target=torch.zeros_like(p);target[torch.arange(len(rows)),y]=1.;brier=(p-target).square().sum(-1).mean();return {'cross_entropy':float(ce),'brier':float(brier)}
+for (split,q),rows in groups.items():
+ chosen=[selected(row) for row in rows];correct=sum(c==row['gold'] for c,row in zip(chosen,rows));expected=report['c'][q] if split=='test' else report['shifts']['c_wording'][q];entry={'count':len(rows),'correct':correct,'accuracy':correct/len(rows),'versions':{}}
+ if split=='test':assert all(row['selected']==c for row,c in zip(rows,chosen))
+ for version,temp in [('before',1.),('after',cal['temperatures'][q])]:
+  m64=independent64(rows,temp);m32=explicit32(rows,temp);reported=expected[version];assert reported['count']==len(rows) and reported['correct']==correct and abs(reported['accuracy']-correct/len(rows))<1e-15
+  comparisons={}
+  for metric in ('cross_entropy','brier'):
+   tol=max(1e-12,abs(reported[metric])*5e-6) if metric=='cross_entropy' else max(1e-30,abs(reported[metric])*1e-5);delta=abs(m32[metric]-reported[metric]);assert delta<=tol,(split,q,version,metric,m32[metric],reported[metric],delta,tol);comparisons[metric]={'reported':reported[metric],'explicit_float32':m32[metric],'independent_float64':m64[metric],'float32_abs_difference':delta,'tolerance':tol}
+  entry['versions'][version]={'temperature':temp,'comparisons':comparisons}
+ result['recomputed'][f'{split}/{q}']=entry
+check('all_C_core_and_wording_before_after_metrics_recomputed',True,{'groups':len(groups),'metric_sets':12,'formulas':'CE stable logsumexp; Brier sum classwise squares then mean rows; semantic ties lexical ID. Independent float64 and explicit float32 rounding both retained.'})
+choice=groups[('test','choice')];others=groups[('test','info')]+groups[('test','rubric')];assert all(row['reverse_selected'] in row['candidates'] for row in choice);assert all(row['reverse_selected'] is None for row in others);consistent=sum(row['selected']==row['reverse_selected'] for row in choice);reorder={'count':len(choice),'consistent':consistent,'consistency':consistent/len(choice)}
+check('actual_raw_reverse_selected_reconstructs_primary_gate',reorder==report['c_reorder'] and report['gates']['c_choice']==(result['recomputed']['test/choice']['accuracy']>=.9) and report['gates']['c_reorder']==(reorder['consistency']>=.99),reorder)
+missing=[row for row in choice if row['family_id'].split(':',1)[0] not in row['candidates']];assert all(len(row['candidates'])==5 and 'none' in row['candidates'] and row['gold']=='none' for row in missing);assert all(len(row['candidates'])==6 for row in choice if row not in missing);missing_report={'count':len(missing),'correct':sum(row['selected']==row['gold'] for row in missing)}
+check('missing_best_recomputed_from_raw_task_candidate_contract',missing_report==report['c_missing_best'],{**missing_report,'rule':'Original task from family metadata absent from candidate IDs; none retained. Matches fixed generator only, not inferred model behavior.'})
+core=choice+others;errors=[]
+for row in core:
+ if selected(row)==row['gold']:continue
+ z=[v/cal['temperatures'][row['question']] for v in row['raw_scores']];m=max(z);ws=[math.exp(v-m) for v in z];pmax=max(ws)/math.fsum(ws);n=len(ws);errors.append({'id':row['id'],'concentration':(n*pmax-1)/(n-1)})
+high={'threshold':.9,'count':sum(v['concentration']>=.9 for v in errors),'total_errors':len(errors)}
+check('core_high_concentration_error_counts_recomputed',all(report['c_high_concentration_errors'][k]==v for k,v in high.items()) and (len(errors)>0 or report['c_high_concentration_errors']['highest_concentration_examples']==[]),{**high,'denominator_all_core_C':len(core)})
+wording_effect={}
+for q in ('choice','info','rubric'):
+ r=result['recomputed']['wording_shift/'+q];before=r['versions']['before']['comparisons'];after=r['versions']['after']['comparisons'];wording_effect[q]={'count':r['count'],'correct':r['correct'],'accuracy':r['accuracy'],'errors':r['count']-r['correct'],'CE_before':before['cross_entropy']['explicit_float32'],'CE_after':after['cross_entropy']['explicit_float32'],'Brier_before':before['brier']['explicit_float32'],'Brier_after':after['brier']['explicit_float32']}
+check('wording_shift_calibration_limit_preserved',all(v['CE_after']>v['CE_before'] and v['Brier_after']>v['Brier_before'] for v in wording_effect.values()),wording_effect)
+raw_families={row['family_id'] for row in core};wording_families={row['family_id'] for q in ('choice','info','rubric') for row in groups[('wording_shift',q)]};dbytes=subprocess.check_output(['git','show',f'{commit}:docs/lesson-products/data-v2-manifest.json']);data_manifest=json.loads(dbytes)
+check('family_heldout_scope_vs_shared_generic_inputs',raw_families==wording_families and len(raw_families)==data_manifest['audit']['c']['family_counts']['test'] and hashlib.sha256(dbytes).hexdigest()==freeze['data_manifest_sha256'],{'C_test_families':len(raw_families),'same_families_wording_shift':True,'disclosed_cross_core_split_shared_observations':data_manifest['audit']['c']['cross_split_shared_observations'],'rows_in_shared_observations':data_manifest['audit']['c']['rows_in_shared_observations'],'scope':'Shared fixed-format same-label observations are retained; new family is not new meaning/template guarantee.'})
+check('input_raw_and_freeze_unchanged',sha(raw_path)==actual_raw_sha and sha(freeze_path)==pre['settings_freeze_sha256'])
+result['raw_reference']={'path':str(raw_path.relative_to(R)),'sha256':actual_raw_sha,'bytes':raw_path.stat().st_size,'copied_into_Git':False};result['recorded_wording_calibration_effect']=wording_effect;result['scope']='Recalculation from saved final raw only. No CandidateScorer/Product/model inference, no train/calibration/select/evaluate entry called; no tuning, GPU, paid/remote/external write; no raw copied into Git.';result['command']='.venv/bin/python - < /workspace/work/curriculum-20261016/engineering-final-c/recompute.py';result['probe_script_sha256']=sha(Path('/workspace/work/curriculum-20261016/engineering-final-c/recompute.py'))
+out=R/'docs/lesson-products/reviews/engineering-final-c-execution.json'
+with out.open('x') as f:json.dump(result,f,ensure_ascii=False,indent=2);f.write('\n')
+print(json.dumps({'checks':len(result['checks']),'all_passed':True,'raw_sha256':actual_raw_sha,'core_choice':result['recomputed']['test/choice']['count'],'core_reorder':reorder,'missing_best':missing_report,'core_errors':len(errors),'wording_effect':wording_effect,'output':str(out)},ensure_ascii=False,indent=2))

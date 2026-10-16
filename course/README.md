@@ -81,7 +81,7 @@
 
 這兩種v2模型已完成訓練、公開推論權重與固定最後測試，仍未通過全部原定能力判準。任務限於少量教過類型的文字請求、商品與位置圖、已知中文字卡、真人語音需求及計算工具。完整成績與限制見[19.12](chapters/19.md#19.12)，試用見[公開CPU操作](../docs/selftrained/v2-public-cpu-commands.md)，自己重做見[本機訓練指引](../docs/selftrained/TRAINING.md)。成熟Qwen／Whisper的路線另放第20章，讓你練習接手已有能力的模型。
 
-MoE、PPO、DPO、MTP、量化、蒸餾各自回答不同問題，也有互為替代的安排。第一次完成小助理，不必把每個方法都套一次。先看任務需要什麼，再選架構、訓練訊號與交付方式；成品的能力與限制集中在[19.12](chapters/19.md#19.12)；下載與重做步驟見[19.11](chapters/19.md#19.11)，舊合成示範保留自己的[固定清單](../docs/course-experiments/capstone-public.json)，各局部實驗的操作見[操作頁](training.md)。
+MoE、PPO、DPO、MTP、量化、蒸餾各自回答不同問題，也有互為替代的安排。第一次完成小助理，不必把每個方法都套一次。先看任務需要什麼，再選架構、訓練訊號與交付方式；既有MoE助理的能力與限制集中在[19.12](chapters/19.md#19.12)，下載與重做見[19.11](chapters/19.md#19.11)；新增Looped解題器與機率判斷服務的實測見[19.20](chapters/19.md#19.20)，操作見[19.19](chapters/19.md#19.19)。舊合成示範保留自己的[固定清單](../docs/course-experiments/capstone-public.json)，各局部實驗的操作見[操作頁](training.md)。
 
 <details>
 <summary>程式、資料與授權</summary>

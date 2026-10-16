@@ -1,0 +1,171 @@
+{
+  "reviewer_task": "/root/backfill_tech_curriculum",
+  "source_inspections": [
+    {
+      "path": "scripts/selftrained/train.py",
+      "sha256": "f699c1d45885dde76e2b7a20994f417aa7cde217671dfadf9b7dc85ccb55c9af",
+      "scope": "Only listed lines inspected",
+      "read_ranges": [
+        "235–281",
+        "848–872"
+      ],
+      "excerpts": [
+        {
+          "start_line": 235,
+          "text": "def export_inference(output_dir, *, required=False):\n    \"\"\"公開檔只含選定模型與契約，不帶 optimizer/RNG 或訓練標籤。\"\"\"\n    selected = output_dir / \"best.pt\"\n    if not selected.exists():\n        return False\n    try:\n        from safetensors.torch import save_file\n    except ImportError:\n        if required:\n            raise RuntimeError(\"--export-inference 需要 safetensors 純權重格式套件\") from None\n        return False\n    from tiny_perceptron.selftrained.dataset import file_sha256\n    from tiny_perceptron.selftrained.tokenizer import CharacterTokenizer\n\n    checkpoint = torch.load(selected, map_location=\"cpu\", weights_only=False)\n    # tied embeddings 的兩個名稱保留；clone 避免 safe writer 的共享 storage 歧義。\n    tensors = {name: value.detach().cpu().contiguous().clone() for name, value in checkpoint[\"model\"].items()}\n    save_file(\n        tensors,\n        str(output_dir / \"model.safetensors\"),\n        metadata={\"origin\": \"all-neural-weights-random\", \"schema\": CHECKPOINT_SCHEMA},\n    )\n    (output_dir / \"model-config.json\").write_text(json.dumps(checkpoint[\"config\"], indent=2) + \"\\n\", encoding=\"utf-8\")\n    CharacterTokenizer.from_dict(checkpoint[\"tokenizer\"]).save(output_dir / \"tokenizer.json\")\n    manifest = {\n        \"schema\": CHECKPOINT_SCHEMA,\n        \"selected_checkpoint_sha256\": file_sha256(selected),\n        \"files\": {\n            name: file_sha256(output_dir / name)\n            for name in (\"model.safetensors\", \"model-config.json\", \"tokenizer.json\")\n        },\n        \"stage\": checkpoint[\"stage\"],\n        \"selected_step\": checkpoint[\"step\"],\n        \"origin\": checkpoint[\"origin\"],\n        \"preprocess_version\": checkpoint[\"preprocess_version\"],\n        \"data_sha256\": checkpoint[\"data_sha256\"],\n        \"asset_sha256\": checkpoint[\"asset_sha256\"],\n        \"tokenizer_sha256\": checkpoint[\"tokenizer_sha256\"],\n        \"freeze_perception_backbones\": checkpoint.get(\"training_options\", {}).get(\"freeze_perception_backbones\", False),\n        \"sampling_mode\": checkpoint.get(\"training_options\", {}).get(\"sampling_mode\", \"bucket\"),\n        **checkpoint_language_objective(checkpoint),\n        \"selection\": \"validation_loss\",\n    }\n    (output_dir / \"inference-manifest.json\").write_text(\n        json.dumps(manifest, ensure_ascii=False, indent=2) + \"\\n\", encoding=\"utf-8\"\n    )\n    return True"
+        },
+        {
+          "start_line": 848,
+          "text": "    previous_handlers = {number: signal.signal(number, request_stop) for number in (signal.SIGTERM, signal.SIGINT)}\n\n    def checkpoint(include_selected=True):\n        result = {\n            \"schema\": CHECKPOINT_SCHEMA,\n            \"checkpoint_kind\": \"latest\",\n            \"model\": model.state_dict(),\n            \"config\": dataclasses.asdict(config),\n            \"tokenizer\": tokenizer.to_dict(),\n            \"tokenizer_sha256\": tokenizer_sha(tokenizer),\n            \"optimizer\": optimizer.state_dict(),\n            \"rng\": rng_state(),\n            \"sampler\": sampler.state_dict(),\n            \"step\": step,\n            \"stage\": args.stage,\n            \"tokens\": token_count,\n            \"target_tokens\": target_token_count,\n            \"best_validation_loss\": best_val,\n            \"data_sha256\": hashes,\n            \"asset_sha256\": asset_hashes,\n            \"preprocess_version\": PREPROCESS_VERSION,\n            \"training_options\": vars(args),\n            **objective_metadata,\n            \"stage_history\": history,\n            \"origin\": origin,"
+        }
+      ]
+    },
+    {
+      "path": "docs/selftrained/TRAINING.md",
+      "sha256": "75be4407c97bf850fb8ea9c619dd4fbbd6eff236253e8b34fa86bd1001e4924b",
+      "scope": "Only listed lines inspected",
+      "read_ranges": [
+        "43–53",
+        "66–77",
+        "115–139"
+      ],
+      "excerpts": [
+        {
+          "start_line": 43,
+          "text": "print(\"verified\", len(files), \"frozen files\")\nPY\n```\n\n完整資料含 12 個 JSONL 與 8,950 個 assets，共 8,962 個固定檔案。每次 stage 啟動都核對全部 declarations，並確認每個實際 image/audio 引用的 SHA 都在 manifest 的 assets 中。訓練與 validation 的選擇仍由原 trainer 負責；test 不用來選 checkpoint。\n\n## 手動執行 stage\n\n以下從 repository 根目錄執行。`--` 前是訓練入口的參數，之後是 `train.py` 的完整參數名稱；不接受縮寫。入口提供 `--records`、`--asset-dir`、`--config` 與 `--export-inference`，不用自行加這四項。\n\n先做 `pretrain`：使用固定資料包中的訓練短文，練習預測下一個字。字表只從訓練份建立，後段沿用它；這一段尚未教圖片或聲音，也不是完整聊天訓練。"
+        },
+        {
+          "start_line": 66,
+          "text": "接著做 `sft`：使用固定包中的問答示範，讓文字核心練習依問題、對話歷史與格式要求作答；只在助理答案位置計算代價，資料表示見[19.5](../../course/chapters/19.md#19.5)。後續階段保留相同 manifest/data、architecture、batch16、context512 與 seed20261006，使用新 output directory，並以 `--init-checkpoint` 接自己的前段 `best.pt`。以下接的是你剛才訓練出的文字權重：\n\n```bash\nuv run --frozen --extra cpu --extra selftrained python scripts/selftrained/train_local_stage.py \\\n  --manifest docs/selftrained/v2-manifest.json \\\n  --manifest-sha256 3443e3d32ff1e63f8126c2327011be541238765824623af9c8fdcff6b056cb1b \\\n  --data-root data/selftrained-v2 -- \\\n  --output-dir checkpoints/selftrained-local/moe-sft \\\n  --stage sft --architecture moe --steps 8000 \\\n  --batch-size 16 --context 512 --seed 20261006 \\\n  --learning-rate 0.001 --eval-every 1000 --save-every 1000 \\\n  --init-checkpoint checkpoints/selftrained-local/moe-pretrain/best.pt --device cpu"
+        },
+        {
+          "start_line": 115,
+          "text": "Native fresh source 必須是相同 architecture、真正完成的 tool4/numeric4/native1 joint，使用其 selected-validation `best.pt`，並保有同目錄 execution、training receipt、outer receipt 與 safe export。既有 trainer 會核對真正載入的 checkpoint、來源選定 SHA、完整 objective policy、source/options/config/data、origin 與 stage history。新段可改 objective、steps 和 eval/save interval；LR、batch、seed、context、freeze、family 等 inherited options 必須相同。\n\n## 新 stage 與 exact resume\n\n`--init-checkpoint` 是新 stage：載入自己的 selected `best.pt`，重建 optimizer，以新 stage seed 啟動 RNG/sampler，stage steps/tokens 從零開始。`--resume` 則只接受自己的 `latest.pt`，恢復同 stage 的 optimizer/RNG/sampler/steps/tokens；保留原 objective 與 solver 設定，`--steps` 是該 stage 的總目標步數。兩項不能同時使用。\n\n中斷 weighted 後的 exact resume 範例：\n\n```bash\nuv run --frozen --extra cpu --extra selftrained python scripts/selftrained/train_local_stage.py \\\n  --manifest docs/selftrained/v2-manifest.json \\\n  --manifest-sha256 3443e3d32ff1e63f8126c2327011be541238765824623af9c8fdcff6b056cb1b \\\n  --data-root data/selftrained-v2 -- \\\n  --output-dir checkpoints/selftrained-local/moe-weighted-attempt2 \\\n  --stage joint --architecture moe --steps 10000 \\\n  --batch-size 16 --context 512 --seed 20261006 \\\n  --learning-rate 0.0002 --eval-every 1000 --save-every 1000 \\\n  --freeze-perception-backbones --sampling-mode task-family \\\n  --tool-loss-weight 4 --numeric-run-loss-weight 4 \\\n  --resume checkpoints/selftrained-local/moe-weighted/latest.pt --device cpu\n```\n\n每次 attempt 都使用尚不存在的 output directory，不覆寫前次輸出。SIGTERM/SIGINT 會轉交 trainer，在既有 step boundary 儲存；wrapper 沒有內建 wall timer。未完成目標步數的 graceful child exit0 仍記為 failed，不能拿來 fresh init。若 wrapper 被直接強制終止，可能留下 running metadata，也不能冒稱 completed source。\n\n每個真實 attempt 保留 `runner.log`、實際 child return code、command、effective parser options、source Git/檔案 SHA、manifest SHA、wrapper SHA、parent checkpoint/receipt SHA 與開始/結束時間。`execution.json`、`train-receipt.json`、`receipt.json` 和 checkpoints/export 在同一目錄，outer receipt 記錄實際檔案 bytes/SHA。普通舊 `train.py` 輸出若沒有這組 genuine sidecars，不能事後補寫成歷史 completed native source。`.pt` 是自己產生的可信 pickle checkpoint；公開 safe export 仍供推論使用。"
+        }
+      ]
+    },
+    {
+      "path": "pyproject.toml",
+      "sha256": "54fc71a7406a1e1d03b657c7d7361a7ceff7249f1d71c89b2f874b34a61876ee",
+      "scope": "Only listed lines inspected",
+      "read_ranges": [
+        "33–43"
+      ],
+      "excerpts": [
+        {
+          "start_line": 33,
+          "text": "dev = [\"pytest>=8\", \"ruff>=0.14\", \"safetensors==0.8.0\"]\nnotebook = [\n    \"ipykernel>=6\",\n    \"matplotlib>=3.9\",\n    \"jupyterlab>=4\",\n    \"nbclient>=0.10\",\n]\nsite = [\n    \"zensical==0.0.67\",\n]\n"
+        }
+      ]
+    },
+    {
+      "path": "scripts/export_course.py",
+      "sha256": "ef4145dcfed2a527c9df6b7b3a86262097ed63ea452281586731a4b79b7c91ed",
+      "scope": "Only listed lines inspected",
+      "read_ranges": [
+        "288–299"
+      ],
+      "excerpts": [
+        {
+          "start_line": 288,
+          "text": "                )\n            elif not cell.get(\"metadata\", {}).get(\"course_setup\"):\n                content.append(code_markdown(source))\n                content.append(output_html(cell.get(\"outputs\", [])))\n        colab = f\"https://colab.research.google.com/github/{REPOSITORY}/blob/{revision}/{item['notebook']}\"\n        content.append(\n            '<div class=\"actions\">'\n            f'<a class=\"md-button md-button--primary\" href=\"{html.escape(colab, quote=True)}\" '\n            'target=\"_blank\" rel=\"noopener\">在 Colab 動手做 ↗</a>'\n            f'<a class=\"md-button\" href=\"{item[\"notebook\"]}\" download>下載本節 .ipynb</a></div>\\n\\n'\n            \"要試做本節練習，可開啟 Colab；閱讀與練習使用同一份內容。\"\n            \"操作步驟見[暖身 W.1](first-steps.md#W.1)，小實驗使用 CPU 即可。\""
+        }
+      ]
+    },
+    {
+      "path": "docs/selftrained/v2-jobs/release-final-four-exports.json",
+      "sha256": "37b4856b282f7bdd66010dccc3c1dffe1f966f3e985a49323917cbd8cff5c38b",
+      "inspection": "Read per-export names,files,kind,license,redistribution flags; checked all16 declared files against immutable HF tree without downloading weights.",
+      "observed": {
+        "moe-pretrain": [
+          {
+            "path": "model.safetensors",
+            "license": "MIT",
+            "kind": "inference"
+          },
+          {
+            "path": "model-config.json",
+            "license": "MIT",
+            "kind": "metadata"
+          },
+          {
+            "path": "tokenizer.json",
+            "license": "MIT",
+            "kind": "metadata"
+          },
+          {
+            "path": "inference-manifest.json",
+            "license": "MIT",
+            "kind": "metadata"
+          }
+        ],
+        "moe-sft": [
+          {
+            "path": "model.safetensors",
+            "license": "MIT",
+            "kind": "inference"
+          },
+          {
+            "path": "model-config.json",
+            "license": "MIT",
+            "kind": "metadata"
+          },
+          {
+            "path": "tokenizer.json",
+            "license": "MIT",
+            "kind": "metadata"
+          },
+          {
+            "path": "inference-manifest.json",
+            "license": "MIT",
+            "kind": "metadata"
+          }
+        ],
+        "moe-joint": [
+          {
+            "path": "model.safetensors",
+            "license": "MIT",
+            "kind": "inference"
+          },
+          {
+            "path": "model-config.json",
+            "license": "MIT",
+            "kind": "metadata"
+          },
+          {
+            "path": "tokenizer.json",
+            "license": "MIT",
+            "kind": "metadata"
+          },
+          {
+            "path": "inference-manifest.json",
+            "license": "MIT",
+            "kind": "metadata"
+          }
+        ],
+        "dense-joint": [
+          {
+            "path": "model.safetensors",
+            "license": "MIT",
+            "kind": "inference"
+          },
+          {
+            "path": "model-config.json",
+            "license": "MIT",
+            "kind": "metadata"
+          },
+          {
+            "path": "tokenizer.json",
+            "license": "MIT",
+            "kind": "metadata"
+          },
+          {
+            "path": "inference-manifest.json",
+            "license": "MIT",
+            "kind": "metadata"
+          }
+        ]
+      }
+    }
+  ]
+}

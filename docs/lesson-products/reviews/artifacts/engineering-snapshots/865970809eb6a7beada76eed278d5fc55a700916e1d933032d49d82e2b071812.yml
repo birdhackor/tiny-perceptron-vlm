@@ -1,0 +1,60 @@
+name: Publish frozen B and C lesson products
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_spec:
+        description: Exact committed release descriptor and GitHub transport asset SHA
+        type: string
+        required: true
+      hf_secret_name:
+        description: Existing Modal Secret containing HF_TOKEN
+        type: string
+        default: codex_cloud
+
+permissions:
+  # GitHub requires push permission to read a draft release and its transport asset.
+  contents: write
+
+concurrency:
+  group: tiny-perceptron-course-gpu
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      MODAL_TOKEN_ID: ${{ vars.MODAL_TOKEN_ID || secrets.MODAL_TOKEN_ID }}
+      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+      MODAL_ENVIRONMENT: ${{ vars.MODAL_ENVIRONMENT || 'main' }}
+      HF_RELEASE_REPO: ${{ vars.HF_RELEASE_REPO }}
+      HF_MODAL_SECRET: ${{ inputs.hf_secret_name }}
+      RELEASE_SPEC: ${{ inputs.release_spec }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - name: Check settings without revealing values
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in MODAL_TOKEN_ID MODAL_TOKEN_SECRET HF_RELEASE_REPO; do
+            test -n "${!name}" || { echo "::error::Missing setting: $name"; exit 1; }
+          done
+      - run: python -m pip install modal==1.6.0
+      - name: Use the configured Hugging Face Secret
+        run: python scripts/select_modal_hf_secret.py
+      - name: Verify pinned transport, reserve same gross quota, publish and download anonymously
+        run: |
+          python -m scripts.lesson_products.publish --spec "$RELEASE_SPEC" \
+            --revision "$GITHUB_SHA" --run-id "lesson-release-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+      - name: Preserve actual publication and billing evidence
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: lesson-products-publication
+          path: outputs/lesson-products-release/result.json
+          if-no-files-found: ignore
