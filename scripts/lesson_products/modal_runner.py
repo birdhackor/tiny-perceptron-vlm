@@ -468,6 +468,8 @@ def register(action, data_directory):
             receipt.update(error_type=type(error).__name__, error=str(error)[:1500])
         receipt["remote_wall_seconds"] = time.monotonic() - started
         artifacts, receipt["client_artifacts"] = transfer_payload(directory)
+        # TorchVersion等str子類也可能要求接收端import torch；跨程序只回傳JSON基本型別。
+        receipt = json.loads(json.dumps(receipt, ensure_ascii=False, allow_nan=False))
         write_json(directory / "execution.json", receipt)
         # 結束狀態不釋回bounds；gross sidecar與所有舊預約保持。
         ledger = json.loads(LEDGER.read_bytes())

@@ -1,0 +1,72 @@
+from pathlib import Path
+from dataclasses import asdict
+import hashlib,json,math,platform,subprocess,sys,torch
+from tiny_perceptron.lesson_products import data as D
+from tiny_perceptron.lesson_products import model as M
+from tiny_perceptron.lesson_products import training as T
+R=Path.cwd();P=R/'outputs/lesson-products/products/c';revision='49ce5b40b7931bc18f54174827931a5d5a623017';torch.set_num_threads(1)
+def sha(p):return hashlib.sha256(p.read_bytes()).hexdigest()
+def audit(event,args):
+ if event=='open' and isinstance(args[0],(str,bytes)) and Path(args[0]).name in ('c.jsonl','b.jsonl'):raise AssertionError('Raw split datasets forbidden in this review')
+sys.addaudithook(audit)
+ep=R/'docs/lesson-products/results/initial-c-execution.json';ip=R/'docs/lesson-products/results/initial-c-inspection.json';execution=json.loads(ep.read_text());inspection=json.loads(ip.read_text());receipt=json.loads((P/'training-receipt.json').read_text());best=torch.load(P/'best.pt',map_location='cpu',weights_only=True);last=torch.load(P/'last.pt',map_location='cpu',weights_only=True);weights=torch.load(P/'model.pt',map_location='cpu',weights_only=True);config=M.Config(**json.loads((P/'config.json').read_text()));tokenizer=M.Tokenizer.load(P/'tokenizer.json')
+result={'reviewer_task':'/root/tech_20261016_19_16','reviewer_context':'informed_trained_artifact_engineering','training_source_revision':revision,'environment':{'python':platform.python_version(),'torch':torch.__version__,'device':'cpu','threads':1},'checks':{}}
+def check(k,v,details=None):assert v,(k,details);result['checks'][k]={'passed':True,'details':details}
+check('execution_inspection_receipt_binding',execution['code_revision']==inspection['code_revision']==revision and inspection['execution_sha256']==sha(ep) and execution['training']==receipt and inspection['receipt_canonical_sha256']==hashlib.sha256(json.dumps(execution,sort_keys=True,separators=(',',':'),allow_nan=False).encode()).hexdigest(),{'execution_sha256':sha(ep),'receipt_file_sha256':sha(P/'training-receipt.json'),'execution_receipt_canonical_sha256':inspection['receipt_canonical_sha256'],'local_training_receipt_canonical_sha256':D.digest(receipt),'run_id':execution['run_id']})
+artifacts={}
+for name in ('best.pt','last.pt','model.pt','config.json','tokenizer.json','training-receipt.json'):
+ observed={'sha256':sha(P/name),'bytes':(P/name).stat().st_size};assert observed==inspection['downloaded_files'][name]==execution['client_artifacts'][name];artifacts[name]=observed
+check('six_downloaded_artifacts_match_both_receipts',True,artifacts)
+source_bindings={}
+for path,digest in execution['source_hashes'].items():
+ committed=subprocess.check_output(['git','show',f'{revision}:{path}']);actual=hashlib.sha256(committed).hexdigest();assert actual==digest;source_bindings[path]=actual
+check('recorded_source_hashes_match_fixed_git_commit',True,{'revision':revision,'files_checked':len(source_bindings),'hashes':source_bindings,'scope':'Hash binding, not a fresh full review of finance/runner sources.'})
+for path in ('tiny_perceptron/lesson_products/data.py','tiny_perceptron/lesson_products/model.py','tiny_perceptron/lesson_products/training.py','tiny_perceptron/lesson_products/train.py'):assert sha(R/path)==source_bindings[path]
+check('local_implementation_matches_training_source',True)
+actual=T.state_digest(weights);bd=T.state_digest(best['model']);ld=T.state_digest(last['model'])
+check('actual_export_best_last_state_digest',actual==bd==ld==receipt['selected_weights_sha256'],{'export':actual,'best':bd,'last':ld,'initial_recorded':receipt['initial_weights_sha256'],'selected_equals_last_for_this_run':True})
+for name,value in [('best',best),('last',last)]:
+ meta=value['metadata'];assert value['config']==asdict(config);assert meta['tokenizer_sha256']==sha(P/'tokenizer.json');assert meta['run_identity']==receipt['run_identity'];assert meta['product']=='c' and meta['mode']=='candidate';assert meta['seed']==receipt['seed']==9041;assert meta['data_manifest_sha256']==receipt['data_manifest_sha256'];assert meta['initial_weights_sha256']==receipt['initial_weights_sha256'];assert meta['step']==receipt['selected_step' if name=='best' else 'last_step']==800;assert meta['best_step']==receipt['selected_step'];assert meta['best_weights_sha256']==actual;assert meta['training_recipe']=={'batch_size':receipt['batch_size'],'learning_rate':receipt['learning_rate']};assert meta['depth_weights']==receipt['depth_weights']
+check('step_config_tokenizer_run_metadata_bindings',True,{'best_step':best['metadata']['step'],'last_step':last['metadata']['step'],'run_identity':receipt['run_identity'],'config':asdict(config),'tokenizer_sha256':sha(P/'tokenizer.json'),'mode':'candidate','seed':9041})
+manifest_bytes=subprocess.check_output(['git','show',f'{revision}:docs/lesson-products/data-v2-manifest.json']);manifest=json.loads(manifest_bytes);assert hashlib.sha256(manifest_bytes).hexdigest()==receipt['data_manifest_sha256'];counts={q:manifest['audit']['c']['counts']['policy/'+q] for q in ('choice','info','rubric')}
+for entry in [receipt['before_policy'],receipt['selected_policy']]+[h['policy'] for h in receipt['history'] if 'policy' in h]:
+ for q,v in entry.items():assert v['count']==counts[q] and 0<=v['correct']<=v['count'] and abs(v['accuracy']-v['correct']/v['count'])<1e-7 and math.isfinite(v['cross_entropy']) and v['cross_entropy']>=0 and 0<=v['brier']<=2
+check('policy_denominators_arithmetic_history_scope',True,{'versioned_manifest_sha256':receipt['data_manifest_sha256'],'policy_counts':counts,'total_policy_rows':sum(counts.values()),'selected_policy':receipt['selected_policy'],'scope':'Recorded policy statistics; not independently rerun full policy or final-test evaluation. No raw dataset opened.'})
+keys=[(receipt['before_policy']['choice']['accuracy'],-receipt['before_policy']['choice']['cross_entropy'],0)]+[(h['policy']['choice']['accuracy'],-h['policy']['choice']['cross_entropy'],h['step']) for h in receipt['history'] if 'policy' in h];selected=max(keys,key=lambda x:(x[0],x[1]));assert selected[2]==receipt['selected_step']==800;assert best['metadata']['best_key']==list(selected[:2]);assert receipt['steps_this_attempt']==800 and receipt['stop_reason']=='development_target';assert receipt['resume_source'] is None and receipt['random_initialization'] and receipt['weights_changed'] and receipt['initial_weights_sha256']!=actual
+check('recorded_policy_checkpoint_selection_and_real_update_state',True,{'max_policy_key_step':selected,'steps_this_attempt':800,'stop_reason':receipt['stop_reason'],'initial_vs_selected_digest_different':True})
+model=M.CandidateScorer(config);model.load_state_dict(weights,strict=True);model.eval();assert config.vocab_size==len(tokenizer)==144;assert sum(p.numel() for p in model.parameters())==receipt['parameters']==84545;assert all(bool(torch.isfinite(t).all()) for t in weights.values())
+check('CPU_load_strict_parameters_finite',True,{'parameters':84545,'vocab_size':144,'width':config.width,'c_layers':config.c_layers,'calibration_fitted':False})
+for value in (best,last):
+ opt=torch.optim.AdamW(model.parameters(),lr=receipt['learning_rate'],weight_decay=.01,foreach=False);opt.load_state_dict(value['optimizer']);assert len(opt.state)==len(list(model.parameters()))==30
+ for parameter,state in opt.state.items():assert int(state['step'])==800 and state['exp_avg'].shape==parameter.shape and state['exp_avg_sq'].shape==parameter.shape and bool(torch.isfinite(state['exp_avg']).all()) and bool(torch.isfinite(state['exp_avg_sq']).all())
+ assert any(bool(state['exp_avg'].abs().max()>0) for state in opt.state.values());assert value['sampler_rng'].dtype==torch.uint8 and value['torch_rng'].dtype==torch.uint8 and len(value['cuda_rng'])==1
+ g1=torch.Generator().set_state(value['sampler_rng']);g2=torch.Generator().set_state(value['sampler_rng']);assert torch.equal(torch.randint(1000,(8,),generator=g1),torch.randint(1000,(8,),generator=g2))
+check('checkpoint_optimizer_sampler_and_CUDA_RNG_present',True,{'optimizer_states':30,'optimizer_step_each':800,'sampler_state_shape':list(last['sampler_rng'].shape),'torch_rng_shape':list(last['torch_rng'].shape),'CUDA_rng_shapes':[list(x.shape) for x in last['cuda_rng']],'optimizer_step_run_here':False,'CPU_sampler_copy_restores':True})
+resume=receipt['resume_verification'];check('recorded_resume_fork_matches_actual_last_state',resume['exact_next_step'] and resume['forked_step_discarded'] and resume['before_sha256']==ld and resume['after_sha256']!=ld and math.isfinite(resume['loss']),{'recorded_resume':resume,'actual_last_state_sha256':ld,'rerun_here':False,'scope':'Actual GPU execution record/source verifier inspected; this reviewer checks binding and saved state, not a new GPU/CPU optimizer update.'})
+# Source-reconstruct only known TRAIN families; no raw dataset file or final-test split is read.
+salt=manifest['config']['split_salt'];worlds=[]
+for w in D.box_worlds():
+ if len(w['events'])==1 and D.split_of(w['family_id'],salt)=='train' and int(D.digest(w['family_id'])[:8],16)%5==0:worlds.append(w);break
+for w in D.arithmetic_worlds():
+ if D.split_of(w['family_id'],salt)=='train':worlds.append(w);break
+for task in ('card','address','app'):
+ for w in D.service_worlds(manifest['config']['services']):
+  if w['task']==task and D.split_of(w['family_id'],salt)=='train':worlds.append(w);break
+rows=[]
+for w in worlds:
+ generated=list(D.c_rows(w,'train'))
+ for q in ('choice','info','rubric'):rows.append(next(r for r in generated if r['question']==q and not r['omitted'] and not r.get('missing_best')))
+ if D.REQUIRED[w['task']]:
+  for q in ('info','rubric'):rows.append(next(r for r in generated if r['question']==q and len(r['omitted'])==len(D.REQUIRED[w['task']])))
+assert len(worlds)==5 and all(r['split']=='train' and D.split_of(r['family_id'],salt)=='train' for r in rows)
+tokens,slices,n,labels=M.candidate_batch(rows,tokenizer,config)
+with torch.inference_mode():scores=M.grouped_scores(model(tokens),slices,n);probabilities=scores.softmax(-1)
+assert torch.isfinite(scores[~torch.isneginf(scores)]).all() and torch.isfinite(probabilities).all() and torch.allclose(probabilities.sum(-1),torch.ones(len(rows)),atol=1e-6)
+check('actual_trained_C_CPU_train_only_forward_smoke',True,{'source_reconstructed_train_families':len(worlds),'typed_rows':len(rows),'pair_sequences':len(tokens),'padded_score_shape':list(scores.shape),'token_length':tokens.shape[-1],'question_counts':{q:sum(r['question']==q for r in rows) for q in ('choice','info','rubric')},'scope':'Load/finite-output smoke only, no accuracy claim or new policy/test outcome. No calibration fit.'})
+expected_sequences=receipt['steps_this_attempt']*receipt['batch_size']*6*config.c_layers;expected_tokens=expected_sequences*66
+check('padded_training_work_arithmetic',receipt['work']=={'block_sequence_work':expected_sequences,'block_token_work':expected_tokens},{'expected':{'block_sequence_work':expected_sequences,'block_token_work':expected_tokens},'scope':'Padded block work, not measured FLOPs, elapsed speedup or money.'})
+check('actual_files_unchanged_after_read_only_probes',all(sha(P/name)==v['sha256'] for name,v in artifacts.items()))
+result['training_environment']=receipt['environment'];result['source_hashes']=source_bindings;result['scope']='Actual trained C artifacts/read-only CPU load and source-reconstructed train-family forward. No raw b.jsonl/c.jsonl opened; audit hook forbids them. No calibration/evaluate_frozen/train/optimizer.step/GPU/paid/external calls.';result['command']='.venv/bin/python - < /workspace/work/curriculum-20261016/engineering-trained-c/probe.py';result['probe_script_sha256']=sha(Path('/workspace/work/curriculum-20261016/engineering-trained-c/probe.py'))
+out=R/'docs/lesson-products/reviews/engineering-trained-c-execution.json'
+with out.open('x') as f:json.dump(result,f,ensure_ascii=False,indent=2);f.write('\n')
+print(json.dumps({'checks':len(result['checks']),'all_passed':True,'selected_state_digest':actual,'step':800,'policy_counts':counts,'diagnostic_rows':len(rows),'output':str(out),'raw_datasets_opened':False},ensure_ascii=False,indent=2))
