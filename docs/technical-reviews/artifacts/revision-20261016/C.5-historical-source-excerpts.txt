@@ -1,0 +1,183 @@
+Historical source inspected with git show 910aebc6419c9fc6217279a27fde9851c5cfad30:scripts/course_experiments/applications.py
+Full historical file SHA-256: 8fbb7e1c1a5ee33c50884a3cb6658352aacd80d2131ac6561c272e8c75b2ade0
+
+Lines 28-105
+28: def _sync(ctx):
+29:     if str(ctx.device).startswith("cuda"):
+30:         torch.cuda.synchronize(ctx.device)
+31: 
+32: 
+33: def _prompt_ids(messages, tokenizer):
+34:     roles = {"system": tokenizer.system_id, "user": tokenizer.user_id, "assistant": tokenizer.assistant_id}
+35:     ids = [tokenizer.bos_id]
+36:     for message in messages:
+37:         ids += [roles[message["role"]]] + tokenizer.encode(message["content"]) + [tokenizer.eos_id]
+38:     return ids + [tokenizer.assistant_id]
+39: 
+40: 
+41: @torch.no_grad()
+42: def _sample(model, messages, ctx, count=1, tokens=32, temperature=0.0):
+43:     """實際 batch 抽樣，保留 EOS、非法特殊 token 與測得的生成成本。"""
+44:     tokenizer = ByteTokenizer()
+45:     prompt = _prompt_ids(messages, tokenizer)
+46:     if len(prompt) + tokens > model.config.max_length:
+47:         raise ValueError(f"輸入 {len(prompt)} + 答案預留 {tokens} > {model.config.max_length}")
+48:     was_training = model.training
+49:     model.eval()
+50:     current = torch.tensor([prompt] * count, device=ctx.device)
+51:     active = torch.ones(count, dtype=torch.bool, device=ctx.device)
+52:     outputs = [[] for _ in range(count)]
+53:     state = None
+54:     forward_tokens = 0
+55:     _sync(ctx)
+56:     started = time.perf_counter()
+57:     try:
+58:         for _ in range(tokens):
+59:             result = model(current, cache=state)
+60:             forward_tokens += current.numel()
+61:             scores = result["logits"][:, -1]
+62:             chosen = (
+63:                 scores.argmax(-1)
+64:                 if temperature <= 0
+65:                 else torch.multinomial((scores / temperature).softmax(-1), 1).squeeze(-1)
+66:             )
+67:             was_active = active.tolist()
+68:             for row, (keep, token) in enumerate(zip(was_active, chosen.tolist(), strict=True)):
+69:                 if keep:
+70:                     outputs[row].append(token)
+71:             active = active & (chosen != tokenizer.eos_id)
+72:             if not active.any():
+73:                 break
+74:             current = chosen.masked_fill(~active, tokenizer.pad_id).unsqueeze(1)
+75:             state = result["cache"]
+76:     finally:
+77:         model.train(was_training)
+78:     _sync(ctx)
+79:     seconds = time.perf_counter() - started
+80:     samples = []
+81:     for output in outputs:
+82:         raw = output[:-1] if output and output[-1] == tokenizer.eos_id else output
+83:         samples.append(
+84:             {
+85:                 "generated": tokenizer.decode(raw),
+86:                 "generated_ids": output,
+87:                 "eos": bool(output and output[-1] == tokenizer.eos_id),
+88:                 "invalid_special_tokens": [token for token in raw if token < 8],
+89:                 "generated_tokens": len(output),
+90:             }
+91:         )
+92:     return {
+93:         "messages": messages,
+94:         "input_ids": prompt,
+95:         "input_tokens": len(prompt),
+96:         "samples": samples,
+97:         "candidate_count": count,
+98:         "temperature": temperature,
+99:         "max_new_tokens": tokens,
+100:         "generated_tokens": sum(len(output) for output in outputs),
+101:         "forward_input_tokens": forward_tokens,
+102:         "seconds": seconds,
+103:     }
+104: 
+105: 
+
+Lines 750-811
+750: def _reasoning_samples(model, rows, ctx, mode):
+751:     budgets = []
+752:     for candidate_count in (1, 2, 4, 8):
+753:         samples = []
+754:         for row in rows:
+755:             generation = _sample(
+756:                 model,
+757:                 [{"role": "user", "content": row["question"]}],
+758:                 ctx,
+759:                 count=candidate_count,
+760:                 tokens=8 if mode == "direct" else 48,
+761:                 temperature=0.7,
+762:             )
+763:             candidates = [{**sample, **_verify_reasoning(sample, row, mode)} for sample in generation["samples"]]
+764:             answers = [candidate["final_answer"] for candidate in candidates if candidate["final_answer"] is not None]
+765:             majority = Counter(answers).most_common(1)[0][0] if answers else None
+766:             verified = next(
+767:                 (candidate["final_answer"] for candidate in candidates if candidate["fully_verified"]), None
+768:             )
+769:             samples.append(
+770:                 {
+771:                     **row,
+772:                     "generation": {key: value for key, value in generation.items() if key != "samples"},
+773:                     "candidates": candidates,
+774:                     "oracle_coverage": any(candidate["final_correct"] for candidate in candidates),
+775:                     "majority_answer": majority,
+776:                     "majority_correct": majority == row["truth"],
+777:                     "verified_answer": verified,
+778:                     "verifier_correct": verified == row["truth"],
+779:                     "selection_failed_despite_coverage": any(candidate["final_correct"] for candidate in candidates)
+780:                     and majority != row["truth"],
+781:                 }
+782:             )
+783:         candidates = [candidate for sample in samples for candidate in sample["candidates"]]
+784:         covered = [sample for sample in samples if sample["oracle_coverage"]]
+785:         budgets.append(
+786:             {
+787:                 "candidate_count": candidate_count,
+788:                 "oracle_coverage": _rate(len(covered), len(samples)),
+789:                 "majority_accuracy": _rate(sum(sample["majority_correct"] for sample in samples), len(samples)),
+790:                 "verifier_accuracy": _rate(sum(sample["verifier_correct"] for sample in samples), len(samples)),
+791:                 "majority_accuracy_given_coverage": _rate(
+792:                     sum(sample["majority_correct"] for sample in covered), len(covered)
+793:                 ),
+794:                 "parsed_candidates": _rate(sum(candidate["parsed"] for candidate in candidates), len(candidates)),
+795:                 "candidate_final_accuracy": _rate(
+796:                     sum(candidate["final_correct"] for candidate in candidates), len(candidates)
+797:                 ),
+798:                 "fully_verified_candidates": _rate(
+799:                     sum(candidate["fully_verified"] for candidate in candidates), len(candidates)
+800:                 ),
+801:                 "final_correct_but_steps_invalid": _rate(
+802:                     sum(candidate["final_correct"] and not candidate["fully_verified"] for candidate in candidates),
+803:                     len(candidates),
+804:                 ),
+805:                 "generated_tokens": sum(sample["generation"]["generated_tokens"] for sample in samples),
+806:                 "forward_input_tokens": sum(sample["generation"]["forward_input_tokens"] for sample in samples),
+807:                 "generation_seconds": sum(sample["generation"]["seconds"] for sample in samples),
+808:                 "samples": samples,
+809:             }
+810:         )
+811:     return budgets
+
+Lines 1071-1105
+1071: def run_reasoning(ctx):
+1072:     """同初始權重的短答／可驗證步驟，真實多候選，有限策略 REINFORCE。"""
+1073:     started = time.perf_counter()
+1074:     seed(ctx.seed)
+1075:     ctx.output.mkdir(parents=True, exist_ok=True)
+1076:     splits = split_records(_reasoning_records(), ctx.seed)
+1077:     write_json(ctx.output / "dataset.json", splits)
+1078:     base = new_lm(ctx, width=64, layers=2, max_length=128, heads=2, backend="sdpa")
+1079:     base_state = copy.deepcopy(base.state_dict())
+1080:     save_checkpoint(
+1081:         ctx.output / "same-base.pt",
+1082:         base,
+1083:         step=0,
+1084:         metadata={"seed": ctx.seed, "purpose": "identical direct/steps initialization"},
+1085:     )
+1086:     base_hash = hashlib.sha256(
+1087:         b"".join(value.detach().cpu().numpy().tobytes() for value in base_state.values())
+1088:     ).hexdigest()
+1089:     models = {}
+1090:     for mode in ("direct", "steps"):
+1091:         seed(ctx.seed)
+1092:         model = new_lm(ctx, width=64, layers=2, max_length=128, heads=2, backend="sdpa")
+1093:         model.load_state_dict(base_state)
+1094:         mode_splits = {name: _reasoning_sft(rows, mode) for name, rows in splits.items()}
+1095:         write_json(ctx.output / f"{mode}-dataset.json", mode_splits)
+1096:         training = _fit_lm(model, mode_splits["train"], ctx, mode="sft", steps=900, batch_size=24, name=mode)
+1097:         models[mode] = {
+1098:             "base_state_sha256": base_hash,
+1099:             "training": training,
+1100:             "validation": _sft_nll(model, mode_splits["validation"], ctx),
+1101:             "test": _sft_nll(model, mode_splits["test"], ctx),
+1102:             "budgets": _reasoning_samples(model, splits["test"], ctx, mode),
+1103:         }
+1104:     result = {
+1105:         "task": "C: controlled two-addition arithmetic, candidate selection, and finite-policy RLVR",

@@ -70,6 +70,11 @@
 | 名詞 | 想解決的問題 | 完整講解 |
 | --- | --- | --- |
 | Dense、MoE | 如何在總參數容量與每個token的計算量之間取捨；本課比較共用FFN與路由選少數專家FFN | [15.1](chapters/15.md#15.1)、[15.4](chapters/15.md#15.4) |
+| thinking／reasoning effort，思考投入 | 請求資源偏好，與實際輪數、token、時間分開；Auto可先替題目選預算 | [7.23](chapters/07.md#7.23)、[19.17](chapters/19.md#19.17) |
+| Looped Transformer，循環式Transformer | 同一區塊共享權重，反覆更新狀態；參數不隨輪數增加，計算仍增加 | [14.11](chapters/14.md#14.11) |
+| 終止深度、逐輪監督 | 前者決定在哪輪交卷；後者在多個輪數直接計loss；二者須分開記 | [14.14](chapters/14.md#14.14) |
+| Jev式機率判斷 | 以狀態、問題及候選意義預測分布；Choice、yes/no與有限等級各有契約 | [9.11](chapters/09.md#9.11) |
+| concentration，集中度 | 分布有多集中；Jev Choice摘要不等於實測正確率 | [9.15](chapters/09.md#9.15) |
 | KV cache | 保存每層舊位置的K、V，生成下一字時重用它們 | [16.3](chapters/16.md#16.3) |
 | Flash Attention | 分塊計算，減少大型中間表的儲存與搬移 | [16.9](chapters/16.md#16.9) |
 | context window，上下文窗口 | 模型與介面規定的可用輸入範圍；能放入多少，與實際用好多少要分開看 | [7.19](chapters/07.md#7.19)、[14.7](chapters/14.md#14.7) |

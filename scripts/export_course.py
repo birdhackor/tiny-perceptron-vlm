@@ -23,6 +23,7 @@ if __package__:
         load_routes,
         render_page,
     )
+    from scripts.stage_mathjax import prepare_assets, stage_assets
 else:
     from build_course import lesson_anchor_aliases
     from reading_time import (
@@ -34,6 +35,7 @@ else:
         load_routes,
         render_page,
     )
+    from stage_mathjax import prepare_assets, stage_assets
 
 ROOT = Path(__file__).resolve().parents[1]
 REPOSITORY = "birdhackor/tiny-perceptron-vlm"
@@ -252,6 +254,7 @@ def build(
         if executed_root:
             notebook = checked_notebook(notebook, executed_root / Path(item["notebook"]).relative_to("notebooks"))
         notebooks.append(notebook)
+    mathjax = prepare_assets(ROOT)
     if docs.exists():
         shutil.rmtree(docs)
     docs.mkdir(parents=True)
@@ -261,6 +264,7 @@ def build(
         (docs / folder).mkdir()
         for name in names:
             shutil.copyfile(ROOT / "course/web" / name, docs / folder / name)
+    stage_assets(docs / "javascripts/mathjax", mathjax)
 
     # 發布引用依內容命名的樣式，讓瀏覽器載入修正版；原檔留給 zensical serve。
     stylesheet = docs / "stylesheets/course.css"
@@ -302,8 +306,17 @@ def build(
         path = ROOT / source
         items = [item for item in index if item["source"] == source]
         introduction = chapter_introduction(path.read_text(encoding="utf-8"))
-        content = reading(introduction, path) + "\n## 本章小節\n\n依序閱讀，或點進眼前想弄懂的問題。\n\n"
-        content += "\n".join(f"- [{item['id']} {item['title']}]({item['id']}.md)" for item in items) + "\n"
+        content = reading(introduction, path) + "\n## 本章小節\n\n"
+        if path.stem == "0C":
+            content += "這組必修分兩次閱讀，接續位置如下。\n\n"
+        else:
+            content += "依序閱讀，或點進眼前想弄懂的問題。\n\n"
+        for item in items:
+            if item["id"] == "C.1":
+                content += "### 第7章後：推理與計算預算\n\n"
+            elif item["id"] == "C.6":
+                content += "\n### 第13章後：模型回饋\n\n"
+            content += f"- [{item['id']} {item['title']}]({item['id']}.md)\n"
         (docs / target).write_text(content, encoding="utf-8")
 
     home = home_source + "## 章節\n\n"

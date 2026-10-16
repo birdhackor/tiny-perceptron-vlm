@@ -4,11 +4,11 @@ How does a computer choose the next character after a short phrase? This from-sc
 
 [繁體中文](README.md) | English
 
-**[Online course](https://birdhackor.github.io/tiny-perceptron-vlm/) · [Reading routes](course/README.md) · [First steps](course/first-steps.md) · [287 lessons](course/lessons.md) · [Training recipes](course/training.md)** — the main course is in Traditional Chinese.
+**[Online course](https://birdhackor.github.io/tiny-perceptron-vlm/) · [Reading routes](course/README.md) · [First steps](course/first-steps.md) · [312 lessons](course/lessons.md) · [Training recipes](course/training.md)** — the main course is in Traditional Chinese.
 
 This preview provides lesson text, SVG diagrams and actual CPU outputs. Each lesson has an Open in Colab button for the same complete notebook. In notebooks with code, the first code cell prepares the repository and packages. Small exercises need no GPU. Notebook downloads are also available for local practice. Execution in a real Colab runtime has not been verified.
 
-The course has 20 chapters, three optional branches and 287 lesson notebooks. Including 26 numbered reading, warmup, training and glossary sections, there are 313 numbered sections. Begin with small matrices, bigrams, MLPs and manual attention; introduce multi-token prediction (MTP), modern architecture, Dense/MoE, longer context, cache/SDPA, quantization and distillation later. Each lesson addresses one question, and readers can revisit examples without training one model throughout.
+The course has 20 chapters, the A/B extensions, a required reasoning-compute unit C and 312 lesson notebooks. Including 26 numbered reading, warmup, training and glossary sections, there are 338 numbered sections. Begin with small matrices, bigrams, MLPs and manual attention; introduce multi-token prediction (MTP), modern architecture, Dense/MoE, longer context, cache/SDPA, quantization and distillation later. Each lesson addresses one question, and readers can revisit examples without training one model throughout.
 
 [7.17](course/chapters/07.md#7.17) explains why pre-training and post-training commonly use different data and objectives. [Chapter 13](course/chapters/13.md) develops preference feedback, reward models, PPO and DPO step by step. Instruction checks distinguish content, requested scope, formatting and stopping; context lessons distinguish capacity, positions, computation and information use.
 
@@ -18,9 +18,11 @@ The main [Chapter 19 capstone](course/chapters/19.md#19.1) combines text, vision
 
 Start with [1.1](course/chapters/01.md#1.1), using linked Python and math warmups when needed. Open the same lesson notebook when ready to experiment. Operational recipes live on the [training page](course/training.md); [validation notes](docs/validation.md) record evidence and limitations.
 
+Thinking effort, Looped Transformers, and Jev-style typed probabilistic judgments are now required topics: [7.23](course/chapters/07.md#7.23), [14.11](course/chapters/14.md#14.11), and [9.11](course/chapters/09.md#9.11). C.1–C.5 follows Chapter 7. [Chapter 19](course/chapters/19.md#19.13) has three product routes: the existing MoE assistant, a bounded text looped solver, and an independent probabilistic decision service, followed by Auto effort integration. New product measurements and fixed downloads are pending training and acceptance; the v2 historical results remain their own evidence.
+
 ## Setup
 
-Install [uv](https://docs.astral.sh/uv/getting-started/installation/) and Git. For CPU exercises:
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/) and [Git](https://git-scm.com/downloads) to obtain the project. For CPU exercises:
 
 ```bash
 git clone https://github.com/birdhackor/tiny-perceptron-vlm.git
@@ -40,12 +42,14 @@ Read the online course built with [Zensical](https://zensical.org/): full-text s
 
 ## Minimal workflow
 
+First check the computation path: prepare a small text set, predict a batch of targets, calculate the loss, then work backward to calculate how the model parameters could change. This check leaves the parameters unchanged and saves no trained checkpoint.
+
 ```bash
 python scripts/prepare_data.py --kind toy-text
 python scripts/train.py --task text --data data/generated/toy-text/train.jsonl
 ```
 
-The default runs one forward/backward check with no optimizer update or checkpoint write. Add `--train` explicitly for training. [Training recipes](course/training.md) describe prerequisites, formats, evaluation and limitations for text, style, safety, multimodal, preferences and distillation.
+Expect `mode` to be `dry-run-no-weight-update`, a finite `loss` and finite, positive `grad_norm` in the first `history` entry. This checks the computation path; it does not establish learned answers or held-out ability. Add `--train` explicitly for training. [Training recipes](course/training.md) describe prerequisites, formats, evaluation and limitations for text, style, safety, multimodal, preferences and distillation.
 
 [Fixed training snapshots](assets/training/README.md) are published as separate Git LFS archives. List available snapshots with `python scripts/fetch_training_assets.py --list`, then download, verify and unpack the chosen archive with `python scripts/fetch_training_assets.py --asset NAME`, replacing `NAME` with a listed asset name. Raw caches, checkpoints and outputs stay in ignored `data/`, `checkpoints/` and `outputs/`. External datasets retain their own licenses; see [asset storage](docs/asset-storage.md).
 

@@ -87,6 +87,9 @@
 | 7.20 下一個之外，還能一起練習預測什麼？ | [閱讀](../course/chapters/07.md#7.20) | [開啟](../notebooks/07/7.20.ipynb) |
 | 7.21 未來答案該對到哪一格？ | [閱讀](../course/chapters/07.md#7.21) | [開啟](../notebooks/07/7.21.ipynb) |
 | 7.22 為什麼有些MTP分支串成一條鏈？ | [閱讀](../course/chapters/07.md#7.22) | [開啟](../notebooks/07/7.22.ipynb) |
+| 7.23 選了 high，就是固定多想幾秒嗎？ | [閱讀](../course/chapters/07.md#7.23) | [開啟](../notebooks/07/7.23.ipynb) |
+| 7.24 同一題，怎樣教不同預算的回答？ | [閱讀](../course/chapters/07.md#7.24) | [開啟](../notebooks/07/7.24.ipynb) |
+| 7.25 怎樣判斷多花計算值得？ | [閱讀](../course/chapters/07.md#7.25) | [開啟](../notebooks/07/7.25.ipynb) |
 | 8.1 「有趣的回答」要符合什麼要求？ | [閱讀](../course/chapters/08.md#8.1) | [開啟](../notebooks/08/8.1.ipynb) |
 | 8.2 只改提示，回答為什麼可能改變？ | [閱讀](../course/chapters/08.md#8.2) | [開啟](../notebooks/08/8.2.ipynb) |
 | 8.3 示範回答如何把寫法教進權重？ | [閱讀](../course/chapters/08.md#8.3) | [開啟](../notebooks/08/8.3.ipynb) |
@@ -113,6 +116,12 @@
 | 9.8 學到規則還是記住字句？ | [閱讀](../course/chapters/09.md#9.8) | [開啟](../notebooks/09/9.8.ipynb) |
 | 9.9 最大 softmax 機率很高就可靠嗎？ | [閱讀](../course/chapters/09.md#9.9) | [開啟](../notebooks/09/9.9.ipynb) |
 | 9.10 信心和正確率對得上嗎？ | [閱讀](../course/chapters/09.md#9.10) | [開啟](../notebooks/09/9.10.ipynb) |
+| 9.11 不生成一段話，也能回答問題嗎？ | [閱讀](../course/chapters/09.md#9.11) | [開啟](../notebooks/09/9.11.ipynb) |
+| 9.12 為什麼模型必須讀候選的意思？ | [閱讀](../course/chapters/09.md#9.12) | [開啟](../notebooks/09/9.12.ipynb) |
+| 9.13 缺資訊，應該輸出低信心嗎？ | [閱讀](../course/chapters/09.md#9.13) | [開啟](../notebooks/09/9.13.ipynb) |
+| 9.14 有機率輸出，還要怎樣訓練與校準？ | [閱讀](../course/chapters/09.md#9.14) | [開啟](../notebooks/09/9.14.ipynb) |
+| 9.15 confidence 是「有幾成機會答對」嗎？ | [閱讀](../course/chapters/09.md#9.15) | [開啟](../notebooks/09/9.15.ipynb) |
+| 9.16 模型給機率後，程式怎樣決策？ | [閱讀](../course/chapters/09.md#9.16) | [開啟](../notebooks/09/9.16.ipynb) |
 | 10.1 一張紅色方塊，怎麼存成圖片 tensor？ | [閱讀](../course/chapters/10.md#10.1) | [開啟](../notebooks/10/10.1.ipynb) |
 | 10.2 圖片切成小塊後，如何排成序列？ | [閱讀](../course/chapters/10.md#10.2) | [開啟](../notebooks/10/10.2.ipynb) |
 | 10.3 每塊 48 個像素值，如何變成 8 個特徵？ | [閱讀](../course/chapters/10.md#10.3) | [開啟](../notebooks/10/10.3.ipynb) |
@@ -181,6 +190,14 @@
 | 14.4 逐項改數字，為何能增加表達方式？ | [閱讀](../course/chapters/14.md#14.4) | [開啟](../notebooks/14/14.4.ipynb) |
 | 14.5 怎麼讓特徵控制另一組特徵？ | [閱讀](../course/chapters/14.md#14.5) | [開啟](../notebooks/14/14.5.ipynb) |
 | 14.6 輸入輸出權重應該共享嗎？ | [閱讀](../course/chapters/14.md#14.6) | [開啟](../notebooks/14/14.6.ipynb) |
+| 14.11 同一個區塊多跑幾次，省下的是什麼？ | [閱讀](../course/chapters/14.md#14.11) | [開啟](../notebooks/14/14.11.ipynb) |
+| 14.12 每輪到底把什麼交回去？ | [閱讀](../course/chapters/14.md#14.12) | [開啟](../notebooks/14/14.12.ipynb) |
+| 14.13 只在第三輪算 loss，其他輪會怎樣？ | [閱讀](../course/chapters/14.md#14.13) | [開啟](../notebooks/14/14.13.ipynb) |
+| 14.14 怎樣讓多種終止輪數都能使用？ | [閱讀](../course/chapters/14.md#14.14) | [開啟](../notebooks/14/14.14.ipynb) |
+| 14.15 只練1、3、5輪，可以在2、4輪交卷嗎？ | [閱讀](../course/chapters/14.md#14.15) | [開啟](../notebooks/14/14.15.ipynb) |
+| 14.16 能保證多一輪，loss 就下降嗎？ | [閱讀](../course/chapters/14.md#14.16) | [開啟](../notebooks/14/14.16.ipynb) |
+| 14.17 使用時沒有正解，怎麼知道該停？ | [閱讀](../course/chapters/14.md#14.17) | [開啟](../notebooks/14/14.17.ipynb) |
+| 14.18 怎樣公平比較堆疊與循環模型？ | [閱讀](../course/chapters/14.md#14.18) | [開啟](../notebooks/14/14.18.ipynb) |
 | 14.7 為什麼位置公式算得出，長文章卻未必讀得好？ | [閱讀](../course/chapters/14.md#14.7) | [開啟](../notebooks/14/14.7.ipynb) |
 | 14.8 位置插值如何延長窗口？ | [閱讀](../course/chapters/14.md#14.8) | [開啟](../notebooks/14/14.8.ipynb) |
 | 14.9 所有位置都壓近，會遇到什麼取捨？ | [閱讀](../course/chapters/14.md#14.9) | [開啟](../notebooks/14/14.9.ipynb) |
@@ -241,6 +258,7 @@
 | 18.12 MoE 教師能教 Dense 學生嗎？ | [閱讀](../course/chapters/18.md#18.12) | [開啟](../notebooks/18/18.12.ipynb) |
 | 18.13 圖片／音訊能力能如何蒸餾？ | [閱讀](../course/chapters/18.md#18.13) | [開啟](../notebooks/18/18.13.ipynb) |
 | 18.14 蒸餾後再量化能省多少？ | [閱讀](../course/chapters/18.md#18.14) | [開啟](../notebooks/18/18.14.ipynb) |
+| 19.13 三個成品，分別拿來做什麼？ | [閱讀](../course/chapters/19.md#19.13) | [開啟](../notebooks/19/19.13.ipynb) |
 | 19.1 一個成品，為什麼要試好幾種問題？ | [閱讀](../course/chapters/19.md#19.1) | [開啟](../notebooks/19/19.1.ipynb) |
 | 19.2 為什麼成品選 MoE，卻仍保留 Dense 路線？ | [閱讀](../course/chapters/19.md#19.2) | [開啟](../notebooks/19/19.2.ipynb) |
 | 19.3 同一題的不同版本，怎麼避免跑進兩份考卷？ | [閱讀](../course/chapters/19.md#19.3) | [開啟](../notebooks/19/19.3.ipynb) |
@@ -253,6 +271,13 @@
 | 19.10 如何把成品帶到較小的電腦？ | [閱讀](../course/chapters/19.md#19.10) | [開啟](../notebooks/19/19.10.ipynb) |
 | 19.11 下載一份權重，就能從中斷處繼續訓練嗎？ | [閱讀](../course/chapters/19.md#19.11) | [開啟](../notebooks/19/19.11.ipynb) |
 | 19.12 完成整合後，怎樣回答「這個模型會什麼」？ | [閱讀](../course/chapters/19.md#19.12) | [開啟](../notebooks/19/19.12.ipynb) |
+| 19.14 同一個世界，怎樣避免三份資料互相洩題？ | [閱讀](../course/chapters/19.md#19.14) | [開啟](../notebooks/19/19.14.ipynb) |
+| 19.15 Looped 解題器怎樣成為獨立成品？ | [閱讀](../course/chapters/19.md#19.15) | [開啟](../notebooks/19/19.15.ipynb) |
+| 19.16 判斷器怎樣獨立回答三種問題？ | [閱讀](../course/chapters/19.md#19.16) | [開啟](../notebooks/19/19.16.ipynb) |
+| 19.17 Auto 怎樣選檔，手動又怎樣優先？ | [閱讀](../course/chapters/19.md#19.17) | [開啟](../notebooks/19/19.17.ipynb) |
+| 19.18 三個成品要如何比較才有意義？ | [閱讀](../course/chapters/19.md#19.18) | [開啟](../notebooks/19/19.18.ipynb) |
+| 19.19 下載到權重，怎樣確認自己用對版本？ | [閱讀](../course/chapters/19.md#19.19) | [開啟](../notebooks/19/19.19.ipynb) |
+| 19.20 什麼證據才足以把候選版叫成品？ | [閱讀](../course/chapters/19.md#19.20) | [開啟](../notebooks/19/19.20.ipynb) |
 | 20.1 照片、打字與說話，怎麼交給同一位助理？ | [閱讀](../course/chapters/20.md#20.1) | [開啟](../notebooks/20/20.1.ipynb) |
 | 20.2 不重新訓練，怎麼先開啟成品？ | [閱讀](../course/chapters/20.md#20.2) | [開啟](../notebooks/20/20.2.ipynb) |
 | 20.3 只調整一小份權重，為什麼還要載入大模型？ | [閱讀](../course/chapters/20.md#20.3) | [開啟](../notebooks/20/20.3.ipynb) |

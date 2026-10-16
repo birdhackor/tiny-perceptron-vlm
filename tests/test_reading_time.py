@@ -247,6 +247,9 @@ def test_export_uses_estimates_for_each_page_and_stops_before_writing_stale_data
     monkeypatch.setattr(export_course, "DOCUMENTS", documents)
     # This test simulates the site builder; its optional distribution is not a CPU-test dependency.
     monkeypatch.setattr(export_course, "version", lambda package: "0.0.0-test")
+    # Asset verification has its own offline tests; this fixture only exercises reading-time metadata.
+    monkeypatch.setattr(export_course, "prepare_assets", lambda root: None)
+    monkeypatch.setattr(export_course, "stage_assets", lambda destination, prepared: None)
     (root / "course/lesson-index.json").write_text(json.dumps(index))
     (root / "notebooks/01").mkdir(parents=True)
     for item in index:

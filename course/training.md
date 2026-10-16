@@ -63,6 +63,8 @@ python scripts/train.py --task vision --device cpu
 
 接字表只看前一字；固定窗口 MLP 可以同時讀幾個字。先用相同短文與切分，分別保存更新前、更新後的代價，看看猜法是否改變。
 
+下方完整配方使用macOS／Linux的虛擬環境路徑`.venv/bin/python`。Windows PowerShell請換成`.venv\Scripts\python.exe`，並把建立資料夾的`mkdir -p outputs checkpoints`換成`New-Item -ItemType Directory -Force -Path outputs,checkpoints`；其餘模型參數與JSON檔名相同。
+
 預設資料是十二篇顏色與形狀短文。工具先去掉完全重複的文件、按整篇切分，再取窗口；種子 42 的訓練／驗證／測試是 9／1／2 篇。字表只看訓練側。MLP的`--context 3`表示看前三個字，`--width 16`讓每字查出16個特徵數字，中間層也使用16格。先建立輸出資料夾，再取得未更新的起點：
 
 ```bash
@@ -533,6 +535,8 @@ for path in paths:
 
 </details>
 
+不同輪數的訓練目標另見[14.13–14.15](chapters/14.md#14.13)：固定3輪末端CE與抽1／3／5輪末端CE是兩個機制配方；逐輪監督的產品配方另存。比較要記平均展開工作，不能只對齊更新次數。
+
 ## T.11 留下別人能核對的實驗紀錄
 
 隔一週回頭看「這次比較好了」，你可能忘了改哪個地方、用哪些題目。記錄要把材料、做法和結果接起來，才方便自己檢查或讓別人重做。
@@ -560,6 +564,8 @@ SHA-256是檔案指紋，Git commit是程式版本；兩者讓你取得同一份
 <summary>共同成品、成熟模型與完整歷史紀錄</summary>
 
 [第19章](chapters/19.md)追蹤我們自行訓練的共同模型及各階段載入的起點權重，也稱父權重，階段接續見[19.4](chapters/19.md#19.4)。v2已完成訓練、公開推論權重與固定最後測試；[19.12](chapters/19.md#19.12)列出能力及未達標項目，[公開CPU操作](../docs/selftrained/v2-public-cpu-commands.md)提供試用，[本機訓練指引](../docs/selftrained/TRAINING.md)用Git LFS保存的固定資料逐段接自己的訓練檢查點，不需要作者的私有雲端儲存空間。其結果與局部實驗分開。[第20章](chapters/20.md)是沿用成熟Qwen／Whisper的延伸，專用操作見[重訓指引](../docs/natural-assistant/v4/TRAINING.md)，上游能力不算成我們從零學會。
+
+第19章另有[三成品契約](chapters/19.md#19.13)與[共同家族切分](chapters/19.md#19.14)。新增Looped解題器與Jev式機率判斷服務從隨機權重學起，與既有MoE版本分開；正式訓練可用GPU，學生可下載完成權重，只跑短機制練習。新增產品的精確訓練／推論命令與固定版本，待正式驗收後回填。
 
 完整歷史結果在[實驗紀錄](../docs/course-experiments/README.md)。RAG、工具與推理報告保存各自的原始輸入、輸出及分母。工具要留實際執行結果，以及把結果放回對話後模型生成的回答；只生成請求文字，還沒有完成操作。
 

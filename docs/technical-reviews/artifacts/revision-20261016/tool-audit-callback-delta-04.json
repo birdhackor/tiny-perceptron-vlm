@@ -1,0 +1,148 @@
+{
+  "reviewer_task": "/root/tech_20261016_review_tools",
+  "created_at": "2026-10-16T05:50:59.395618+00:00",
+  "checked_files": [
+    {
+      "path": "docs/review-tools/incremental_revision.py",
+      "sha256": "a1935b683f4de0fabbfe272685dc07a22198cd7377345cbc79bcec5957b4ce4e"
+    },
+    {
+      "path": "docs/review-tools/baseline_replay.py",
+      "sha256": "c9dc98743b745300404a7e1663439db979392a7af2de6ac8cd767ffc3936c690"
+    },
+    {
+      "path": "docs/review-tools/phase7_review.py",
+      "sha256": "88b302984c7afd484b1009812f6a9ec7fc6edfd17470a8535eac2247dc912433"
+    },
+    {
+      "path": "docs/course-revision-20261016/tools/reader.py",
+      "sha256": "2672569f08f6b235249550244bc1fdf8223edada74b4ea3b5aa8aa295e80d23f"
+    },
+    {
+      "path": "docs/course-revision-20261016/tools/freeze_sources.py",
+      "sha256": "6de62176227ebf543eb79c2e5ba25294c156b1b842d4bbec4aaed85c5f0bbc80"
+    },
+    {
+      "path": "tests/test_incremental_revision_review.py",
+      "sha256": "17629dcae86c1e8acb80e8dabbd56a9f63017df7725342535e71c68e5d66ad89"
+    }
+  ],
+  "previous_exact_reconstructed_source": {
+    "path": "docs/course-revision-20261016/tool-snapshots/f0714d2dbe35adb3ca0b4a95be5d40d8a58e60eeeef0f2a86b7f9f9e4d93ce9d.py",
+    "sha256": "f0714d2dbe35adb3ca0b4a95be5d40d8a58e60eeeef0f2a86b7f9f9e4d93ce9d",
+    "provenance": "post-edit inverse patch with exact immutable03 SHA, not a pre-edit copy"
+  },
+  "changed_existing_functions": [
+    "audit_manifest"
+  ],
+  "unchanged_existing_functions": [
+    "require",
+    "sha",
+    "module",
+    "local",
+    "artifact",
+    "document",
+    "node",
+    "at",
+    "owner",
+    "reader_session",
+    "technical_reports",
+    "page_member",
+    "collection_seal",
+    "reader_closure",
+    "reported_issues",
+    "check_dispositions",
+    "check_active"
+  ],
+  "added_functions": [
+    "require_collected",
+    "review_seals"
+  ],
+  "exact_source_diff": "--- callback03-exact-reconstruction\n+++ current\n@@ -151,6 +151,37 @@\n     collection_role = proof.get(\"collection_role\", role)\n     require(collection_role in ROLES and ROLES.index(collection_role) >= ROLES.index(role), \"invalid followup phase\")\n     return sealed[proof[\"wave\"]].get(collection_role)\n+\n+\n+def review_seals(root, waves, selected):\n+    \"\"\"後補證據仍須核對實際收件階段，不回填已結束的早期簽封。\"\"\"\n+    sealed = {}\n+    preceding_wave_end = None\n+    for wave in waves:\n+        require(wave[\"id\"] not in sealed, \"duplicate review wave\")\n+        sealed[wave[\"id\"]] = {}\n+        previous_end = preceding_wave_end\n+        for role in ROLES:\n+            if role not in selected and role not in wave[\"seals\"]:\n+                continue\n+            seal = document(root, wave[\"seals\"][role])\n+            require(seal.get(\"role\") == role and seal.get(\"status\") == \"completed\", \"stage is incomplete\")\n+            require(at(seal[\"started_at\"]) <= at(seal[\"completed_at\"]), \"stage duration reversed\")\n+            if previous_end:\n+                require(at(seal[\"started_at\"]) >= previous_end, \"review stages overlapped\")\n+            previous_end = at(seal[\"completed_at\"])\n+            sealed[wave[\"id\"]][role] = seal\n+        preceding_wave_end = previous_end\n+    return sealed\n+\n+\n+def require_collected(proof, role, sealed, references):\n+    phase = collection_seal(proof, role, sealed)\n+    require(phase is not None, \"missing actual collection stage\")\n+    require(\n+        all(ref[\"sha256\"] in phase[\"report_sha256s\"] for ref in references),\n+        \"reports were not collected before stage closure\",\n+    )\n \n \n def reader_closure(root, proof, current, task, pid, reader_seal, sealed):\n@@ -454,21 +485,7 @@\n         selected = ROLES[:1] if stage == \"reader\" else ROLES[:2] if stage == \"technical\" else ROLES\n         waves = manifest.get(\"review_waves\", [])\n         require(waves, \"missing actual review chronology\")\n-        sealed = {}\n-        preceding_wave_end = None\n-        for wave in waves:\n-            require(wave[\"id\"] not in sealed, \"duplicate review wave\")\n-            sealed[wave[\"id\"]] = {}\n-            previous_end = preceding_wave_end\n-            for role in selected:\n-                seal = document(root, wave[\"seals\"][role])\n-                require(seal.get(\"role\") == role and seal.get(\"status\") == \"completed\", \"stage is incomplete\")\n-                require(at(seal[\"started_at\"]) <= at(seal[\"completed_at\"]), \"stage duration reversed\")\n-                if previous_end:\n-                    require(at(seal[\"started_at\"]) >= previous_end, \"review stages overlapped\")\n-                previous_end = at(seal[\"completed_at\"])\n-                sealed[wave[\"id\"]][role] = seal\n-            preceding_wave_end = previous_end\n+        sealed = review_seals(root, waves, selected)\n         for assignment in assignments[\"tasks\"]:\n             if assignment[\"role\"] not in selected:\n                 continue\n@@ -547,11 +564,7 @@\n                             reader_tasks,\n                         )\n                         require(not errors, key + \": \" + repr(errors))\n-                    seal = sealed[proof[\"wave\"]][role]\n-                    require(\n-                        all(ref[\"sha256\"] in seal[\"report_sha256s\"] for ref in proof[\"section_reports\"]),\n-                        \"section reviews were not collected before stage closure\",\n-                    )\n+                    require_collected(proof, role, sealed, proof[\"section_reports\"])\n                     continue\n                 require(proof.get(\"mode\") == \"review\", \"missing current role evidence: \" + pid + \"/\" + role)\n                 report = document(root, proof[\"report\"])\n@@ -611,10 +624,7 @@\n                 \"tests/test_incremental_revision_review.py\",\n             ):\n                 require(checked.get(name) == sha(local(root, name).read_bytes()), \"tool audit version stale: \" + name)\n-            require(\n-                audit_ref[\"report\"][\"sha256\"] in sealed[audit_ref[\"wave\"]][\"technical\"][\"report_sha256s\"],\n-                \"tool audit not sealed\",\n-            )\n+            require_collected(audit_ref, \"technical\", sealed, [audit_ref[\"report\"]])\n         check_dispositions(root, manifest, selected, live, task_roles, sealed)\n         if stage == \"all\":\n             dependency = document(root, manifest[\"dependency_audit\"])\n",
+  "preserved_audits": [
+    {
+      "path": "docs/course-revision-20261016/reviews/tool-audit-original.json",
+      "sha256": "be82bab34702b8887d7c918e6644d305e344b2210df9bf9cba0f85d96876ee6d",
+      "artifacts_unchanged": [
+        {
+          "path": "docs/technical-reviews/artifacts/revision-20261016/tool-audit-probes.py",
+          "sha256": "6156ec71e1baedeb04ef73529e7dd5a58305fc8a6ac2899d58a038f0ef09e703"
+        },
+        {
+          "path": "docs/technical-reviews/artifacts/revision-20261016/tool-audit-probes-results.json",
+          "sha256": "c564bfa2b78eec09c13b1d6700862b398ba15f140f68a4dc5dd141e2ee476080"
+        },
+        {
+          "path": "docs/technical-reviews/artifacts/revision-20261016/tool-audit-executions.json",
+          "sha256": "79d60c7c20cbf791ae0ee0476eceb56ab6eb0caa8212bacffee560ebe75de97e"
+        }
+      ]
+    },
+    {
+      "path": "docs/course-revision-20261016/reviews/tool-audit-callback-01.json",
+      "sha256": "e5fa339efb88c68b641ef7e7dcbb15dc48de1ff0667b33a151a2e8bd095bf677",
+      "artifacts_unchanged": [
+        {
+          "path": "docs/technical-reviews/artifacts/revision-20261016/tool-audit-callback-probes-01.py",
+          "sha256": "17c2e0e8c5971565b4dd5fb3beba3b5c4b2bc30345a672dce5949b75af7a2d63"
+        },
+        {
+          "path": "docs/technical-reviews/artifacts/revision-20261016/tool-audit-callback-probes-results-01.json",
+          "sha256": "e288e3a3f3f42590f9befb6899fa2da20d1629d350920689d50bd93cd18a9a98"
+        },
+        {
+          "path": "docs/technical-reviews/artifacts/revision-20261016/tool-audit-callback-executions-01.json",
+          "sha256": "f2d6dc192984f770a298a63245889d8c66d9488f2bc6ff5535a018180c2756f0"
+        },
+        {
+          "path": "docs/technical-reviews/artifacts/revision-20261016/tool-audit-callback-chain-01.json",
+          "sha256": "48c0db1925f48975671124c041901052ae38cb39159bb770e7f289eae3b02ff0"
+        }
+      ]
+    },
+    {
+      "path": "docs/course-revision-20261016/reviews/tool-audit-callback-02.json",
+      "sha256": "c21ea419b940748ac8d124e1d4e2a570aa0b56d38c19fc7ab8177052e4e75009",
+      "artifacts_unchanged": [
+        {
+          "path": "docs/technical-reviews/artifacts/revision-20261016/tool-audit-callback-probes-02.py",
+          "sha256": "07f96e763a64296ada8d99cfbae368d22df4507fe57917c61c1782bb727623bb"
+        },
+        {
+          "path": "docs/technical-reviews/artifacts/revision-20261016/tool-audit-callback-probes-results-02.json",
+          "sha256": "42ef85205d9225a8fdabb1c124e2b6724180a3a3f93480d823f7badd3883809c"
+        },
+        {
+          "path": "docs/technical-reviews/artifacts/revision-20261016/tool-audit-callback-executions-02.json",
+          "sha256": "139a022554d5cf7772556e0e8bcfe0ea7fe38a60c951e6f26c4c7fe29981eee1"
+        },
+        {
+          "path": "docs/technical-reviews/artifacts/revision-20261016/tool-audit-callback-chain-02.json",
+          "sha256": "6c45abeb6ed9f4acbf1b48f676ceafa7fcaeace78596c14ef0e446a3cb4ce91d"
+        }
+      ]
+    },
+    {
+      "path": "docs/course-revision-20261016/reviews/tool-audit-callback-03.json",
+      "sha256": "90c2dc8bc790b95953c8026e2d713fd68a84bbd9b64ba9a06f604563e7bcd719",
+      "artifacts_unchanged": [
+        {
+          "path": "docs/technical-reviews/artifacts/revision-20261016/tool-audit-callback-probes-03.py",
+          "sha256": "305b2e7a292143a2e03d6bd3fe10a802ecd16b28961b9c9d1806f89c990aa037"
+        },
+        {
+          "path": "docs/technical-reviews/artifacts/revision-20261016/tool-audit-callback-probes-results-03.json",
+          "sha256": "1618cee319d9bfcc8e8c8b542967510aa3456bca9ea096421fdf4683f6c1e2a7"
+        },
+        {
+          "path": "docs/technical-reviews/artifacts/revision-20261016/tool-audit-callback-executions-03.json",
+          "sha256": "2ffb15c0b567f474ce8786f3ccbf8ff54d79457cf3e3ab6a33f116255654a2d2"
+        },
+        {
+          "path": "docs/technical-reviews/artifacts/revision-20261016/tool-audit-callback-chain-03.json",
+          "sha256": "3746d47ed4413950e585ef790dae70e008458da712b3c275a7545d165cc3f046"
+        }
+      ]
+    }
+  ]
+}

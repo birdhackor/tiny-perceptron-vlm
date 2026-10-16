@@ -1302,6 +1302,13 @@ def check_active(root=ROOT, stage="all"):
         return None
     try:
         active = read_json(pointer)
+        if active.get("review_policy") == "tutorial_incremental_v2":
+            spec = importlib.util.spec_from_file_location(
+                "active_incremental_revision", root / "docs/review-tools/incremental_revision.py"
+            )
+            revision = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(revision)
+            return revision.check_active(root, active, stage)
         if active.get("review_policy") == "tutorial_composite_v1":
             spec = importlib.util.spec_from_file_location(
                 "active_composite_review", ROOT / "docs/review-tools/composite_review.py"

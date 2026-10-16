@@ -12,7 +12,7 @@
 
 ## 教材提供什麼
 
-20章與A／B／C支線，共287份逐課Notebook；加上閱讀指南、暖身、訓練操作與名詞頁，共313個編號小節。前段只用小矩陣、接字表、MLP與手寫注意力；後段才加入多token預測（MTP）、現代架構、Dense／MoE、長上下文、cache／SDPA、量化與蒸餾。每節聚焦一個問題，可以回跳，也不必一路訓練同一個模型。
+20章與A／B延伸及C推理計算單元，共312份逐課Notebook；加上閱讀指南、暖身、訓練操作與名詞頁，共338個編號小節。前段只用小矩陣、接字表、MLP與手寫注意力；後段才加入多token預測（MTP）、現代架構、Dense／MoE、長上下文、cache／SDPA、量化與蒸餾。每節聚焦一個問題，可以回跳，也不必一路訓練同一個模型。
 
 用幾個字看懂運作後，[7.17](course/chapters/07.md#7.17)解釋為什麼常先預訓練，再做後訓練；[第13章](course/chapters/13.md)逐步介紹偏好回饋、獎勵模型、PPO與DPO。指令遵循分開檢查內容、指定範圍、格式與停止；長上下文則分開討論容納長度、位置表示、計算成本與資訊使用。
 
@@ -22,9 +22,11 @@
 
 第一次讀可以直接從[1.1](course/chapters/01.md#1.1)開始。Python、tensor、機率、矩陣與梯度有按需暖身；想動手時再開啟同一節Notebook。各章的訓練入口集中在[操作頁](course/training.md)，來源與實測證據見[驗證範圍](docs/validation.md)。
 
+Thinking effort（思考投入）、Looped Transformer（循環深度）及Jev式機率判斷已納入必修，分別見[7.23](course/chapters/07.md#7.23)、[14.11](course/chapters/14.md#14.11)與[9.11](course/chapters/09.md#9.11)。C.1–C.5接在第7章後。第19章擴成[三成品路線](course/chapters/19.md#19.13)：既有MoE助理、有限文字Looped解題器、獨立機率判斷服務，再接Auto effort；新增產品的實測與固定下載版本待正式驗收後回填，不改寫v2歷史結果。
+
 ## 安裝與開啟 Notebook
 
-先安裝 [uv](https://docs.astral.sh/uv/getting-started/installation/) 與 Git。CPU 閱讀與練習：
+先安裝 [uv](https://docs.astral.sh/uv/getting-started/installation/) 與用來取得專案的[Git](https://git-scm.com/downloads)。CPU 閱讀與練習：
 
 ```bash
 git clone https://github.com/birdhackor/tiny-perceptron-vlm.git
@@ -51,12 +53,14 @@ Windows PowerShell 啟用指令是 `.venv\Scripts\Activate.ps1`。選擇 **Tiny 
 
 ## 最小流程
 
+先做一次通路檢查：第一行準備小段文字，第二行讓模型讀一小批題目、算預測與代價，再反向計算參數應往哪裡調。這裡先算方向，不更新模型中的可調數值（權重），也不保存訓練權重。
+
 ```bash
 python scripts/prepare_data.py --kind toy-text
 python scripts/train.py --task text --data data/generated/toy-text/train.jsonl
 ```
 
-預設只做一個 batch 的 forward/backward，不更新權重。正式訓練再明確加 `--train`；字元模型、多模態、風格與安全、偏好和蒸餾配方在[訓練操作](course/training.md)。[首批固定訓練資料](assets/training/README.md)以 Git LFS 發布，先用 `python scripts/fetch_training_assets.py --list` 查看名稱，再用 `python scripts/fetch_training_assets.py --asset NAME` 下載、核對並解包所選包；將`NAME`換成清單中的名稱。原始快取與權重仍放在被 Git 忽略的 `data/`、`checkpoints/`；分工見[資產管理](docs/asset-storage.md)。
+報告的`mode`應為`dry-run-no-weight-update`；逐步紀錄`history`第一筆的`loss`是有限數字、`grad_norm`也有限且大於0，表示這批題目的代價與更新方向能算出來。這只驗證通路，還沒有學會回答或通過新題。正式訓練再明確加 `--train`；字元模型、多模態、風格與安全、偏好和蒸餾配方在[訓練操作](course/training.md)。[首批固定訓練資料](assets/training/README.md)以 Git LFS 發布，先用 `python scripts/fetch_training_assets.py --list` 查看名稱，再用 `python scripts/fetch_training_assets.py --asset NAME` 下載、核對並解包所選包；將`NAME`換成清單中的名稱。原始快取與權重仍放在被 Git 忽略的 `data/`、`checkpoints/`；分工見[資產管理](docs/asset-storage.md)。
 
 已設定 Modal 與 Hugging Face 帳號時，可手動執行 GitHub Actions 的 **GPU training smoke test**，驗證 GPU 權重更新、HF checkpoint 上傳與下載續訓。帳號設定、時間限制與結果判讀見 [GPU 操作說明](docs/gpu-training.md)。
 
