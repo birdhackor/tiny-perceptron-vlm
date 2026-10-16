@@ -1,0 +1,159 @@
+{
+  "schema_version": 1,
+  "review_stage": "engineering_technical",
+  "product": "b_solver_and_training",
+  "reviewer_task": "/root/tech_20261016_19_15",
+  "author_tasks": [
+    "/root"
+  ],
+  "reviewer_context": "independent engineering follow-up; this task previously reviewed only frozen19.15, and that report remains unchanged",
+  "source_revision": "367147fb50649c3a093e6dbf3b5ff03fb579d1c3",
+  "verdict": "revise",
+  "summary": "CPU獨立核對的共享循環、每輪原輸入、三種CE、paired sampler及不中斷/恢復下一步均通過；可重現resume_best跨run/配方混入輸出而回報成功的工程缺陷。",
+  "checked_files": [
+    {
+      "path": "tiny_perceptron/lesson_products/data.py",
+      "sha256": "a26424b78d4ded7cb0be221b829725a15cdd5cf40a5bc9a5e811696b3ec1f4f5"
+    },
+    {
+      "path": "tiny_perceptron/lesson_products/model.py",
+      "sha256": "46506db31cc80bcd5d95b9b6b007d2d02e0880dcab397b5fc44daccaf0a65e54"
+    },
+    {
+      "path": "tiny_perceptron/lesson_products/training.py",
+      "sha256": "6938528eb000e1bbc9825159a16439a4b45caf17d2ce1a9062ab2430b9728059"
+    },
+    {
+      "path": "tiny_perceptron/lesson_products/train.py",
+      "sha256": "be11f2697f70ef5c3ffd525d518bfdcac5f1942ad7930f36cfed48d010084913"
+    },
+    {
+      "path": "docs/course-revision-20261016/PRODUCT-SPEC.md",
+      "sha256": "3e2641958a2ebfa4b3f0ebf0ccaa577bcab36f15bc3a624db407e523c940631c"
+    },
+    {
+      "path": "docs/lesson-products/data-v1-manifest.json",
+      "sha256": "272c82a15b88a2af83c3f395722462cb86ebd4ee31bfc26d3a9ebca54bad1c71"
+    },
+    {
+      "path": "docs/lesson-products/data-v1-token-audit.json",
+      "sha256": "65b6a4be0902f4e7841c8e7d195fa84031d2010523489d9305ea0f86f76af466"
+    },
+    {
+      "path": "docs/lesson-products/data-v1-generation-receipt.json",
+      "sha256": "54e2b7616974ab4a89cbfa26c7f5b1853b91fe9cc9c0fe8dead2ccf808e76fe8"
+    },
+    {
+      "path": "docs/lesson-products/jobs/mechanism-fixed3-v1.json",
+      "sha256": "0427300d7ad13dd7939c2d66c7a5e9559aa1ced914c9a86431167f7d78ad099a"
+    },
+    {
+      "path": "docs/lesson-products/jobs/mechanism-odd135-v1.json",
+      "sha256": "a45b6c1444e0d0a06a5ee210b9840c4ada5a83846f450e25efa63d0037f4432e"
+    },
+    {
+      "path": "docs/lesson-products/jobs/train-b-v1.json",
+      "sha256": "bebcf11e6e0d7ee39f559f9e427e71608d0d21e49ab1a8ca4928676e41f74625"
+    },
+    {
+      "path": "docs/lesson-products/jobs/train-c-v1.json",
+      "sha256": "78ce92d13d40465ea25b782fa43bf31d59975c42a6c8e5a6a097acee2495f64a"
+    },
+    {
+      "path": "scripts/lesson_products/modal_runner.py",
+      "sha256": "79cbec19d0b061afe7686fe32bb673aa0fdd1c5f18d8458f3b001255c31ba5cc"
+    },
+    {
+      "path": "tests/test_lesson_products.py",
+      "sha256": "d06a2f32887075feddc3eab9fa71c9a16b7df34d69a83fea5cee4fd1e8ad9803"
+    },
+    {
+      "path": "tests/test_lesson_products_runner.py",
+      "sha256": "f254e8024784fefb8022c3c8ac5e36f32e040fc5fb33bcce46003e9f4f5f7f64"
+    }
+  ],
+  "issues": [
+    {
+      "id": "E-B-1",
+      "status": "open",
+      "severity": "medium",
+      "location": "tiny_perceptron/lesson_products/train.py:90-96;130-132;171-177",
+      "title": "resume_best未綁同run與監督配方，會靜默匯出其他run的權重",
+      "details": "last的metadata驗product/mode/data/tokenizer/depth_weights，但resume_best只驗step與data_manifest_sha256。只要另一B checkpoint有相同step與資料hash，就能通過；其mode、seed、initial_weights_sha256、config/tokenizer、best_key並未與last對上。若續訓一小段沒有創造更好的policy key，foreign best直接成為model.pt，而training-receipt仍宣稱last run的mode/seed/initial hash。這會污染成品或機制配方歸屬，並不是純記錄格式問題。",
+      "reproduction": "見engineering-solver-execution.json的negative_cross_run_resume_best。fixture last為multi/seed301，best為odd/seed999，step同為20、data同。用真實train入口續1個CPU update，policy fixture故意固定低於原best來隔離檢查分支。入口成功回傳mode=multi,seed301，匯出hash卻精確等於odd/seed999的best。",
+      "expected": "resume_best必須與last的同一訓練血緣／配方／tokenizer／config一致，且對應last儲存的原policy最佳checkpoint；錯誤配對應在任何續訓更新前拒絕。",
+      "observed": "錯誤checkpoint被接受並原樣匯出，actual selected hash=a32d46b1bb05825705a88f36858464d4769158345267c0eddc4be01cfa2956c6；入口仍回報multi/seed301。",
+      "suggested_minimal_fix": "在last metadata保存best checkpoint的固定identity（至少權重hash及run/initial/code-data-tokenizer-config/mode/seed契約），resume_best驗證完整配對；加錯誤mode/seed/initial和同step不同權重的負例。保留本原始判斷，修後另存複查。",
+      "scope": "影響resume入口；本輪fresh jobs沒有使用resume_best，這個缺陷不等於已證明fresh訓練失敗。"
+    }
+  ],
+  "verified": [
+    {
+      "id": "V1",
+      "finding": "47673筆B資料獨立重算兩盒／加法真值、family與穩定split；B核心38519可觀測文字及token序列無跨組重複。原始B/C檔案hash和生成manifest吻合；C中共享B家族的split一致。",
+      "evidence_check": "data_truth_and_isolation"
+    },
+    {
+      "id": "V2",
+      "finding": "B只有一個Block實例被調用5次；每次入block的張量逐項精確等於上一hidden+0.5*原embedding/position，從隨機nn模組開始，答案頭19類。",
+      "evidence_check": "shared_block_and_original_each_loop"
+    },
+    {
+      "id": "V3",
+      "finding": "multi的1..5各深度CE加權平均及完整optimizer更新符合獨立計算；fixed3僅第3讀出直接CE，odd的1/3/5每次僅末端讀出直接CE。中間hidden仍有間接反傳。",
+      "evidence_check": [
+        "multi_depth_weighted_CE_and_update",
+        "supervised_positions"
+      ]
+    },
+    {
+      "id": "V4",
+      "finding": "同seed的小fixture fixed3/odd各9更新有相同初始權重hash、完全相同minibatch indices與最後sampler RNG；odd深度抽樣沒有改變batch schedule。",
+      "evidence_check": "paired_mechanism_seed_and_sampler"
+    },
+    {
+      "id": "V5",
+      "finding": "真正先走2步、存checkpoint，再比較不中斷第3步與restore第3步；CPU上model、AdamW state、sampler RNG、Torch RNG及下一批random draws精確相同。此測試比僅比較兩個restore fork更強。",
+      "evidence_check": "uninterrupted_vs_restored_next_step"
+    },
+    {
+      "id": "V6",
+      "finding": "train入口靜態只讀train/policy；fixture動態亦只請求這兩組，optimizer實際只收到標記train的資料。policy_report依boxes主指標選權重，分1..4事件長度及sum報表；沒有執行real test模型推論。",
+      "evidence_check": "negative_cross_run_resume_best.read_splits/optimizer_updated_splits; train.py:16-36,105-106,149-154"
+    },
+    {
+      "id": "V7",
+      "finding": "兩個mechanism jobs除mode外完全相同：seed8159、max_steps1500、batch128、lr.001、train550秒。產品B是multi另seed7421；產品門檻仍為預先要求。",
+      "evidence_check": "mechanism_jobs_static_pair"
+    }
+  ],
+  "execution": {
+    "path": "docs/lesson-products/reviews/engineering-solver-execution.json",
+    "sha256": "1e4cbadedbaa99a315682ec65f2f5af8a8665e9abc23859582b0a7fdb16951ed",
+    "command": "PYTHONPATH=. .venv/bin/python /workspace/work/curriculum-20261016/engineering-solver/check.py",
+    "script_local_path": "/workspace/work/curriculum-20261016/engineering-solver/check.py",
+    "script_sha256": "c561e017bd2c1dde647da58e6cc071021f9d0087c1d32dd8a0925fc2141e1b5d",
+    "environment": {
+      "python": "3.13.5",
+      "torch": "2.14.1+cpu",
+      "device": "cpu",
+      "threads": "1",
+      "platform": "Linux-6.18.44-x86_64-with-glibc2.41"
+    },
+    "result": {
+      "passed_checks": 7,
+      "reproduced_defects": 1
+    },
+    "test_authorship": "獨立編寫fixture/比較與負例；閱讀但未將作者既有測試的pass算作本人驗證。"
+  },
+  "limits": [
+    "這是B/訓練的工程技術審閱，不是新canonical課文pass；原technical-19.15-original.json未修改。",
+    "沒有付費工作、正式大訓練、外部寫入、模型下載、Git提交或產品code修改；只以CPU小fixture做數十次更新。",
+    "沒有在real calibration/policy/test/shift題執行模型或用成績調參；全量讀取只核對生成真值／隔離與hash。",
+    "未驗GPU deterministic kernel／CUDA RNG續訓、速度、顯存或CPU/GPU跨裝置精確相等；CPU續訓證據不能代替它們。",
+    "正式核心兩盒>=90%、算術次要>=85%均未驗收。現成test分母2956盒題(1478家族)、42算術題(10家族)，家族內衍生題相關，未提供統計區間。",
+    "相同max_steps與wall cap不能保證實際1500更新。正式paired機制比較須核對actual last_step和起始hash；兩個policy-best可能selected_step不同，不能直接以兩個model.pt宣稱同更新比較。eval入口尚未完成，這是後續驗收要求。",
+    "checkpoint基礎restore在本CPU配置精確，但train API未把batch_size綁入checkpoint metadata；改batch size會改後續minibatch排程，若要求精確續訓應固定並驗證同訓練設定。",
+    "C僅檢查共享資料血緣／檔案hash與共用checkpoint程式；未對C的候選架構或校準作全面獨立工程審查。"
+  ]
+}

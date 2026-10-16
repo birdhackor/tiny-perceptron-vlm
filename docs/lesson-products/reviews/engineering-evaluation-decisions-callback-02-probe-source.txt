@@ -1,0 +1,134 @@
+from pathlib import Path
+from collections import Counter
+from unittest.mock import patch
+import tempfile,json,hashlib,math,platform,copy,torch
+from tiny_perceptron.lesson_products import evaluation as E
+from tiny_perceptron.lesson_products import data as D
+from tiny_perceptron.lesson_products import model as M
+from tiny_perceptron.lesson_products import training as T
+from tiny_perceptron.lesson_products import inference as I
+R=Path.cwd();scratch=Path(tempfile.mkdtemp(prefix='MOCK-only-',dir='/workspace/work/curriculum-20261016/engineering-evaluation-decisions-callback-02'));torch.set_num_threads(1);torch.manual_seed(193016)
+def sha(p):return hashlib.sha256(p.read_bytes()).hexdigest()
+eval_sha=sha(R/'tiny_perceptron/lesson_products/evaluation.py');result={'reviewer_task':'/root/tech_20261016_19_16','reviewer_context':'informed_engineering_new_scope','environment':{'python':platform.python_version(),'torch':torch.__version__,'device':'cpu'},'evaluation_sha256':eval_sha,'checks':{},'reproduced_issues':[]}
+def check(k,v,details=None):assert v,(k,details);result['checks'][k]={'passed':True,'details':details}
+def rejected(call):
+ try:call()
+ except (ValueError,FileExistsError,KeyError):return True
+ return False
+def save(p,v):p.parent.mkdir(parents=True,exist_ok=True);p.write_text(json.dumps(v,ensure_ascii=False,indent=2))
+def independent_metrics(logits,labels):
+ ces=[];bs=[]
+ for z,gold in zip(logits,labels):
+  z=[float(x) for x in z];maxz=max(z);ws=[math.exp(x-maxz) if math.isfinite(x) else 0. for x in z];den=sum(ws);p=[v/den for v in ws];ces.append(math.log(den)+maxz-z[gold]);bs.append(sum((x-int(i==gold))**2 for i,x in enumerate(p)))
+ return sum(ces)/len(ces),sum(bs)/len(bs)
+# Completely artificial data directory; never read actual heldout files.
+data=scratch/'data';data.mkdir();save(data/'manifest.json',{'version':'MOCK-ENGINEERING-ONLY','files':{}});data_sha=sha(data/'manifest.json')
+tok=M.Tokenizer();cfg=M.Config(len(tok),width=8,heads=2,ff=16,c_layers=1)
+bdir=scratch/'b';cdir=scratch/'c'
+for product,folder,cls in [('b',bdir,M.LoopedSolver),('c',cdir,M.CandidateScorer)]:
+ folder.mkdir();net=cls(cfg);torch.save(net.state_dict(),folder/'model.pt');cfg.save(folder/'config.json');tok.save(folder/'tokenizer.json');digest=T.state_digest(net.state_dict())
+ receipt={'product':product,'mode':'multi' if product=='b' else 'candidate','weights_changed':True,'initial_weights_sha256':'1'*64,'selected_weights_sha256':digest,'resume_verification':{'exact_next_step':True},'data_manifest_sha256':data_sha,'environment':{'gpu':'NVIDIA L4 (fictional authorized fixture; NO GPU run)','torch':torch.__version__,'python':platform.python_version(),'device':'MOCK'},'scope':'Fictional CPU engineering fixture, not evidence of training.'};save(folder/'training-receipt.json',receipt)
+mechanisms={};initial=M.LoopedSolver(cfg).state_dict()
+for mode in ('fixed3','odd'):
+ folder=scratch/mode;folder.mkdir();torch.save({'config':cfg.__dict__,'model':initial,'metadata':{'mode':mode,'data_manifest_sha256':data_sha,'initial_weights_sha256':T.state_digest(initial),'step':20,'seed':99}},folder/'last.pt');save(folder/'training-receipt.json',{'scope':'Fictional engineering fixture; no training'});mechanisms[mode]=folder
+# Four complete eligible B cases per split, all model outputs mocked below.
+state_index={}
+def bs(split):
+ shift={'policy':0,'test':1,'wording_shift':2,'entity_shift':3,'long_shift':4}.get(split,0)
+ worlds=[{'task':'boxes','a':shift,'b':7,'events':[('A',2)],'query':'A'},{'task':'boxes','a':shift,'b':6,'events':[('swap',0),('A',3)],'query':'B'},{'task':'sum','x':shift,'y':1,'z':2},{'task':'sum','x':shift,'y':2,'z':3}]
+ rows=[]
+ for i,w in enumerate(worlds):
+  state=D.render(w);state_index[state]=i;row={'id':f'MOCK-{split}-B{i}','family_id':f'MOCK-{split}-family{i}','split':split,'state':state,'task':w['task'],'world':w,'gold':D.answer(w)}
+  if w['task']=='boxes':row['strata']=D.box_strata(w)
+  rows.append(row)
+ return rows
+rows_by={('b',s):bs(s) for s in ('policy','test','wording_shift','entity_shift','long_shift')}
+def cs(split):
+ worlds=[{'task':'card','application':'123456','family_id':'MOCK-card'},{'task':'address','family_id':'MOCK-address'},{'task':'sum','x':0,'y':1,'z':2,'family_id':'MOCK-sum'}]
+ rows=[]
+ for w in worlds:
+  for row in D.c_rows(w,split):row['id']=f'MOCK-{split}-C{len(rows)}';rows.append(row)
+ return rows
+for s in ('calibration','test','wording_shift'):rows_by[('c',s)]=cs(s)
+read_log=[];phase='select';active_output=None
+
+def read_mock(directory,product,split):
+ assert Path(directory)==data
+ if phase=='select':assert (product,split) in (('c','calibration'),('b','policy')),('unexpected-selection-split',product,split)
+ else:assert active_output.with_suffix('.started.json').is_file(),'prediction reads preceded start marker'
+ read_log.append((phase,product,split));return copy.deepcopy(rows_by[(product,split)])
+
+def b_mock(product,rows,depths=(1,3,5)):
+ out={}
+ for depth in depths:
+  z=torch.full((len(rows),19),-4.)
+  for i,row in enumerate(rows):
+   correct=(depth==3 and i in (0,3)) or (depth==1 and i==3) or (depth==5 and i==0)
+   picked=row['gold'] if correct else (row['gold']+1)%19;z[i,picked]=4.
+  out[depth]=z
+ return out
+
+def c_mock(product,rows):
+ width=max(len(r['candidates']) for r in rows);z=torch.full((len(rows),width),-float('inf'))
+ for i,row in enumerate(rows):
+  cand=row['candidates'];q=row['question'];scores={c:0. for c in cand}
+  if 'id' not in row:
+   idx=state_index[row['state']];chosen=('boxes' if idx==0 else 'card' if idx==1 else 'sum') if q=='choice' else ('no' if idx==2 else 'yes');scores[chosen]=8.
+  elif row['split']=='calibration':
+   g=row['gold'];wrong=next(c for c in cand if c!=g)
+   if q=='choice':scores[g]=2.;scores[wrong]=3. if i%4==0 else 0.
+   elif q=='info':scores[g]=4.
+   else:scores[wrong]=5.;scores[g]=-2.
+  else:
+   g=row['gold'];scores[g]=6.
+   if row['id']==f"MOCK-{row['split']}-C0":scores[g]=0.;scores[next(c for c in cand if c!=g)]=200.
+   elif row['task']=='address' and q in ('choice','info'):scores={c:0. for c in cand}
+  z[i,:len(cand)]=torch.tensor([scores[c] for c in cand])
+ return z
+
+def mechanism_predict(model,encoded,loops=3,batch_size=128):return b_mock(None,encoded['rows'],(loops,))[loops]
+latency_calls=[]
+def solve_mock(product,state,loops=3):return {'seconds':loops*.01,'answer':0,'loops':loops,'stress_length':False}
+def auto_mock(b,c,state,effort='auto',max_loops=5):
+ idx=state_index[state];accepted=idx in (0,3);task='boxes' if idx==0 else 'sum';depth={'low':1,'medium':3,'high':5}.get(effort)
+ if depth is None:depth=I.rule_depth(b.auto_policy,task,I.parse_state(state).get('event_count',0))
+ latency_calls.append({'state':state,'effort':effort,'accepted':accepted});return {'seconds':.2+(depth*.01 if accepted else 0.),'c_seconds':.2,'b_loops':depth if accepted else 0}
+
+# Informed callback: private best checkpoints actually pair with model/config/tokenizer/receipt.
+result['reviewer_context']='informed_callback';result['reproduced_issues']=[]
+for product,folder,cls in [('b',bdir,M.LoopedSolver),('c',cdir,M.CandidateScorer)]:
+ net=cls(cfg);net.load_state_dict(torch.load(folder/'model.pt',weights_only=True));receipt=json.loads((folder/'training-receipt.json').read_text());receipt.update(selected_step=20,run_identity='MOCK-'+product+'-SELECTED-RUN',tokenizer_sha256=sha(folder/'tokenizer.json'));save(folder/'training-receipt.json',receipt)
+ meta={'product':product,'mode':receipt['mode'],'data_manifest_sha256':data_sha,'step':receipt['selected_step'],'run_identity':receipt['run_identity'],'tokenizer_sha256':receipt['tokenizer_sha256'],'initial_weights_sha256':receipt['initial_weights_sha256'],'best_weights_sha256':receipt['selected_weights_sha256'],'best_step':20,'best_key':[.5,-.1],'seed':99,'depth_weights':[1]*5,'training_recipe':{'batch_size':4,'learning_rate':.001},'reference_depth':5 if product=='b' else 0}
+ T.checkpoint(folder/'best.pt',net,torch.optim.AdamW(net.parameters(),lr=.001),torch.Generator().manual_seed(99),meta)
+for mode,folder in mechanisms.items():
+ value=torch.load(folder/'last.pt',weights_only=True);net=M.LoopedSolver(cfg);net.load_state_dict(value['model']);meta=value['metadata'];meta.update(product='b',tokenizer_sha256=sha(bdir/'tokenizer.json'),training_recipe={'batch_size':4,'learning_rate':.001},depth_weights=[1]*5,run_identity='MOCK-MECHANISM-'+mode);(folder/'tokenizer.json').write_bytes((bdir/'tokenizer.json').read_bytes());T.checkpoint(folder/'last.pt',net,torch.optim.AdamW(net.parameters(),lr=.001),torch.Generator().manual_seed(99),meta)
+paired={p:{'selected_weights_sha256':json.loads((d/'training-receipt.json').read_text())['selected_weights_sha256'],'best_checkpoint_sha256':sha(d/'best.pt'),'tokenizer_sha256':sha(d/'tokenizer.json')} for p,d in [('b',bdir),('c',cdir)]}
+check('fixtures_have_actually_matching_private_best',all(T.state_digest(torch.load(d/'best.pt',weights_only=True)['model'])==T.state_digest(torch.load(d/'model.pt',weights_only=True))==paired[p]['selected_weights_sha256'] for p,d in [('b',bdir),('c',cdir)]),paired)
+# Only the two added raw-reversal lines are under callback02 review; prior35 assertions are not rerun.
+prior=R/'docs/lesson-products/reviews/engineering-evaluation-decisions-callback-01.json';prior_report=json.loads(prior.read_text());source=R/'tiny_perceptron/lesson_products/evaluation.py';text=source.read_text();removed=[line for line in text.splitlines(keepends=True) if 'reversed_by_index' in line or '"reverse_selected"' in line];reduced=''.join(line for line in text.splitlines(keepends=True) if line not in removed);prior_eval=next(x['sha256'] for x in prior_report['checked_files'] if x['path']=='tiny_perceptron/lesson_products/evaluation.py')
+check('exactly_two_added_lines_unchanged_prior_method',len(removed)==2 and hashlib.sha256(reduced.encode()).hexdigest()==prior_eval,{'added_lines':removed,'reduced_source_sha256':hashlib.sha256(reduced.encode()).hexdigest(),'prior_source_sha256':prior_eval})
+reverse_observed=[]
+def capture_c(product,rows):
+ z=c_mock(product,rows)
+ if rows and all(row['question']=='choice' for row in rows) and all(row.get('split')=='test' for row in rows):
+  for row,scores in zip(rows,z):reverse_observed.append({'id':row['id'],'candidates':row['candidates'],'scores':scores[:len(row['candidates'])].tolist(),'actual_selected':min(zip(row['candidates'],scores.tolist()),key=lambda pair:(-pair[1],pair[0]))[0]})
+ return z
+with patch.object(E,'read_dataset',read_mock),patch.object(E,'b_logits',b_mock),patch.object(E,'c_logits',capture_c),patch.object(E,'predict',mechanism_predict),patch.object(E,'auto_solve',auto_mock),patch.object(I.Product,'solve',solve_mock):
+ freeze=scratch/'settings.json';E.select_settings(data,bdir,cdir,freeze,mechanism_directories=mechanisms)
+ phase='evaluate';active_output=scratch/'MOCK-reorder-output.json';report=E.evaluate_frozen(freeze,data,bdir,cdir,active_output,mechanisms)
+raw_path=active_output.with_suffix('.predictions.jsonl');lines=raw_path.read_text().splitlines(keepends=True);core_lines=[line for line in lines if (row:=json.loads(line))['product']=='c' and row['split']=='test'];core=[json.loads(line) for line in core_lines];choices=[row for row in core if row['question']=='choice'];others=[row for row in core if row['question']!='choice'];actual={row['id']:row['actual_selected'] for row in reverse_observed}
+check('core_C_reverse_is_actual_rerun_output',len(actual)==len(choices) and all(row['reverse_selected']==actual[row['id']] for row in choices),{'actual_reverse_calls_rows':len(reverse_observed),'raw_choice_rows':len(choices)})
+check('nonChoice_reverse_is_null_not_counted',all('reverse_selected' in row and row['reverse_selected'] is None for row in others),{'info_rubric_rows':len(others)})
+consistent=sum(row['selected']==row['reverse_selected'] for row in choices);count=len(choices);ratio=consistent/count
+check('raw_alone_recomputes_primary_reorder_count_ratio_gate',report['c_reorder']=={'count':count,'consistent':consistent,'consistency':ratio} and report['gates']['c_reorder']==(ratio>=.99),{'raw_recomputed':{'count':count,'consistent':consistent,'consistency':ratio},'report':report['c_reorder'],'gate':report['gates']['c_reorder']})
+different=[{'id':row['id'],'selected':row['selected'],'reverse_selected':row['reverse_selected']} for row in choices if row['selected']!=row['reverse_selected']]
+check('actual_reverse_difference_is_preserved',bool(different) and ratio<.99,{'different_cases':different,'purpose':'Deliberately position-sensitive synthetic scorer; prevents silently assuming reverse selected equals original.'})
+check('raw_fingerprint_includes_new_fields',sha(raw_path)==report['predictions']['sha256'] and raw_path.stat().st_size==report['predictions']['bytes'],{'sha256':sha(raw_path),'bytes':raw_path.stat().st_size})
+base=R/'docs/lesson-products/reviews';rawcopy=base/'engineering-evaluation-decisions-callback-02-MOCK-core-C.jsonl'
+with rawcopy.open('x') as f:f.writelines(core_lines)
+result['scope']='Informed two-line raw-reorder callback only. Matched fictional checkpoints and all model predictions/timings mocked. No actual product data or trained heldout prediction, optimizer/GPU/paid/external call. Prior35 checks referenced, not rerun.'
+result['actual_reverse_fixture_choices']=reverse_observed;result['prior_callback']={'path':str(prior.relative_to(R)),'sha256':sha(prior),'verdict':prior_report['verdict'],'prior_source_sha256':prior_eval,'prior35_checks_rerun':False};result['mock_core_C_raw']={'path':str(rawcopy.relative_to(R)),'sha256':sha(rawcopy),'rows':len(core),'scope':'Exact core C lines copied from mock evaluation raw file, not formal model results.'};result['resolved_issue_ids']=['EVAL-RECEIPT-01','EVAL-FREEZE-01','C-DATA-01'];result['command']='.venv/bin/python - < /workspace/work/curriculum-20261016/engineering-evaluation-decisions-callback-02/probe.py';result['probe_script_sha256']=sha(Path('/workspace/work/curriculum-20261016/engineering-evaluation-decisions-callback-02/probe.py'))
+check('current_evaluation_source_unchanged_during_short_probe',sha(source)==eval_sha)
+out=base/'engineering-evaluation-decisions-callback-02-execution.json'
+with out.open('x') as f:json.dump(result,f,ensure_ascii=False,indent=2);f.write('\n')
+print(json.dumps({'assertions':len(result['checks']),'evaluation_sha256':eval_sha,'raw_count':count,'raw_consistent':consistent,'raw_ratio':ratio,'output':str(out),'prior35_rerun':False},ensure_ascii=False,indent=2))

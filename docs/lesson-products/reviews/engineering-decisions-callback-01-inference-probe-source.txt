@@ -1,0 +1,49 @@
+from pathlib import Path
+import hashlib,json,math,platform,itertools,torch
+from tiny_perceptron.lesson_products.inference import Product,check_manifest,parse_state
+from tiny_perceptron.lesson_products import model as M
+from tiny_perceptron.lesson_products.data import CANDIDATES,MEANINGS
+R=Path.cwd();torch.set_num_threads(1);torch.manual_seed(192818)
+def sha(p):return hashlib.sha256(p.read_bytes()).hexdigest()
+source=R/'tiny_perceptron/lesson_products/inference.py';source_sha=sha(source)
+r={'reviewer_task':'/root/tech_20261016_19_16','environment':{'python':platform.python_version(),'torch':torch.__version__,'device':'cpu'},'inference_sha256':source_sha,'checks':{}}
+def check(k,v,details=None):assert v,(k,details);r['checks'][k]={'passed':True,'details':details}
+folder=Path('/workspace/work/curriculum-20261016/engineering-decisions-callback-01/package');p=Product(folder,'c');manifest=json.loads((folder/'artifact-manifest.json').read_text())
+check('C_manifest_with_calibration_loads',True,{'required_files':sorted(manifest['files'])})
+def rejected(call):
+ try:call()
+ except ValueError:return True
+ return False
+changed={**manifest,'files':{k:v for k,v in manifest['files'].items() if k!='calibration.json'}};(folder/'artifact-manifest.json').write_text(json.dumps(changed));check('C_requires_manifest_bound_calibration',rejected(lambda:Product(folder,'c')));(folder/'artifact-manifest.json').write_text(json.dumps(manifest))
+(folder/'auto-policy.json').write_text('{}');check('C_rejects_unbound_extra_policy',rejected(lambda:Product(folder,'c')));(folder/'auto-policy.json').unlink()
+calib=folder/'calibration.json';original=calib.read_bytes();calib.write_text('{}');check('C_rejects_calibration_fingerprint_change',rejected(lambda:Product(folder,'c')));calib.write_bytes(original)
+# Corresponding B mandatory-policy contract, still only random weights and no solve or training.
+bfolder=folder.parent/'package-b';bfolder.mkdir(exist_ok=True);tok=M.Tokenizer();cfg=M.Config(len(tok),width=16,heads=4,ff=32,c_layers=1);net=M.LoopedSolver(cfg);torch.save(net.state_dict(),bfolder/'model.pt');cfg.save(bfolder/'config.json');tok.save(bfolder/'tokenizer.json');(bfolder/'auto-policy.json').write_text(json.dumps({'version':1,'sum_depth':3,'low_max_events':1,'medium_max_events':3}))
+bmanifest={'version':1,'product':'b','files':{x.name:{'sha256':sha(x),'bytes':x.stat().st_size} for x in bfolder.iterdir() if x.is_file() and x.name!='artifact-manifest.json'}};(bfolder/'artifact-manifest.json').write_text(json.dumps(bmanifest));Product(bfolder,'b');check('B_manifest_with_policy_loads',True)
+changed={**bmanifest,'files':{k:v for k,v in bmanifest['files'].items() if k!='auto-policy.json'}};(bfolder/'artifact-manifest.json').write_text(json.dumps(changed));check('B_requires_manifest_bound_policy',rejected(lambda:Product(bfolder,'b')));(bfolder/'artifact-manifest.json').write_text(json.dumps(bmanifest))
+(bfolder/'calibration.json').write_text('{}');check('B_rejects_unbound_extra_calibration',rejected(lambda:Product(bfolder,'b')));(bfolder/'calibration.json').unlink()
+# Latest real random scorer probabilities must match a direct forward for each typed question.
+for q in CANDIDATES:
+ state='三數加法;x=?;y=?;z=0';j=p.judge(state,q);cs=list(CANDIDATES[q]);tokens=M.padded([tok.encode(state,q,c) for c in cs],cfg.max_length)
+ with torch.inference_mode():expected=(p.model(tokens).float()/j['temperature']).softmax(-1).tolist()
+ assert all(abs(j['probabilities'][c]-v)<1e-7 for c,v in zip(cs,expected));assert j['meanings']=={c:MEANINGS[c] for c in cs};assert abs(sum(j['probabilities'].values())-1)<1e-6
+check('latest_real_scorer_three_typed_outputs',True,{'types':['choice','info','rubric'],'temperature_scaling':'applied before softmax','scope':'random tiny CPU fixture, no model quality result'})
+class Probe(torch.nn.Module):
+ def __init__(self,values):super().__init__();self.values=values;self.calls=0
+ def forward(self,tokens):
+  self.calls+=1;keys={tuple(tok.ids[ch] for ch in text):k for k,text in MEANINGS.items()};out=[]
+  for row in tokens.tolist():
+   sep=max(i for i,x in enumerate(row) if x==2);meaning=keys[tuple(x for x in row[sep+1:] if x)];out.append(self.values.get(meaning,0.))
+  return torch.tensor(out)
+p.model=Probe({});chosen={p.judge('地址填寫規則','choice',perm)['selected'] for perm in itertools.permutations(CANDIDATES['choice'])};check('latest_exact_ties_all_720_semantically_stable',chosen=={min(CANDIDATES['choice'])},{'permutations':720,'selected':sorted(chosen)})
+p.model=Probe({'yes':5.,'no':-5.,'card':7.});j=p.judge('三數加法;x=?;y=?;z=?','info');k=p.judge('三數加法;x=0;y=0;z=0','choice');check('latest_parser_does_not_override_scorer',j['selected']=='yes' and k['selected']=='card',{'intentionally_wrong_fixture_outputs':[j['selected'],k['selected']],'forward_calls':p.model.calls,'parse_only':parse_state('三數加法;x=?;y=?;z=?')})
+for temp in (0.,-1.,float('nan'),101.,float('inf')):
+ p.calibration['temperatures']['info']=temp;assert rejected(lambda:p.judge('地址填寫規則','info'))
+check('latest_invalid_temperatures_rejected',True,{'values':['0','-1','NaN','101','Infinity']})
+for q,cs in [('choice',['card','address']),('choice',['card','card','none']),('info',['card','none']),('unknown',['yes','no'])]:assert rejected(lambda:p.judge('地址填寫規則',q,cs))
+check('latest_typed_candidate_contract_rejects_invalid',True,{'cases':4})
+check('latest_source_unchanged_during_execution',sha(source)==source_sha)
+r['command']='.venv/bin/python - < /workspace/work/curriculum-20261016/engineering-decisions-callback-01/inference_latest.py';r['probe_script_sha256']=sha(Path('/workspace/work/curriculum-20261016/engineering-decisions-callback-01/inference_latest.py'));r['scope']='Offline random fixtures only; no optimizer updates or formal train/test calls.'
+out=R/'docs/lesson-products/reviews/engineering-decisions-callback-01-inference-execution.json'
+with out.open('x') as f:json.dump(r,f,ensure_ascii=False,indent=2);f.write('\n')
+print(json.dumps({'checks':len(r['checks']),'all_passed':True,'inference_sha256':source_sha,'output':str(out)},ensure_ascii=False,indent=2))

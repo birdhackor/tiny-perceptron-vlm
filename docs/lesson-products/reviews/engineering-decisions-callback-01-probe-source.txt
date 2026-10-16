@@ -1,0 +1,127 @@
+from pathlib import Path
+from collections import Counter,defaultdict
+import itertools,json,hashlib,math,platform,time,torch
+from tiny_perceptron.lesson_products import data as D
+from tiny_perceptron.lesson_products import model as M
+from tiny_perceptron.lesson_products.inference import Product,parse_state
+R=Path.cwd();start=time.monotonic();torch.set_num_threads(1);torch.manual_seed(192817)
+original=R/'docs/lesson-products/reviews/engineering-decisions-original.json';original_sha=hashlib.sha256(original.read_bytes()).hexdigest()
+result={'reviewer_task':'/root/tech_20261016_19_16','reviewer_context':'informed_callback','environment':{'python':platform.python_version(),'torch':torch.__version__,'device':'cpu','threads':1},'checks':{}}
+def sha(p):return hashlib.sha256(p.read_bytes()).hexdigest()
+def check(name,passed,details=None):
+ assert passed,(name,details)
+ result['checks'][name]={'passed':True,'details':details}
+def parse_visible(state):
+ parts=state.split(';');fields=dict(part.split('=',1) for part in parts[1:]);task={'兩盒追蹤':'boxes','盒子狀態':'boxes','三數加法':'sum','整數加總':'sum','卡片進度':'card','查卡片目前進度':'card','地址填寫規則':'address','我想瞭解地址怎麼填':'address','App重設密碼':'app','App密碼忘記了':'app','天氣預測':'none','幫我預報明天天氣':'none'}[parts[0]];return task,fields
+required={'boxes':('A','B','事件','查詢'),'sum':('x','y','z'),'card':('申請編號',),'address':(),'app':('裝置',)}
+def oracle(row):
+ task,f=parse_visible(row['state'])
+ if row['question']=='choice':return task if task in row['candidates'] else 'none'
+ n=sum(f.get(k,'?')!='?' for k in required[task]);total=len(required[task])
+ if row['question']=='info':return 'yes' if n==total else 'no'
+ return 'grade2' if n==total else 'grade0' if n==0 else 'grade1'
+m1=json.loads((R/'docs/lesson-products/data-v1-manifest.json').read_text());m2=json.loads((R/'docs/lesson-products/data-v2-manifest.json').read_text());tok=M.Tokenizer()
+old_ids=set();old_families=defaultdict(set)
+for line in (R/'outputs/lesson-products/data-v1/c.jsonl').open():
+ row=json.loads(line);old_ids.add(row['id']);old_families[row['family_id']].add(row['split'])
+check('v1_exact_source_snapshots',sha(R/'docs/lesson-products/source-snapshots/data-v1.py')=='a26424b78d4ded7cb0be221b829725a15cdd5cf40a5bc9a5e811696b3ec1f4f5' and sha(R/'docs/lesson-products/source-snapshots/model-v1.py')=='46506db31cc80bcd5d95b9b6b007d2d02e0880dcab397b5fc44daccaf0a65e54')
+b1=R/'outputs/lesson-products/data-v1/b.jsonl';b2=R/'outputs/lesson-products/data-v2/b.jsonl'
+check('B_v1_v2_exact_bytes',b1.read_bytes()==b2.read_bytes() and sha(b2)==m1['files']['b.jsonl']['sha256']==m2['files']['b.jsonl']['sha256'],{'rows':47673,'bytes':b2.stat().st_size,'sha256':sha(b2)})
+check('split_salt_protocol_unchanged',D.SPLIT_PROTOCOL=='finite-worlds-v1' and D.choose_salt()==m1['config']['split_salt']==m2['config']['split_salt'],{'salt':D.choose_salt(),'SPLIT_PROTOCOL':D.SPLIT_PROTOCOL,'data_version':D.VERSION})
+obs={};families=defaultdict(set);coverage=Counter();masks=defaultdict(int);new_ids=set();new_families=defaultdict(set);samples={};total=0;label_errors=[];parse_errors=[];max_c=0;missingbest=0
+splitbit={s:1<<i for i,s in enumerate(D.SPLITS)};labelbit={s:1<<i for i,s in enumerate(D.MEANINGS)}
+for line in (R/'outputs/lesson-products/data-v2/c.jsonl').open():
+ row=json.loads(line);total+=1;new_ids.add(row['id']);new_families[row['family_id']].add(row['split']);expected=oracle(row)
+ if expected!=row['gold']:label_errors.append(row['id'])
+ try:parse_state(row['state'])
+ except Exception as e:parse_errors.append({'id':row['id'],'error':str(e)})
+ task=row['task'];keys=D.REQUIRED.get(task,());mask=sum(1<<i for i,k in enumerate(keys) if k in row['omitted']);masks[(row['family_id'],row['split'],task)]|=1<<mask
+ coverage[(row['split'],task,row['question'],row['gold'])]+=1
+ if row.get('missing_best'):assert 'none' in row['candidates'] and task not in row['candidates'] and row['gold']=='none';missingbest+=1
+ samples.setdefault((task,row['question']),row)
+ if row['split'] not in D.SPLITS:continue
+ families[row['family_id']].add(row['split']);key=(row['state'],row['question'],tuple(sorted(row['candidates'])))
+ if key not in obs:
+  token_chunks=[]
+  for candidate in key[2]:
+   encoded=tok.encode(row['state'],row['question'],candidate);max_c=max(max_c,len(encoded));token_chunks.append(bytes([len(encoded)])+bytes(encoded))
+  th=hashlib.sha256(b''.join(token_chunks)).hexdigest();obs[key]=[0,0,0,th]
+ v=obs[key];v[0]|=splitbit[row['split']];v[1]|=labelbit[row['gold']];v[2]+=1
+cpath=R/'outputs/lesson-products/data-v2/c.jsonl'
+check('v2_actual_file_hash_count',total==420110==m2['files']['c.jsonl']['rows'] and cpath.stat().st_size==166490845==m2['files']['c.jsonl']['bytes'] and sha(cpath)==m2['files']['c.jsonl']['sha256'],{'rows':total,'bytes':cpath.stat().st_size,'sha256':sha(cpath)})
+check('all_v2_C_visible_labels',not label_errors,{'independent_oracle_rows':total,'errors':len(label_errors)})
+check('all_v2_C_public_syntax',not parse_errors,{'rows':total,'errors':len(parse_errors),'scope':'syntax only; no model predictions made on dataset'})
+check('all_v1_C_rows_preserved',old_ids<=new_ids,{'v1_ids':len(old_ids),'v2_ids':len(new_ids),'missing_v1_ids':len(old_ids-new_ids)})
+check('same_C_families_and_splits',dict(old_families)==dict(new_families),{'families':len(new_families),'scope':'including deliberate wording_shift descendants'})
+mask_errors=[(fid,s,t,bits) for (fid,s,t),bits in masks.items() if bits!=(1<<(1<<len(D.REQUIRED.get(t,()))))-1]
+check('every_family_split_all_required_masks',not mask_errors,{'family_split_task_groups':len(masks),'mask_errors':len(mask_errors),'boxes_masks':16,'sum_masks':8,'card_app_masks':2,'address_masks':1})
+for line in b2.open():
+ row=json.loads(line)
+ if row['split'] in D.SPLITS:families[row['family_id']].add(row['split'])
+check('joint_B_C_family_core_split',all(len(v)==1 for v in families.values()),{'unique_families':len(families)})
+def audit_vals(values):
+ shared=[v for v in values if v[0].bit_count()>1]
+ return {'unique_observations':len(values),'cross_split_shared_observations':len(shared),'rows_in_shared_observations':sum(v[2] for v in shared),'conflicting_labels':sum(v[1].bit_count()>1 for v in values)}
+raw=audit_vals(list(obs.values()));check('v2_independent_raw_overlap',all(raw[k]==m2['audit']['c'][k] for k in raw),raw)
+tokenobs={}
+for _,v in obs.items():
+ mask,label,count,th=v
+ if th not in tokenobs:tokenobs[th]=[0,0,0]
+ x=tokenobs[th];x[0]|=mask;x[1]|=label;x[2]+=count
+token=audit_vals(list(tokenobs.values()));ta=json.loads((R/'docs/lesson-products/data-v2-token-audit.json').read_text())
+check('v2_actual_token_observation_audit',token['unique_observations']==ta['c']['unique_token_observations'] and token['cross_split_shared_observations']==ta['c']['cross_split_shared_token_observations'] and token['conflicting_labels']==ta['c']['conflicting_token_labels'],{**token,'max_c_tokens':max_c,'method':'Tokenize every distinct actual core observable candidate group, SHA256 length-delimited actual token IDs, combine split/label masks; count repeated raw rows.'})
+result['coverage']={s:{t:{g:coverage[(s,t,'rubric',g)] for g in ('grade0','grade1','grade2')} for t in ('boxes','sum','card','app','address')} for s in D.SPLITS}
+check('grade0_partial_full_all_core_splits',all(all(result['coverage'][s][t][g]>0 for g in ('grade0','grade1','grade2')) for s in D.SPLITS for t in ('boxes','sum')),result['coverage'])
+check('no_illegal_partial_or_address_missing',all(result['coverage'][s][t]['grade1']==0 for s in D.SPLITS for t in ('card','app','address')) and all(result['coverage'][s]['address']['grade0']==0 for s in D.SPLITS))
+check('missing_best_retained',missingbest>0,{'rows':missingbest})
+# Independent small-world exact powerset checks including all-zero operands and all missing fields.
+worlds=[{'task':'boxes','a':0,'b':0,'events':[('A',0)],'query':'A','family_id':'cb-boxes'},{'task':'sum','x':0,'y':0,'z':0,'family_id':'cb-sum'},{'task':'card','application':'000000','family_id':'cb-card'},{'task':'app','device':'手機','family_id':'cb-app'},{'task':'address','family_id':'cb-address'}]
+exact=0
+for world in worlds:
+ rows=list(D.c_rows(world,'train'));keys=D.REQUIRED[world['task']];want={tuple(k for i,k in enumerate(keys) if bits&(1<<i)) for bits in range(1<<len(keys))}
+ for q in ('choice','info','rubric'):
+  chosen=[r for r in rows if r['question']==q and not r.get('missing_best')];assert {tuple(r['omitted']) for r in chosen}==want
+  assert len(chosen)==len(want)
+  for row in chosen:assert oracle(row)==row['gold'];p=parse_state(row['state']);assert set(p)<= {'task','event_count','stress_length'}
+  exact+=len(chosen)
+check('direct_c_rows_exact_29_masks_87_labels',exact==87,{'worlds':5,'masks':29,'typed_rows':exact,'parse_state_outputs':'task/event count/stress only; no answer/sufficiency'})
+# Load a real tiny random C package, no training. Artifact fixture stays under ignored scratch.
+folder=Path('/workspace/work/curriculum-20261016/engineering-decisions-callback-01/package');folder.mkdir(exist_ok=True)
+cfg=M.Config(len(tok),width=16,heads=4,ff=32,c_layers=1);net=M.CandidateScorer(cfg).eval();torch.save(net.state_dict(),folder/'model.pt');cfg.save(folder/'config.json');tok.save(folder/'tokenizer.json');(folder/'calibration.json').write_text(json.dumps({'temperatures':{'choice':2.0,'info':0.5,'rubric':1.5}}))
+manifest={'version':1,'product':'c','files':{p.name:{'sha256':sha(p),'bytes':p.stat().st_size} for p in folder.iterdir() if p.is_file() and p.name!='artifact-manifest.json'}};(folder/'artifact-manifest.json').write_text(json.dumps(manifest));product=Product(folder,'c')
+for q in ('choice','info','rubric'):
+ state='三數加法;x=?;y=?;z=0';candidates=list(D.CANDIDATES[q]);j=product.judge(state,q,candidates)
+ with torch.inference_mode():scores=product.model(M.padded([tok.encode(state,q,c) for c in candidates],128)).float()/j['temperature'];p=scores.softmax(-1).tolist()
+ assert all(abs(j['probabilities'][c]-n)<1e-7 for c,n in zip(candidates,p));assert abs(sum(p)-1)<1e-6
+ assert j['selected']==min(candidates,key=lambda c:(-j['probabilities'][c],c))
+ assert '不是答對機率' in j['concentration_scope'];assert j['meanings']=={c:D.MEANINGS[c] for c in candidates}
+check('real_random_scorer_judge_probability_contract',True,{'typed_questions':3,'temperatures':product.calibration['temperatures'],'scope':'only synthetic incomplete fixture; not final dataset accuracy'})
+# Replace scorer with explicit semantic lookup probe: verify parsing does not supply C labels.
+class SemanticProbe(torch.nn.Module):
+ def __init__(self,values):super().__init__();self.values=values;self.calls=[]
+ def forward(self,tokens):
+  meaning_to_id={tuple(tok.encode('','choice',c)[3:]):c for c in []} # decode by final SEP, using explicit candidate meanings.
+  candidate_tokens={tuple(tok.ids[ch] for ch in text):key for key,text in D.MEANINGS.items()}
+  keys=[]
+  for row in tokens.tolist():
+   last=max(i for i,v in enumerate(row) if v==2);suffix=tuple(v for v in row[last+1:] if v!=0);keys.append(candidate_tokens[suffix])
+  self.calls.append(keys);return torch.tensor([self.values.get(k,0.) for k in keys])
+probe=SemanticProbe({'yes':5.,'no':-5.,'card':7.});product.model=probe
+j=product.judge('三數加法;x=?;y=?;z=?','info');k=product.judge('三數加法;x=0;y=0;z=0','choice')
+check('parse_state_does_not_replace_C_decision',j['selected']=='yes' and k['selected']=='card',{'intentionally_wrong_model_outputs':{'all_missing_info':j['selected'],'sum_choice':k['selected']},'purpose':'Demonstrates outputs follow scorer even when an oracle would disagree; not a model quality claim.','scorer_calls':probe.calls})
+# All exact ties: selection must be semantic-ID stable across all 720 permutations.
+zero=SemanticProbe({});product.model=zero;picks=set()
+for permutation in itertools.permutations(D.CANDIDATES['choice']):picks.add(product.judge('地址填寫規則','choice',permutation)['selected'])
+check('judge_exact_tie_semantic_id_all_720',picks=={min(D.CANDIDATES['choice'])},{'permutations':720,'selected':sorted(picks),'candidate_ids':list(D.CANDIDATES['choice'])})
+invalid=['三數加法;x=7;y=0;z=0','兩盒追蹤;A=0;Q=0;事件=交換;查詢=A','兩盒追蹤;A=0;B=0;事件=;查詢=A','卡片進度;申請編號=123','App重設密碼;裝置=手錶','地址填寫規則;申請編號=123456','隨便聊聊']
+for state in invalid:
+ try:parse_state(state)
+ except ValueError:pass
+ else:raise AssertionError(('accepted-invalid',state))
+check('parse_state_rejects_out_of_contract_syntax',True,{'cases':len(invalid)})
+check('original_report_unchanged',sha(original)==original_sha,{'sha256':original_sha})
+result['limits']=['No optimizer updates, formal training, final-test prediction/quality scoring, remote or paid call.','Raw data labels and grammar audits include all stored splits; this is not evaluating a trained model on final-test outcomes.','Only C/data/inference judge callback scope; runner still points to v1 at inspection time, not approved to launch v2 by this report.','C generic observation reuse is 5453 groups / 215427 rows and does not establish unseen-format generalization.']
+result['command']='.venv/bin/python - < /workspace/work/curriculum-20261016/engineering-decisions-callback-01/probe.py';result['probe_script_sha256']=sha(Path('/workspace/work/curriculum-20261016/engineering-decisions-callback-01/probe.py'));result['elapsed_seconds']=round(time.monotonic()-start,3)
+out=R/'docs/lesson-products/reviews/engineering-decisions-callback-01-execution.json'
+with out.open('x') as f:json.dump(result,f,ensure_ascii=False,indent=2);f.write('\n')
+print(json.dumps({'checks':len(result['checks']),'all_passed':all(x['passed'] for x in result['checks'].values()),'elapsed_seconds':result['elapsed_seconds'],'output':str(out),'coverage':result['coverage']},ensure_ascii=False,indent=2))

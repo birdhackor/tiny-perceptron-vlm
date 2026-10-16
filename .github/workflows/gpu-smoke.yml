@@ -9,16 +9,22 @@ on:
         type: string
         required: false
         default: ''
+      curriculum_job:
+        description: Bounded lesson product job JSON; blank runs the existing smoke test
+        type: string
+        required: false
+        default: ''
 
 permissions:
   contents: read
 
 concurrency:
-  group: modal-gpu-smoke
+  group: tiny-perceptron-course-gpu
   cancel-in-progress: false
 
 jobs:
   smoke:
+    if: ${{ inputs.curriculum_job == '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
     env:
@@ -75,3 +81,54 @@ jobs:
               summary.write(f"Train loss: {result['loss_before']['train']:.4f} → {result['loss_after']['train']:.4f}\n\n")
               summary.write('```json\n' + json.dumps(result, ensure_ascii=False, indent=2) + '\n```\n')
           PY
+
+  lesson-products:
+    if: ${{ inputs.curriculum_job != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    env:
+      MODAL_TOKEN_ID: ${{ vars.MODAL_TOKEN_ID || secrets.MODAL_TOKEN_ID }}
+      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+      MODAL_ENVIRONMENT: ${{ vars.MODAL_ENVIRONMENT || 'main' }}
+      HF_CHECKPOINT_REPO: ${{ vars.HF_CHECKPOINT_REPO }}
+      HF_RELEASE_REPO: ${{ vars.HF_RELEASE_REPO }}
+      HF_MODAL_SECRET: ${{ inputs.hf_secret_name || vars.HF_MODAL_SECRET }}
+      LESSON_JOB: ${{ inputs.curriculum_job }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - name: Check required settings without revealing credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in MODAL_TOKEN_ID MODAL_TOKEN_SECRET HF_CHECKPOINT_REPO HF_RELEASE_REPO; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Missing repository secret or variable: $name"
+              exit 1
+            fi
+          done
+      - name: Install the existing Modal execution client
+        run: python -m pip install modal==1.6.0
+      - name: Find Hugging Face Secret without reading its value
+        run: python scripts/select_modal_hf_secret.py
+      - name: Regenerate exact committed finite-world data without GPU
+        run: |
+          python -m scripts.lesson_products.modal_runner --action prepare \
+            --job "$LESSON_JOB" --revision "$GITHUB_SHA" \
+            --run-id "curriculum-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+      - name: Reserve gross quota, verify HF write/download, then use bounded L4
+        run: |
+          python -m scripts.lesson_products.modal_runner --action run \
+            --job "$LESSON_JOB" --revision "$GITHUB_SHA" \
+            --run-id "curriculum-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+      - name: Save actual attempt evidence
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: lesson-products-result
+          path: |
+            outputs/lesson-products/runner-result.json
+            outputs/lesson-products/transfers/
+          if-no-files-found: ignore

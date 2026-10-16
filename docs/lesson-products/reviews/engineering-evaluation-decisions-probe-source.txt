@@ -1,0 +1,157 @@
+from pathlib import Path
+from collections import Counter
+from unittest.mock import patch
+import tempfile,json,hashlib,math,platform,copy,torch
+from tiny_perceptron.lesson_products import evaluation as E
+from tiny_perceptron.lesson_products import data as D
+from tiny_perceptron.lesson_products import model as M
+from tiny_perceptron.lesson_products import training as T
+from tiny_perceptron.lesson_products import inference as I
+R=Path.cwd();scratch=Path(tempfile.mkdtemp(prefix='MOCK-only-',dir='/workspace/work/curriculum-20261016/engineering-evaluation-decisions'));torch.set_num_threads(1);torch.manual_seed(193016)
+def sha(p):return hashlib.sha256(p.read_bytes()).hexdigest()
+eval_sha=sha(R/'tiny_perceptron/lesson_products/evaluation.py');result={'reviewer_task':'/root/tech_20261016_19_16','reviewer_context':'informed_engineering_new_scope','environment':{'python':platform.python_version(),'torch':torch.__version__,'device':'cpu'},'evaluation_sha256':eval_sha,'checks':{},'reproduced_issues':[]}
+def check(k,v,details=None):assert v,(k,details);result['checks'][k]={'passed':True,'details':details}
+def rejected(call):
+ try:call()
+ except (ValueError,FileExistsError,KeyError):return True
+ return False
+def save(p,v):p.parent.mkdir(parents=True,exist_ok=True);p.write_text(json.dumps(v,ensure_ascii=False,indent=2))
+def independent_metrics(logits,labels):
+ ces=[];bs=[]
+ for z,gold in zip(logits,labels):
+  z=[float(x) for x in z];maxz=max(z);ws=[math.exp(x-maxz) if math.isfinite(x) else 0. for x in z];den=sum(ws);p=[v/den for v in ws];ces.append(math.log(den)+maxz-z[gold]);bs.append(sum((x-int(i==gold))**2 for i,x in enumerate(p)))
+ return sum(ces)/len(ces),sum(bs)/len(bs)
+# Completely artificial data directory; never read actual heldout files.
+data=scratch/'data';data.mkdir();save(data/'manifest.json',{'version':'MOCK-ENGINEERING-ONLY','files':{}});data_sha=sha(data/'manifest.json')
+tok=M.Tokenizer();cfg=M.Config(len(tok),width=8,heads=2,ff=16,c_layers=1)
+bdir=scratch/'b';cdir=scratch/'c'
+for product,folder,cls in [('b',bdir,M.LoopedSolver),('c',cdir,M.CandidateScorer)]:
+ folder.mkdir();net=cls(cfg);torch.save(net.state_dict(),folder/'model.pt');cfg.save(folder/'config.json');tok.save(folder/'tokenizer.json');digest=T.state_digest(net.state_dict())
+ receipt={'product':product,'mode':'multi' if product=='b' else 'candidate','weights_changed':True,'initial_weights_sha256':'1'*64,'selected_weights_sha256':digest,'resume_verification':{'exact_next_step':True},'data_manifest_sha256':data_sha,'environment':{'gpu':'NVIDIA L4 (fictional authorized fixture; NO GPU run)','torch':torch.__version__,'python':platform.python_version(),'device':'MOCK'},'scope':'Fictional CPU engineering fixture, not evidence of training.'};save(folder/'training-receipt.json',receipt)
+mechanisms={};initial=M.LoopedSolver(cfg).state_dict()
+for mode in ('fixed3','odd'):
+ folder=scratch/mode;folder.mkdir();torch.save({'config':cfg.__dict__,'model':initial,'metadata':{'mode':mode,'data_manifest_sha256':data_sha,'initial_weights_sha256':T.state_digest(initial),'step':20,'seed':99}},folder/'last.pt');save(folder/'training-receipt.json',{'scope':'Fictional engineering fixture; no training'});mechanisms[mode]=folder
+# Four complete eligible B cases per split, all model outputs mocked below.
+state_index={}
+def bs(split):
+ shift={'policy':0,'test':1,'wording_shift':2,'entity_shift':3,'long_shift':4}.get(split,0)
+ worlds=[{'task':'boxes','a':shift,'b':7,'events':[('A',2)],'query':'A'},{'task':'boxes','a':shift,'b':6,'events':[('swap',0),('A',3)],'query':'B'},{'task':'sum','x':shift,'y':1,'z':2},{'task':'sum','x':shift,'y':2,'z':3}]
+ rows=[]
+ for i,w in enumerate(worlds):
+  state=D.render(w);state_index[state]=i;row={'id':f'MOCK-{split}-B{i}','family_id':f'MOCK-{split}-family{i}','split':split,'state':state,'task':w['task'],'world':w,'gold':D.answer(w)}
+  if w['task']=='boxes':row['strata']=D.box_strata(w)
+  rows.append(row)
+ return rows
+rows_by={('b',s):bs(s) for s in ('policy','test','wording_shift','entity_shift','long_shift')}
+def cs(split):
+ worlds=[{'task':'card','application':'123456','family_id':'MOCK-card'},{'task':'address','family_id':'MOCK-address'},{'task':'sum','x':0,'y':1,'z':2,'family_id':'MOCK-sum'}]
+ rows=[]
+ for w in worlds:
+  for row in D.c_rows(w,split):row['id']=f'MOCK-{split}-C{len(rows)}';rows.append(row)
+ return rows
+for s in ('calibration','test','wording_shift'):rows_by[('c',s)]=cs(s)
+read_log=[];phase='select';active_output=None
+
+def read_mock(directory,product,split):
+ assert Path(directory)==data
+ if phase=='select':assert (product,split) in (('c','calibration'),('b','policy')),('unexpected-selection-split',product,split)
+ else:assert active_output.with_suffix('.started.json').is_file(),'prediction reads preceded start marker'
+ read_log.append((phase,product,split));return copy.deepcopy(rows_by[(product,split)])
+
+def b_mock(product,rows,depths=(1,3,5)):
+ out={}
+ for depth in depths:
+  z=torch.full((len(rows),19),-4.)
+  for i,row in enumerate(rows):
+   correct=(depth==3 and i in (0,3)) or (depth==1 and i==3) or (depth==5 and i==0)
+   picked=row['gold'] if correct else (row['gold']+1)%19;z[i,picked]=4.
+  out[depth]=z
+ return out
+
+def c_mock(product,rows):
+ width=max(len(r['candidates']) for r in rows);z=torch.full((len(rows),width),-float('inf'))
+ for i,row in enumerate(rows):
+  cand=row['candidates'];q=row['question'];scores={c:0. for c in cand}
+  if 'id' not in row:
+   idx=state_index[row['state']];chosen=('boxes' if idx==0 else 'card' if idx==1 else 'sum') if q=='choice' else ('no' if idx==2 else 'yes');scores[chosen]=8.
+  elif row['split']=='calibration':
+   g=row['gold'];wrong=next(c for c in cand if c!=g)
+   if q=='choice':scores[g]=2.;scores[wrong]=3. if i%4==0 else 0.
+   elif q=='info':scores[g]=4.
+   else:scores[wrong]=5.;scores[g]=-2.
+  else:
+   g=row['gold'];scores[g]=6.
+   if row['id']==f"MOCK-{row['split']}-C0":scores[g]=0.;scores[next(c for c in cand if c!=g)]=200.
+   elif row['task']=='address' and q in ('choice','info'):scores={c:0. for c in cand}
+  z[i,:len(cand)]=torch.tensor([scores[c] for c in cand])
+ return z
+
+def mechanism_predict(model,encoded,loops=3,batch_size=128):return b_mock(None,encoded['rows'],(loops,))[loops]
+latency_calls=[]
+def solve_mock(product,state,loops=3):return {'seconds':loops*.01,'answer':0,'loops':loops,'stress_length':False}
+def auto_mock(b,c,state,effort='auto',max_loops=5):
+ idx=state_index[state];accepted=idx in (0,3);task='boxes' if idx==0 else 'sum';depth={'low':1,'medium':3,'high':5}.get(effort)
+ if depth is None:depth=I.rule_depth(b.auto_policy,task,I.parse_state(state).get('event_count',0))
+ latency_calls.append({'state':state,'effort':effort,'accepted':accepted});return {'seconds':.2+(depth*.01 if accepted else 0.),'c_seconds':.2,'b_loops':depth if accepted else 0}
+
+with patch.object(E,'read_dataset',read_mock),patch.object(E,'b_logits',b_mock),patch.object(E,'c_logits',c_mock),patch.object(E,'predict',mechanism_predict),patch.object(E,'auto_solve',auto_mock),patch.object(I.Product,'solve',solve_mock):
+ freeze=scratch/'settings.json';selected=E.select_settings(data,bdir,cdir,freeze,mechanism_directories=mechanisms)
+ check('selection_reads_only_calibration_C_policy_B',read_log==[('select','c','calibration'),('select','b','policy')],{'reads':read_log})
+ # Independently recompute per-question CE grid minimum without calling production metrics.
+ cal=rows_by[('c','calibration')];z=c_mock(None,cal);temps={}
+ for q in D.CANDIDATES:
+  ids=[i for i,row in enumerate(cal) if row['question']==q];labels=[cal[i]['candidates'].index(cal[i]['gold']) for i in ids]
+  temps[q]=min(E.TEMPERATURES,key=lambda t:(independent_metrics(z[ids]/t,labels)[0],t))
+ check('temperature_per_question_CE_calibration_only',selected['temperatures']==temps,{'expected':temps,'observed':selected['temperatures'],'grid':list(E.TEMPERATURES)})
+ f=json.loads(freeze.read_text());grid=f['auto_search'];check('policy_grid_and_budget',len(grid)==45 and selected['auto_rule']['policy_quality']['mean_actual_b_loops_all_complete']<=3,{'grid_count':len(grid),'selected_rule':selected['auto_rule']})
+ # Explicit denominator counterexample: C rejects2/4; B gets accepted2/2 correct at medium.
+ bpol=rows_by[('b','policy')];pred={d:zs.argmax(-1) for d,zs in b_mock(None,bpol).items()};route=E.auto_inputs(bpol);cp=E.chosen_meanings(c_mock(None,route),route);quality=E.auto_quality(bpol,pred,cp,selected['auto_rule'],fixed=3)
+ check('end_to_end_denominator_C_rejections',quality['accuracy_end_to_end']==.5 and quality['conditional_accuracy']==1. and quality['coverage']==.5 and quality['mean_actual_b_loops_all_complete']==1.5 and quality['c_calls_per_input']==2,quality)
+ # Frozen source/data/product mutations must fail; mutations affect scratch copies only.
+ check('frozen_guard_valid_baseline',E.frozen_guard(freeze,data,bdir,cdir,mechanisms)==f)
+ content=(cdir/'model.pt').read_bytes();(cdir/'model.pt').write_bytes(content+b'drift');check('guard_rejects_product_drift',rejected(lambda:E.frozen_guard(freeze,data,bdir,cdir,mechanisms)));(cdir/'model.pt').write_bytes(content)
+ original=(data/'manifest.json').read_bytes();(data/'manifest.json').write_bytes(original+b' ');check('guard_rejects_manifest_drift',rejected(lambda:E.frozen_guard(freeze,data,bdir,cdir,mechanisms)));(data/'manifest.json').write_bytes(original)
+ copies=scratch/'source-copies';copies.mkdir();source_copies=[]
+ for source in E.SOURCE_FILES:target=copies/source.name;target.write_bytes(source.read_bytes());source_copies.append(target)
+ source_copies[0].write_bytes(source_copies[0].read_bytes()+b'\n')
+ with patch.object(E,'SOURCE_FILES',tuple(source_copies)):check('guard_rejects_source_drift_without_repo_mutation',rejected(lambda:E.frozen_guard(freeze,data,bdir,cdir,mechanisms)))
+ check('guard_rejects_missing_mechanism',rejected(lambda:E.frozen_guard(freeze,data,bdir,cdir,{'fixed3':mechanisms['fixed3']})))
+ # Receipt/model prefreeze mismatch counterexample. Receipt retains digest of original states.
+ old_model=(cdir/'model.pt').read_bytes();original_receipt=json.loads((cdir/'training-receipt.json').read_text());replacement=M.CandidateScorer(cfg);torch.save(replacement.state_dict(),cdir/'model.pt');replacement_hash=T.state_digest(replacement.state_dict());assert replacement_hash!=original_receipt['selected_weights_sha256']
+ mismatch_freeze=scratch/'mismatched-model-settings.json';E.select_settings(data,bdir,cdir,mismatch_freeze,mechanism_directories=mechanisms)
+ check('reproduced_receipt_state_mismatch_accepted',mismatch_freeze.is_file(),{'receipt_selected_weights_sha256':original_receipt['selected_weights_sha256'],'actual_model_state_sha256':replacement_hash,'frozen_model_file_sha256':json.loads(mismatch_freeze.read_text())['products']['c']['model.pt']})
+ result['reproduced_issues'].append({'id':'EVAL-RECEIPT-01','actual':'select_settings accepted a C model.pt whose state digest differs from training-receipt.selected_weights_sha256','scope':'completely fictional legal-shaped receipt; tests missing binding, not the truth of GPU evidence'})
+ (cdir/'model.pt').write_bytes(old_model)
+ for product,directory in [('b',bdir),('c',cdir)]:E.make_artifact_manifest(directory,product,data_sha,sha(freeze))
+ # Main mock evaluation: every prediction path remains patched, never a trained heldout inference.
+ phase='evaluate';active_output=scratch/'MOCK-final-a.json';a=E.evaluate_frozen(freeze,data,bdir,cdir,active_output,mechanisms)
+ check('fixed_medium_and_end_to_end_counts',set(a['auto'])=={'low','medium','high','auto'} and a['auto']['medium']['accuracy_end_to_end']==.5 and a['auto']['medium']['conditional_accuracy']==1.,a['auto'])
+ raw_path=active_output.with_suffix('.predictions.jsonl');raw=[json.loads(line) for line in raw_path.open()];br=[x for x in raw if x['product']=='b'];cr=[x for x in raw if x['product']=='c'];ctest=rows_by[('c','test')]
+ check('raw_main_rows_and_fingerprint',len(br)==len(rows_by[('b','test')]) and len(cr)==len(ctest) and sha(raw_path)==a['predictions']['sha256'],{'B_rows':len(br),'C_rows':len(cr),'report_bytes':a['predictions']['bytes'],'actual_bytes':raw_path.stat().st_size})
+ for q in D.CANDIDATES:
+  qr=[x for x in cr if x['question']==q];labels=[x['candidates'].index(x['gold']) for x in qr];values=[[s/temps[q] for s in x['raw_scores']] for x in qr];ce,brier=independent_metrics(values,labels);observed=a['c'][q]['after'];correct=sum(x['selected']==x['gold'] for x in qr)
+  assert abs(ce-observed['cross_entropy'])<2e-5 and abs(brier-observed['brier'])<1e-6 and observed['correct']==correct and observed['count']==len(qr)
+ check('C_raw_reconstructs_counts_CE_Brier',True,{'types':list(D.CANDIDATES),'Brier':'sum over candidate classes then mean observations','CE':'independent stable logsumexp, natural logarithm','CE_tolerance':'2e-5 float32-vs-float64 with large mock logits'})
+ missing=[x for x,row in zip(cr,ctest) if row.get('missing_best')];high=[]
+ for x in cr:
+  if x['selected']==x['gold']:continue
+  zs=[s/temps[x['question']] for s in x['raw_scores']];mz=max(zs);ps=[math.exp(z-mz) for z in zs];pm=max(ps)/sum(ps);high.append((len(ps)*pm-1)/(len(ps)-1))
+ choice_rows=[row for row in ctest if row['question']=='choice'];reversed_rows=[{**row,'candidates':list(reversed(row['candidates']))} for row in choice_rows];reverse_logits=c_mock(None,reversed_rows);expected_reverse=[min(zip(row['candidates'],zs.tolist()),key=lambda pair:(-pair[1],pair[0]))[0] for row,zs in zip(reversed_rows,reverse_logits)];expected_consistent=sum(x['selected']==rev for x,rev in zip([x for x in cr if x['question']=='choice'],expected_reverse))
+ check('reorder_missing_best_high_error_denominators',a['c_reorder']['count']==sum(x['question']=='choice' for x in cr) and a['c_reorder']['consistent']==expected_consistent and a['gates']['c_reorder']==(expected_consistent/len(choice_rows)>=.99) and a['c_missing_best']=={'count':len(missing),'correct':sum(x['selected']==x['gold'] for x in missing)} and a['c_high_concentration_errors']['count']==sum(x>=.9 for x in high),{'reorder':a['c_reorder'],'missing_best':a['c_missing_best'],'high_errors':a['c_high_concentration_errors']})
+ check('latency_includes_C_cost_and_rejections',set(a['latency']['measurements'])=={'low','medium','high','auto'} and all(abs(x['c_mean_seconds']-.2)<1e-9 and x['integrated_mean_seconds']>=.2 for x in a['latency']['measurements'].values()) and any(not x['accepted'] for x in latency_calls),{'measurements':a['latency']['measurements'],'mock_cost_note':'Costs are injected constants, not measured model performance.'})
+ check('same_output_replay_rejected',rejected(lambda:E.evaluate_frozen(freeze,data,bdir,cdir,active_output,mechanisms)))
+ # Same frozen bytes, new output path: the supposed once-per-freeze guard is bypassed.
+ second=scratch/'MOCK-final-b.json';active_output=second;b=E.evaluate_frozen(freeze,data,bdir,cdir,second,mechanisms)
+ check('reproduced_same_freeze_new_output_replayed',second.exists() and second.with_suffix('.started.json').exists() and a['settings_freeze_sha256']==b['settings_freeze_sha256'],{'first_freeze_sha256':a['settings_freeze_sha256'],'second_freeze_sha256':b['settings_freeze_sha256'],'different_output_names':True,'frozen_test_outcomes_observed_after_two_runs':json.loads(freeze.read_text())['test_outcomes_observed']})
+ result['reproduced_issues'].append({'id':'EVAL-FREEZE-01','actual':'evaluate_frozen accepted same freeze twice under different output filenames; freeze.test_outcomes_observed remains false','scope':'only synthetic inputs and mocked predictions; no formal model test was run'})
+ check('started_marker_exists_before_any_fake_test_read',all(e[0]=='evaluate' for e in read_log if e[2] in ('test','wording_shift','entity_shift','long_shift')))
+ # An artifact manifest can claim unrelated freeze/data even while frozen guard and Product pass.
+ m=json.loads((cdir/'artifact-manifest.json').read_text());m['settings_freeze_sha256']='0'*64;m['data_manifest_sha256']='0'*64;save(cdir/'artifact-manifest.json',m);E.frozen_guard(freeze,data,bdir,cdir,mechanisms);I.Product(cdir,'c')
+ check('observed_artifact_manifest_identity_not_bound',True,{'manifest_freeze_sha256':'0'*64,'actual_freeze_sha256':sha(freeze),'scope':'No prediction after this mutation; guard/load only.'})
+ result['artifact_identity_note']='frozen_guard does not inspect artifact-manifest.json identity fields; default Product checks file hashes/product/version but not data/freeze identity. Prediction-bearing weights/settings are separately hash-guarded.'
+check('evaluation_source_unchanged_during_review',sha(R/'tiny_perceptron/lesson_products/evaluation.py')==eval_sha)
+result['execution_scope']='Entirely fictional scratch datasets, random tiny weight files, fictional L4 receipt strings and mocked B/C/predict/latency paths. No actual product heldout file or trained model was evaluated. No optimizer/GPU/paid/external call. Mock final JSONs stay outside repo.'
+result['command']='.venv/bin/python - < /workspace/work/curriculum-20261016/engineering-evaluation-decisions/probe.py';result['probe_script_sha256']=sha(Path('/workspace/work/curriculum-20261016/engineering-evaluation-decisions/probe.py'))
+out=R/'docs/lesson-products/reviews/engineering-evaluation-decisions-execution.json'
+with out.open('x') as stream:json.dump(result,stream,ensure_ascii=False,indent=2);stream.write('\n')
+print(json.dumps({'checks':len(result['checks']),'all_probes_completed':True,'issues':result['reproduced_issues'],'evaluation_sha256':eval_sha,'output':str(out)},ensure_ascii=False,indent=2))

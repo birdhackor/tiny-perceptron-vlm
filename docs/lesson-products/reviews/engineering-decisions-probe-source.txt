@@ -1,0 +1,144 @@
+from pathlib import Path
+from collections import Counter,defaultdict
+import itertools,json,hashlib,math,platform,time,sys,copy
+import torch
+from torch.nn import functional as F
+from tiny_perceptron.lesson_products import data as D
+from tiny_perceptron.lesson_products import model as M
+from tiny_perceptron.lesson_products import training as T
+R=Path.cwd(); start=time.monotonic(); torch.set_num_threads(1); torch.manual_seed(192816)
+report={'reviewer_task':'/root/tech_20261016_19_16','review_kind':'independent_engineering','environment':{'python':platform.python_version(),'torch':torch.__version__,'device':'cpu','threads':torch.get_num_threads()},'checks':{}}
+def digest(b):return hashlib.sha256(b).hexdigest()
+def check(name,value,details=None):
+ assert value,(name,details)
+ report['checks'][name]={'passed':True,'details':details}
+# Independent visible-text oracle: no call to data.judgment or data.answer.
+def parse(state):
+ parts=state.split(';'); fields=dict(part.split('=',1) for part in parts[1:])
+ task={'兩盒追蹤':'boxes','盒子狀態':'boxes','三數加法':'sum','整數加總':'sum','卡片進度':'card','查卡片目前進度':'card','地址填寫規則':'address','我想瞭解地址怎麼填':'address','App重設密碼':'app','App密碼忘記了':'app','天氣預測':'none','幫我預報明天天氣':'none'}[parts[0]]
+ return task,fields
+required={'boxes':('A','B','事件','查詢'),'sum':('x','y','z'),'card':('申請編號',),'address':(),'app':('裝置',)}
+def visible_label(row):
+ task,fields=parse(row['state']); q=row['question']
+ if q=='choice':return task if task in row['candidates'] else 'none'
+ present=sum(fields.get(k,'?')!='?' for k in required[task]); total=len(required[task])
+ if q=='info':return 'yes' if present==total else 'no'
+ return 'grade2' if present==total else 'grade0' if present==0 else 'grade1'
+def b_oracle(row):
+ task,f=parse(row['state'])
+ if task=='sum':return sum(int(f[k]) for k in ('x','y','z'))
+ names=('A','B') if 'A' in f else ('P','Q'); boxes={k:int(f[k]) for k in names}
+ for event in f['事件'].split(','):
+  if event=='交換':boxes[names[0]],boxes[names[1]]=boxes[names[1]],boxes[names[0]]
+  else:boxes[event[0]]=int(event.split('設')[1])
+ return boxes[f['查詢']]
+manifest=json.loads((R/'docs/lesson-products/data-v1-manifest.json').read_text()); actual=[]
+for name in ('b','c'):
+ path=R/f'outputs/lesson-products/data-v1/{name}.jsonl'
+ rows=[json.loads(line) for line in path.open()]
+ check(f'{name}_file_hash_count',digest(path.read_bytes())==manifest['files'][name+'.jsonl']['sha256'] and len(rows)==manifest['files'][name+'.jsonl']['rows'],{'rows':len(rows),'sha256':digest(path.read_bytes())})
+ actual.append(rows)
+b,c=actual
+check('all_visible_B_answers',all(b_oracle(row)==row['gold'] for row in b),{'independent_oracle_rows':len(b)})
+check('all_visible_C_labels',all(visible_label(row)==row['gold'] for row in c),{'independent_oracle_rows':len(c),'rules':'Parse public prefix and required visible fields; 0 is present; unknown choice maps none.'})
+# Recompute observation overlap and label conflicts independently, using model-visible fields.
+families=defaultdict(set); overlap={}
+for product,rows in (('b',b),('c',c)):
+ obs=defaultdict(lambda:{'splits':set(),'labels':set(),'rows':0})
+ for row in rows:
+  if row['split'] not in ('train','calibration','policy','test'):continue
+  families[row['family_id']].add(row['split'])
+  key=row['state'] if product=='b' else (row['state'],row['question'],tuple(sorted(row['candidates'])))
+  v=obs[key];v['splits'].add(row['split']);v['labels'].add(row['gold']);v['rows']+=1
+ shared=[v for v in obs.values() if len(v['splits'])>1]
+ overlap[product]={'unique_observations':len(obs),'cross_split_shared_observations':len(shared),'rows_in_shared_observations':sum(v['rows'] for v in shared),'conflicting_labels':sum(len(v['labels'])>1 for v in obs.values())}
+ check(f'{product}_independent_observation_audit',all(overlap[product][key]==manifest['audit'][product][key] for key in overlap[product]),overlap[product])
+check('joint_family_split',all(len(v)==1 for v in families.values()),{'unique_core_families':len(families)})
+check('case_id_not_visible',all(row['case_id'] not in row['state'] for row in b+c))
+# Full deterministic regeneration; compare serialized bytes, not only self-reported counts.
+rb,rc,conf=D.build_rows()
+for product,rows in (('b',rb),('c',rc)):
+ h=hashlib.sha256()
+ for row in rows:h.update((D.canonical(row)+'\n').encode())
+ check(f'{product}_regeneration_hash',h.hexdigest()==manifest['files'][product+'.jsonl']['sha256'],{'rows':len(rows),'sha256':h.hexdigest()})
+del rb,rc
+# Direct truth-function counterexamples exercise every omission mask on the five supported tasks.
+worlds=[{'task':'boxes','a':0,'b':0,'events':[('A',0)],'query':'A','family_id':'probe-boxes'},{'task':'sum','x':0,'y':0,'z':0,'family_id':'probe-sum'},{'task':'card','application':'0','family_id':'probe-card'},{'task':'address','family_id':'probe-address'},{'task':'app','device':'手機','family_id':'probe-app'}]
+omission_checks=[]
+for w in worlds:
+ keys=D.REQUIRED[w['task']]
+ for bits in itertools.product((False,True),repeat=len(keys)):
+  missing=tuple(k for k,yes in zip(keys,bits) if yes)
+  for q in ('choice','info','rubric'):
+   row={'state':D.render(w,missing),'question':q,'candidates':list(D.CANDIDATES[q])}
+   expected=visible_label(row);observed=D.judgment(w,missing,q,row['candidates'])
+   assert expected==observed,(w,missing,q,expected,observed)
+  omission_checks.append({'task':w['task'],'omitted':list(missing),'info':D.judgment(w,missing,'info',D.CANDIDATES['info']),'rubric':D.judgment(w,missing,'rubric',D.CANDIDATES['rubric'])})
+check('all_29_legal_omission_masks',len(omission_checks)==29,{'worlds':5,'masks':len(omission_checks),'typed_questions_checked':len(omission_checks)*3,'zero_values':'all numeric fields 0 and application string 0 accepted','address':'empty requirement list -> yes and grade2'})
+coverage={task:{q:dict(Counter(row['gold'] for row in c if row['split']=='train' and row['task']==task and row['question']==q)) for q in ('choice','info','rubric')} for task in D.TASKS}
+report['coverage']=coverage
+report['coverage_limits']={'max_generated_omitted_fields':max(len(row['omitted']) for row in c),'multi_field_grade0_train_rows':sum(row['task'] in ('boxes','sum') and row['question']=='rubric' and row['gold']=='grade0' and row['split']=='train' for row in c),'note':'All-missing sum/boxes labels are well-defined and judgment() correct, but never generated. This is a coverage limit, not evidence of a trained-model error.'}
+check('missing_best_retains_none',all('none' in row['candidates'] and row['gold']=='none' and row['task'] not in row['candidates'] for row in c if row.get('missing_best')),{'rows':sum(bool(row.get('missing_best')) for row in c)})
+tok=M.Tokenizer();cfg=M.Config(len(tok),width=24,heads=4,ff=48,c_layers=2,max_length=128);model=M.CandidateScorer(cfg).eval()
+check('tokenizer_injective_chars',len(set(tok.ids.values()))==len(tok.ids),{'vocab_size':len(tok),'special_ids':[0,1,2]})
+# Independently rerun actual token audit on all rows; expected duplicates explicitly retained.
+audit=M.audit_tokens(b,c,tok);expected=json.loads((R/'docs/lesson-products/data-v1-token-audit.json').read_text())['audit']
+check('full_actual_token_audit',audit==expected,audit)
+# Every six-candidate permutation, same state and semantic keys. Compute in bounded CPU batches.
+base=next(copy.deepcopy(row) for row in c if row['question']=='choice' and row['task']=='boxes' and not row.get('missing_best'))
+base_tokens,sl,n,_=M.candidate_batch([base],tok,cfg)
+with torch.inference_mode():baseline=model(base_tokens)
+lookup=dict(zip(base['candidates'],baseline.tolist()));maxerr=0.;consistent=0;tested=0
+for batch_start in range(0,720,24):
+ perms=list(itertools.permutations(base['candidates']))[batch_start:batch_start+24]
+ rows=[{**base,'candidates':list(p)} for p in perms]
+ tokens,slices,n,_=M.candidate_batch(rows,tok,cfg)
+ with torch.inference_mode():scores=M.grouped_scores(model(tokens),slices,n)
+ for row,score in zip(rows,scores):
+  want=torch.tensor([lookup[k] for k in row['candidates']]);maxerr=max(maxerr,float((score-want).abs().max()));assert torch.allclose(score,want,atol=1e-6,rtol=1e-5)
+  consistent+=int(row['candidates'][int(score.argmax())]==base['candidates'][int(baseline.argmax())]);tested+=1
+check('all_720_choice_permutations',tested==720 and consistent==720,{'permutations':tested,'random_untrained_model_semantic_agreement':consistent,'max_score_abs_diff':maxerr,'scope':'structural scoring probe, not heldout accuracy'})
+# Full/reduced Choice, info and rubric together; check padding, row order, labels and masked loss.
+rows=[base,next(copy.deepcopy(row) for row in c if row.get('missing_best')),next(copy.deepcopy(row) for row in c if row['question']=='info'),next(copy.deepcopy(row) for row in c if row['question']=='rubric')]
+e=T.encoded_data(rows,'c',tok,cfg)
+with torch.inference_mode():batched=T.logits_for(model,e,torch.arange(len(rows)))
+max_batch_err=0.
+for i,row in enumerate(rows):
+ tokens,slices,n,labels=M.candidate_batch([row],tok,cfg)
+ with torch.inference_mode():single=model(tokens)
+ max_batch_err=max(max_batch_err,float((batched[i,:n]-single).abs().max()));assert torch.allclose(batched[i,:n],single,atol=1e-6,rtol=1e-5)
+ assert torch.isneginf(batched[i,n:]).all();assert e['labels'][i].item()==row['candidates'].index(row['gold'])
+# Mutate only padded candidate contents: masked logits and loss for real candidates must stay identical.
+changed={**e,'tokens':e['tokens'].clone()}
+changed['tokens'][~e['mask']]=torch.randint(1,len(tok),(int((~e['mask']).sum()),e['tokens'].shape[-1]))
+with torch.inference_mode():mutated=T.logits_for(model,changed,torch.arange(len(rows)))
+check('mixed_candidate_counts_and_masked_padding',torch.equal(batched,mutated),{'candidate_counts':[len(row['candidates']) for row in rows],'max_unbatched_score_diff':max_batch_err,'masked_candidate_logits':'-inf','masked_candidate_content_mutation':'valid logits unchanged'})
+with torch.inference_mode():extra=model(F.pad(base_tokens,(0,cfg.max_length-base_tokens.shape[-1])))
+check('sequence_zero_padding_invariant',torch.allclose(extra,baseline,atol=1e-6,rtol=1e-5),{'original_length':base_tokens.shape[-1],'padded_length':cfg.max_length,'max_abs_diff':float((extra-baseline).abs().max())})
+metadata_rows=[{**row,'family_id':'different','case_id':'different','id':'different','task':'not-input','split':'different'} for row in rows]
+metadata_data=T.encoded_data(metadata_rows,'c',tok,cfg)
+check('metadata_does_not_enter_tokens',torch.equal(e['tokens'],metadata_data['tokens']) and torch.equal(e['mask'],metadata_data['mask']))
+model.train();logits=T.logits_for(model,e,torch.arange(len(rows)));loss=F.cross_entropy(logits,e['labels']);loss.backward()
+check('mixed_mask_backward_finite',bool(torch.isfinite(loss)) and all(p.grad is None or bool(torch.isfinite(p.grad).all()) for p in model.parameters()),{'loss':float(loss.detach()),'shared_scalar_head_gradient_norm':float(model.score.weight.grad.norm()),'optimizer_steps':0})
+# Independent float64 metric calculation with variable candidate count and fixed Brier convention.
+fixture=torch.tensor([[0.,0.,-float('inf')],[0.,0.,0.]],dtype=torch.float32);labels=[0,2]
+met=T.metrics(fixture,labels);expected_ce=(math.log(2)+math.log(3))/2;expected_brier=(.5+2/3)/2
+check('masked_probability_metrics',abs(met['cross_entropy']-expected_ce)<1e-6 and abs(met['brier']-expected_brier)<1e-6,{'observed':met,'expected_ce':expected_ce,'expected_brier':expected_brier,'denominator':2,'brier':'sum classes, mean samples'})
+# Offline jobs validation and isolation check; never call main/register/remote functions.
+from scripts.lesson_products.modal_runner import validate_job
+jobs={}
+for path in (R/'docs/lesson-products/jobs').glob('*.json'):
+ value=json.loads(path.read_text());validate_job(value);jobs[path.name]={'product':value['product'],'mode':value['mode'],'wall_seconds':value['wall_seconds'],'train_seconds':value['train_seconds'],'sha256':digest(path.read_bytes())}
+check('offline_job_schema_bounds',len(jobs)==4,jobs)
+fixed=json.loads((R/'docs/lesson-products/jobs/mechanism-fixed3-v1.json').read_text());odd=json.loads((R/'docs/lesson-products/jobs/mechanism-odd135-v1.json').read_text())
+check('mechanism_jobs_only_mode_differs',{k:v for k,v in fixed.items() if k!='mode'}=={k:v for k,v in odd.items() if k!='mode'})
+# Explicit score tie boundary: argmax alone has no semantic tie-breaker.
+tied=torch.zeros(6);first=base['candidates'];reverse=list(reversed(first))
+report['tie_boundary']={'scores':'all exactly zero (constructed logits)','original_pick':first[int(tied.argmax())],'reversed_pick':reverse[int(tied.argmax())],'scope':'Scorer is permutation equivariant; argmax tie-breaking by list position is not a semantic invariant. Final evaluator must report ties or fix semantic tie policy.'}
+report['elapsed_seconds']=round(time.monotonic()-start,3)
+report['command']='.venv/bin/python - < /workspace/work/curriculum-20261016/engineering-decisions/probe.py'
+report['probe_script_sha256']=digest(Path('/workspace/work/curriculum-20261016/engineering-decisions/probe.py').read_bytes())
+report['scope']='Offline CPU; random untrained tiny C scorer, no optimizer steps, no paid/network/external write, no formal training or capstone final evaluation.'
+out=R/'docs/lesson-products/reviews/engineering-decisions-execution.json';out.parent.mkdir(parents=True,exist_ok=True)
+with out.open('x') as stream:json.dump(report,stream,ensure_ascii=False,indent=2);stream.write('\n')
+print(json.dumps({'checks':len(report['checks']),'passed':all(v['passed'] for v in report['checks'].values()),'output':str(out),'elapsed_seconds':report['elapsed_seconds'],'coverage_limits':report['coverage_limits'],'tie_boundary':report['tie_boundary']},ensure_ascii=False,indent=2))
