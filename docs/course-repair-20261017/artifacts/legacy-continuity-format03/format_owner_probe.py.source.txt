@@ -1,0 +1,150 @@
+from pathlib import Path
+import ast
+import concurrent.futures
+import datetime
+import hashlib
+import json
+import platform
+import re
+import subprocess
+import sys
+import time
+
+REPO = Path('/workspace/tiny-perceptron-vlm')
+TASK = '/root/continuity_20261016_entries'
+D = REPO / 'docs/course-repair-20261017'
+ART = D / 'artifacts/legacy-continuity-format03'
+SELF = Path(__file__).resolve()
+INPUTS = ['course/chapters/07.md', 'course/chapters/09.md', 'course/chapters/14.md', 'course/chapters/19.md', 'pyproject.toml']
+
+
+def now():
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+
+def sha(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def ref(path):
+    path = Path(path)
+    return {'path': path.relative_to(REPO).as_posix(), 'sha256': sha(path)}
+
+
+def syntax_probe():
+    results = []
+    errors = []
+    for name in INPUTS[:4]:
+        source = (REPO / name).read_text(encoding='utf-8')
+        blocks = []
+        active = None
+        for number, line in enumerate(source.splitlines(keepends=True), 1):
+            if active is None:
+                match = re.match(r'^\s*(`{3,}|~{3,})[ \t]*(\S*)', line)
+                if match:
+                    fence, language = match.groups()
+                    active = {'char': fence[0], 'length': len(fence), 'python': language.lower() in {'python', 'python3', 'py'}, 'start_line': number + 1, 'lines': []}
+            elif re.match(r'^\s*' + re.escape(active['char']) + '{' + str(active['length']) + r',}[ \t]*\r?\n?$', line):
+                if active['python']:
+                    blocks.append(active)
+                active = None
+            elif active['python']:
+                active['lines'].append(line)
+        if active and active['python']:
+            errors.append({'path': name, 'start_line': active['start_line'], 'error': 'unclosed Python fence'})
+        fence_records = []
+        for index, block in enumerate(blocks, 1):
+            code = ''.join(block['lines'])
+            try:
+                ast.parse(code, filename=f"{name}:fence-{index}:line-{block['start_line']}")
+                parsed = True
+            except SyntaxError as error:
+                parsed = False
+                errors.append({'path': name, 'fence': index, 'start_line': block['start_line'], 'error': str(error)})
+            fence_records.append({'index': index, 'start_line': block['start_line'], 'python_bytes_sha256': hashlib.sha256(code.encode()).hexdigest(), 'parsed': parsed})
+        results.append({'path': name, 'sha256': sha(REPO / name), 'python_fence_count': len(blocks), 'fences': fence_records})
+    result = {'python_executable': sys.executable, 'python_version': sys.version, 'files': results, 'total_python_fences': sum(item['python_fence_count'] for item in results), 'errors': errors, 'scope': 'All currently marked python/python3/py fences; ast.parse only. No code execution or semantic/AST-equivalence claim.'}
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return bool(errors)
+
+
+def run(argv):
+    start = now()
+    timer = time.monotonic()
+    result = subprocess.run(argv, cwd=REPO, capture_output=True, text=True, check=False)
+    return {'argv': argv, 'cwd': '.', 'started_at': start, 'finished_at': now(), 'elapsed_seconds': round(time.monotonic() - timer, 6), 'exit_code': result.returncode, 'stdout': result.stdout, 'stderr': result.stderr}
+
+
+if len(sys.argv) > 1 and sys.argv[1] == '--syntax-only':
+    raise SystemExit(syntax_probe())
+
+before = {name: sha(REPO / name) for name in INPUTS}
+old_dir = REPO / 'docs/course-revision-20261016'
+old_paths = sorted(old_dir.glob('reviews/continuity*entries*.json'))
+old_paths += sorted(old_dir.glob('reviews/dependency-audit*.json'))
+old_paths += sorted(old_dir.glob('reviews/continuity-order-format-owner*.json'))
+old_paths += sorted(old_dir.glob('checks/continuity*entries*.json'))
+old_paths += sorted(old_dir.glob('checks/continuity-order-format-owner*.json'))
+old_preserved = [ref(path) for path in sorted(set(old_paths))]
+commands = [
+    ['.venv/bin/ruff', 'check', '.'],
+    ['.venv/bin/ruff', 'format', '--check', '.'],
+    ['.venv/bin/python', SELF.relative_to(REPO).as_posix(), '--syntax-only'],
+    ['.venv/bin/ruff', '--version'],
+    ['git', 'ls-files', '--error-unmatch', *INPUTS],
+]
+with concurrent.futures.ThreadPoolExecutor(max_workers=5) as pool:
+    executions = list(pool.map(run, commands))
+syntax = json.loads(executions[2]['stdout']) if executions[2]['stdout'].strip() else {'files': [], 'total_python_fences': 0, 'errors': ['No syntax result emitted']}
+after = {name: sha(REPO / name) for name in INPUTS}
+stable = before == after
+ruff_count = re.search(r'(\d+) files? already formatted', executions[1]['stdout'])
+actual_ruff_count = int(ruff_count.group(1)) if ruff_count else None
+tracked = set(executions[4]['stdout'].splitlines()) == set(INPUTS) and executions[4]['exit_code'] == 0
+passed = all(item['exit_code'] == 0 for item in executions) and stable and tracked and not syntax['errors']
+checked = [{'path': name, 'sha256': after[name]} for name in INPUTS]
+new_issues = []
+if not passed:
+    new_issues.append({'id': 'AUTHOR-FORMAT-01-current-format03', 'necessity': 'necessary', 'reason': 'At least one current read-only format/syntax/tracked-input/stability check failed; see actual checks.', 'status': 'open'})
+receipt = {
+    'schema_version': 1, 'reviewer_task': TASK, 'current_context': 'informed', 'created_at': now(),
+    'environment': {'python_executable': sys.executable, 'python_version': sys.version, 'platform': platform.platform(), 'ruff_version': executions[3]['stdout'].strip(), 'cwd': '.', 'uv_invoked': False},
+    'helper': ref(SELF), 'checked_files': checked, 'source_sha256_before': before, 'source_sha256_after': after,
+    'source_version_stable_during_execution': stable, 'tracked_inputs_verified': tracked,
+    'commands': executions, 'ruff_actual_formatted_file_count': actual_ruff_count, 'syntax_result': syntax,
+    'verdict': 'pass' if passed else 'revise',
+    'limits': ['Ruff applies the current unchanged project configuration and exclusions; format was check-only.', 'Syntax parsing does not execute cells or verify semantics, values, Notebook state, model quality, or training.', 'No installation, sync, uv command, training, paid service, commit, push, or delegate was used.'],
+}
+receipt_path = ART / 'commands-result.json'
+with receipt_path.open('x', encoding='utf-8') as handle:
+    json.dump(receipt, handle, ensure_ascii=False, indent=2)
+    handle.write('\n')
+prior_path = old_dir / 'reviews/continuity-order-format-owner-callback-01.json'
+prior = json.loads(prior_path.read_text())
+old_hashes = {item['path']: item['sha256'] for item in prior['checked_files']}
+report = {
+    'schema_version': 1, 'reviewer_task': TASK, 'reviewer': TASK, 'current_context': 'informed', 'created_at': now(),
+    'role': 'AUTHOR-FORMAT-01歷史原owner局部當前格式／語法callback；不是新全書輪。',
+    'stage_context': '依root本次派工，technical已結束、continuity collection目前開啟；本次實際檢查與時間不回填舊stage。',
+    'verdict': 'pass' if passed else 'revise', 'resolved_issue_ids': ['AUTHOR-FORMAT-01'] if passed else [],
+    'checked_files': checked, 'original_issue': 'AUTHOR-FORMAT-01', 'prior_contract_report': ref(prior_path),
+    'closure': {'issue_id': 'AUTHOR-FORMAT-01', 'status': 'resolved' if passed else 'open', 'reason': '本人重新實跑目前全repo Ruff check及format --check，並完整逐個ast.parse四章當前所有Python fences；目前結果足以延續原格式fix的closure，不以新SHA替代實查。' if passed else '當前檢查尚未全過，原格式fix不可提前閉合。', 'current_input_changes_from_prior': [{'path': name, 'old_sha256': old_hashes[name], 'current_sha256': after[name], 'changed': old_hashes[name] != after[name]} for name in INPUTS]},
+    'actual_checks': {'commands': executions, 'ruff_actual_formatted_file_count': actual_ruff_count, 'python_fences_by_chapter': {item['path']: item['python_fence_count'] for item in syntax['files']}, 'total_python_fences': syntax['total_python_fences'], 'parse_errors': syntax['errors'], 'source_version_stable_during_execution': stable, 'tracked_inputs_verified': tracked},
+    'artifacts': [ref(SELF), ref(receipt_path)], 'prior_reports_and_receipts_preserved': old_preserved,
+    'new_issues': new_issues, 'optional_issues': [], 'unknowns': [], 'unperformed_scope': ['未執行教材Python fences／Notebook／正式test或模型。', '未重讀四章完整ML正文、重驗教學語義、方法理由、數值、API、資料、正式訓練或能力。', '未開新全書reader或其他本輪peer意見，未替代第三位全書獨立銜接審閱。', '未改教材、Notebook、實作、pyproject、criteria、validators、任何舊報告或seal。'],
+    'limits': ['當前format與syntax pass不等於所有Notebook執行或全書理解pass。', '本報告與先前報告並列保存，不抹除舊時點來源及判斷。'],
+    'instructions_read': [{'path': name, 'sha256': sha(REPO / name)} for name in ['AGENTS.md', '.agents/skills/clear-tutorial/SKILL.md', '.agents/skills/clear-tutorial/references/review-protocol.md']],
+}
+report_path = D / 'reviews/continuity-format-owner-callback-03.json'
+with report_path.open('x', encoding='utf-8') as handle:
+    json.dump(report, handle, ensure_ascii=False, indent=2)
+    handle.write('\n')
+for item in old_preserved:
+    assert sha(REPO / item['path']) == item['sha256'], item['path']
+assert len(checked) == 5 and all(not Path(item['path']).is_absolute() for item in checked)
+assert {item['path'] for item in checked} == set(INPUTS)
+assert all(sha(REPO / item['path']) == item['sha256'] for item in checked)
+for path in [SELF, receipt_path, report_path]:
+    ignored = subprocess.run(['git', 'check-ignore', '-q', path.relative_to(REPO).as_posix()], cwd=REPO, check=False)
+    assert ignored.returncode == 1, ('artifact ignored or git check failed', str(path), ignored.returncode)
+print(json.dumps({'report': ref(report_path), 'receipt': ref(receipt_path), 'helper': ref(SELF), 'verdict': report['verdict'], 'ruff_check': {'exit_code': executions[0]['exit_code'], 'stdout': executions[0]['stdout'], 'stderr': executions[0]['stderr']}, 'ruff_format': {'exit_code': executions[1]['exit_code'], 'stdout': executions[1]['stdout'], 'stderr': executions[1]['stderr']}, 'python_fences_by_chapter': report['actual_checks']['python_fences_by_chapter'], 'total_python_fences': syntax['total_python_fences'], 'parse_errors': syntax['errors'], 'checked_files': checked, 'source_version_stable': stable, 'prior_reports_receipts_count_preserved': len(old_preserved), 'self_check': '5 tracked relative inputs; all artifact/report paths not ignored; old report/receipt bytes unchanged; exclusive JSON creation'}, ensure_ascii=False, indent=2))

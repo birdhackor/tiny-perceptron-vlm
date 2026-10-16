@@ -1,0 +1,26 @@
+import json,torch,sys
+from pathlib import Path
+from tiny_perceptron.alignment import reliability_bins,LoRALinear
+from torch import nn
+from torch.nn import functional as F
+torch.set_num_threads(1)
+print('Python',sys.version.split()[0],'torch',torch.__version__,'threads',torch.get_num_threads())
+r=json.loads(Path('/workspace/tiny-perceptron-vlm/docs/course-experiments/results/encoders.json').read_text())['results']
+for name in ('vision','audio'):
+ c=r[name]['calibration'];x=torch.tensor(c['test']['logits']);y=torch.tensor(c['test']['labels'])
+ for phase in ('original','calibrated'):
+  t=c['test'][phase]['temperature'];p=(x/t).softmax(-1);conf,pred=p.max(-1);ok=pred==y
+  brier=(p-F.one_hot(y,num_classes=p.shape[-1])).square().sum(-1).mean().item()
+  bins=reliability_bins(conf,ok,bins=5);ece=sum(b['count']/len(y)*abs(b['accuracy']-b['confidence']) for b in bins)
+  nll=F.cross_entropy(x/t,y).item()
+  for metric,value in [('nll',nll),('brier',brier),('ece',ece)]:assert abs(value-c['test'][phase][metric])<2e-6,(name,phase,metric,value)
+  print(name,phase,'correct',ok.sum().item(),'nll',nll,'brier',brier,'ece',ece)
+ bins=reliability_bins(torch.tensor([.55,.65,.85,.95,.25]),torch.tensor([1,0,1,0,1]),bins=2)
+ ece=sum(b['count']/5*abs(b['accuracy']-b['confidence']) for b in bins);assert abs(ece-.35)<1e-6
+print('five-example ECE',ece)
+torch.manual_seed(3);layer=LoRALinear(nn.Linear(16,12),rank=4,alpha=4)
+with torch.no_grad():layer.b.normal_()
+x=torch.randn(3,16);a=layer(x);b=F.linear(x,layer.merged_weight(),layer.base.bias)
+error=(a-b).abs().max().item();assert error<1e-5
+print('nonzero LoRA merged maxerror',error)
+print('All assertions passed; no optimizer updates or model training.')

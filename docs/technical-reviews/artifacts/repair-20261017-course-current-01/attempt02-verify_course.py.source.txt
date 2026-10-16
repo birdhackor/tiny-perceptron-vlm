@@ -1,0 +1,144 @@
+"""Bounded CPU/source verification for the course continuity callback; no training."""
+from pathlib import Path
+import contextlib, datetime, hashlib, io, json, platform, re, sys
+from collections import Counter
+from course_io import R, B, W, TASK, note, sha
+sys.path.insert(0,str(R))
+import torch
+from scripts import build_course, export_course
+from tiny_perceptron.selftrained.model import LimitedAssistant, SelftrainedConfig
+from tiny_perceptron.lesson_products.model import Config, Tokenizer, LoopedSolver, CandidateScorer, padded
+from tiny_perceptron.lesson_products.data import CANDIDATES
+from tiny_perceptron.lesson_products.inference import parse_state, rule_depth, auto_solve
+
+torch.set_num_threads(1)
+torch.manual_seed(20261017)
+out={'reviewer_task':TASK,'collection_role':'continuity','wave':'textbook-repair-20261017',
+     'started_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),
+     'environment':{'python':platform.python_version(),'torch':str(torch.__version__),'device':'cpu','threads':'1'},
+     'scope':'Actual current execution: parsers, old raw-output aggregation, and tiny random untrained forward passes only. Zero optimizer updates; no pretrained or published model loaded; no original experiment rerun.'}
+course=R/'course/README.md'
+body=course.read_text()
+assert sha(course)=='5c53818f580c6758cdffaf2e42c0368abdbd472854c52410fc9341dd92567738'
+assert course.read_bytes()==(B/'input-freeze03/pages/course.md').read_bytes()
+out['course']={'source':str(course.relative_to(R)),'sha256':sha(course),'lines':len(body.splitlines()),'details':body.count('<details>'),'svg_references':re.findall(r'!\[[^\]]*\]\(([^)]+\.svg)\)',body)}
+links=[]
+for label,ref in re.findall(r'\[([^\]]+)\]\(([^)]+)\)',body):
+    target,_,anchor=ref.partition('#');p=(course.parent/target).resolve()
+    assert p.is_file(),ref
+    if anchor:assert re.search(r'^## '+re.escape(anchor)+r'\s',p.read_text(),re.M),ref
+    links.append({'label':label,'reference':ref,'exists':True,'anchor_verified':bool(anchor)})
+out['course_links']=links
+chapters=[]
+for p in sorted((R/'course/chapters').glob('*.md')):
+    lines=p.read_text().splitlines();first=next(i for i,l in enumerate(lines) if l.startswith('## '))
+    headings=[{'line':i+1,'text':l} for i,l in enumerate(lines) if l.startswith('## ')]
+    chapters.append({'path':str(p.relative_to(R)),'sha256':sha(p),'intro_lines':[1,first],'headings':headings})
+out['chapter_route_inventory']=chapters
+assert len(chapters)==23 and sum(len(p['headings']) for p in chapters)==312
+capture=io.StringIO()
+with contextlib.redirect_stdout(capture):build_course.build(check=True)
+index=json.loads((R/'course/lesson-index.json').read_text())
+nb_checks=[];code_count=0;output_count=0
+for item in index:
+    p=R/item['notebook'];original=json.loads(p.read_text());executed=B/'final-executed03'/Path(item['notebook']).relative_to('notebooks')
+    result=export_course.checked_notebook(original,executed)
+    for cell in result['cells']:
+        if cell['cell_type']=='code':
+            code_count+=1;output_count+=len(cell.get('outputs',[]));export_course.output_html(cell.get('outputs',[]))
+    nb_checks.append({'id':item['id'],'notebook':item['notebook'],'source_sha256':sha(p),'root_executed_copy_sha256':sha(executed)})
+(W/'notebook-input-identities.json').write_text(json.dumps(nb_checks,ensure_ascii=False,indent=2)+'\n')
+out['notebooks']={'build_check_stdout':capture.getvalue(),'count':len(index),'code_cells':code_count,'output_objects':output_count,'exact_cell_sources_and_no_error':True,'identity_list_sha256':sha(W/'notebook-input-identities.json'),'scope':'Root-produced actual prior kernel outputs inspected for source identity; this reviewer did not run those 312 notebooks.'}
+targets={v:k+'.md' for k,v in export_course.DOCUMENTS.items()}
+targets.update({p['path']:'chapter-'+Path(p['path']).stem+'.md' for p in chapters})
+lesson_targets={(x['source'],x['id']):x['id']+'.md' for x in index}
+converted=export_course.reading_markdown(body,course,targets,lesson_targets,'working-repair-20261017-freeze03')
+out['site_source']={'details_markdown_enabled':'<details markdown="1">' in converted,'first_lesson_resolved':'(1.1.md)' in converted,'scope':'Pure Markdown conversion checked. Colab/footer source inspected; preview ref is explicitly uncommitted and not claimed to resolve remotely.'}
+assert out['site_source']['details_markdown_enabled'] and out['site_source']['first_lesson_resolved']
+sec=re.split(r'^## ',(R/'course/chapters/01.md').read_text(),flags=re.M)[1]
+code=re.search(r'```python\n(.*?)```',sec,re.S)[1]
+capture=io.StringIO();state={}
+with contextlib.redirect_stdout(capture):exec(compile(code,'course/chapters/01.md#1.1','exec'),state)
+assert state['ids']==[3,2,1,4,1,2,3,0] and state['restored']==state['text']
+other={}
+with contextlib.redirect_stdout(io.StringIO()):exec(code.replace('sorted(set(text))','sorted(set(text), reverse=True)'),other)
+out['character_ids']={'stdout':capture.getvalue(),'id_count':len(state['ids']),'same_cat_id':state['ids'][0]==state['ids'][6],'reversed_ids':other['ids'],'reversed_restores':other['restored']==state['text'],'scope':'Literal 1.1 code and stated exercise; no language understanding claimed.'}
+assert out['character_ids']['reversed_restores']
+q=torch.tensor([[[[1.,0.]]]],dtype=torch.float64);k=torch.tensor([[[[1.,0.],[0.,1.]]]],dtype=torch.float64);v=torch.tensor([[[[2.,0.],[0.,4.]]]],dtype=torch.float64)
+weights=(q@k.transpose(-1,-2)/(2**0.5)).softmax(-1)
+sdpa=torch.nn.functional.scaled_dot_product_attention(q,k,v,dropout_p=0)
+out['attention']={'weights':weights.flatten().tolist(),'output':sdpa.flatten().tolist(),'max_error':float((sdpa-weights@v).abs().max()),'scope':'One float64 CPU attention calculation: comparison, normalized weights, weighted values. Not human reading or quality evidence.'}
+assert out['attention']['max_error']<1e-12
+forward=[]
+for architecture in ['moe','dense']:
+    config=SelftrainedConfig(vocab_size=32,architecture=architecture,width=16,layers=1,heads=2,kv_heads=1,ffn_hidden=32,experts=2,top_k=1,max_length=64)
+    model=LimitedAssistant(config).eval();before={k:v.clone() for k,v in model.state_dict().items()}
+    ids=torch.tensor([[1]+[7]*2+[8]*32+[9]*16+[11]],dtype=torch.long)
+    modalities=[[{'kind':'image','values':torch.zeros(2,1,32,32),'coordinates':torch.tensor([[.25,.5],[.75,.5]])},{'kind':'ocr','values':torch.zeros(1,32,128)},{'kind':'audio','values':torch.zeros(20,40)}]]
+    with torch.no_grad():result=model(ids,modalities=modalities)
+    unchanged=all(torch.equal(v,model.state_dict()[k]) for k,v in before.items())
+    assert result['logits'].shape==(1,52,32) and torch.isfinite(result['logits']).all() and unchanged
+    forward.append({'architecture':architecture,'config':config.__dict__,'input_ids_shape':list(ids.shape),'logits_shape':list(result['logits'].shape),'perception_kinds':[x['kind'] for x in result['perception']],'parameters_unchanged':unchanged,'scope':'New tiny random model with zero input fixtures; verifies wiring and shape only, not released model accuracy.'})
+out['multimodal_forward']=forward
+tok=Tokenizer();config=Config(vocab_size=len(tok),width=16,heads=2,ff=32,max_length=128,c_layers=1)
+b,c=LoopedSolver(config).eval(),CandidateScorer(config).eval()
+state='兩盒追蹤;A=2;B=6;事件=交換;查詢=B'
+tokens=padded([tok.encode(state)],128)
+candidates=list(CANDIDATES['choice'])
+ctokens=padded([tok.encode(state,'choice',candidate) for candidate in candidates],128)
+with torch.no_grad():
+    b_logits=b(tokens,loops=3);c_logits=c(ctokens);c_probs=c_logits.softmax(-1)
+    reverse=c(ctokens.flip(0)).softmax(-1).flip(0)
+assert b_logits.shape==(1,19) and c_logits.shape==(6,) and torch.allclose(c_probs,reverse,atol=1e-6)
+class FakeB:
+    auto_policy={'version':1,'sum_depth':3,'low_max_events':1,'medium_max_events':3}
+    def synchronize(self):pass
+    def solve(self,state,loops):return {'fixture':True,'loops':loops}
+class FakeC:
+    def synchronize(self):pass
+    def judge(self,state,question):return {'selected':'boxes' if question=='choice' else 'yes','seconds':0}
+auto=auto_solve(FakeB(),FakeC(),state,effort='high',max_loops=2)
+assert auto['requested_loops']==5 and auto['b_loops']==2 and auto['status']=='budget_limited'
+out['products']={'finite_parsed_state':parse_state(state),'looped_logits_shape':list(b_logits.shape),'candidate_scores_shape':list(c_logits.shape),'probability_sum':float(c_probs.sum()),'reorder_max_error':float((c_probs-reverse).abs().max()),'auto_fixture':auto,'scope':'Fresh random B/C forward shapes; typed-candidate permutation; Auto tested with explicit fixture stubs, not claimed as released model decisions.'}
+operations=Path('/workspace/selftrained-v2/outputs/selftrained-v2/operations')
+v2=[]
+for architecture in ['moe','dense']:
+    folder='moe-joint-native-balanced-4000-attempt-1' if architecture=='moe' else 'dense-joint-weighted-10000-attempt-2'
+    ep=next((operations/folder).rglob('execution.json'));tp=ep.with_name('train-receipt.json');mp=ep.with_name('inference-manifest.json')
+    execution=json.loads(ep.read_text());train=json.loads(tp.read_text());manifest=json.loads(mp.read_text())
+    finalbase=R/f'docs/selftrained/results/public-raw/{architecture}/test'
+    metrics=json.loads((finalbase/'metrics.json').read_text());receipt=json.loads((finalbase/'evaluation-receipt.json').read_text())
+    raw=next((operations/(architecture+'-public-final-test-attempt-1')).rglob('outputs.jsonl'))
+    rows=0;tasks=Counter();tool_correct=0;ids=[]
+    with raw.open() as f:
+        for line in f:
+            row=json.loads(line);rows+=1;task=row['record']['task'];tasks[task]+=1;ids.append(row['record']['id'])
+            if task=='tool_call':tool_correct+=int(row['score']['tool_roundtrip'])
+    assert sha(raw)==receipt['outputs_sha256'] and rows==3734==receipt['completed_count']==metrics['count']
+    assert len(set(ids))==rows and tasks['tool_call']==276 and tool_correct==metrics['per_task_final_reply']['tool_call']['tool_roundtrip']['numerator']
+    assert execution['status']=='completed' and execution['returncode']==0 and train['completed_requested_steps'] and not train['interrupted']
+    assert train['origin']['kind']=='all-neural-weights-random' and manifest['selected_checkpoint_sha256']==metrics['selected_checkpoint_sha256']
+    assert sha(mp)==metrics['inference_manifest_sha256'] and tool_correct/276<metrics['thresholds']['tool_roundtrip']
+    projection={'architecture':architecture,'primary_inputs':[{'absolute_origin':str(p),'bytes':p.stat().st_size,'sha256':sha(p)} for p in [ep,tp,mp,raw]],'execution_fields':{k:execution[k] for k in ['run_id','stage','revision','manifest_sha256','status','returncode','started_at','finished_at']},'train_fields':{k:train[k] for k in ['architecture','steps','completed_requested_steps','interrupted','inference_exported','selected_checkpoint_available','test_used_for_selection','selection']},'origin_kind':train['origin']['kind'],'origin_seed':train['origin']['seed'],'stage_history_projection':[{k:s[k] for k in ['stage','step','checkpoint_sha256','selection']} for s in train['stage_history']],'selected_checkpoint_sha256':manifest['selected_checkpoint_sha256'],'selected_step':manifest['selected_step'],'weight_file':manifest['files']['model.safetensors'],'raw_recomputed_count':rows,'unique_ids':len(set(ids)),'tasks':dict(tasks),'tool_roundtrip':{'numerator':tool_correct,'denominator':276,'rate':tool_correct/276,'required':metrics['thresholds']['tool_roundtrip']},'scope':'Exact original producer fields plus full JSONL count/task aggregation of already-recorded score booleans; not a generation rerun or independent semantic regrading. Stage history is field projection, not full lineage reexecution.'}
+    v2.append(projection)
+out['original_v2_records']=v2
+release=json.loads((R/'tiny_perceptron/lesson_products/release.json').read_text())
+bc=[]
+for product in ['b','c']:
+    manifest_path=W/'primary'/f'public-{product}-manifest.json';mp=json.loads(manifest_path.read_text());tp=W/'primary'/f'public-{product}-training.json';tr=json.loads(tp.read_text())
+    assert sha(manifest_path)==release['products'][product]['manifest_sha256'] and sha(tp)==mp['files']['training-receipt.json']['sha256']
+    assert tr['random_initialization'] and tr['weights_changed'] and tr['resume_source'] is None
+    bc.append({'product':product,'manifest_sha256':sha(manifest_path),'training_receipt_sha256':sha(tp),'fields':{k:tr[k] for k in ['run_identity','product','mode','random_initialization','resume_source','steps_this_attempt','last_step','selected_step','stop_reason','seed','batch_size','parameters','data_manifest_sha256','initial_weights_sha256','selected_weights_sha256','weights_changed','environment','scope']},'source_url':next(r['url'] for r in json.loads((W/'release-receipts-fetch.json').read_text()) if r['name']==f'public-{product}-training')})
+out['original_bc_training']=bc
+out['public_metadata_fetch']=json.loads((W/'public-metadata-fetch.json').read_text())
+out['release_receipts_fetch']=json.loads((W/'release-receipts-fetch.json').read_text())
+assert all(r.get('status')==200 for r in out['public_metadata_fetch']+out['release_receipts_fetch'])
+for a in ['moe','dense']:
+    public_config=json.loads((W/'primary'/f'public-v2-{a}-config.json').read_text());assert public_config['architecture']==a
+old=json.loads((R/'docs/course-experiments/capstone-public.json').read_text())
+out['legacy_manifest']={'revision':old['revision'],'model_ids':[m['id'] for m in old['models']],'scope':'Separate fixed synthetic capstone inventory; not conflated with v2 or B/C release.'}
+out['licensing']={'license_text_has_MIT':'MIT License' in (R/'LICENSE').read_text(),'pyproject_license_MIT':'license = "MIT"' in (R/'pyproject.toml').read_text(),'torch_declared':'"torch>=2.11"' in (R/'pyproject.toml').read_text(),'scope':'Own project MIT declaration and source documents retain third-party asset/model/font license boundaries; not a new legal audit of every third-party file.'}
+out['finished_at']=datetime.datetime.now(datetime.timezone.utc).isoformat()
+(W/'execution.json').write_text(json.dumps(out,ensure_ascii=False,indent=2)+'\n')
+note('verification_complete',artifact='execution.json',sha256=sha(W/'execution.json'),scope=out['scope'])
+print(json.dumps({'status':'pass','course':out['course'],'course_link_count':len(links),'chapters':len(chapters),'notebooks':out['notebooks'],'character_ids':out['character_ids'],'attention':out['attention'],'multimodal_shapes':[{k:r[k] for k in ['architecture','input_ids_shape','logits_shape','perception_kinds','parameters_unchanged']} for r in forward],'product_shapes':{k:out['products'][k] for k in ['looped_logits_shape','candidate_scores_shape','probability_sum','reorder_max_error']},'raw_tests':[{k:r[k] for k in ['architecture','raw_recomputed_count','unique_ids','tool_roundtrip']} for r in v2],'execution_sha256':sha(W/'execution.json')},ensure_ascii=False,indent=2))

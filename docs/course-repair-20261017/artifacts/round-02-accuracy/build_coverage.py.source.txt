@@ -1,0 +1,59 @@
+"""Mechanical reconciliation of this review's own original receipts; not semantic grading."""
+from pathlib import Path
+import json, hashlib, re, datetime
+from collections import Counter
+W=Path('/workspace/work/textbook-repair-20261017/round-02-accuracy')
+P=W.parent/'input-freeze02'; R=Path('/workspace/tiny-perceptron-vlm')
+TASK='/root/astra_repair_02_accuracy'
+def sha(p): return hashlib.sha256(Path(p).read_bytes()).hexdigest()
+def rows(name): return [json.loads(s) for s in (W/name).read_text().splitlines()]
+def meta(p): return {'path':str(p),'bytes':Path(p).stat().st_size,'sha256':sha(p)}
+order=json.loads((P/'reading-order.json').read_text()); notes=rows('reading-log.jsonl'); views=rows('figure-view-log.jsonl'); nbs=rows('notebook-output-receipts.jsonl')
+inventory=json.loads((P/'figure-inventory.json').read_text()); freeze=R/'docs/course-repair-20261017/freeze-02.json'
+assert sha(freeze)=='0cd3d655989e1a507f00d641b263ae55f4dc6b20b65787c94b0374f46c107066'
+original={x['page_id']:x for x in json.loads(freeze.read_text())['pages']}
+assert len(order)==len(notes)==350
+assert [x['order'] for x in notes]==list(range(1,351))
+assert [x['page_id'] for x in notes]==[x['page_id'] for x in order]
+assert all(x['reviewer_task']==TASK for x in notes+views+nbs)
+nb_latest={x['page_id']:x for x in nbs}; nb_pages=[x for x in order if x.get('notebook')]
+assert len(nb_pages)==len(nb_latest)==312
+page_checks=[]
+nb_code_cells=0; nb_error_outputs=0; nb_unexecuted_cells=0; nb_code_blocks=0
+for page,note in zip(order,notes,strict=True):
+    page_id=page['page_id']; raw=Path(page['frozen_path']).read_text()
+    assert sha(page['frozen_path'])==page['source_sha256']==note['source_sha256']==original[page_id]['source_sha256'],page_id
+    assert note['quote'] in raw,page_id
+    details=len(re.findall(r'<details\b',raw)); assert details==page['details_blocks']==note['details_blocks'],page_id
+    assert note['figures_sha256']==page['figures_sha256']==original[page_id]['figures_sha256'],page_id
+    assert note['checks'] and note['unknowns'] and note['limitations'] and note['read_range'],page_id
+    code_blocks=len(re.findall(r'```python\n(.*?)```',raw,re.S))
+    info={'order':page['ordinal'],'page_id':page_id,'source_sha256':page['source_sha256'],'reading_log_line':page['ordinal'],'exact_quote_present':True,'details_blocks':details,'figures':len(page['figures_sha256']),'read_range':note['read_range'],'original_verdict':note['verdict']}
+    if page.get('notebook'):
+        nb=nb_latest[page_id]; assert sha(nb['path'])==nb['sha256'],page_id
+        doc=json.loads(Path(nb['path']).read_text());cells=[c for c in doc['cells'] if c['cell_type']=='code']
+        actual=[''.join(c['source']).strip() for c in cells]; expected=re.findall(r'```python\n(.*?)```',raw,re.S)
+        assert len(expected)==nb['source_python_blocks'] and all(s.strip() in actual for s in expected),page_id
+        assert all(nb['exact_code_block_matches']),page_id
+        errors=sum(o.get('output_type')=='error' for c in cells for o in c.get('outputs',[]))
+        unexecuted=sum(c.get('execution_count') is None for c in cells)
+        nb_error_outputs+=errors;nb_unexecuted_cells+=unexecuted;nb_code_cells+=len(cells);nb_code_blocks+=len(expected)
+        info['notebook']={'sha256':nb['sha256'],'source_python_blocks':len(expected),'exact_source_matches':True,'error_outputs':errors,'unexecuted_code_cells':unexecuted,'executed_by':'root; inspected by reviewer, not reviewer kernel rerun'}
+    page_checks.append(info)
+assert nb_error_outputs==nb_unexecuted_cells==0
+latest={x['source']:x for x in views};assert set(latest)==set(inventory)
+figure_checks=[]
+for src,expected in inventory.items():
+    row=latest[src];assert sha(P/'figures-src'/src)==expected==row['source_sha256'],src
+    assert sha(row['render'])==row['render_sha256'],src
+    assert row['observation'] and row['view_tool']=='functions tools.view_image',src
+    all_placements=[x['page_id'] for x in order if src in x['figures_sha256']]
+    if src=='course/figures/window_training.svg':
+        assert 'window_training.svg' in Path(next(x for x in order if x['page_id']=='2.5')['frozen_path']).read_text()
+        all_placements=['2.5 (ordinary Markdown link inside details; not embedded-image map)']
+    figure_checks.append({'source':src,'source_sha256':expected,'render_sha256':row['render_sha256'],'valid_observation_time':row['time'],'authoritative_view_log_line':max(i for i,x in enumerate(views,1) if x['source']==src),'all_view_log_lines':[i for i,x in enumerate(views,1) if x['source']==src],'canonical_placements':all_placements})
+files=[meta(p) for p in sorted(P.rglob('*')) if p.is_file()];assert len(files)==1168
+out={'reviewer_task':TASK,'time':datetime.datetime.now(datetime.timezone.utc).isoformat(),'kind':'mechanical coverage reconciliation of own full semantic reading receipts','source_freeze':meta(freeze),'pack':str(P),'reading_order':meta(P/'reading-order.json'),'figure_inventory':meta(P/'figure-inventory.json'),'counts':{'canonical_pages':len(notes),'lesson_pages':sum(x['kind']=='lesson' for x in order),'canonical_kind_counts':dict(Counter(x['kind'] for x in order)),'details_blocks':sum(x['details_blocks'] for x in order),'pages_with_details':sum(bool(x['details_blocks']) for x in order),'figure_view_log_rows':len(views),'unique_original_figures':len(inventory),'embedded_page_map_unique_figures':len({k for x in order for k in x['figures_sha256']}),'notebook_receipt_rows':len(nbs),'unique_root_executed_notebooks':len(nb_latest),'root_notebook_code_cells':nb_code_cells,'source_python_blocks_matched':nb_code_blocks,'root_notebook_error_outputs':nb_error_outputs,'root_notebook_unexecuted_code_cells':nb_unexecuted_cells,'pack_actual_files':len(files),'source_receipt_rows':len(rows('source-receipts.jsonl')),'original_verdict_counts':dict(Counter(x['verdict'] for x in notes))},'checks':{'page_order_exact':True,'source_bytes_match_assigned_freeze':True,'all350_exact_quotes_present':True,'all277_details_accounted':True,'all115_original_SVG_and_view_PNG_hashes_match':True,'all312_raw_notebook_files_and282_fenced_source_blocks_checked':True,'no_peer_review_used_for_this_reconciliation':True},'timing':{'first_semantic_note':notes[0]['time'],'last_semantic_note':notes[-1]['time'],'last_figure_observation':max(x['time'] for x in views),'last_notebook_output_receipt':max(x['time'] for x in nbs)},'limitations':['Hash, exact quotations and row counts alone do not establish semantic correctness; page notes and actual image observations carry that judgment.','Two premature figure notes retained but superseded after actual views; use authoritative_view_log_line.','window_training.svg was actually viewed late after finding its ordinary-link placement at2.5; timestamps not backfilled.','Three future natural guides were partly opened through lesson links before ordinal credit, exact freeze bytes confirmed, then reread fully in canonical order.','Notebook raw outputs were executed by root (312 kernels plus5 delta replacements); this reviewer read them and did not rerun those notebooks. Mechanical source match here is the282 literal Python-fenced canonical blocks appearing in raw notebook code cells; it is not a new full-cell comparison against a separate frozen notebook snapshot.','Original pending and partial verdicts remain unchanged; later source resolutions are append-only in source-followups.jsonl.','This is logical source-first isolation on a shared filesystem, not physical isolation or proof of human beginner comprehension.'],'pages':page_checks,'figures':figure_checks,'own_receipts':[meta(W/n) for n in ['reading-log.jsonl','figure-view-log.jsonl','notebook-output-receipts.jsonl','source-receipts.jsonl','source-followups.jsonl','read-events.jsonl','render-events.jsonl','method-events.jsonl','methods-events.jsonl','execution-receipts.jsonl']]}
+(W/'coverage.json').write_text(json.dumps(out,ensure_ascii=False,indent=2)+'\n')
+(W/'input-pack-inventory-at-seal.json').write_text(json.dumps({'reviewer_task':TASK,'time':out['time'],'purpose':'Current exact pack inventory captured at initial sealing; expected canonical source and figure hashes independently checked against assigned freeze in coverage.json. This does not invent a preexisting wholepack baseline.','files':files},ensure_ascii=False,indent=2)+'\n')
+print(json.dumps({'reviewer_task':TASK,'counts':out['counts'],'checks':out['checks'],'coverage_sha256':sha(W/'coverage.json')},ensure_ascii=False,indent=2))

@@ -45,7 +45,7 @@ python scripts/train.py --task vision --device cpu
 
 前向用目前參數預測，反向計算代價對參數的敏感度；真正調整要由更新工具執行。
 
-先看報告的幾個欄位：
+先看報告的幾個欄位（若看最後摘要，`loss` 等批次數值在 `history` 第一筆）：
 
 | 欄位 | 這一步要確認什麼 |
 | --- | --- |
@@ -531,7 +531,7 @@ for path in paths:
 .venv/bin/python -m scripts.course_experiments.run --experiment multimodal_distillation --device cuda
 ```
 
-第一行是[12.12](chapters/12.md#12.12)的固定圖音聯合訓練，直接讀取 `sft` 與 `encoders`，不承接 `vqa`。這份 `joint`、T.6 手動保存的 `checkpoints/joint.pt` 和第19章的 `capstone_joint` 各有自己的配方，不能互換來源。實驗工具每次只執行指定項，不自動補齊依賴；上述命令沿用同一個預設 `outputs/course-experiments/course-v1/` 根目錄，第二行會讀取 `vqa/` 與 `joint/` 各自的 `model.pt`、`dataset.json`。先保留來源權重和原始切分；僅下載推論包不足以恢復訓練資料。操作與格式見[實驗說明](../docs/course-experiments/README.md)。
+第一行是[12.12](chapters/12.md#12.12)的固定圖音聯合訓練，直接讀取 `sft` 與 `encoders`，不承接 `vqa`。這份 `joint`、T.6 手動保存的 `checkpoints/joint.pt` 和舊合成整合實驗的 `capstone_joint` 各有自己的配方，不能互換來源。實驗工具每次只執行指定項，不自動補齊依賴；上述命令沿用同一個預設 `outputs/course-experiments/course-v1/` 根目錄，第二行會讀取 `vqa/` 與 `joint/` 各自的 `model.pt`、`dataset.json`。先保留來源權重和原始切分；僅下載推論包不足以恢復訓練資料。操作與格式見[實驗說明](../docs/course-experiments/README.md)。
 
 </details>
 

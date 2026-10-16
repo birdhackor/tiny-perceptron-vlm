@@ -1,0 +1,54 @@
+import json, hashlib, pathlib, sys, collections, itertools, datetime
+import torch
+torch.set_num_threads(1)
+sys.path.insert(0, '/workspace/tiny-perceptron-vlm')
+from scripts.selftrained.evaluate import score_reply, summarize
+R=pathlib.Path('/workspace/tiny-perceptron-vlm')
+W=pathlib.Path('/workspace/work/textbook-repair-20261017/round-02-accuracy')
+ROOT=pathlib.Path('/workspace/selftrained-v2/outputs/selftrained-v2')
+def sha(p):
+    with p.open('rb') as f:return hashlib.file_digest(f,'sha256').hexdigest()
+report={'reviewer_task':'/root/astra_repair_02_accuracy','time':datetime.datetime.now(datetime.timezone.utc).isoformat(),'command':'.venv/bin/python /workspace/work/textbook-repair-20261017/round-02-accuracy/audit_capstone_raw.py','method':'Read preserved raw records and output JSONL only; no model loading/generation/training. Recompute saved scoring using inspected evaluator and independently count dataset splits/groups.','python':sys.version,'torch':torch.__version__,'threads':torch.get_num_threads(),'evaluations':{},'data':{}}
+paths={
+'moe':ROOT/'operations/moe-public-final-test-attempt-1/monitor/artifact/selftrained-run-bf43be260d3e819f4ff3df3b1155daac98d01071-37448172517-1/gha-37448172517-1/raw/outputs.jsonl',
+'dense':ROOT/'operations/dense-public-final-test-attempt-1/monitor/artifact/selftrained-run-9482b50212cca4c6b68cf7ad2d54abe27c2b308b-37451905991-1/gha-37451905991-1/raw/outputs.jsonl'}
+for arch,p in paths.items():
+    rows=[json.loads(s) for s in p.read_text().splitlines()]
+    expected=json.loads((R/f'docs/selftrained/results/public-raw/{arch}/test/metrics.json').read_text())
+    scores=[row['record']['id'] for row in rows if score_reply(row['record'],row['trace']['final_output'],row['trace'])!=row['score']]
+    got=summarize(rows)
+    fields=['per_task_final_reply','stratified_final_reply','perception','controls','voice_topic_continuation','generation_budget']
+    matching={k:got[k]==expected[k] for k in fields}
+    case_groups=collections.defaultdict(list)
+    for row in rows:
+        s=row['record'].get('supervision',{});pair=row['record'].get('pair_id',s.get('pair_id'))
+        if pair:case_groups[(s.get('control_type','paired'),pair)].append(row)
+    sizes=collections.defaultdict(collections.Counter)
+    for (kind,_),members in case_groups.items():sizes[kind][len(members)]+=1
+    samples=[]
+    for task in ['tool_call','ocr','voice_topic_continuation']:
+        row=next(r for r in rows if r['record']['task']==task and not r['score']['semantic'])
+        samples.append({k:row[k] for k in ['record','trace','score','perception']})
+    report['evaluations'][arch]={'path':str(p),'sha256':sha(p),'rows':len(rows),'rescoring_mismatches':scores,'aggregate_matches':matching,'control_group_size_counts':{k:dict(v) for k,v in sizes.items()},'failure_samples':samples}
+    print(arch,'rows',len(rows),'SHA',sha(p),'rescoring_mismatches',len(scores),'aggregate_matches',matching,'group_sizes',{k:dict(v) for k,v in sizes.items()})
+m=json.loads((R/'docs/selftrained/v2-manifest.json').read_text());data=ROOT/'data'
+verified=[];counts=collections.Counter();groups=collections.defaultdict(set);vision_sources=collections.defaultdict(set);ocr_words=collections.defaultdict(set);recordings=collections.defaultdict(set)
+for item in m['records']:
+    p=data/item['path'];h=sha(p);assert h==item['sha256'] and p.stat().st_size==item['bytes'],str(p)
+    rows=[json.loads(s) for s in p.read_text().splitlines()]
+    verified.append({'path':str(p),'sha256':h,'rows':len(rows)})
+    for r in rows:
+        sp=r['split'];counts[sp]+=1;groups[r['group_id']].add(sp);s=r.get('supervision',{})
+        for source in s.get('source_ids',[]):vision_sources[source].add(sp)
+        word=s.get('ocr_text','')
+        if len(word)>=2:ocr_words[word].add(sp)
+        for msg in [r]+r['messages']:
+            if msg.get('audio'):recordings[sp].add(msg['audio'])
+print('data',dict(counts),'group_cross',sum(len(v)>1 for v in groups.values()),'vision_source_cross',sum(len(v)>1 for v in vision_sources.values()),'ocr_2plus_cross',sum(len(v)>1 for v in ocr_words.values()),'audio_assets',{k:len(v) for k,v in recordings.items()})
+asset_mismatches=[]
+for item in m['assets']:
+    p=data/item['path']
+    if not p.exists() or p.stat().st_size!=item['bytes'] or sha(p)!=item['sha256']:asset_mismatches.append(item['path'])
+report['data']={'manifest_sha256':sha(R/'docs/selftrained/v2-manifest.json'),'verified_records':verified,'split_counts':dict(counts),'cross_split_group_ids':sum(len(v)>1 for v in groups.values()),'cross_split_vision_source_ids':sum(len(v)>1 for v in vision_sources.values()),'cross_split_ocr_words_length_at_least_two':sum(len(v)>1 for v in ocr_words.values()),'recording_asset_counts_including_augmentations':{k:len(v) for k,v in recordings.items()},'manifest_assets_checked':len(m['assets']),'asset_mismatches':asset_mismatches,'limitation':'Hash and record-identity checks do not mean all audio was listened to or all 8950 assets visually inspected. Augmented train audio counts are not original source recordings.'}
+print('manifest_assets',len(m['assets']),'mismatches',len(asset_mismatches))
+(W/'capstone-raw-audit.json').write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n')

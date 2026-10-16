@@ -1,0 +1,28 @@
+from pathlib import Path
+import json,hashlib,collections,datetime,platform
+W=Path(__file__).parent; R=Path('/workspace/tiny-perceptron-vlm'); T='/root/astra_repair_02_accuracy'
+def digest(p):return hashlib.sha256(p.read_bytes()).hexdigest()
+p=R/'docs/natural-assistant/v4/manifest.json'; m=json.loads(p.read_text()); receipts=[{'path':str(p),'sha256':digest(p)}]
+counts=collections.Counter();fam=collections.defaultdict(set)
+for x in m['rows']:
+ if x['task']=='scene':kind='photo_scene' if x['references']['qa_type']=='scene' else 'photo_fact'
+ elif x['task']=='chat':kind='oasst_chat' if x['id'].startswith('oasst2-') else 'authored_chat'
+ elif x['task']=='text_presence':kind='presence'
+ else:kind=('nvidia_' if x['image'].startswith('ocr/nvidia/') else 'commons_')+x['task']
+ counts[kind,x['split']]+=1;fam[x['family']].add(x['split'])
+splits=['train','validation','test']; table={k:[counts[k,s] for s in splits] for k in sorted(set(k for k,s in counts))}
+expected={'photo_scene':[439,28,42],'photo_fact':[439,56,84],'nvidia_ocr':[710,0,0],'nvidia_ocr_order':[117,0,0],'commons_ocr':[141,10,10],'commons_ocr_order':[6,3,3],'presence':[103,18,18],'oasst_chat':[42,9,13],'authored_chat':[80,0,0]};assert table==expected
+material={}
+for label,predicate in [('docci',lambda x:x.get('image','').startswith('vision/')),('commons_whole',lambda x:x.get('image','').startswith('ocr/commons/') and '/crops/' not in x['image']),('nvidia',lambda x:x.get('image','').startswith('ocr/nvidia/')),('oasst',lambda x:x['id'].startswith('oasst2-')),('authored',lambda x:x['id'].startswith('project-chat-'))]:
+ material[label]={s:{'families':len({x['family'] for x in m['rows'] if x['split']==s and predicate(x)}),'images':len({x['image'] for x in m['rows'] if x['split']==s and predicate(x) and x.get('image')})} for s in splits}
+archives=[{k:v for k,v in x.items() if k!='files'}|{'unpacked_bytes':sum(f['bytes'] for f in x['files']),'file_count':len(x['files'])} for x in m['archives']]
+ui=R/'docs/natural-assistant/evidence/v4-research/student-selected-public-ui/actual-ui'
+a=json.loads((ui/'report.json').read_text());b=json.loads((ui/'browser/report.json').read_text());disk=json.loads((ui/'disk-observation.json').read_text());obs=[json.loads(l) for l in (ui/'observer.jsonl').read_text().splitlines()]
+for f in ['report.json','browser/report.json','browser/requests.json','disk-observation.json','observer.jsonl']:receipts.append({'path':str(ui/f),'sha256':digest(ui/f)})
+cache=R/'outputs/natural-v4/student-base-cache/hf'; cachefiles=[]
+for sp in cache.glob('models--*/snapshots/*'):
+ files=[f for f in sp.rglob('*') if f.is_file()];cachefiles.append({'snapshot':sp.name,'file_count':len(files),'bytes':sum(f.stat().st_size for f in files),'method':'current filesystem stat only; no weight load, inference, download, or recomputation of large weight hashes'})
+selected_cache_bytes=sum(x['bytes'] for x in cachefiles);assert selected_cache_bytes==disk['official_cache']['unique_regular_file_bytes']==5889111977
+rss=a['server_cpu_resources']['maximum_resident_set_kib'];assert rss==13496104
+result={'reviewer_task':T,'time':datetime.datetime.now(datetime.timezone.utc).isoformat(),'command':f'{R}/.venv/bin/python {__file__}','python':platform.python_version(),'claims':['natural-v4-data counts and bytes','natural-v4-student old raw UI timings and RSS'],'source_receipts':receipts,'data':{'row_table_order':splits,'row_table':table,'row_totals':[sum(x['split']==s for x in m['rows']) for s in splits],'audio_counts':{s:sum(x['split']==s for x in m['audio_rows']) for s in splits},'family_cross_split_count':sum(len(s)>1 for s in fam.values()),'material':material,'commons_crop_files':sum(x['path'].startswith('ocr/commons/crops/') for x in m['files']),'archives':archives,'total_archive_bytes':sum(x['bytes'] for x in archives),'total_unpacked_bytes':sum(x['unpacked_bytes'] for x in archives)},'ui':{'original_git_revision':a['git_revision'],'original_model_identities':a['public_release_prelaunch_gate'],'actual_observer_nonmock':next(x for x in obs if x['kind']=='observer_ready')['inference_mock'] is False,'threads':a['torch_threads'],'interop':a['torch_interop_threads'],'ready_seconds':a['ready_seconds'],'job_seconds':a['wall_seconds'],'chat_seconds':b['chat_seconds'],'asr_seconds_including_load':b['asr_seconds_including_load'],'server_max_rss_kib':rss,'server_max_rss_gib':rss/1024**2,'selected_cache':cachefiles,'selected_cache_gib':selected_cache_bytes/1024**3,'reset_states':a['reset_states'],'shutdown_removed_new_upload_directories':a['shutdown_removed_new_upload_directories']},'limitations':['Raw original harness outputs were read and arithmetic recomputed; UI and models not rerun by this reviewer.','Material counts derive from fixed manifest metadata, not a complete semantic re-annotation of all photos.','Original data metadata contains label peer-review provenance; those conclusions are excluded as correctness evidence.','No large data or model download; current selected cache only statted to verify count and byte sum.']}
+(W/'natural-manifest-ui-audit.json').write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\n');print(json.dumps(result,ensure_ascii=False,indent=2))

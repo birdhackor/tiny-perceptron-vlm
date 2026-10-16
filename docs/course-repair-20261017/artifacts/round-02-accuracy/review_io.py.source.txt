@@ -1,0 +1,51 @@
+from pathlib import Path
+import json,sys,hashlib,datetime,subprocess,re,math,xml.etree.ElementTree as ET
+W=Path('/workspace/work/textbook-repair-20261017/round-02-accuracy'); P=W.parent/'input-freeze02'; ORDER=json.loads((P/'reading-order.json').read_text()); TASK='/root/astra_repair_02_accuracy'
+def now(): return datetime.datetime.now(datetime.timezone.utc).isoformat()
+def add(file,row):
+ row={'reviewer_task':TASK,'time':now(),**row}
+ with (W/file).open('a') as f:f.write(json.dumps(row,ensure_ascii=False)+'\n')
+def note(rows):
+ for row in rows:
+  x=next(x for x in ORDER if x['page_id']==row['page_id']);raw=Path(x['frozen_path']).read_bytes();assert hashlib.sha256(raw).hexdigest()==x['source_sha256']
+  assert row['quote'] in raw.decode(),row['page_id']
+  add('reading-log.jsonl',{'order':x['ordinal'],'source':x['source'],'source_sha256':x['source_sha256'],'figures_sha256':x['figures_sha256'],'read_range':f"全檔1-{len(raw.decode().splitlines())}行，正文／程式／練習與全部{x['details_blocks']}個details按凍結原位置閱讀；非盲讀初學測試",'details_blocks':x['details_blocks'],**row})
+def render(x):
+ from playwright.sync_api import sync_playwright
+ out=W/'figures'/Path(x).with_suffix('.png').name;out.parent.mkdir(exist_ok=True)
+ src=P/'figures-src'/x;r=ET.parse(src).getroot();v=r.get('viewBox').split()
+ def css_size(attribute,fallback):
+  value=r.get(attribute,str(fallback));m=re.fullmatch(r'([0-9.]+)(px|pt)?',value)
+  return math.ceil(float(m.group(1))*(4/3 if m.group(2)=='pt' else 1)) if m else math.ceil(float(fallback))
+ wi=css_size('width',v[2]);he=css_size('height',v[3])
+ if not out.exists():
+  with sync_playwright() as pw:
+   browser=pw.chromium.launch(executable_path='/usr/bin/chromium',headless=True,args=['--no-sandbox','--disable-dev-shm-usage']);page=browser.new_page(viewport={'width':wi,'height':he});page.set_content('<html><body style="margin:0">'+src.read_text()+'</body></html>');page.evaluate('document.fonts.ready');page.screenshot(path=str(out));browser.close()
+ add('render-events.jsonl',{'source':x,'source_sha256':hashlib.sha256(src.read_bytes()).hexdigest(),'render':str(out),'render_sha256':hashlib.sha256(out.read_bytes()).hexdigest(),'method':'Playwright system Chromium set_content of unmodified SVG, body margin 0, fonts.ready','viewport':[wi,he]})
+ print('FIGURE',x,str(out))
+def read(a,n):
+ assert n<=3
+ for x in ORDER[a-1:a-1+n]:
+  raw=Path(x['frozen_path']).read_text();print(f"\nPAGE {x['ordinal']} {x['page_id']} {x['source_sha256']} | {len(raw.splitlines())} lines | details {x['details_blocks']}\n"+raw)
+  add('read-events.jsonl',{'order':x['ordinal'],'page_id':x['page_id'],'source_sha256':x['source_sha256'],'event':'source_emitted_full','character_count':len(raw),'note':'Emission does not count as completed reading; completion requires independent semantic notes and truncation recovery.'})
+  for fig in x['figures_sha256']:print('FIGURE_SOURCE',fig)
+  if x.get('notebook'):
+   nb=W.parent/'final-executed'/x['notebook'].removeprefix('notebooks/');doc=json.loads(nb.read_text());cells=[c for c in doc['cells'] if c['cell_type']=='code'];code=[''.join(c['source']).strip() for c in cells];expected=re.findall(r'```python\n(.*?)```',raw,re.S);matches=[c.strip() in code for c in expected]
+   print('RAW_NOTEBOOK_OUTPUTS (root executed; not my rerun)',nb)
+   for i,c in enumerate(cells):
+    for o in c.get('outputs',[]):
+     text=''.join(o.get('text',o.get('data',{}).get('text/plain',[])))
+     if text and not text.startswith(('<torch._C.Generator','<IPython.core.display.SVG')):print('cell',i,text)
+     if o.get('output_type')=='error':print('ERROR',o.get('ename'),o.get('evalue'))
+   add('notebook-output-receipts.jsonl',{'page_id':x['page_id'],'path':str(nb),'sha256':hashlib.sha256(nb.read_bytes()).hexdigest(),'source_python_blocks':len(expected),'exact_code_block_matches':matches,'execution_by':'root; raw outputs inspected by this reviewer; not reviewer reexecution'})
+
+if __name__=='__main__':
+ cmd=sys.argv[1]
+ if cmd=='read':read(int(sys.argv[2]),int(sys.argv[3]))
+ elif cmd=='note':note(json.load(sys.stdin))
+ elif cmd=='render':
+  for x in ORDER[int(sys.argv[2])-1:int(sys.argv[2])-1+int(sys.argv[3])]:
+   for fig in x['figures_sha256']:render(fig)
+ elif cmd=='figure':
+  for row in json.load(sys.stdin):
+   fig=row['source'];src=P/'figures-src'/fig;out=W/'figures'/Path(fig).with_suffix('.png').name;add('figure-view-log.jsonl',{'source_sha256':hashlib.sha256(src.read_bytes()).hexdigest(),'render':str(out),'render_sha256':hashlib.sha256(out.read_bytes()).hexdigest(),'view_tool':'functions tools.view_image','render_method':'system Chromium via Playwright set_content of original SVG, intrinsic viewBox dimensions; no SVG edits',**row})
