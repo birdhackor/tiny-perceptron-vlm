@@ -127,7 +127,7 @@
 | 10.3 每塊 48 個像素值，如何變成 8 個特徵？ | [閱讀](../course/chapters/10.md#10.3) | [開啟](../notebooks/10/10.3.ipynb) |
 | 10.4 相同圖塊，如何知道它在左邊還是右邊？ | [閱讀](../course/chapters/10.md#10.4) | [開啟](../notebooks/10/10.4.ipynb) |
 | 10.5 形狀答案如何把梯度送回圖片入口？ | [閱讀](../course/chapters/10.md#10.5) | [開啟](../notebooks/10/10.5.ipynb) |
-| 10.6 8 維圖片特徵，如何接到 12 維文字介面？ | [閱讀](../course/chapters/10.md#10.6) | [開啟](../notebooks/10/10.6.ipynb) |
+| 10.6 寬度 8 的圖片特徵，如何接到寬度 12 的文字核心？ | [閱讀](../course/chapters/10.md#10.6) | [開啟](../notebooks/10/10.6.ipynb) |
 | 10.7 圖片展開後，答案目標如何跟著移動？ | [閱讀](../course/chapters/10.md#10.7) | [開啟](../notebooks/10/10.7.ipynb) |
 | 10.8 沒附圖時，包裝會改變原文字計算嗎？ | [閱讀](../course/chapters/10.md#10.8) | [開啟](../notebooks/10/10.8.ipynb) |
 | 10.9 怎麼從向量方向比較圖文配對？ | [閱讀](../course/chapters/10.md#10.9) | [開啟](../notebooks/10/10.9.ipynb) |
