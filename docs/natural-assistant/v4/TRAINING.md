@@ -37,9 +37,9 @@
 先依[資料說明](DATA.md)取得這一版的照片、OCR 與語音快照，並完成逐檔核對。它們解包到 `data/natural-v4`，題目由 `docs/natural-assistant/v4/manifest.json` 配對；來源、授權與修改另保留在包內及來源清單。
 
 ```bash
-.venv-natural/bin/python scripts/fetch_natural_data.py --manifest docs/natural-assistant/v4/manifest.json --revision 9a61ecf524c9518f33f1501c28aa72997d4a82d0 --manifest-sha256 0c660490eb78bd82a8e092c2658646a6bae59c70058b6f5c2c944d138f732f60 --output data/natural-v4 --list
-.venv-natural/bin/python scripts/fetch_natural_data.py --manifest docs/natural-assistant/v4/manifest.json --revision 9a61ecf524c9518f33f1501c28aa72997d4a82d0 --manifest-sha256 0c660490eb78bd82a8e092c2658646a6bae59c70058b6f5c2c944d138f732f60 --output data/natural-v4
-.venv-natural/bin/python scripts/fetch_natural_data.py --manifest docs/natural-assistant/v4/manifest.json --revision 9a61ecf524c9518f33f1501c28aa72997d4a82d0 --manifest-sha256 0c660490eb78bd82a8e092c2658646a6bae59c70058b6f5c2c944d138f732f60 --output data/natural-v4 --verify
+.venv-natural/bin/python scripts/fetch_natural_data.py --manifest docs/natural-assistant/v4/manifest.json --revision 3a282925bb46bb68c87fed4157ae4df5f6de30ee --manifest-sha256 0c660490eb78bd82a8e092c2658646a6bae59c70058b6f5c2c944d138f732f60 --output data/natural-v4 --list
+.venv-natural/bin/python scripts/fetch_natural_data.py --manifest docs/natural-assistant/v4/manifest.json --revision 3a282925bb46bb68c87fed4157ae4df5f6de30ee --manifest-sha256 0c660490eb78bd82a8e092c2658646a6bae59c70058b6f5c2c944d138f732f60 --output data/natural-v4
+.venv-natural/bin/python scripts/fetch_natural_data.py --manifest docs/natural-assistant/v4/manifest.json --revision 3a282925bb46bb68c87fed4157ae4df5f6de30ee --manifest-sha256 0c660490eb78bd82a8e092c2658646a6bae59c70058b6f5c2c944d138f732f60 --output data/natural-v4 --verify
 ```
 
 訓練讀 `rows` 中的 `train` 題目，驗證與最後測試分開保留。`audio_rows` 在這份微調中不進入更新器；FLEURS 檢查聽寫，AISHELL 問句再比較兩路聊天。錄音來源叫訓練集，也不會因此被這次訓練讀入。

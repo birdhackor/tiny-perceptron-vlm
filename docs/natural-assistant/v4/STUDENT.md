@@ -15,7 +15,7 @@
 ```bash
 GIT_LFS_SKIP_SMUDGE=1 git clone --no-checkout https://github.com/birdhackor/tiny-perceptron-vlm.git tiny-perceptron-natural
 cd tiny-perceptron-natural
-GIT_LFS_SKIP_SMUDGE=1 git checkout --detach 59a1eda4ed7b6e8609892ec2b9013c821ac93e69
+GIT_LFS_SKIP_SMUDGE=1 git checkout --detach ee17b8871cfe2ba9807b796dd11f339b5dae3b5c
 python3.12 --version
 ```
 

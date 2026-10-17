@@ -99,8 +99,8 @@ FLEURS 一句旅遊敘述，可以有正確逐字稿，卻沒有「助手接下�
 
 | 固定對象 | 本次設定 | 用途 |
 | --- | --- | --- |
-| 本機程式 | 學生操作頁的 `59a1…` 提交 | 固定下載、驗證與執行工具的程式。 |
-| 遠端資料版本 | `--revision 9a61…` | 從這次Git提交取得資料清單與三個LFS資料包。 |
+| 本機程式 | 學生操作頁的 `ee17…` 提交 | 固定下載、驗證與執行工具的程式。 |
+| 遠端資料版本 | `--revision 3a28…` | 從這次Git提交取得資料清單與三個LFS資料包。 |
 | 清單檔案內容 | `--manifest-sha256 0c6604…` | 核對 `manifest.json` 的完整檔案bytes，不是整個repo的指紋。 |
 
 下面的完整指紋不要改成省略形式。下載時，程式會要求本機與指定遠端版本的清單都符合這個SHA-256，再按清單中另列的指紋核對壓縮包與解包檔案。`--list`只核對本機清單並列大小；`--verify`則核對已有的資料，不下載新包。
@@ -108,19 +108,19 @@ FLEURS 一句旅遊敘述，可以有正確逐字稿，卻沒有「助手接下�
 ```bash
 .venv-natural/bin/python scripts/fetch_natural_data.py \
   --manifest docs/natural-assistant/v4/manifest.json \
-  --revision 9a61ecf524c9518f33f1501c28aa72997d4a82d0 \
+  --revision 3a282925bb46bb68c87fed4157ae4df5f6de30ee \
   --manifest-sha256 0c660490eb78bd82a8e092c2658646a6bae59c70058b6f5c2c944d138f732f60 \
   --output data/natural-v4 --list
 
 .venv-natural/bin/python scripts/fetch_natural_data.py \
   --manifest docs/natural-assistant/v4/manifest.json \
-  --revision 9a61ecf524c9518f33f1501c28aa72997d4a82d0 \
+  --revision 3a282925bb46bb68c87fed4157ae4df5f6de30ee \
   --manifest-sha256 0c660490eb78bd82a8e092c2658646a6bae59c70058b6f5c2c944d138f732f60 \
   --output data/natural-v4
 
 .venv-natural/bin/python scripts/fetch_natural_data.py \
   --manifest docs/natural-assistant/v4/manifest.json \
-  --revision 9a61ecf524c9518f33f1501c28aa72997d4a82d0 \
+  --revision 3a282925bb46bb68c87fed4157ae4df5f6de30ee \
   --manifest-sha256 0c660490eb78bd82a8e092c2658646a6bae59c70058b6f5c2c944d138f732f60 \
   --output data/natural-v4 --verify
 ```
@@ -149,7 +149,7 @@ FLEURS 一句旅遊敘述，可以有正確逐字稿，卻沒有「助手接下�
 
 ```bash
 GIT_LFS_SKIP_SMUDGE=1 git clone --no-checkout https://github.com/birdhackor/tiny-perceptron-vlm.git outputs/natural-v4-source
-GIT_LFS_SKIP_SMUDGE=1 git -C outputs/natural-v4-source checkout --detach 9a61ecf524c9518f33f1501c28aa72997d4a82d0
+GIT_LFS_SKIP_SMUDGE=1 git -C outputs/natural-v4-source checkout --detach 3a282925bb46bb68c87fed4157ae4df5f6de30ee
 ```
 
 這裡跳過LFS快照，因為接下來要從來源重建。固定版本把重建程式、來源清單、裁切位置與標註綁在一起；只指定輸出清單，而使用另一版的裁切程式，不能保證重建出相同檔案。
