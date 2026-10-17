@@ -52,7 +52,7 @@
 | 5.11 同一段文字出現很多次會怎樣？ | [閱讀](../course/chapters/05.md#5.11) | [開啟](../notebooks/05/5.11.ipynb) |
 | 5.12 改幾個字就算新資料嗎？ | [閱讀](../course/chapters/05.md#5.12) | [開啟](../notebooks/05/5.12.ipynb) |
 | 5.13 資料或模型變大，哪個值得花預算？ | [閱讀](../course/chapters/05.md#5.13) | [開啟](../notebooks/05/5.13.ipynb) |
-| 5.14 模型不動或震盪要怎麼找步幅？ | [閱讀](../course/chapters/05.md#5.14) | [開啟](../notebooks/05/5.14.ipynb) |
+| 5.14 模型不動或震盪要怎麼找學習率？ | [閱讀](../course/chapters/05.md#5.14) | [開啟](../notebooks/05/5.14.ipynb) |
 | 5.15 一次比較略好就有進步嗎？ | [閱讀](../course/chapters/05.md#5.15) | [開啟](../notebooks/05/5.15.ipynb) |
 | 5.16 配比怎麼落到實際 batch？ | [閱讀](../course/chapters/05.md#5.16) | [開啟](../notebooks/05/5.16.ipynb) |
 | 5.17 eval 就會停止計算梯度嗎？ | [閱讀](../course/chapters/05.md#5.17) | [開啟](../notebooks/05/5.17.ipynb) |
