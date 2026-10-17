@@ -85,7 +85,7 @@
 | 7.18 後訓練有哪些不同教法？ | [閱讀](../course/chapters/07.md#7.18) | [開啟](../notebooks/07/7.18.ipynb) |
 | 7.19 回答能寫多長，和前文能放多少，有何不同？ | [閱讀](../course/chapters/07.md#7.19) | [開啟](../notebooks/07/7.19.ipynb) |
 | 7.20 下一個之外，還能一起練習預測什麼？ | [閱讀](../course/chapters/07.md#7.20) | [開啟](../notebooks/07/7.20.ipynb) |
-| 7.21 未來答案該對到哪一格？ | [閱讀](../course/chapters/07.md#7.21) | [開啟](../notebooks/07/7.21.ipynb) |
+| 7.21 未來答案該對到哪個位置？ | [閱讀](../course/chapters/07.md#7.21) | [開啟](../notebooks/07/7.21.ipynb) |
 | 7.22 為什麼有些MTP分支串成一條鏈？ | [閱讀](../course/chapters/07.md#7.22) | [開啟](../notebooks/07/7.22.ipynb) |
 | 7.23 選了 high，就是固定多想幾秒嗎？ | [閱讀](../course/chapters/07.md#7.23) | [開啟](../notebooks/07/7.23.ipynb) |
 | 7.24 同一題，怎樣教不同預算的回答？ | [閱讀](../course/chapters/07.md#7.24) | [開啟](../notebooks/07/7.24.ipynb) |
