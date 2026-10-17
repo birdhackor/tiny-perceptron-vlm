@@ -164,7 +164,7 @@
 | 12.11 把聲音轉成文字後，哪些問題仍答不了？ | [閱讀](../course/chapters/12.md#12.11) | [開啟](../notebooks/12/12.11.ipynb) |
 | 12.12 一個答案同時需要圖與聲音，怎麼檢查兩條線索？ | [閱讀](../course/chapters/12.md#12.12) | [開啟](../notebooks/12/12.12.ipynb) |
 | 12.13 整段平均後，還分得出哪個聲音先來嗎？ | [閱讀](../course/chapters/12.md#12.13) | [開啟](../notebooks/12/12.13.ipynb) |
-| 12.14 先聽寫成文字，怎麼共用聊天歷史？ | [閱讀](../course/chapters/12.md#12.14) | [開啟](../notebooks/12/12.14.ipynb) |
+| 12.14 先用語音辨識轉成文字，怎麼共用聊天歷史？ | [閱讀](../course/chapters/12.md#12.14) | [開啟](../notebooks/12/12.14.ipynb) |
 | 12.15 幾種真人語音問題，如何從零學會回應？ | [閱讀](../course/chapters/12.md#12.15) | [開啟](../notebooks/12/12.15.ipynb) |
 | 12.16 說話和打字，如何保留同一段對話？ | [閱讀](../course/chapters/12.md#12.16) | [開啟](../notebooks/12/12.16.ipynb) |
 | 13.1 偏好為什麼必須連同問題一起記？ | [閱讀](../course/chapters/13.md#13.1) | [開啟](../notebooks/13/13.1.ipynb) |
