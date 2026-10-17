@@ -1,9 +1,13 @@
-"""學生看得到的程式區塊如果在 git 指令那一行釘住某個 commit，這個 commit 必須是目前歷史裡的祖先。
+"""學生頁面釘住的本 repo commit 必須是目前歷史裡的祖先。
 
-改寫 Git 歷史後舊的 hash 會失效，教材卻仍叫讀者 `git checkout` 它；這裡在完整 clone 上抓出這種殘留。
-學生頁面 = course/chapters 的全部章檔，加上 scripts.build_course.READING_PAGES 列出的頁面。
-只看和 `git ` 在同一行的 40 位十六進位字串。其他指令（例如腳本的 --revision 參數）上的 hash 可能是
-Hugging Face 的版本而不是這個 repo 的 commit，從文字分不出來，所以不在這道檢查的範圍內。
+改寫 Git 歷史後舊的 hash 會失效，教材卻仍叫讀者 `git checkout` 它，或連到 GitHub 上已經不存在的版本；
+這裡在完整 clone 上抓出這種殘留。學生頁面 = course/chapters 的全部章檔，加上
+scripts.build_course.READING_PAGES 列出的頁面。看兩種地方：
+
+- fenced 程式區塊裡、和 `git ` 在同一行的 40 位十六進位字串。其他指令（例如腳本的 --revision 參數）上的
+  hash 可能是 Hugging Face 的版本而不是這個 repo 的 commit，從文字分不出來，所以不在範圍內。
+- 頁面任何位置、指向本 repo（github.com/birdhackor/tiny-perceptron-vlm）的 blob／tree／commit／raw 網址
+  裡的 40 位 hash。封存 repo 與其他 repo 的網址不在範圍內。
 """
 
 import os
@@ -19,6 +23,11 @@ from scripts.build_course import READING_PAGES
 ROOT = Path(__file__).resolve().parents[1]
 COMMIT = re.compile(r"(?<![0-9A-Fa-f])[0-9A-Fa-f]{40}(?![0-9A-Fa-f])")
 FENCE = re.compile(r"^\s*(`{3,}|~{3,})(.*)$")
+# GitHub 的帳號與 repo 名稱不分大小寫；repo 名稱後面必須緊接 `/`，封存 repo（…-archive）因此不算。
+REPOSITORY_URL = re.compile(
+    r"github\.com/birdhackor/tiny-perceptron-vlm/(?:blob|tree|commit|raw)/([0-9A-Fa-f]{40})(?![0-9A-Fa-f])",
+    re.IGNORECASE,
+)
 
 
 def code_lines(text):
@@ -40,17 +49,24 @@ def pins_in(text):
     return [(number, commit) for number, line in code_lines(text) if "git " in line for commit in COMMIT.findall(line)]
 
 
+def url_pins_in(text):
+    """(行號, hash)：頁面任何位置指向本 repo 的 blob／tree／commit／raw 網址裡的 40 位 hash。"""
+    return [
+        (number, commit) for number, line in enumerate(text.split("\n"), 1) for commit in REPOSITORY_URL.findall(line)
+    ]
+
+
 def student_pages(root, reading_pages=READING_PAGES):
     chapters = sorted(path.relative_to(root).as_posix() for path in (root / "course/chapters").glob("*.md"))
     return chapters + list(reading_pages)
 
 
-def course_pins(root, reading_pages=READING_PAGES):
-    """[(頁面, 行號, hash)]：全部學生頁面裡釘住的 commit。"""
+def course_pins(root, reading_pages=READING_PAGES, extract=pins_in):
+    """[(頁面, 行號, hash)]：全部學生頁面裡，由 extract 抽出的 commit。"""
     return [
         (page, number, commit)
         for page in student_pages(root, reading_pages)
-        for number, commit in pins_in((root / page).read_text(encoding="utf-8"))
+        for number, commit in extract((root / page).read_text(encoding="utf-8"))
     ]
 
 
@@ -125,6 +141,30 @@ def test_pins_are_read_from_git_lines_inside_fenced_blocks(text, expected):
     assert pins_in(text) == expected
 
 
+REPO = "https://github.com/birdhackor/tiny-perceptron-vlm"
+URL_TEXTS = [
+    pytest.param(f"見[原始碼]({REPO}/blob/{A}/tiny_perceptron/model.py)。\n", [(1, A)], id="blob-link-in-prose"),
+    pytest.param(f"\n[資料夾]({REPO}/tree/{A}/docs)\n", [(2, A)], id="tree-link"),
+    pytest.param(f"<{REPO}/commit/{A}>\n", [(1, A)], id="commit-link"),
+    pytest.param(f"```bash\ncurl -LO {REPO}/raw/{A}/data.json\n```\n", [(2, A)], id="raw-url-inside-a-fence"),
+    pytest.param(f"{REPO}/blob/{A}/a.py 與 {REPO}/blob/{B}/b.py\n", [(1, A), (1, B)], id="two-links-on-one-line"),
+    pytest.param(
+        f"https://github.com/BirdHackor/Tiny-Perceptron-VLM/blob/{A}/a.py\n", [(1, A)], id="names-in-other-case"
+    ),
+    pytest.param(f"{REPO}-archive/blob/{A}/a.py\n", [], id="archive-repository"),
+    pytest.param(f"https://github.com/pytorch/pytorch/blob/{A}/torch/nn.py\n", [], id="another-repository"),
+    pytest.param(f"https://huggingface.co/birdhackor/tiny-perceptron-vlm/tree/{A}\n", [], id="hugging-face"),
+    pytest.param(f"{REPO}/blob/main/tiny_perceptron/model.py\n", [], id="branch-name"),
+    pytest.param(f"{REPO}/blob/1a2b3c4/a.py\n", [], id="abbreviated-commit"),
+    pytest.param(f"{REPO}/blob/{A}1/a.py\n", [], id="41-hex-digits"),
+]
+
+
+@pytest.mark.parametrize(("text", "expected"), URL_TEXTS)
+def test_pins_are_read_from_links_to_this_repository(text, expected):
+    assert url_pins_in(text) == expected
+
+
 # ---- 頁面集合 ----------------------------------------------------------------------------------------------
 
 
@@ -151,6 +191,9 @@ def test_pages_added_to_the_chapters_or_the_reading_list_are_scanned(tmp_path):
     write(tmp_path, "docs/second.md", fenced(f"git checkout {'e' * 40}"))
     reading_pages["docs/second.md"] = "second.html"
     assert {commit for _, _, commit in course_pins(tmp_path, reading_pages)} == {A, B, "d" * 40, "e" * 40}
+    write(tmp_path, "docs/second.md", f"[原始碼]({REPO}/blob/{'f' * 40}/a.py)\n")
+    write(tmp_path, "docs/maintainer.md", f"[原始碼]({REPO}/blob/{'c' * 40}/a.py)\n")
+    assert course_pins(tmp_path, reading_pages, extract=url_pins_in) == [("docs/second.md", 1, "f" * 40)]
 
 
 def test_every_student_page_exists():
@@ -263,3 +306,12 @@ def test_commits_pinned_on_git_lines_are_ancestors_of_head():
     problems = pin_problems(ROOT, pins)
     if problems:
         pytest.fail("教材釘住的 commit 不在目前歷史裡：\n" + "\n".join(problems), pytrace=False)
+
+
+def test_commits_pinned_in_links_to_this_repository_are_ancestors_of_head():
+    reason = history_unavailable(ROOT)
+    if reason:
+        pytest.skip(reason)
+    problems = pin_problems(ROOT, course_pins(ROOT, extract=url_pins_in))
+    if problems:
+        pytest.fail("教材連到本 repo 的網址釘住的 commit 不在目前歷史裡：\n" + "\n".join(problems), pytrace=False)

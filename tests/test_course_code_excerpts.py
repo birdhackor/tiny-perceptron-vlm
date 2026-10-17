@@ -493,6 +493,8 @@ BAD_EXCERPTS = [
     pytest.param(["pack", "unpack"], PACK.rstrip("\n") + "\n\n\n\n" + UNPACK, id="three-blank-lines-between-names"),
     pytest.param(["pack", "unpack"], UNPACK.rstrip("\n") + "\n\n\n" + PACK, id="names-in-the-wrong-order"),
     pytest.param(["pack", "unpack"], PACK, id="second-name-missing"),
+    pytest.param(["Counter"], COUNTER.replace("        return self.count\n", ""), id="last-line-missing"),
+    pytest.param(["Counter"], COUNTER.partition("\n\n    def add")[0], id="last-method-missing"),
     pytest.param(["pack"], PACK_AND_UNPACK + "\n", id="unlisted-definition-added"),
     pytest.param(["Counter"], COUNTER.replace("self.count += amount", "self.count += 1"), id="method-body-changed"),
     pytest.param(["cached"], CACHED.replace("@functools.lru_cache(maxsize=None)\n", ""), id="decorator-removed"),
