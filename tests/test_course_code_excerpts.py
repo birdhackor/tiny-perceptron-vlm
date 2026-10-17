@@ -783,7 +783,6 @@ def test_extracted_source_is_what_inspect_getsource_returns(path):
 # ---- 真實教材 ------------------------------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason="正文還沒有任何節錄標記；第一批章節加入節錄時移除這個標記")
 def test_course_excerpts_exist_and_match_the_library():
     markers = collect_markers(ROOT)
     assert markers, "course/chapters 的 python 區塊裡找不到任何「# 節錄自」或「# 精簡自」標記，沒有東西可以比對。"
