@@ -226,7 +226,7 @@
 | 16.9 Attention 中間矩陣為何佔空間？ | [閱讀](../course/chapters/16.md#16.9) | [開啟](../notebooks/16/16.9.ipynb) |
 | 16.10 怎麼用重算換記憶體？ | [閱讀](../course/chapters/16.md#16.10) | [開啟](../notebooks/16/16.10.ipynb) |
 | 16.11 編譯有何代價與收益？ | [閱讀](../course/chapters/16.md#16.11) | [開啟](../notebooks/16/16.11.ipynb) |
-| 16.12 滑動窗口省下什麼，也限制了什麼？ | [閱讀](../course/chapters/16.md#16.12) | [開啟](../notebooks/16/16.12.ipynb) |
+| 16.12 滑動視窗省下什麼，也限制了什麼？ | [閱讀](../course/chapters/16.md#16.12) | [開啟](../notebooks/16/16.12.ipynb) |
 | 16.13 分塊處理，是否代表看不到其他塊？ | [閱讀](../course/chapters/16.md#16.13) | [開啟](../notebooks/16/16.13.ipynb) |
 | 16.14 先草擬幾個token，再核對，能省下什麼？ | [閱讀](../course/chapters/16.md#16.14) | [開啟](../notebooks/16/16.14.ipynb) |
 | 17.1 數字個數相同，為什麼空間不同？ | [閱讀](../course/chapters/17.md#17.1) | [開啟](../notebooks/17/17.1.ipynb) |
