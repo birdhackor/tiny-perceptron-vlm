@@ -180,7 +180,7 @@
 | 13.11 拿到分數後，為什麼還要扣掉預期？ | [閱讀](../course/chapters/13.md#13.11) | [開啟](../notebooks/13/13.11.ipynb) |
 | 13.12 同一批作答重用時，如何記住它來自哪個策略？ | [閱讀](../course/chapters/13.md#13.12) | [開啟](../notebooks/13/13.12.ipynb) |
 | 13.13 PPO裁切的是鼓勵，還是所有機率？ | [閱讀](../course/chapters/13.md#13.13) | [開啟](../notebooks/13/13.13.ipynb) |
-| 13.14 評分員、估計員與兩種基準各做什麼？ | [閱讀](../course/chapters/13.md#13.14) | [開啟](../notebooks/13/13.14.ipynb) |
+| 13.14 獎勵模型、價值模型與兩種基準各做什麼？ | [閱讀](../course/chapters/13.md#13.14) | [開啟](../notebooks/13/13.14.ipynb) |
 | 13.15 一輪選卡與更新，如何接起來？ | [閱讀](../course/chapters/13.md#13.15) | [開啟](../notebooks/13/13.15.ipynb) |
 | 13.16 獎勵提高，如何知道任務真的完成？ | [閱讀](../course/chapters/13.md#13.16) | [開啟](../notebooks/13/13.16.ipynb) |
 | 13.17 PPO與DPO，為什麼是兩條路？ | [閱讀](../course/chapters/13.md#13.17) | [開啟](../notebooks/13/13.17.ipynb) |
