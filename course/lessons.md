@@ -260,7 +260,7 @@
 | 18.14 蒸餾後再量化能省多少？ | [閱讀](../course/chapters/18.md#18.14) | [開啟](../notebooks/18/18.14.ipynb) |
 | 19.1 一個成品，為什麼要試好幾種問題？ | [閱讀](../course/chapters/19.md#19.1) | [開啟](../notebooks/19/19.1.ipynb) |
 | 19.2 為什麼成品選 MoE，卻仍保留 Dense 路線？ | [閱讀](../course/chapters/19.md#19.2) | [開啟](../notebooks/19/19.2.ipynb) |
-| 19.3 同一題的不同版本，怎麼避免跑進兩份考卷？ | [閱讀](../course/chapters/19.md#19.3) | [開啟](../notebooks/19/19.3.ipynb) |
+| 19.3 同一題的不同版本，怎麼避免同時跑進訓練與測試資料？ | [閱讀](../course/chapters/19.md#19.3) | [開啟](../notebooks/19/19.3.ipynb) |
 | 19.4 怎麼確認下一階段真的接著上一階段學？ | [閱讀](../course/chapters/19.md#19.4) | [開啟](../notebooks/19/19.4.ipynb) |
 | 19.5 讓助理簡短、誠實與守規則，要教哪種示範？ | [閱讀](../course/chapters/19.md#19.5) | [開啟](../notebooks/19/19.5.ipynb) |
 | 19.6 圖片與聲音怎麼交給同一位助理？ | [閱讀](../course/chapters/19.md#19.6) | [開啟](../notebooks/19/19.6.ipynb) |
@@ -273,7 +273,7 @@
 | 19.13 三個成品，分別拿來做什麼？ | [閱讀](../course/chapters/19.md#19.13) | [開啟](../notebooks/19/19.13.ipynb) |
 | 19.14 同一個世界，怎樣避免三份資料互相洩題？ | [閱讀](../course/chapters/19.md#19.14) | [開啟](../notebooks/19/19.14.ipynb) |
 | 19.15 Looped 解題器怎樣成為獨立成品？ | [閱讀](../course/chapters/19.md#19.15) | [開啟](../notebooks/19/19.15.ipynb) |
-| 19.16 判斷器怎樣獨立回答三種問題？ | [閱讀](../course/chapters/19.md#19.16) | [開啟](../notebooks/19/19.16.ipynb) |
+| 19.16 機率判斷器怎樣獨立回答三種問題？ | [閱讀](../course/chapters/19.md#19.16) | [開啟](../notebooks/19/19.16.ipynb) |
 | 19.17 Auto 怎樣選檔，手動又怎樣優先？ | [閱讀](../course/chapters/19.md#19.17) | [開啟](../notebooks/19/19.17.ipynb) |
 | 19.18 三個成品要如何比較才有意義？ | [閱讀](../course/chapters/19.md#19.18) | [開啟](../notebooks/19/19.18.ipynb) |
 | 19.19 下載到權重，怎樣確認自己用對版本？ | [閱讀](../course/chapters/19.md#19.19) | [開啟](../notebooks/19/19.19.ipynb) |
