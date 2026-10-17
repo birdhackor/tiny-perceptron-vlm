@@ -191,16 +191,16 @@
 | 14.5 怎麼讓特徵控制另一組特徵？ | [閱讀](../course/chapters/14.md#14.5) | [開啟](../notebooks/14/14.5.ipynb) |
 | 14.6 輸入輸出權重應該共享嗎？ | [閱讀](../course/chapters/14.md#14.6) | [開啟](../notebooks/14/14.6.ipynb) |
 | 14.7 為什麼位置公式算得出，長文章卻未必讀得好？ | [閱讀](../course/chapters/14.md#14.7) | [開啟](../notebooks/14/14.7.ipynb) |
-| 14.8 位置插值如何延長窗口？ | [閱讀](../course/chapters/14.md#14.8) | [開啟](../notebooks/14/14.8.ipynb) |
+| 14.8 位置插值如何延長視窗？ | [閱讀](../course/chapters/14.md#14.8) | [開啟](../notebooks/14/14.8.ipynb) |
 | 14.9 所有位置都壓近，會遇到什麼取捨？ | [閱讀](../course/chapters/14.md#14.9) | [開啟](../notebooks/14/14.9.ipynb) |
 | 14.10 YaRN如何兼顧近處與遠處？ | [閱讀](../course/chapters/14.md#14.10) | [開啟](../notebooks/14/14.10.ipynb) |
 | 14.11 同一個區塊多跑幾次，省下的是什麼？ | [閱讀](../course/chapters/14.md#14.11) | [開啟](../notebooks/14/14.11.ipynb) |
 | 14.12 每輪到底把什麼交回去？ | [閱讀](../course/chapters/14.md#14.12) | [開啟](../notebooks/14/14.12.ipynb) |
 | 14.13 只在第三輪算 loss，其他輪會怎樣？ | [閱讀](../course/chapters/14.md#14.13) | [開啟](../notebooks/14/14.13.ipynb) |
-| 14.14 怎樣讓多種終止輪數都能使用？ | [閱讀](../course/chapters/14.md#14.14) | [開啟](../notebooks/14/14.14.ipynb) |
+| 14.14 怎樣讓多種終止深度都能使用？ | [閱讀](../course/chapters/14.md#14.14) | [開啟](../notebooks/14/14.14.ipynb) |
 | 14.15 只練1、3、5輪，可以在2、4輪交卷嗎？ | [閱讀](../course/chapters/14.md#14.15) | [開啟](../notebooks/14/14.15.ipynb) |
 | 14.16 能保證多一輪，loss 就下降嗎？ | [閱讀](../course/chapters/14.md#14.16) | [開啟](../notebooks/14/14.16.ipynb) |
-| 14.17 使用時沒有正解，怎麼知道該停？ | [閱讀](../course/chapters/14.md#14.17) | [開啟](../notebooks/14/14.17.ipynb) |
+| 14.17 使用時沒有正確答案，怎麼知道該停？ | [閱讀](../course/chapters/14.md#14.17) | [開啟](../notebooks/14/14.17.ipynb) |
 | 14.18 怎樣公平比較堆疊與循環模型？ | [閱讀](../course/chapters/14.md#14.18) | [開啟](../notebooks/14/14.18.ipynb) |
 | 15.1 Dense 的計算方式是什麼？ | [閱讀](../course/chapters/15.md#15.1) | [開啟](../notebooks/15/15.1.ipynb) |
 | 15.2 能否準備多組 FFN？ | [閱讀](../course/chapters/15.md#15.2) | [開啟](../notebooks/15/15.2.ipynb) |
