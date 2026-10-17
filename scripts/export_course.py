@@ -188,6 +188,34 @@ def code_markdown(source):
     return f"{fence}python\n{source.rstrip()}\n{fence}\n"
 
 
+def section_footer(item, notebook, revision, executed_outputs):
+    """每節頁尾：Notebook 下載與 Colab 兩個同級入口，以及依本節有沒有教材程式選出的說明。"""
+    colab = f"https://colab.research.google.com/github/{REPOSITORY}/blob/{revision}/{item['notebook']}"
+    # 只有圖解的小節，Notebook 裡也有準備工具與圖解用的程式格；這兩種都不算教材程式。
+    has_code = any(
+        cell["cell_type"] == "code"
+        and not cell.get("metadata", {}).get("course_setup")
+        and "course_figure" not in cell.get("metadata", {})
+        for cell in notebook["cells"]
+    )
+    if has_code:
+        # 沒附執行結果的建置不能說輸出在上方，與首頁的 home_introduction 一致。
+        shown = "本節的程式與 CPU 實際輸出都在上方" if executed_outputs else "本節的程式都在上方"
+        note = (
+            f"{shown}，不開 Colab 也能讀完。想自己改數字再跑，可以下載 Notebook 在本機執行，"
+            "或在 Colab 開啟同一份內容（需要 Google 帳號，雲端環境未經本課實測）。"
+            "本機操作見[暖身 W.1](first-steps.md#W.1)。"
+        )
+    else:
+        note = "本節沒有程式；Notebook 與本頁是同一份內容。"
+    return (
+        '<div class="actions">'
+        f'<a class="md-button" href="{item["notebook"]}" download>下載本節 .ipynb</a>'
+        f'<a class="md-button" href="{html.escape(colab, quote=True)}" target="_blank" rel="noopener">在 Colab 開啟 ↗</a>'
+        f"</div>\n\n{note}"
+    )
+
+
 def home_introduction(index, executed_outputs=False):
     """首頁的作者說明；生成章節清單與閱讀時間不納入這段來源。"""
     return (
@@ -289,15 +317,7 @@ def build(
             elif not cell.get("metadata", {}).get("course_setup"):
                 content.append(code_markdown(source))
                 content.append(output_html(cell.get("outputs", [])))
-        colab = f"https://colab.research.google.com/github/{REPOSITORY}/blob/{revision}/{item['notebook']}"
-        content.append(
-            '<div class="actions">'
-            f'<a class="md-button md-button--primary" href="{html.escape(colab, quote=True)}" '
-            'target="_blank" rel="noopener">在 Colab 動手做 ↗</a>'
-            f'<a class="md-button" href="{item["notebook"]}" download>下載本節 .ipynb</a></div>\n\n'
-            "要試做本節練習，可開啟 Colab；閱讀與練習使用同一份內容。"
-            "操作步驟見[暖身 W.1](first-steps.md#W.1)，小實驗使用 CPU 即可。"
-        )
+        content.append(section_footer(item, notebook, revision, bool(executed_root)))
         (docs / f"{item['id']}.md").write_text("\n\n".join(content) + "\n", encoding="utf-8")
     for name, relative in DOCUMENTS.items():
         path = ROOT / relative

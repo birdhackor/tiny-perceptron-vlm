@@ -2,13 +2,14 @@
 
 import copy
 import json
+from html.parser import HTMLParser
 from pathlib import Path
 
 import pytest
 
 from scripts import build_course, export_course
 from scripts.build_course import notebook_reading_links
-from scripts.export_course import COURSE_URL, checked_notebook, output_html, reading_markdown
+from scripts.export_course import COURSE_URL, checked_notebook, output_html, reading_markdown, section_footer
 
 
 @pytest.mark.parametrize("problem", ["markdown", "code", "missing_cell", "not_executed", "error"])
@@ -129,3 +130,168 @@ def test_v4_guides_use_local_pages_and_keep_source_files_on_github(slug, other_p
     assert f"[來源]({external}docs/natural-assistant/v4/data/ocr-sources.json)" in result
     assert f"[程式]({external}scripts/natural_assistant.py)" in result
     assert "```bash\npython scripts/natural_assistant.py --manifest manifest.json\n```" in result
+
+
+# ---- 每節頁尾 ----------------------------------------------------------------------------------------------
+
+ITEM = {"id": "9.1", "title": "標題", "source": "course/chapters/09.md", "notebook": "notebooks/09/9.1.ipynb"}
+# 有教材程式的小節，頁尾說明會指向暖身頁的本機操作；沒有程式就沒有東西要跑。
+RUN_GUIDE = "first-steps.md"
+PROSE = "只有文字。\n"
+FIGURE = "文字。\n\n![圖](../figures/demo.svg)\n\n更多文字。\n"
+CODE = "文字。\n\n```python\nprint(1)\n```\n"
+FIGURE_AND_CODE = "文字。\n\n![圖](../figures/demo.svg)\n\n```python\nprint(1)\n```\n"
+
+
+class Anchors(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.found = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "a":
+            self.found.append(dict(attrs))
+
+
+def anchors_of(footer):
+    parser = Anchors()
+    parser.feed(footer.partition("</div>")[0])
+    return parser.found
+
+
+def note_of(footer):
+    return footer.rpartition("</div>\n\n")[2].strip()
+
+
+@pytest.fixture
+def make_notebook(tmp_path, monkeypatch):
+    """用 build_course 產生真實的 cell 結構，包含圖解與準備工具用的程式格。"""
+    (tmp_path / "course/figures").mkdir(parents=True)
+    (tmp_path / "course/figures/demo.svg").write_text("<svg/>", encoding="utf-8")
+    monkeypatch.setattr(build_course, "ROOT", tmp_path)
+    return lambda body: build_course.notebook("9.1", "標題", body, tmp_path / "course/chapters/09.md")
+
+
+def test_a_figure_only_section_still_has_code_cells_that_are_not_teaching_code(make_notebook):
+    codes = [cell for cell in make_notebook(FIGURE)["cells"] if cell["cell_type"] == "code"]
+    assert [("course_setup" in cell["metadata"], "course_figure" in cell["metadata"]) for cell in codes] == [
+        (True, False),
+        (False, True),
+    ]
+
+
+@pytest.mark.parametrize("executed", [False, True])
+@pytest.mark.parametrize(
+    ("body", "has_code"),
+    [
+        pytest.param(PROSE, False, id="prose-only"),
+        pytest.param(FIGURE, False, id="figure-only"),
+        pytest.param(CODE, True, id="python-block"),
+        pytest.param(FIGURE_AND_CODE, True, id="figure-and-python-block"),
+    ],
+)
+def test_footer_note_depends_on_whether_the_section_has_teaching_code(make_notebook, body, has_code, executed):
+    note = note_of(section_footer(ITEM, make_notebook(body), "main", executed))
+    assert (RUN_GUIDE in note) is has_code
+
+
+def test_footer_notes_differ_between_sections_with_and_without_code(make_notebook):
+    with_code = note_of(section_footer(ITEM, make_notebook(CODE), "main", True))
+    without_code = note_of(section_footer(ITEM, make_notebook(PROSE), "main", True))
+    assert with_code and without_code and with_code != without_code
+
+
+def test_footer_claims_outputs_only_when_the_build_carries_them(make_notebook):
+    notebook = make_notebook(CODE)
+    with_outputs = note_of(section_footer(ITEM, notebook, "main", True))
+    without_outputs = note_of(section_footer(ITEM, notebook, "main", False))
+    assert "輸出" in with_outputs and "輸出" not in without_outputs
+    assert RUN_GUIDE in with_outputs and RUN_GUIDE in without_outputs
+    prose = make_notebook(PROSE)
+    assert note_of(section_footer(ITEM, prose, "main", True)) == note_of(section_footer(ITEM, prose, "main", False))
+
+
+@pytest.mark.parametrize("body", [PROSE, CODE], ids=["no-code", "code"])
+def test_download_and_colab_are_equal_buttons_with_the_links_the_site_check_expects(make_notebook, body):
+    download, colab = anchors_of(section_footer(ITEM, make_notebook(body), "abc123", True))
+    assert download["href"] == ITEM["notebook"] and "download" in download
+    assert colab["href"] == (
+        f"https://colab.research.google.com/github/{export_course.REPOSITORY}/blob/abc123/{ITEM['notebook']}"
+    )
+    assert colab["target"] == "_blank"
+    assert [download["class"], colab["class"]] == ["md-button", "md-button"]
+
+
+COURSE_FILES = {
+    "course/chapters/01.md": (
+        "# 第 1 章\n\n導言。\n\n"
+        "## 1.1 有程式\n\n文字。\n\n```python\nprint(1)\n```\n\n"
+        "## 1.2 只有文字\n\n文字。\n\n"
+        "## 1.3 只有圖解\n\n![圖](../figures/demo.svg)\n"
+    ),
+    "course/figures/demo.svg": "<svg/>",
+    "course/README.md": "# 閱讀指南\n\n選一節。\n",
+    "README.md": "# 專案\n\n參考。\n",
+    "course/lesson-contract.json": json.dumps({"schema_version": 1, "lesson_ids": ["1.1", "1.2", "1.3"]}),
+    "course/web/course.css": "/* test */",
+    "course/web/course.js": "/* test */",
+    "course/web/mathjax.js": "/* test */",
+    "zensical.toml": (
+        '[project]\ndocs_dir = "outputs/docs"\nsite_dir = "outputs/site"\n'
+        'nav = ["1.1.md", "1.2.md", "1.3.md", "chapter-01.md", "course.md", "readme.md", "index.md"]\n'
+    ),
+}
+
+
+def build_fake_site(root, monkeypatch, executed):
+    """在假的課程根目錄建置三節（有程式、只有文字、只有圖解），回傳各節產生的 Markdown 頁面。"""
+    for relative, text in COURSE_FILES.items():
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8", newline="\n")
+    monkeypatch.setattr(build_course, "ROOT", root)
+    build_course.build()
+    executed_root = None
+    if executed:
+        executed_root = root / "outputs/notebooks"
+        (executed_root / "01").mkdir(parents=True)
+        for source in (root / "notebooks/01").glob("*.ipynb"):
+            notebook = json.loads(source.read_text(encoding="utf-8"))
+            for cell in notebook["cells"]:
+                if cell["cell_type"] == "code":
+                    cell["execution_count"] = 1
+                    cell["outputs"] = [{"output_type": "stream", "name": "stdout", "text": ["1\n"]}]
+            (executed_root / "01" / source.name).write_text(json.dumps(notebook), encoding="utf-8")
+    monkeypatch.setattr(export_course, "ROOT", root)
+    monkeypatch.setattr(export_course, "DOCUMENTS", {"course": "course/README.md", "readme": "README.md"})
+    monkeypatch.setattr(export_course, "version", lambda package: "0.0.0-test")
+    monkeypatch.setattr(export_course, "prepare_assets", lambda root: None)
+    monkeypatch.setattr(export_course, "stage_assets", lambda destination, prepared: None)
+    destination = root / "outputs/site"
+    monkeypatch.setattr(export_course.subprocess, "run", lambda *args, **kwargs: destination.mkdir(parents=True))
+    export_course.build(destination, executed_root, "abc123", root / "absent.json", root / "absent-routes.json")
+    return {
+        lesson: (root / "outputs/docs" / f"{lesson}.md").read_text(encoding="utf-8") for lesson in ("1.1", "1.2", "1.3")
+    }
+
+
+def test_each_published_page_gets_the_footer_for_its_own_section(tmp_path, monkeypatch):
+    pages = build_fake_site(tmp_path, monkeypatch, executed=False)
+    assert {lesson: RUN_GUIDE in note_of(page) for lesson, page in pages.items()} == {
+        "1.1": True,
+        "1.2": False,
+        "1.3": False,
+    }
+    for lesson, page in pages.items():
+        links = [anchor["href"] for anchor in anchors_of(page.rpartition('<div class="actions">')[2])]
+        assert links == [
+            f"notebooks/01/{lesson}.ipynb",
+            f"https://colab.research.google.com/github/{export_course.REPOSITORY}/blob/abc123/notebooks/01/{lesson}.ipynb",
+        ]
+
+
+def test_the_published_footer_claims_outputs_only_for_a_build_with_executed_notebooks(tmp_path, monkeypatch):
+    plain = build_fake_site(tmp_path / "plain", monkeypatch, executed=False)
+    executed = build_fake_site(tmp_path / "executed", monkeypatch, executed=True)
+    assert "輸出" in note_of(executed["1.1"]) and "輸出" not in note_of(plain["1.1"])
+    assert note_of(executed["1.2"]) == note_of(plain["1.2"])
