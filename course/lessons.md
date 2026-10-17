@@ -59,11 +59,11 @@
 | 6.1 字元切詞有什麼成本？ | [閱讀](../course/chapters/06.md#6.1) | [開啟](../notebooks/06/6.1.ipynb) |
 | 6.2 常見片段怎麼合併？ | [閱讀](../course/chapters/06.md#6.2) | [開啟](../notebooks/06/6.2.ipynb) |
 | 6.3 怎麼訓練實用的 tokenizer？ | [閱讀](../course/chapters/06.md#6.3) | [開啟](../notebooks/06/6.3.ipynb) |
-| 6.4 詞表要多大？ | [閱讀](../course/chapters/06.md#6.4) | [開啟](../notebooks/06/6.4.ipynb) |
+| 6.4 字表要多大？ | [閱讀](../course/chapters/06.md#6.4) | [開啟](../notebooks/06/6.4.ipynb) |
 | 6.5 換 tokenizer 後如何比較模型？ | [閱讀](../course/chapters/06.md#6.5) | [開啟](../notebooks/06/6.5.ipynb) |
-| 6.6 邊界標記怎麼保持完整？ | [閱讀](../course/chapters/06.md#6.6) | [開啟](../notebooks/06/6.6.ipynb) |
+| 6.6 特殊 token 怎麼保持完整？ | [閱讀](../course/chapters/06.md#6.6) | [開啟](../notebooks/06/6.6.ipynb) |
 | 6.7 一個 token 一定是一個完整字嗎？ | [閱讀](../course/chapters/06.md#6.7) | [開啟](../notebooks/06/6.7.ipynb) |
-| 6.8 訓練窗口是在切詞嗎？ | [閱讀](../course/chapters/06.md#6.8) | [開啟](../notebooks/06/6.8.ipynb) |
+| 6.8 訓練視窗是在切詞嗎？ | [閱讀](../course/chapters/06.md#6.8) | [開啟](../notebooks/06/6.8.ipynb) |
 | 6.9 讀檔分段會改變切詞嗎？ | [閱讀](../course/chapters/06.md#6.9) | [開啟](../notebooks/06/6.9.ipynb) |
 | 7.1 對話怎麼表示？ | [閱讀](../course/chapters/07.md#7.1) | [開啟](../notebooks/07/7.1.ipynb) |
 | 7.2 模型怎麼知道輪到誰？ | [閱讀](../course/chapters/07.md#7.2) | [開啟](../notebooks/07/7.2.ipynb) |
