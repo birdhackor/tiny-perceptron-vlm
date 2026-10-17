@@ -4,9 +4,9 @@
 
 繁體中文 | [English](README_en.md)
 
-**[線上教材](https://birdhackor.github.io/tiny-perceptron-vlm/) · [閱讀路線](course/README.md) · [操作與數學暖身](course/first-steps.md) · [全部小節](course/lessons.md) · [訓練操作](course/training.md)**
+**[線上教材](https://birdhackor.github.io/tiny-perceptron-vlm/) · [閱讀路線](course/README.md) · [操作與數學暖身](course/first-steps.md) · [全部小節](course/lessons.md) · [名詞頁](course/glossary.md) · [訓練操作](course/training.md)**
 
-教材預覽版：網站提供正文、SVG 圖解與實際 CPU 輸出。每節按「在 Colab 動手做」可開啟同一課的完整 Notebook；有程式的Notebook會在第一個程式格準備專案與套件，小實驗不必先租 GPU。也可下載本節 `.ipynb` 後依下方步驟在本機練習。Colab 雲端執行尚未實機驗證。
+教材預覽版：網站提供正文、SVG 圖解，以及每節程式在 CPU 上實際執行的輸出，可以直接當書讀，不必先安裝。想自己改程式再跑時，可以下載本節 `.ipynb` 依下方步驟在本機執行，或按頁尾的「在 Colab 開啟」開啟同一份 Notebook；有程式的 Notebook 會在第一個程式格準備專案與套件，小實驗不必先租 GPU。Colab 需要 Google 帳號，Colab 雲端執行尚未實機驗證。
 
 ![文字與識別編號的對照](course/figures/rewrite-01-character-ids.svg)
 
@@ -16,13 +16,13 @@
 
 用幾個字看懂運作後，[7.17](course/chapters/07.md#7.17)解釋為什麼常先預訓練，再做後訓練；[第13章](course/chapters/13.md)逐步介紹偏好回饋、獎勵模型、PPO與DPO。指令遵循分開檢查內容、指定範圍、格式與停止；長上下文則分開討論容納長度、位置表示、計算成本與資訊使用。
 
-[第19章整合專題](course/chapters/19.md#19.1)把自行訓練的文字、圖片、聲音與工具使用組成一位小助理。v2 的文字核心、視覺／語音入口與接頭都由本專案從零訓練，已完成訓練、公開推論權重及兩版各3,734題的固定最後測試。MoE共5,447,107參數，Dense共2,288,067參數；兩版仍未通過全部原定能力判準。任務限於三類服飾與兩格位置、12個已知中文字的指定連續1–4字區域、三種銀行客服語音主題，以及有限文字對話和計算器。完整成績與限制見[19.12](course/chapters/19.md#19.12)，先試用可走[公開CPU操作](docs/selftrained/v2-public-cpu-commands.md)。舊版合成小世界的權重、配方與逐題報告保留於[固定實驗](docs/course-experiments/README.md)，不是本版成品的成績。
+[第19章整合專題](course/chapters/19.md#19.1)把自行訓練的文字、圖片、聲音與工具使用組成一位小助理，也就是 MoE 助理。它目前的 v2 版有 MoE 與較簡單的 Dense 兩種架構，文字核心、視覺／語音入口與接頭都由本專案從零訓練，已完成訓練、公開推論權重，並在兩版各3,734題的固定測試資料上評估。MoE共5,447,107參數，Dense共2,288,067參數；兩版仍未通過全部原定能力判準。任務限於三類服飾與兩格位置、12個已知中文字的指定連續1–4字區域、三種銀行客服語音主題，以及有限文字對話和計算器。完整成績與限制見[19.12](course/chapters/19.md#19.12)，先試用可走[公開CPU操作](docs/selftrained/v2-public-cpu-commands.md)。另一組合成小世界整合實驗的權重、配方與逐題報告在[固定實驗](docs/course-experiments/README.md)，那些是另一組模型的成績。
 
 [第20章](course/chapters/20.md#20.1)是成熟模型的應用延伸：Qwen3-VL處理圖文，Whisper先把語音轉成文字。它另有[操作](docs/natural-assistant/v4/STUDENT.md)、[資料](docs/natural-assistant/v4/DATA.md)與[訓練](docs/natural-assistant/v4/TRAINING.md)指引。上游模型的能力與自行訓練主線分開驗收。
 
-第一次讀可以直接從[1.1](course/chapters/01.md#1.1)開始。Python、tensor、機率、矩陣與梯度有按需暖身；想動手時再開啟同一節Notebook。各章的訓練入口集中在[操作頁](course/training.md)，來源與實測證據見[驗證範圍](docs/validation.md)。
+第一次讀可以直接從[1.1](course/chapters/01.md#1.1)開始。Python、tensor、機率、矩陣與梯度有按需暖身；想自己改程式再跑時，再在本機或 Colab 開啟同一節 Notebook。各章的訓練命令集中在[操作頁](course/training.md)，來源與實測證據見[驗證範圍](docs/validation.md)。
 
-Thinking effort（思考投入）、Looped Transformer（循環深度）及Jev式機率判斷已納入必修，分別見[7.23](course/chapters/07.md#7.23)、[14.11](course/chapters/14.md#14.11)與[9.11](course/chapters/09.md#9.11)。C.1–C.5接在第7章後。第19章擴成[三成品路線](course/chapters/19.md#19.13)：既有MoE助理（A）、有限文字Looped解題器（B）、獨立機率判斷服務（C），再接Auto effort；B／C已完成NVIDIA L4訓練與凍結後的最後測試：B兩盒追蹤2928/2956、三數加法2/42；C的核心候選判斷全對，但換說法會出錯。固定下載與命令見[產品操作](docs/lesson-products/README.md)，完整分母、變化測試與限制見[19.20](course/chapters/19.md#19.20)。
+Thinking effort（思考投入）、Looped Transformer（循環深度）及Jev式機率判斷已納入必修，分別見[7.23](course/chapters/07.md#7.23)、[14.11](course/chapters/14.md#14.11)與[9.11](course/chapters/09.md#9.11)。C.1–C.5接在第7章後。第19章擴成[三成品路線](course/chapters/19.md#19.13)：MoE 助理、有限文字的 Looped 解題器、獨立的機率判斷器，再接 Auto effort。Looped 解題器與機率判斷器已在 NVIDIA L4 完成訓練，設定凍結後才在測試資料上評估：Looped 解題器的兩盒追蹤答對 2928/2956、三數加法 2/42；機率判斷器在固定測試題的候選判斷上全對，但換一種說法就會出錯。固定下載與命令見[產品操作](docs/lesson-products/README.md)，完整分母、變化測試與限制見[19.20](course/chapters/19.md#19.20)。
 
 ## 安裝與開啟 Notebook
 
@@ -38,7 +38,7 @@ python -m ipykernel install --sys-prefix --name tiny-perceptron --display-name "
 jupyter lab notebooks
 ```
 
-Windows PowerShell 啟用指令是 `.venv\Scripts\Activate.ps1`。選擇 **Tiny Perceptron** kernel，先開啟 `notebooks/01/1.1.ipynb`。詳細操作見[暖身指南](course/first-steps.md)。
+Windows PowerShell 啟用指令是 `.venv\Scripts\Activate.ps1`。選擇 **Tiny Perceptron** kernel，先開啟 `notebooks/01/1.1.ipynb`。詳細操作見[暖身指南](course/first-steps.md)。只讀教材與跑各節短程式不需要 Git LFS；要下載訓練資料包時才需要，安裝與確認方式見[W.1](course/first-steps.md#W.1)。
 
 | 環境 | 安裝選擇 |
 | --- | --- |
@@ -47,35 +47,35 @@ Windows PowerShell 啟用指令是 `.venv\Scripts\Activate.ps1`。選擇 **Tiny 
 | NVIDIA CUDA 13.0 相容硬體／驅動 | `uv sync --frozen --extra cu130 --group notebook` |
 | NVIDIA CUDA 12.6 相容硬體／驅動 | `uv sync --frozen --extra cu126 --group notebook` |
 
-各版本的顯卡、驅動與套件配套選擇見[環境說明](docs/environment.md)。Colab操作另見[W.1](course/first-steps.md#W.1)。使用 extra 後，啟用 `.venv` 直接用 `python`，或每次 `uv run` 都帶相同 extra，避免更換 PyTorch。本機小節核驗使用CPU；前19章的正式GPU訓練另在Modal的NVIDIA L4、PyTorch 2.14.1+cu126上實測，版本與結果保存於[實驗報告](docs/course-experiments/README.md)。第20章另用Python 3.12與PyTorch 2.8.0的獨立環境；GPU訓練用CUDA 12.8配套，安裝步驟見[學生操作指引](docs/natural-assistant/v4/STUDENT.md)。Apple MPS已在macOS CI通過基本矩陣前向／反向與CPU比對；整套教材與正式模型訓練尚未在MPS驗證，範圍見[CI紀錄](docs/validation-artifacts/release-compatibility-ci.json)。
+各版本的顯卡、驅動與套件配套選擇見[環境說明](docs/environment.md)。Colab操作另見[W.1](course/first-steps.md#W.1)。使用 extra 後，啟用 `.venv` 直接用 `python`，或每次 `uv run` 都帶相同 extra，避免更換 PyTorch。本機小節核驗使用CPU；前19章的正式GPU訓練另在Modal的NVIDIA L4、PyTorch 2.14.1+cu126上實測，版本與結果保存於[實驗紀錄](docs/course-experiments/README.md)。第20章另用Python 3.12與PyTorch 2.8.0的獨立環境；GPU訓練用CUDA 12.8配套，安裝步驟見[學生操作指引](docs/natural-assistant/v4/STUDENT.md)。Apple MPS已在macOS CI通過基本矩陣前向／反向與CPU比對；整套教材與正式模型訓練尚未在MPS驗證，範圍見[CI紀錄](docs/validation-artifacts/release-compatibility-ci.json)。
 
-只想閱讀，可直接開啟線上教材。全站使用 [Zensical](https://zensical.org/) 建置，提供全文搜尋、章節目錄、頁內目錄、深淺色模式與程式碼複製；每節仍可下載 Notebook 或在 Colab 練習。SVG 可放大並保留靜態標註，支援系統減少動態效果。網站建置另需 `--group site`；本機閱讀與 GitHub Pages 操作見[教材發布](docs/publishing.md)。公式由 MathJax 連網排版。
+只想閱讀，可直接開啟線上教材。全站使用 [Zensical](https://zensical.org/) 建置，提供全文搜尋、章節目錄、頁內目錄、深淺色模式與程式碼複製；每節頁尾可下載 Notebook，或在 Colab 開啟同一份內容。SVG 可放大並保留靜態標註，支援系統減少動態效果。網站建置另需 `--group site`；本機閱讀與 GitHub Pages 操作見[教材發布](docs/publishing.md)。公式由 MathJax 連網排版。
 
 ## 最小流程
 
-先做一次通路檢查：第一行準備小段文字，第二行讓模型讀一小批題目、算預測與代價，再反向計算參數應往哪裡調。這裡先算方向，不更新模型中的可調數值（權重），也不保存訓練權重。
+先做一次通路檢查：第一行準備小段文字，第二行讓模型讀一小批題目、算預測與代價，再用反向傳播算出參數應往哪裡調。這裡先算方向，不更新模型中的可調數字（參數），也不保存權重檔。
 
 ```bash
 python scripts/prepare_data.py --kind toy-text
 python scripts/train.py --task text --data data/generated/toy-text/train.jsonl
 ```
 
-報告的`mode`應為`dry-run-no-weight-update`；逐步紀錄`history`第一筆的`loss`是有限數字、`grad_norm`也有限且大於0，表示這批題目的代價與更新方向能算出來。這只驗證通路，還沒有學會回答或通過新題。正式訓練再明確加 `--train`；字元模型、多模態、風格與安全、偏好和蒸餾配方在[訓練操作](course/training.md)。[首批固定訓練資料](assets/training/README.md)以 Git LFS 發布，先用 `python scripts/fetch_training_assets.py --list` 查看名稱，再用 `python scripts/fetch_training_assets.py --asset NAME` 下載、核對並解包所選包；將`NAME`換成清單中的名稱。原始快取與權重仍放在被 Git 忽略的 `data/`、`checkpoints/`；分工見[資產管理](docs/asset-storage.md)。
+報告的`mode`應為`dry-run-no-weight-update`；逐步紀錄`history`第一筆的`loss`是有限數字、`grad_norm`也有限且大於0，表示這批題目的代價與更新方向能算出來。這只驗證通路，還沒有學會回答或通過新題。正式訓練再明確加 `--train`；字元模型、多模態、風格與安全、偏好和蒸餾配方在[訓練操作](course/training.md)。[首批固定訓練資料](assets/training/README.md)以 Git LFS 發布，下載前先依[W.1](course/first-steps.md#W.1)安裝 Git LFS；先用 `python scripts/fetch_training_assets.py --list` 查看名稱（這一步不需要 Git LFS），再用 `python scripts/fetch_training_assets.py --asset NAME` 下載、核對並解包所選包；將`NAME`換成清單中的名稱。原始快取與權重仍放在被 Git 忽略的 `data/`、`checkpoints/`；分工見[資產管理](docs/asset-storage.md)。
 
 已設定 Modal 與 Hugging Face 帳號時，可手動執行 GitHub Actions 的 **GPU training smoke test**，驗證 GPU 權重更新、HF checkpoint 上傳與下載續訓。帳號設定、時間限制與結果判讀見 [GPU 操作說明](docs/gpu-training.md)。
 
-想先觀察第19章的v2成品，可按[公開CPU操作](docs/selftrained/v2-public-cpu-commands.md)安裝 `cpu` 和 `selftrained` 配套，匿名取得[固定HF版本](https://huggingface.co/birdhackor/tiny-perceptron-course-models/tree/979cdfacc588ad0536f1c64fff96f264571cf054/selftrained/v2)。該版有MoE pretrain、MoE SFT、MoE joint與Dense joint四組推論輸出，共16個配對檔案，採MIT授權。MoE joint選用最後一段第1,000步，該段實際完成4,000步；Dense joint選用第1,000步，該段完成10,000步。這些是依驗證選出的權重，成功示範不代表最後測試全部通過。
+想先觀察第19章的v2成品，可按[公開CPU操作](docs/selftrained/v2-public-cpu-commands.md)安裝 `cpu` 和 `selftrained` 配套，匿名取得[固定HF版本](https://huggingface.co/birdhackor/tiny-perceptron-course-models/tree/979cdfacc588ad0536f1c64fff96f264571cf054/selftrained/v2)。該版有MoE pretrain、MoE SFT、MoE joint與Dense joint四組推論輸出，共16個配對檔案，採MIT授權。MoE joint選用最後一段第1,000步，該段實際完成4,000步；Dense joint選用第1,000步，該段完成10,000步。這些是依驗證選出的權重，成功示範不代表測試題全部通過。
 
-要自己從隨機初始化重做，使用[本機訓練指引](docs/selftrained/TRAINING.md)和[固定v2資料清單](docs/selftrained/v2-manifest.json)：Git LFS資料包67,862,431 bytes，含8,962個檔案，訓練／驗證／測試題數為28,876／2,435／3,734。各段接自己的完整checkpoint，不需要作者的私人Volume；公開safetensors推論權重不含更新器等訓練狀態，不能精確續訓。
+要自己從隨機初始化重做，使用[本機訓練指引](docs/selftrained/TRAINING.md)和[固定v2資料清單](docs/selftrained/v2-manifest.json)：Git LFS資料包67,862,431 bytes，含8,962個檔案，訓練／驗證／測試題數為28,876／2,435／3,734。各段接自己的完整checkpoint，不需要作者的私人Volume；公開safetensors推論權重不含最佳化器等訓練狀態，不能精確續訓。
 
-各章的局部比較仍可下載[公開學生權重](https://huggingface.co/birdhackor/tiny-perceptron-course-models)：原30組實驗共120份存檔，包含不同尺寸與教師／學生等比較版本。[原下載清單](docs/course-experiments/public-models.json)保留固定版本與檔案指紋；[舊合成整合清單](docs/course-experiments/capstone-public.json)另保留11份階段、量化及Dense學生檔。例如在上面已安裝的 CPU 環境中：
+各章的局部比較仍可下載[公開學生權重](https://huggingface.co/birdhackor/tiny-perceptron-course-models)：30組實驗共120份權重檔，包含不同尺寸與教師／學生等比較版本。[下載清單](docs/course-experiments/public-models.json)保留固定版本與檔案指紋；[合成小世界整合清單](docs/course-experiments/capstone-public.json)另保留11份階段、量化及Dense學生檔。例如在上面已安裝的 CPU 環境中：
 
 ```bash
 python scripts/fetch_course_models.py --list
 python scripts/check_course_models.py --model text_foundation
 ```
 
-第二條會匿名下載基礎文字模型、核對檔案並在 CPU 上執行推論。這是檔案與執行通路的檢查；回答是否正確要看對應的留出題評估。推論權重已去除更新器與隨機狀態，不能拿來精確接續同一次訓練；教材的完整訓練備份另行保存。
+第二條會匿名下載文字模型 `text_foundation`、核對檔案並在 CPU 上執行推論。這是檔案與執行通路的檢查；回答是否正確要看對應實驗在驗證與測試題上的評估。推論權重已去除最佳化器與隨機狀態，不能拿來精確接續同一次訓練；教材的完整訓練備份另行保存。
 
 ## 專案結構與維護
 
