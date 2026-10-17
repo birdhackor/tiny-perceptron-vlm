@@ -252,7 +252,7 @@
 | 18.6 教師與學生的 token 對得上嗎？ | [閱讀](../course/chapters/18.md#18.6) | [開啟](../notebooks/18/18.6.ipynb) |
 | 18.7 教師需要跟著更新嗎？ | [閱讀](../course/chapters/18.md#18.7) | [開啟](../notebooks/18/18.7.ipynb) |
 | 18.8 如何學習整個分佈？ | [閱讀](../course/chapters/18.md#18.8) | [開啟](../notebooks/18/18.8.ipynb) |
-| 18.9 標準答案和教師偏好怎麼一起學？ | [閱讀](../course/chapters/18.md#18.9) | [開啟](../notebooks/18/18.9.ipynb) |
+| 18.9 正確答案和教師偏好怎麼一起學？ | [閱讀](../course/chapters/18.md#18.9) | [開啟](../notebooks/18/18.9.ipynb) |
 | 18.10 蒸餾是否幫到學生？ | [閱讀](../course/chapters/18.md#18.10) | [開啟](../notebooks/18/18.10.ipynb) |
 | 18.11 教師的風格和錯誤會被學走嗎？ | [閱讀](../course/chapters/18.md#18.11) | [開啟](../notebooks/18/18.11.ipynb) |
 | 18.12 MoE 教師能教 Dense 學生嗎？ | [閱讀](../course/chapters/18.md#18.12) | [開啟](../notebooks/18/18.12.ipynb) |
