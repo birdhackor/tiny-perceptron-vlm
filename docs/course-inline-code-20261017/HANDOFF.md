@@ -31,7 +31,7 @@ branch `course-inline-code-20261017`，從 `b05ebda3527789e4b6c550ad20271ababce2
 
 ## 驗收
 
-下表在 `827ebf74` 跑，只有以 kernel 執行 Notebook 那一列在 `02608a1a` 跑；兩者之間只有 `tests/test_course_data_pins.py` 多一個測試案例。環境是 macOS（Apple silicon，沒有 NVIDIA GPU）、Python 3.13.16，套件版本與 `uv.lock` 相同（torch 2.14.1、ruff 0.16.9）：
+下表全部在 `761abe0f` 跑。環境是 macOS（Apple silicon，沒有 NVIDIA GPU）、Python 3.13.16，套件版本與 `uv.lock` 相同（torch 2.14.1、ruff 0.16.9）：
 
 | 指令 | 結果 |
 | --- | --- |
@@ -39,7 +39,7 @@ branch `course-inline-code-20261017`，從 `b05ebda3527789e4b6c550ad20271ababce2
 | `ruff check .`、`ruff format --check .` | 通過 |
 | `python scripts/build_course.py --check` | 通過 |
 | `python scripts/check_notebooks.py` | 312 份 Notebook 全部執行成功 |
-| `python scripts/check_notebooks.py --mode kernel --workers 1` | 312 份 Notebook 全部執行成功（483 秒） |
+| `python scripts/check_notebooks.py --mode kernel --workers 1` | 312 份 Notebook 全部執行成功（480 秒） |
 | `python -m pytest` | 1 failed、1854 passed、3 skipped |
 | 三道發布審閱檢查 | 失敗，見上面第 1 項 |
 
@@ -47,7 +47,7 @@ branch `course-inline-code-20261017`，從 `b05ebda3527789e4b6c550ad20271ababce2
 
 ## 網站預覽
 
-本機在 `02608a1a` 建置過。閱讀時間紀錄已過期，所以匯出時把 `--reading-times` 指向不存在的檔案：這樣各頁不顯示估時，其餘照發布流程核對。
+本機在 `761abe0f` 建置過。閱讀時間紀錄已過期，所以匯出時把 `--reading-times` 指向不存在的檔案：這樣各頁不顯示估時，其餘照發布流程核對。
 
 ```bash
 python scripts/check_notebooks.py --mode kernel --workers 1 --output outputs/notebooks
@@ -56,13 +56,13 @@ python scripts/check_site.py
 python -m http.server 8000 --directory outputs/site
 ```
 
-第一行要先照[發布說明](../publishing.md)註冊 `tiny-perceptron` kernel。前三行在 `02608a1a` 跑過，只是 Notebook 輸出與估時檔放在別的路徑：312 份 Notebook 全部執行成功，匯出成功，`check_site.py` 回報 351 頁、312 份下載與 Colab 入口、135095 個內部連結、1344 個 Notebook 閱讀連結通過。
+第一行要先照[發布說明](../publishing.md)註冊 `tiny-perceptron` kernel。前三行在 `761abe0f` 跑過，只是 Notebook 輸出與估時檔放在別的路徑：312 份 Notebook 全部執行成功，匯出成功，`check_site.py` 回報 351 頁、312 份下載與 Colab 入口、135110 個內部連結、1347 個 Notebook 閱讀連結通過。
 
 ## 審閱
 
 每階段 commit 後，由沒參與撰寫的 subagent 審閱：技術審閱者實跑程式、核對節錄與數字；P2–P4 的第二輪與 P5 的第一輪（階段見下表）另有初學讀者試讀指定的小節，回報看不懂的地方。主 agent 逐條裁決，修正後只複查修正的 commit；每個階段結束前另由不同模型複審主 agent 的裁決。
 
-下表是各輪接受的意見條數，從裁決表數：判定接受的才算，一列記多條時照列內寫的條數，登記不改的不算（P1–P5 的第一輪沒有區分邏輯與文字；「初學讀者必改」是初學讀者意見裡主 agent 判定必須改的條目）。邏輯類指讀者照著讀會得到錯的事實或做錯事，文字類指意思沒錯、用詞可以更好。
+下表是各輪接受的意見條數，從裁決表數：判定接受的才算，一列記多條時照列內寫的條數，登記不改的不算（P1–P5 的第一輪沒有區分邏輯與文字；「初學讀者必改」是初學讀者意見裡主 agent 判定必須改的條目）。邏輯類指讀者照著讀會得到錯的事實或做錯事，文字類指意思沒錯、用詞可以更好，目標缺口指違反 D1 或 D5 的決定（實作沒放在第一次教的節、該補程式的節沒補）。
 
 | 階段 | 範圍 | 第一輪 | 第二輪 | 第三輪 | 結果 |
 | --- | --- | --- | --- | --- | --- |
@@ -72,6 +72,8 @@ python -m http.server 8000 --directory outputs/site
 | P4 | 第 14–20 章、單元 A、B | 接受 51 | 技術 6、初學讀者必改 6 | 邏輯 2、文字 4 | 最後一輪的邏輯類由複審者核對修正 commit，收斂 |
 | P5 | 入口頁 | 接受 8 | 邏輯 2、文字 4 | 邏輯 0、文字 1 | 收斂 |
 | P6 | 名詞頁 | 邏輯 6、文字 8 | 邏輯 3、文字 1 | — | 最後一輪的邏輯類由複審者核對修正 commit，收斂 |
+| P7 | 交接文件與配置表 | 邏輯 5、文字 6 | 邏輯 1、文字 2 | — | 最後一輪的邏輯類由複審者核對修正 commit，收斂 |
+| 總體審查 | 整個 branch（第二輪起章檔、文件分開複查修正） | 邏輯 9、目標缺口 6、文字 32 | 章檔邏輯 2；文件邏輯 5、文字 3 | 章檔 0；文件邏輯 2、文字 0 | 文件第四輪：邏輯 0，另 1 條邏輯類登記不改（守衛是 `tests/test_course_commit_pins.py`） |
 
 第二輪複查發現，修正時新寫的句子常常本身又錯：沒有對照它提到的程式、紀錄或其他節，或同一個問題只改了被點名的那一處。之後的修正要求每句新寫的事實附收據（指令輸出或原文）、泛化句先試反例、做同型掃描，同一句在本分支改過兩次以上就只能刪或縮小；第三輪複查時，章節修正帶進的新錯只剩第 19 章的 2 條。名詞頁第二輪的 3 條邏輯類出自主 agent 自己寫的修正句，所以那一輪只做刪除與縮小。
 
