@@ -10,12 +10,17 @@ tests/test_course_commit_pins.py。四條規則的驗證與不涵蓋範圍，寫
 - remote_manifest_problems：fetch_natural_data.py 下載時比對的、指定 Git 版本裡的清單。
 - package_pointer_problems：頁面集合 .json 裡本 repo 資料包的 revision 寫法與 Git LFS pointer。
 
-需要 Git 歷史的核對，在 blobs_unavailable 回報無法核對時（淺 clone、partial clone）跳過。
+需要 Git 歷史的核對，在 blobs_unavailable 回報無法核對時（淺 clone、partial clone）跳過。package_pointer_problems 的
+revision 寫法檢查不需要歷史，但和 pointer 核對在同一個測試裡，淺 clone、partial clone 會一起跳過。
 
 四條規則都不看的：正文（fence 外）與 inline code 裡的手抄指紋，例如 docs/selftrained/TRAINING.md 敘述裡的清單
 SHA-256，以及模型卡範本 docs/selftrained/model-cards/repository-README.md 裡的清單與資料包指紋；敘述裡沒有機器讀得出的
 「這是哪個檔案的指紋」。讀命令的兩條規則（manifest_pins 與 fetch_settings）也不涵蓋 PowerShell 以反引號續行的命令：
 commands 只把行尾 `\\` 當續行，反引號結尾的每一行各算一條命令。
+這兩條規則的每個選項都取同一行（續行接起來）裡最後出現的值；commands 不拆 `&&`、`;`，也不去掉 `#` 註解，所以
+同一行串起的多條命令會混成一組設定，被後面蓋掉的值不核對；註解裡的選項，以及緊接在值後面的 `;`，也會被當成值。
+例如 `--revision <hash>;`，或行尾註解寫「不寫 --revision 時…」，remote_manifest_problems 會報成腳本在下載前就停下；
+`--manifest-sha256 <64 位>;`，或註解裡的 `--manifest-sha256` 後面不是 64 位十六進位時，manifest_pins 整條命令都不核對。
 """
 
 import ast
@@ -50,8 +55,11 @@ ROOT = Path(__file__).resolve().parents[1]
 HEX64 = re.compile(r"[0-9A-Fa-f]{64}")
 SHELL_EXPANSION = re.compile(r"[$`]")
 # heredoc 的開頭一行：python（可帶版本號與路徑）之後只接以 - 開頭的參數，再接 <<分隔字；分隔字後面可接管線、
-# 輸出轉向或下一條命令（|、>、2>、&&、; 開頭）。
-HEREDOC = re.compile(r"\bpython[0-9.]*(?:\s+-\S*)*\s*<<-?\s*(['\"]?)([A-Za-z_]\w*)\1(?:\s*(?:[|&;]|\d*>).*)?\s*$")
+# 輸出轉向、下一條命令（|、>、2>、&&、; 開頭），或空白之後的 # 註解。bash 的 # 只在一個 word 的開頭才是註解：
+# <<'PY'#x 的分隔字是 PY#x，不是 PY。
+HEREDOC = re.compile(
+    r"\bpython[0-9.]*(?:\s+-\S*)*\s*<<-?\s*(['\"]?)([A-Za-z_]\w*)\1(?:\s*(?:[|&;]|\d*>).*|\s+#.*)?\s*$"
+)
 RAW_MANIFEST_URL = re.compile(rf"https://raw\.githubusercontent\.com/{re.escape(REPOSITORY)}/([0-9a-f]{{40}})/(.+)")
 # scripts/selftrained/hf_transport.py 的 materialize_git_lfs 也用這個樣式檢查資料包的 revision。
 FULL_COMMIT = re.compile(r"[a-f0-9]{40}")
@@ -121,8 +129,8 @@ def heredocs(text):
     """[(第一行的行號, Python 原始碼)]：fenced 程式區塊裡餵給 Python 的 heredoc 內容，去掉共同縮排。
 
     開頭一行要有 `python`（可帶版本號，例如 `python3.12`；前面可以有路徑或 `uv run …`），後面只接以 `-` 開頭的參數
-    （例如 `-I`、`-`；`-` 可省），再接 `<<分隔字`（分隔字可加引號，`<<-` 也算）；分隔字後面可以接管線、輸出轉向或
-    下一條命令。內容到只有分隔字的那一行為止。
+    （例如 `-I`、`-`；`-` 可省），再接 `<<分隔字`（分隔字可加引號，`<<-` 也算）；分隔字後面可以接管線、輸出轉向、
+    下一條命令，或空白之後的 `#` 註解。內容到只有分隔字的那一行為止。
     """
     found = []
     for lines in code_blocks(text):
@@ -199,8 +207,9 @@ def heredoc_manifest_pins(text):
     這種組合的名稱。Path.cwd() 與相對路徑都當成 repo 根目錄，和頁面上其他命令一樣。
 
     驗證：交給 local_file_problems，核對路徑上的檔案，SHA-256 逐字等於 assert 寫的值。
-    不涵蓋：heredocs 不讀的開頭寫法——`python -c '…'`、`python <腳本>`、`python -m <模組>` 後面的 heredoc 是給程式的
-    標準輸入，不是 Python 原始碼；旗標的引數另成一個參數時（例如 `python -X utf8 - <<'PY'`）也不讀。另外不涵蓋函式、
+    不涵蓋：heredocs 不讀的開頭寫法——`python -c '…'`、`python <腳本>`、`python -m <模組>` 後面的 heredoc；
+    旗標的引數另成一個參數時（例如 `python -X utf8 - <<'PY'`）也不讀。分隔字後面接一般引數的開頭
+    （例如 `python - <<'PY' data/`）也不讀。另外不涵蓋函式、
     迴圈或 if 裡的 assert，路徑用其他寫法算出（例如由變數組字串）、名稱在 assert 之前被 for、with 或 import 重新綁定，
     以及 python fence 裡的程式（執行時的工作目錄不一定是 repo 根目錄）。
     """
@@ -470,6 +479,21 @@ MANIFEST_TEXTS = [
         [],
         id="powershell-backtick-continuation-is-not-joined",
     ),
+    pytest.param(
+        f"```bash\n{TRAIN} --manifest old.json --manifest-sha256 {T} && {TRAIN} --manifest {M} --manifest-sha256 {S}\n```\n",
+        [(2, M, S)],
+        id="two-commands-joined-with-and-become-one-pin",
+    ),
+    pytest.param(
+        f"```bash\n{TRAIN} --manifest {M} --manifest-sha256 {S}  # 換清單時也要改 --manifest-sha256 的值\n```\n",
+        [],
+        id="option-mentioned-in-a-trailing-comment-drops-the-command",
+    ),
+    pytest.param(
+        f"```bash\n{TRAIN} --manifest {M} --manifest-sha256 {S}; echo 完成\n```\n",
+        [],
+        id="semicolon-right-after-the-digest-drops-the-command",
+    ),
 ]
 
 
@@ -636,6 +660,57 @@ HEREDOC_TEXTS = [
         [],
         id="flag-argument-as-a-separate-word",
     ),
+    pytest.param(
+        heredoc(
+            "import hashlib",
+            f'assert {sha_of(f"Path({M!r})")} == "{S}"',
+            start="uv run --frozen python - <<'PY'  # 核對清單沒有被改過",
+        ),
+        [(4, M, S)],
+        id="comment-after-the-delimiter",
+    ),
+    pytest.param(
+        heredoc("import hashlib", f'assert {sha_of(f"Path({M!r})")} == "{S}"', start="python - <<'PY'#x"),
+        [],
+        id="hash-right-after-the-delimiter-is-part-of-it",
+    ),
+    pytest.param(
+        heredoc("import hashlib", f'assert {sha_of(f"Path({M!r})")} == "{S}"', start="python - <<'PY' data/"),
+        [],
+        id="argument-after-the-delimiter",
+    ),
+    pytest.param(
+        heredoc(
+            "import hashlib", f'assert {sha_of(f"Path({M!r})")} == "{S}"', start="python - <<'PY' 2>&1 | tee check.log"
+        ),
+        [(4, M, S)],
+        id="stderr-redirected-before-the-pipe",
+    ),
+    pytest.param(
+        heredoc("import hashlib", f'assert {sha_of(f"Path({M!r})")} == "{S}"', start="python - <<'PY' && echo 完成"),
+        [(4, M, S)],
+        id="next-command-after-and",
+    ),
+    pytest.param(
+        heredoc("import hashlib", f'assert {sha_of(f"Path({M!r})")} == "{S}"', start="python - <<'PY'; echo 完成"),
+        [(4, M, S)],
+        id="next-command-after-a-semicolon",
+    ),
+    pytest.param(
+        heredoc("import hashlib", f'assert {sha_of(f"Path({M!r})")} == "{S}"', start="python3.12 - <<'PY'"),
+        [(4, M, S)],
+        id="version-with-a-dot",
+    ),
+    pytest.param(
+        heredoc("import hashlib", f'assert {sha_of(f"Path({M!r})")} == "{S}"', start='python - <<"PY"'),
+        [(4, M, S)],
+        id="double-quoted-delimiter",
+    ),
+    pytest.param(
+        heredoc("\timport hashlib", f'\tassert {sha_of(f"Path({M!r})")} == "{S}"', start="python - <<-PY", end="\tPY"),
+        [(4, M, S)],
+        id="dash-heredoc-with-tab-indented-lines",
+    ),
 ]
 
 
@@ -667,6 +742,26 @@ FETCH_SETTING_TEXTS = [
     ),
     pytest.param(f"```bash\npython scripts/other.py --manifest {M} --revision {R2}\n```\n", [], id="another-script"),
     pytest.param(f"執行 `{FETCH} --list` 即可。\n", [], id="inline-code-in-prose"),
+    pytest.param(
+        f"```bash\n{FETCH} --revision {R1} --revision {R2}\n```\n",
+        [(2, DEFAULTS[0], R2, DEFAULTS[2])],
+        id="every-option-takes-its-last-value",
+    ),
+    pytest.param(
+        f"```bash\n{FETCH} --manifest {M} --revision {R1} --list && {FETCH} --revision {R2} --verify\n```\n",
+        [(2, M, R2, DEFAULTS[2])],
+        id="two-fetches-joined-with-and-become-one-setting",
+    ),
+    pytest.param(
+        f"```bash\n{FETCH} --revision {R2} --list  # 不寫 --revision 時用腳本的預設版本\n```\n",
+        [(2, DEFAULTS[0], "時用腳本的預設版本", DEFAULTS[2])],
+        id="revision-mentioned-in-a-trailing-comment-is-taken-as-the-value",
+    ),
+    pytest.param(
+        f"```bash\n{FETCH} --revision {R2}; echo 完成\n```\n",
+        [(2, DEFAULTS[0], R2 + ";", DEFAULTS[2])],
+        id="semicolon-right-after-the-revision-stays-in-the-value",
+    ),
 ]
 
 

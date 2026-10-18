@@ -11,17 +11,20 @@ docs/publishing.md，再加上從這些頁面 fence 外的相對連結 `[文字]
 - fenced 程式區塊裡、和 `git ` 在同一行的 40 位十六進位字串。
 - 頁面任何位置、指向本 repo（github.com/birdhackor/tiny-perceptron-vlm）的 blob／tree／commit／raw 網址裡的
   40 位 hash。封存 repo 與其他 repo 的網址不算。
-- fenced 程式區塊裡執行 scripts/fetch_natural_data.py 的命令（行尾 `\\` 續行接成同一條，不跨區塊）的
-  `--revision` 值；這個腳本用它組本 repo 的 raw／media 網址。其他腳本的 `--revision`、`--model-revision`
-  多半是 Hugging Face 的版本，不算。
+- fenced 程式區塊裡執行 scripts/fetch_natural_data.py 的那一行（行尾 `\\` 續行接成同一行，不跨區塊）裡，每一個
+  以剛好 40 位十六進位開頭的 `--revision` 值（外層成對的引號先去掉）；這個腳本用它組本 repo 的 raw／media 網址。
+  其他腳本另成一行的 `--revision`、`--model-revision` 多半是 Hugging Face 的版本，不算。
 - 頁面集合裡的 .json 檔解析後，`repo_id` 等於 birdhackor/tiny-perceptron-vlm 的物件的 40 位 `revision`。
 - scripts/fetch_natural_data.py 模組層級的 `DEFAULT_REVISION`，執行時用 ast 讀出。
 
 不涵蓋：續行的 `git` 命令（hash 不在 `git` 那一行）、shell 變數、Python 清單形式的命令、正文 inline code 與
 一般敘述裡的 hash。
 PowerShell 以反引號續行的命令也不涵蓋：commands 只把行尾 `\\` 當續行，反引號結尾的每一行各算一條命令。
-git() 設定的 `GIT_NO_LAZY_FETCH` 要 git 2.45 以上才認得；更舊的 git 在 partial clone 裡遇到本機沒有的物件，仍會向
-promisor remote 連網路補抓，補抓成功時，已改寫掉的 commit 會被報成「是 commit，但不是 HEAD 的祖先」。
+`&&`、`;` 串起的多條命令不拆開，`#` 註解也不去掉：同一行裡每個以剛好 40 位十六進位開頭的 `--revision` 值都算
+釘選，包括註解裡的和同一行其他腳本的，它們不是 HEAD 的祖先時一樣會被報。
+git() 設定的 `GIT_NO_LAZY_FETCH`，git 2.45 以上，以及各維護線從 2.39.4、2.40.2、2.41.1、2.42.2、2.43.4、2.44.1 起
+都認得；比這些舊的 git（例如 2.44.0、2.40.1）在 partial clone 裡遇到本機沒有的物件，仍會向 promisor remote 連網路
+補抓，補抓成功時，已改寫掉的 commit 會被報成「是 commit，但不是 HEAD 的祖先」。
 """
 
 import ast
@@ -85,7 +88,10 @@ def url_pins_in(text):
 
 
 def commands(text):
-    """(第一行的行號, 命令)：fenced 程式區塊裡的每條命令；行尾 `\\` 的續行接到下一行，不跨區塊。"""
+    """(第一行的行號, 一行)：fenced 程式區塊裡的每一行，行尾 `\\` 的續行接到下一行，不跨區塊。
+
+    `&&`、`;` 串起的多條命令不拆開，`#` 註解也不去掉。
+    """
     result = []
     for lines in code_blocks(text):
         start, parts = None, []
@@ -101,22 +107,30 @@ def commands(text):
     return result
 
 
+def unquoted(value):
+    """去掉外層成對的單或雙引號；不成對時原樣回傳。"""
+    return value[1:-1] if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"" else value
+
+
+def option_values(command, option):
+    """命令裡每一個 option 的值，依出現的順序，各自去掉外層成對的單或雙引號。"""
+    return [unquoted(value) for value in re.findall(rf"(?<!\S){re.escape(option)}(?:=|\s+)(\S+)", command)]
+
+
 def option_value(command, option):
     """命令裡最後一個 option 的值（argparse 以最後一個為準），去掉外層成對的單或雙引號；沒有這個選項時回傳 None。"""
-    values = re.findall(rf"(?<!\S){re.escape(option)}(?:=|\s+)(\S+)", command)
-    if not values:
-        return None
-    value = values[-1]
-    return value[1:-1] if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"" else value
+    values = option_values(command, option)
+    return values[-1] if values else None
 
 
 def fetch_pins_in(text):
     """(命令第一行的行號, hash)：fenced 程式區塊裡執行 fetch_natural_data.py 的命令的 `--revision` 值。"""
     pins = []
     for number, command in commands(text):
-        revision = option_value(command, "--revision") if RUNS_FETCH_SCRIPT.search(command) else None
-        if revision is not None and COMMIT.fullmatch(revision):
-            pins.append((number, revision))
+        if RUNS_FETCH_SCRIPT.search(command):
+            for value in option_values(command, "--revision"):
+                if found := COMMIT.match(value):
+                    pins.append((number, found[0]))
     return pins
 
 
@@ -315,11 +329,36 @@ FETCH_TEXTS = [
         [(2, A)],
         id="continued-lines",
     ),
+    pytest.param(
+        f"```bash\n{FETCH} --list \\\n  --revision \\\n  {A}\n```\n", [(2, A)], id="value-on-its-own-continued-line"
+    ),
     pytest.param(f"```bash\n{FETCH} --revision={A}\n```\n", [(2, A)], id="equals-sign"),
     pytest.param(f'```bash\n{FETCH} --revision "{A}" --list\n```\n', [(2, A)], id="double-quoted-revision"),
     pytest.param(f"```bash\n{FETCH} --revision '{A}'\n```\n", [(2, A)], id="single-quoted-revision"),
     pytest.param(f'```bash\n{FETCH} --revision="{A}"\n```\n', [(2, A)], id="equals-sign-and-quotes"),
-    pytest.param(f"```bash\n{FETCH} --revision {B} --revision {A}\n```\n", [(2, A)], id="last-revision-wins"),
+    pytest.param(
+        f"```bash\n{FETCH} --revision {B} --revision {A}\n```\n", [(2, B), (2, A)], id="every-revision-counts"
+    ),
+    pytest.param(
+        f"```bash\n{FETCH} --revision {A} --list && {FETCH} --revision {B} --verify\n```\n",
+        [(2, A), (2, B)],
+        id="two-fetches-joined-with-and",
+    ),
+    pytest.param(
+        f"```bash\n{FETCH} --revision {A}; {FETCH} --revision {B} --verify\n```\n",
+        [(2, A), (2, B)],
+        id="two-fetches-joined-with-semicolon",
+    ),
+    pytest.param(
+        f"```bash\n{FETCH} --revision {A} --list  # 舊版用 --revision {B}；不寫 --revision 時用腳本的預設版本\n```\n",
+        [(2, A), (2, B)],
+        id="revision-mentioned-in-a-trailing-comment",
+    ),
+    pytest.param(
+        f"```bash\npython scripts/selftrained/chat.py --revision {A} && {FETCH} --list\n```\n",
+        [(2, A)],
+        id="another-script-joined-on-the-same-line",
+    ),
     pytest.param(f"```bash\n{FETCH} --revision \"{A}'\n```\n", [], id="mismatched-quotes"),
     pytest.param(
         f"```bash\n{FETCH} --revision {A} --list\n\n{FETCH} \\\n  --revision {B}\n```\n",
@@ -350,6 +389,7 @@ FETCH_TEXTS = [
         id="python-list",
     ),
     pytest.param(f"```bash\n{FETCH} --revision {A[:39]}\n```\n", [], id="39-hex-digits"),
+    pytest.param(f"```bash\n{FETCH} --revision {A}1\n```\n", [], id="41-hex-digits"),
 ]
 
 
@@ -564,6 +604,24 @@ def test_a_quoted_revision_of_a_commit_off_the_history_is_rejected(history, quot
     assert len(problems) == 1 and "page.md:4" in problems[0] and "不是 HEAD 的祖先" in problems[0]
 
 
+@pytest.mark.parametrize(
+    "line",
+    [
+        pytest.param(
+            "{fetch} --revision {side} --list && {fetch} --revision {head} --verify", id="earlier-of-two-fetches"
+        ),
+        pytest.param(
+            "{fetch} --revision {head} --list  # 舊版用 --revision {side}", id="revision-in-a-trailing-comment"
+        ),
+    ],
+)
+def test_every_revision_on_a_fetch_line_is_checked_against_the_history(history, line):
+    repo, ids = history
+    text = fenced(line.format(fetch=FETCH, side=ids["side"], head=ids["head"]))
+    problems = pin_problems(repo, [("page.md", number, commit) for number, commit in fetch_pins_in(text)])
+    assert len(problems) == 1 and ids["side"] in problems[0] and "不是 HEAD 的祖先" in problems[0]
+
+
 def test_one_problem_is_reported_for_each_hash_with_every_place_it_is_pinned(history):
     repo, ids = history
     pins = [("a.md", 1, ids["absent"]), ("b.md", 5, ids["absent"]), ("b.md", 6, ids["side"])]
@@ -598,7 +656,7 @@ def partial_clone(tmp_path):
     if shutil.which("git") is None:
         pytest.skip("找不到 git 指令")
     if git_version() < (2, 45):
-        pytest.skip("git 2.45 以上才認得 GIT_NO_LAZY_FETCH")
+        pytest.skip("`git --no-lazy-fetch` 要 git 2.45 以上")
     source = tmp_path / "source"
     source.mkdir()
     run_git(source, "init", "--initial-branch=main")

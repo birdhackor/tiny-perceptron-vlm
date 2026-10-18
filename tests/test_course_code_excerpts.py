@@ -404,11 +404,19 @@ def stray_marker_problems(root):
                         "這一行在第一個 `## X.Y` 節標題之前的導言裡；build_course.py 不為導言產生 Notebook，"
                         "這個區塊不會執行，標記也就無從核對。請把它移進某一節。"
                     )
+                # 開頭一行以 ```python 結尾、反引號卻不只三個（例如 ````python）時，build_course.py 的正則仍在裡面
+                # 找到 ```python 開頭，照樣產生程式格。
+                longer_fence = opener.lstrip() != NOTEBOOK_FENCE and opener.endswith(NOTEBOOK_FENCE)
                 if opener.lstrip() != NOTEBOOK_FENCE:
                     reasons.append(
                         f"所在 fence 的開頭一行是 {opener.lstrip()!r}；標記所在的 fence，開頭一行（縮排除外）"
-                        '必須剛好是 ```python。build_course.py 不會把 ```py、```python title="…" '
-                        "或 python 後多了空白的區塊變成 Notebook 程式格，標記在那裡無從核對。"
+                        "必須剛好是 ```python。"
+                        + (
+                            ""
+                            if longer_fence
+                            else 'build_course.py 不會把 ```py、```python title="…" '
+                            "或 python 後多了空白的區塊變成 Notebook 程式格，標記在那裡無從核對。"
+                        )
                     )
                 if number != first:
                     reasons.append("標記要寫在區塊第一行；寫在其他行，不會被當成標記核對。")
@@ -416,6 +424,8 @@ def stray_marker_problems(root):
                     reasons.append(
                         "標記要從行首（縮排除外）的 `#` 開始、獨占一行；寫成行尾註解或接在其他文字後面，不會被當成標記核對。"
                     )
+                if longer_fence and len(reasons) == 1:
+                    reasons[0] += "build_course.py 仍會把這個區塊變成 Notebook 程式格，這個標記仍會被核對。"
                 if reasons:
                     head = f"{page} 第 {number} 行（{section or '導言'}）\n  標記行：{line.strip()}"
                     problems.append("\n".join([head, *(textwrap.indent(reason, "  ") for reason in reasons)]))
@@ -666,6 +676,7 @@ STRAY_REASONS = {
     "fence": "必須剛好是 ```python",
     "line": "標記要寫在區塊第一行",
     "trailing": "寫成行尾註解",
+    "checked": "這個標記仍會被核對",
 }
 STRAY_MARKERS = [
     pytest.param(INTRODUCTION.format(MARKED), {"intro"}, id="before-the-first-section-heading"),
@@ -743,7 +754,44 @@ STRAY_MARKERS = [
         {"line", "trailing"},
         id="marker-inside-a-string-literal",
     ),
-    pytest.param(chapter_text(("9.1", MARKED.replace("```", "````"))), {"fence"}, id="four-backtick-fence"),
+    pytest.param(
+        chapter_text(
+            (
+                "9.1",
+                block(
+                    "## 精簡自 tiny_perceptron/quantization.py：pack（省略輸入範圍檢查）",
+                    "def pack(pair):",
+                    "    return pair[0] * 16 + pair[1]",
+                ),
+            )
+        ),
+        {"trailing"},
+        id="one-hash-too-many-before-the-marker",
+    ),
+    pytest.param(
+        chapter_text(
+            (
+                "9.1",
+                block(
+                    "# 先看精簡版 # 精簡自 tiny_perceptron/quantization.py：pack（省略輸入範圍檢查）",
+                    "def pack(pair):",
+                    "    return pair[0] * 16 + pair[1]",
+                ),
+            )
+        ),
+        {"trailing"},
+        id="marker-after-another-comment-on-the-first-line",
+    ),
+    pytest.param(
+        chapter_text(("9.1", block("import math", marker_line(["pack"])).replace("```", "````"))),
+        {"fence", "line"},
+        id="four-backtick-fence-with-the-marker-on-a-later-line",
+    ),
+    pytest.param(
+        chapter_text(("9.1", MARKED.replace("```", "````").replace("````python", "````py"))),
+        {"fence"},
+        id="four-backtick-py-fence",
+    ),
 ]
 
 
@@ -754,6 +802,15 @@ def test_a_marker_that_no_notebook_code_cell_starts_with_is_reported(tmp_path, c
     assert len(problems) == 1
     assert {kind for kind, text in STRAY_REASONS.items() if text in problems[0]} == expected
     assert problems[0] in check_course(tmp_path)
+
+
+@pytest.mark.parametrize("fence", ["````", "`````"], ids=["four-backticks", "five-backticks"])
+def test_a_marker_in_a_fence_with_more_than_three_backticks_is_checked_and_reported(tmp_path, fence):
+    write(tmp_path, "course/chapters/09.md", chapter_text(("9.1", MARKED.replace("```", fence))))
+    assert [(marker.fence.section, marker.names[0]) for marker in collect_markers(tmp_path)] == [("9.1", "pack")]
+    [problem] = stray_marker_problems(tmp_path)
+    assert {kind for kind, text in STRAY_REASONS.items() if text in problem} == {"fence", "checked"}
+    assert "無從核對" not in problem
 
 
 NOT_STRAY = [
