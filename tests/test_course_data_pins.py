@@ -670,6 +670,11 @@ HEREDOC_TEXTS = [
         id="comment-after-the-delimiter",
     ),
     pytest.param(
+        heredoc("import hashlib", f'assert {sha_of(f"Path({M!r})")} == "{S}"', start="python - <<'PY'  #核對清單"),
+        [(4, M, S)],
+        id="comment-without-a-space-after-the-hash",
+    ),
+    pytest.param(
         heredoc("import hashlib", f'assert {sha_of(f"Path({M!r})")} == "{S}"', start="python - <<'PY'#x"),
         [],
         id="hash-right-after-the-delimiter-is-part-of-it",
