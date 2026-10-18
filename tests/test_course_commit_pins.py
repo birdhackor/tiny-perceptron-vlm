@@ -352,6 +352,7 @@ JSON_TEXTS = [
     ),
     pytest.param({"revision": A, "repo_id": REPOSITORY}, [("revision", A)], id="revision-before-repo-id"),
     pytest.param({"model": {"repo_id": OTHER_REPOSITORY, "revision": A}}, [], id="another-repository"),
+    pytest.param({"package": {"repo_id": f"{REPOSITORY}-archive", "revision": A}}, [], id="archive-repository"),
     pytest.param({"repo_id": REPOSITORY, "commit": A}, [], id="another-key"),
     pytest.param({"revision": A, "source": {"repo_id": REPOSITORY}}, [], id="repo-id-on-another-object"),
     pytest.param({"repo_id": REPOSITORY, "revision": "main"}, [], id="branch-name"),

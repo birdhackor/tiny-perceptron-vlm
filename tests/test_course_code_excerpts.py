@@ -1264,6 +1264,29 @@ CONDENSED_SECTIONS = [
         id="assert-only-inside-a-function-body",
     ),
     pytest.param(
+        [
+            (
+                "9.1",
+                CONDENSED_PACK
+                + "\n\n"
+                + block(
+                    "from tiny_perceptron.quantization import pack as library_pack",
+                    "",
+                    "",
+                    "def check():",
+                    "    same = pack((3, 4)) == library_pack((3, 4))",
+                    "    return same",
+                    "",
+                    "",
+                    "same = True",
+                    "assert same",
+                ),
+            )
+        ],
+        {"not-both"},
+        id="assignment-inside-a-function-is-not-traced",
+    ),
+    pytest.param(
         [("9.1", CONDENSED_PACK), ("9.2", CHECK_PACK)],
         {"import", "no-assert"},
         id="import-and-assert-belong-to-another-section",
