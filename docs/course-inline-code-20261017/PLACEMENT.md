@@ -44,6 +44,7 @@ grep -n -E '^# (節錄自|精簡自) tiny_perceptron/' course/chapters/*.md
 | 12.8 | `log_mel`、`AudioEncoder` | multimodal.py | 原樣節錄 |
 | 12.13 | `audio_order_report` | natural_concepts.py | 只說明並連結：怎麼接兩段音、倒轉時間框與回傳的欄位 |
 | 12.14 | `speech_stages` | natural_concepts.py | 只說明並連結：四個參數與回傳的欄位 |
+| 12.15 | `AudioEncoder` | selftrained/model.py | 只說明並連結：三步怎麼整理時間與兩個回傳值 |
 | 13.3 | `sequence_log_probability` | alignment.py | 原樣節錄 |
 | 13.5 | `dpo_loss` | alignment.py | 原樣節錄 |
 | 13.10 | `preference_loss` | posttraining.py | 原樣節錄 |
@@ -67,8 +68,12 @@ grep -n -E '^# (節錄自|精簡自) tiny_perceptron/' course/chapters/*.md
 | 19.2 | `SelftrainedConfig` | selftrained/model.py | 只說明：和預設值不同的四項與其餘預設 |
 | 19.5 | `RecordEncoder` | selftrained/dataset.py | 精簡版 |
 | 19.5 | `CharacterTokenizer` | selftrained/tokenizer.py | 只說明並連結：特殊 token 的編號與 `build` 收哪些字 |
+| 19.6 | `decode_ocr` | selftrained/model.py | 原樣節錄 |
 | 19.7 | `parse_tool_call`、`execute_tool_call` | selftrained/tools.py | 原樣節錄 |
 | 19.14 | `family`、`split_of` | lesson_products/data.py | 原樣節錄 |
+| 19.15 | `LoopedSolver` | lesson_products/model.py | 原樣節錄 |
+| 19.16 | `CandidateScorer` | lesson_products/model.py | 原樣節錄 |
+| 19.16 | `candidate_batch`、`grouped_scores` | lesson_products/model.py | 只說明並連結：怎麼檢查候選、每個候選排成一列，分數怎麼排回各題 |
 | 19.17 | `rule_depth` | lesson_products/inference.py | 原樣節錄 |
 | A.3 | `lexical_terms`、`retrieve` | retrieval.py | 原樣節錄 |
 | B.2 | `call_tool` | retrieval.py | 原樣節錄 |
@@ -76,4 +81,17 @@ grep -n -E '^# (節錄自|精簡自) tiny_perceptron/' course/chapters/*.md
 
 節錄與精簡版裡用到、但沒有另外展示的常數與零件（例如 5.2 的 `IGNORE`、19.7 的 `CALL_KEYS`、19.2 的三個感知入口），在同一節的文字裡說明用途，不另列。
 
-下列 17 節沒有 Python 程式區塊：11.17、12.15、12.16、19.1、19.3、19.6、19.8、19.11、19.13、19.15、19.16、19.18、19.19、19.20、20.2、20.4、20.8。
+下列各節沒有 Python 程式區塊，各節後面是維持文字的理由：
+
+- 11.17：機制已在 [11.14](../../course/chapters/11.md#11.14) 用程式示範：左右對調的兩張圖，4×4 平均摘要相同、完整像素序列不同；本節是設計例。
+- 12.16：機制已在 [12.9](../../course/chapters/12.md#12.9) 與 [7.1](../../course/chapters/07.md#7.1) 用程式示範：`<audio>` 換成聲音特徵，依角色決定哪些位置計分。
+- 19.1：需要下載權重：重做本節的回答要先從 Hugging Face 匿名下載公開 MoE 權重，命令在本機終端機執行。
+- 19.3：機制已在 [19.14](../../course/chapters/19.md#19.14) 用程式示範：`family`、`split_of` 讓同一家族固定分到同一份。
+- 19.8：機制已在 [13.5](../../course/chapters/13.md#13.5) 與 [13.13](../../course/chapters/13.md#13.13) 用程式示範：DPO 的 `dpo_loss`、PPO 的 `ppo_clipped_objective`；本節只談成品要選哪一種。
+- 19.11：需要下載權重：本節的 CPU 示範要先從 Hugging Face 下載公開推論權重。
+- 19.13：機制已在 [19.2](../../course/chapters/19.md#19.2)、[19.15](../../course/chapters/19.md#19.15) 與 [19.16](../../course/chapters/19.md#19.16) 用程式示範：三個成品的模型各在其中一節節錄或精簡；本節只介紹三者的用途與輸入輸出。
+- 19.18：內容是實測結果：表中的數字取自實驗紀錄與 CPU 執行紀錄。
+- 19.19：需要下載權重：命令先下載 Looped 解題器與機率判斷器的權重，再在本機推論。
+- 19.20：內容是實測結果：驗收表是設定凍結後首次測試的成績。
+- 20.2：需要下載權重：試用要先下載兩個成熟模型，共約 5.48 GiB。
+- 20.4：需要下載資料包：例子是第 20 章固定資料裡的真實照片，照片要照 [DATA.md](../natural-assistant/v4/DATA.md) 的〈取得固定快照，核對後再使用〉下載。
