@@ -8,13 +8,14 @@ tests/test_course_commit_pins.py。四條規則的驗證與不涵蓋範圍，寫
 - manifest_pins：命令同時帶的 `--manifest` 與 `--manifest-sha256`。
 - heredoc_manifest_pins：heredoc 裡用 `assert` 核對檔案 SHA-256 的 Python。
 - remote_manifest_problems：fetch_natural_data.py 下載時比對的、指定 Git 版本裡的清單。
-- package_pointer_problems：頁面集合 .json 裡本 repo 資料包的 Git LFS pointer。
+- package_pointer_problems：頁面集合 .json 裡本 repo 資料包的 revision 寫法與 Git LFS pointer。
 
 需要 Git 歷史的核對，在 blobs_unavailable 回報無法核對時（淺 clone、partial clone）跳過。
 
 四條規則都不看的：正文（fence 外）與 inline code 裡的手抄指紋，例如 docs/selftrained/TRAINING.md 敘述裡的清單
 SHA-256，以及模型卡範本 docs/selftrained/model-cards/repository-README.md 裡的清單與資料包指紋；敘述裡沒有機器讀得出的
-「這是哪個檔案的指紋」。
+「這是哪個檔案的指紋」。讀命令的兩條規則（manifest_pins 與 fetch_settings）也不涵蓋 PowerShell 以反引號續行的命令：
+commands 只把行尾 `\\` 當續行，反引號結尾的每一行各算一條命令。
 """
 
 import ast
@@ -39,6 +40,7 @@ from tests.test_course_commit_pins import (
     commands,
     git,
     history_unavailable,
+    option_value,
     page_set,
     run_git,
     write,
@@ -47,8 +49,12 @@ from tests.test_course_commit_pins import (
 ROOT = Path(__file__).resolve().parents[1]
 HEX64 = re.compile(r"[0-9A-Fa-f]{64}")
 SHELL_EXPANSION = re.compile(r"[$`]")
-HEREDOC = re.compile(r"\bpython[0-9.]*\s+-\s*<<-?\s*(['\"]?)([A-Za-z_]\w*)\1\s*$")
+# heredoc 的開頭一行：python（可帶版本號與路徑）之後只接以 - 開頭的參數，再接 <<分隔字；分隔字後面可接管線、
+# 輸出轉向或下一條命令（|、>、2>、&&、; 開頭）。
+HEREDOC = re.compile(r"\bpython[0-9.]*(?:\s+-\S*)*\s*<<-?\s*(['\"]?)([A-Za-z_]\w*)\1(?:\s*(?:[|&;]|\d*>).*)?\s*$")
 RAW_MANIFEST_URL = re.compile(rf"https://raw\.githubusercontent\.com/{re.escape(REPOSITORY)}/([0-9a-f]{{40}})/(.+)")
+# scripts/selftrained/hf_transport.py 的 materialize_git_lfs 也用這個樣式檢查資料包的 revision。
+FULL_COMMIT = re.compile(r"[a-f0-9]{40}")
 LFS_POINTER = re.compile(
     r"version https://git-lfs\.github\.com/spec/v1\noid sha256:([0-9a-f]{64})\nsize (0|[1-9][0-9]*)\n"
 )
@@ -68,15 +74,6 @@ def page_items(root, extract, suffix=".md", **pages):
         if page.endswith(suffix)
         for item in extract((root / page).read_text(encoding="utf-8"))
     ]
-
-
-def option_value(command, option):
-    """命令裡最後一個 option 的值（argparse 以最後一個為準），去掉外層成對的引號；沒有這個選項時回傳 None。"""
-    values = re.findall(rf"(?<!\S){re.escape(option)}(?:=|\s+)(\S+)", command)
-    if not values:
-        return None
-    value = values[-1]
-    return value[1:-1] if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"" else value
 
 
 def local_file_problems(root, pins):
@@ -121,7 +118,12 @@ def manifest_pins(text):
 
 
 def heredocs(text):
-    """[(第一行的行號, Python 原始碼)]：fenced 程式區塊裡餵給 `python -` 的 heredoc 內容，去掉共同縮排。"""
+    """[(第一行的行號, Python 原始碼)]：fenced 程式區塊裡餵給 Python 的 heredoc 內容，去掉共同縮排。
+
+    開頭一行要有 `python`（可帶版本號，例如 `python3.12`；前面可以有路徑或 `uv run …`），後面只接以 `-` 開頭的參數
+    （例如 `-I`、`-`；`-` 可省），再接 `<<分隔字`（分隔字可加引號，`<<-` 也算）；分隔字後面可以接管線、輸出轉向或
+    下一條命令。內容到只有分隔字的那一行為止。
+    """
     found = []
     for lines in code_blocks(text):
         index = 0
@@ -197,8 +199,10 @@ def heredoc_manifest_pins(text):
     這種組合的名稱。Path.cwd() 與相對路徑都當成 repo 根目錄，和頁面上其他命令一樣。
 
     驗證：交給 local_file_problems，核對路徑上的檔案，SHA-256 逐字等於 assert 寫的值。
-    不涵蓋：函式、迴圈或 if 裡的 assert，路徑用其他寫法算出（例如由變數組字串）、名稱在 assert 之前被 for、with
-    或 import 重新綁定，python fence 裡的程式（執行時的工作目錄不一定是 repo 根目錄），以及 `python -c`。
+    不涵蓋：heredocs 不讀的開頭寫法——`python -c '…'`、`python <腳本>`、`python -m <模組>` 後面的 heredoc 是給程式的
+    標準輸入，不是 Python 原始碼；旗標的引數另成一個參數時（例如 `python -X utf8 - <<'PY'`）也不讀。另外不涵蓋函式、
+    迴圈或 if 裡的 assert，路徑用其他寫法算出（例如由變數組字串）、名稱在 assert 之前被 for、with 或 import 重新綁定，
+    以及 python fence 裡的程式（執行時的工作目錄不一定是 repo 根目錄）。
     """
     pins = []
     for start, source in heredocs(text):
@@ -368,12 +372,13 @@ def package_pins(text):
 
 
 def package_pointer_problems(repo, packages):
-    """[(頁面, JSON 路徑, revision, path, sha256, bytes)] 的每一個資料包：path 在 revision 那個版本必須是
-    Git LFS pointer，oid 等於 sha256、size 等於 bytes。
+    """[(頁面, JSON 路徑, revision, path, sha256, bytes)] 的每一個資料包：revision 是 40 位小寫十六進位的完整
+    commit hash，path 在那個版本是 Git LFS pointer，oid 等於 sha256、size 等於 bytes。
 
-    驗證：git_blob 取出的內容逐字等於標準的 pointer 三行（`version https://git-lfs.github.com/spec/v1`、
-    `oid sha256:<sha256>`、`size <bytes>`，各以換行結尾）；scripts/selftrained/hf_transport.py 的
-    materialize_git_lfs 也是逐字比對。不符時指出是取不到、不是標準 pointer，還是 oid／size 不同。
+    驗證：revision 完整符合 FULL_COMMIT（大寫、短 hash 與分支名稱都不收），不符的不再往下核對；再以 git_blob 取出
+    那個版本的原始 bytes，逐字等於標準的 pointer 三行（`version https://git-lfs.github.com/spec/v1`、
+    `oid sha256:<sha256>`、`size <bytes>`，各以 LF 結尾），CRLF 也算不符。不符時指出是 revision 寫法、取不到、
+    不是標準 pointer，還是 oid／size 不同。
     不涵蓋：LFS 伺服器上有沒有這個物件（測試不連網路）；revision 是否在目前歷史裡，由
     tests/test_course_commit_pins.py 核對；沒有 `repo_id` 與 `revision` 的資料包紀錄，例如
     fetch_natural_data.py 清單裡的 archives。
@@ -381,6 +386,12 @@ def package_pointer_problems(repo, packages):
     problems = []
     for page, place, revision, path, sha256, size in packages:
         label = f"{page}:{place}"
+        if not (isinstance(revision, str) and FULL_COMMIT.fullmatch(revision)):
+            problems.append(
+                f"{label}：revision {revision!r} 不是 40 位小寫十六進位的完整 commit hash；"
+                "materialize_git_lfs 只接受這種寫法，請寫出完整的小寫 hash"
+            )
+            continue
         shown = git_blob(repo, revision, path)
         if shown.returncode != 0:
             reason = shown.stderr.decode("utf-8", "replace").strip()
@@ -449,6 +460,16 @@ MANIFEST_TEXTS = [
         id="continuation-does-not-cross-blocks",
     ),
     pytest.param(f"執行 `{TRAIN} --manifest {M} --manifest-sha256 {S}` 即可。\n", [], id="inline-code-in-prose"),
+    pytest.param(
+        f"```bash\n{TRAIN} \\\n  --manifest-sha256={T} \\\n  --manifest={M} \\\n  --data-root data\n```\n",
+        [(2, M, T)],
+        id="digest-before-the-path-in-equals-form-on-continued-lines",
+    ),
+    pytest.param(
+        f"```powershell\n{TRAIN} `\n  --manifest {M} `\n  --manifest-sha256 {S} `\n  --data-root data\n```\n",
+        [],
+        id="powershell-backtick-continuation-is-not-joined",
+    ),
 ]
 
 
@@ -550,6 +571,71 @@ HEREDOC_TEXTS = [
         [],
         id="line-after-the-delimiter",
     ),
+    pytest.param(
+        heredoc("import hashlib", f'assert {sha_of(f"Path({M!r})")} == "{S}"', start="uv run --frozen python - <<'PY'"),
+        [(4, M, S)],
+        id="uv-run-options-before-python",
+    ),
+    pytest.param(
+        heredoc("import hashlib", f'assert {sha_of(f"Path({M!r})")} == "{S}"', start="uv run --frozen python <<'PY'"),
+        [(4, M, S)],
+        id="python-without-the-dash",
+    ),
+    pytest.param(
+        heredoc(
+            "import hashlib", f'assert {sha_of(f"Path({M!r})")} == "{S}"', start="uv run --frozen python -I - <<'PY'"
+        ),
+        [(4, M, S)],
+        id="flag-before-the-dash",
+    ),
+    pytest.param(
+        heredoc(
+            "import hashlib",
+            f'assert {sha_of(f"Path({M!r})")} == "{S}"',
+            start="uv run --frozen python - <<'PY' | tee data-step.log",
+        ),
+        [(4, M, S)],
+        id="piped-to-tee",
+    ),
+    pytest.param(
+        heredoc("import hashlib", f'assert {sha_of(f"Path({M!r})")} == "{S}"', start="python3 - <<PY > check.log 2>&1"),
+        [(4, M, S)],
+        id="output-redirected",
+    ),
+    pytest.param(
+        heredoc(
+            "import hashlib",
+            f'assert {sha_of(f"Path({M!r})")} == "{S}"',
+            start="python -c 'import sys; exec(sys.stdin.read())' <<'PY'",
+        ),
+        [],
+        id="python-c-reads-the-heredoc-as-input",
+    ),
+    pytest.param(
+        heredoc(
+            "import hashlib",
+            f'assert {sha_of(f"Path({M!r})")} == "{S}"',
+            start="python scripts/x.py <<'EOF'",
+            end="EOF",
+        ),
+        [],
+        id="script-reads-the-heredoc-as-input",
+    ),
+    pytest.param(
+        heredoc(
+            "import hashlib",
+            f'assert {sha_of(f"Path({M!r})")} == "{S}"',
+            start="python -m json.tool <<'EOF'",
+            end="EOF",
+        ),
+        [],
+        id="module-reads-the-heredoc-as-input",
+    ),
+    pytest.param(
+        heredoc("import hashlib", f'assert {sha_of(f"Path({M!r})")} == "{S}"', start="python -X utf8 - <<'PY'"),
+        [],
+        id="flag-argument-as-a-separate-word",
+    ),
 ]
 
 
@@ -573,6 +659,12 @@ FETCH_SETTING_TEXTS = [
         id="some-options-on-continued-lines",
     ),
     pytest.param(f'```bash\n{FETCH} --revision "$REVISION"\n```\n', [], id="shell-variable"),
+    pytest.param(
+        f'```bash\n{FETCH} --revision "{R2}"\n```\n', [(2, DEFAULTS[0], R2, DEFAULTS[2])], id="double-quoted-revision"
+    ),
+    pytest.param(
+        f"```bash\n{FETCH} --revision '{R2}'\n```\n", [(2, DEFAULTS[0], R2, DEFAULTS[2])], id="single-quoted-revision"
+    ),
     pytest.param(f"```bash\npython scripts/other.py --manifest {M} --revision {R2}\n```\n", [], id="another-script"),
     pytest.param(f"執行 `{FETCH} --list` 即可。\n", [], id="inline-code-in-prose"),
 ]
@@ -747,6 +839,16 @@ def test_a_revision_that_does_not_hold_the_pinned_manifest_is_rejected(natural_h
     assert len(problems) == 1 and reason in problems[0] and "a.md:3" in problems[0]
 
 
+def test_a_fetch_command_without_a_revision_is_checked_at_the_default_revision(natural_history):
+    repo, ids, scratch = natural_history
+    value = digest(repo / V4_MANIFEST)
+    text = f"```bash\n{FETCH} --manifest {V4_MANIFEST} --manifest-sha256 {value} --list\n```\n"
+    settings = [("a.md", *setting) for setting in fetch_settings(text, (V3_MANIFEST, ids["empty"], T))]
+    assert settings == [("a.md", 2, V4_MANIFEST, ids["empty"], value)]
+    [problem] = remote_manifest_problems(repo, settings, scratch)
+    assert f"{ids['empty']} 版本取不到 {V4_MANIFEST}" in problem
+
+
 def test_one_problem_is_reported_for_each_fetch_setting_with_every_place(natural_history):
     repo, ids, scratch = natural_history
     setting = (V3_MANIFEST, ids["empty"], digest(repo / V3_MANIFEST))
@@ -763,11 +865,16 @@ def lfs_pointer(oid, size, newline="\n"):
 
 @pytest.fixture
 def pointer_history(tmp_path):
-    """一個 commit，裡面有標準 pointer、CRLF 換行的 pointer，和一個不是 pointer 的壓縮包。"""
+    """一個 commit，裡面有標準 pointer、幾種走樣的 pointer，和一個不是 pointer 的壓縮包。"""
     repo, _ = git_repository(tmp_path)
+    standard = lfs_pointer(S, 123)
     for path, content in (
-        (POINTER_PATH, lfs_pointer(S, 123).encode()),
+        (POINTER_PATH, standard.encode()),
         ("assets/training/crlf.tar.gz", lfs_pointer(S, 123, "\r\n").encode()),
+        ("assets/training/extra-line.tar.gz", (standard + "ext-0-foo sha256:" + T + "\n").encode()),
+        ("assets/training/no-size.tar.gz", standard.replace("size 123\n", "").encode()),
+        ("assets/training/trailing-blank-line.tar.gz", (standard + "\n").encode()),
+        ("assets/training/no-final-newline.tar.gz", standard.removesuffix("\n").encode()),
         ("assets/training/raw.tar.gz", b"\x1f\x8b\x08\x00 not a pointer"),
     ):
         (repo / path).parent.mkdir(parents=True, exist_ok=True)
@@ -787,6 +894,18 @@ def test_a_package_matches_the_lfs_pointer_at_its_revision(pointer_history):
         pytest.param({"bytes": 124}, "size 是 123，JSON 寫的是 124", id="another-size"),
         pytest.param({"path": "assets/training/raw.tar.gz"}, "不是標準的 Git LFS pointer", id="not-a-pointer"),
         pytest.param({"path": "assets/training/crlf.tar.gz"}, "不是標準的 Git LFS pointer", id="crlf-pointer"),
+        pytest.param({"path": "assets/training/extra-line.tar.gz"}, "不是標準的 Git LFS pointer", id="extra-line"),
+        pytest.param({"path": "assets/training/no-size.tar.gz"}, "不是標準的 Git LFS pointer", id="missing-size-line"),
+        pytest.param(
+            {"path": "assets/training/trailing-blank-line.tar.gz"},
+            "不是標準的 Git LFS pointer",
+            id="trailing-blank-line",
+        ),
+        pytest.param(
+            {"path": "assets/training/no-final-newline.tar.gz"},
+            "不是標準的 Git LFS pointer",
+            id="missing-final-newline",
+        ),
         pytest.param({"path": "assets/training/absent.tar.gz"}, "版本取不到", id="path-missing-at-the-revision"),
         pytest.param({"revision": "e" * 40}, "版本取不到", id="revision-that-does-not-exist"),
     ],
@@ -797,6 +916,88 @@ def test_a_package_that_differs_from_its_lfs_pointer_is_rejected(pointer_history
     pins = [("a.json", "package", package["revision"], package["path"], package["sha256"], package["bytes"])]
     problems = package_pointer_problems(repo, pins)
     assert len(problems) == 1 and reason in problems[0] and "a.json:package" in problems[0]
+
+
+@pytest.mark.parametrize(
+    "rewrite",
+    [
+        pytest.param(str.upper, id="upper-case-revision"),
+        pytest.param(lambda revision: revision[:8], id="abbreviated-revision"),
+        pytest.param(lambda revision: "main", id="branch-name-revision"),
+    ],
+)
+def test_a_package_revision_must_be_a_full_lower_case_commit_hash(pointer_history, rewrite):
+    repo, revision = pointer_history
+    # 這三種寫法 git 都讀得到同一個 pointer（main 是 fixture 的分支），只有 revision 寫法這一條會擋下。
+    assert git_blob(repo, rewrite(revision), POINTER_PATH).stdout == lfs_pointer(S, 123).encode()
+    problems = package_pointer_problems(repo, [("a.json", "package", rewrite(revision), POINTER_PATH, S, 123)])
+    assert len(problems) == 1 and "a.json:package" in problems[0]
+    assert "不是 40 位小寫十六進位的完整 commit hash" in problems[0]
+
+
+def test_a_branch_name_is_reported_even_when_another_package_record_is_valid(pointer_history):
+    repo, revision = pointer_history
+    record = {"repo_id": REPOSITORY, "path": POINTER_PATH, "sha256": S, "bytes": 123}
+    write(repo, "course/chapters/01.md", "[資料](../../docs/valid.json) [另一份](../../docs/branch.json)\n")
+    write(repo, "docs/valid.json", json.dumps({"package": {**record, "revision": revision}}))
+    write(repo, "docs/branch.json", json.dumps({"package": {**record, "revision": "main"}}))
+    packages = page_items(repo, package_pins, suffix=".json", reading_pages={}, extra_pages=())
+    assert len(packages) == 2
+    [problem] = package_pointer_problems(repo, packages)
+    assert problem.startswith("docs/branch.json:package：revision 'main' 不是 40 位小寫十六進位")
+
+
+@pytest.mark.parametrize(
+    "stale",
+    [
+        pytest.param("command", id="command-on-another-page-left-with-the-old-digest"),
+        pytest.param("heredoc", id="heredoc-assert-left-with-the-old-digest"),
+    ],
+)
+def test_a_page_left_with_the_old_digest_after_the_manifest_changed_is_reported(tmp_path, stale):
+    write(tmp_path, M, '{"rows": []}\n')
+    old = digest(tmp_path / M)
+    write(tmp_path, M, '{"rows": [] }\n')
+    new = digest(tmp_path / M)
+    write(tmp_path, "course/chapters/01.md", "[訓練](../../docs/a.md) [另一頁](../../docs/b.md)\n")
+    write(
+        tmp_path,
+        "docs/a.md",
+        f"```bash\n{TRAIN} --manifest {M} --manifest-sha256 {new}\n```\n\n"
+        + heredoc("import hashlib", f'assert {sha_of(f"Path({M!r})")} == "{old if stale == "heredoc" else new}"'),
+    )
+    write(
+        tmp_path,
+        "docs/b.md",
+        f"```bash\n{TRAIN} --manifest {M} --manifest-sha256 {old if stale == 'command' else new}\n```\n",
+    )
+    pages = {"reading_pages": {}, "extra_pages": ()}
+    pins = page_items(tmp_path, manifest_pins, **pages) + page_items(tmp_path, heredoc_manifest_pins, **pages)
+    [problem] = local_file_problems(tmp_path, pins)
+    assert f"頁面寫的是 {old}" in problem
+    assert ("docs/a.md:8" if stale == "heredoc" else "docs/b.md:2") in problem
+
+
+@pytest.mark.parametrize(
+    "start",
+    [
+        pytest.param("uv run --frozen python - <<'PY'", id="python-dash"),
+        pytest.param("uv run --frozen python <<'PY'", id="python-without-the-dash"),
+        pytest.param("uv run --frozen python -I - <<'PY'", id="flag-before-the-dash"),
+        pytest.param("uv run --frozen python - <<'PY' | tee data-step.log", id="piped-to-tee"),
+    ],
+)
+def test_a_wrong_digest_asserted_in_a_heredoc_on_a_linked_page_is_reported(tmp_path, start):
+    write(tmp_path, M, '{"rows": []}\n')
+    write(tmp_path, "course/chapters/01.md", "[核對](../../docs/check.md)\n")
+    write(
+        tmp_path,
+        "docs/check.md",
+        "# 核對\n\n" + heredoc("import hashlib", f'assert {sha_of(f"Path({M!r})")} == "{T}"', start=start),
+    )
+    pins = page_items(tmp_path, heredoc_manifest_pins, reading_pages={}, extra_pages=())
+    [problem] = local_file_problems(tmp_path, pins)
+    assert "docs/check.md:6" in problem and f"頁面寫的是 {T}" in problem
 
 
 def test_the_checks_read_pins_from_the_page_set(tmp_path):
@@ -887,4 +1088,7 @@ def test_packages_of_this_repository_match_their_lfs_pointers():
     reason = blobs_unavailable(ROOT)
     if reason:
         pytest.skip(reason)
-    fail_with(package_pointer_problems(ROOT, packages), "資料包紀錄和它釘的版本裡的 Git LFS pointer 不同")
+    fail_with(
+        package_pointer_problems(ROOT, packages),
+        "資料包紀錄的 revision 寫法不對，或和它釘的版本裡的 Git LFS pointer 不同",
+    )

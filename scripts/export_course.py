@@ -204,7 +204,7 @@ def section_footer(item, notebook, revision, executed_outputs):
         note = (
             f"{shown}，不開 Colab 也能讀完。想自己改數字再跑，可以在自己的電腦執行 Notebook："
             "依[暖身 W.1](first-steps.md#W.1)下載的專案裡已有每一節的 Notebook；"
-            "按「下載本節 .ipynb」存下的也是同一份 Notebook，要放進專案資料夾裡才能在本機執行。"
+            "按「下載本節 .ipynb」存下的也是同一份 Notebook，要放進專案的 `notebooks/` 資料夾才能在本機執行。"
             "也可以在 Colab 開啟同一份內容（需要 Google 帳號，雲端環境未經本課實測）。"
         )
     else:

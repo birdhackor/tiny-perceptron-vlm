@@ -10,7 +10,7 @@
 
 冒號、頓號、括號都用全形。第一行以「# 節錄」或「# 精簡」開頭卻不符合格式，一律是錯誤，避免寫錯的標記被當成
 一般程式放過。只有某一節裡、會變成 Notebook 程式格的區塊第一行才算標記；章檔 fence 裡看起來像標記的其他行
-（在導言裡、在開頭一行不剛好是 ```python 的 fence 裡，或不在區塊第一行）也一律是錯誤，見 stray_marker_problems。
+也一律是錯誤，見 stray_marker_problems。
 解析與檢查函式都接受根目錄參數，所以能在假的 repo 上驗證。
 """
 
@@ -243,8 +243,8 @@ def condensed_problems(marker, siblings):
     - 在精簡版的定義之後：位於同一節較後面的 python 區塊，或標記區塊裡、精簡版定義結束之後的行。
     - 運算式用到的名稱，沿同一節的簡單指派往回追（assignment_sources），同時追得到精簡版的名稱
       與函式庫的別名。
-    - 函式庫別名來自 ``from <模組> import <名稱> as <別名>``，而且別名和精簡版的名稱不同。同一節有沒換名的
-      ``from <模組> import <名稱>`` 就是錯誤：它會把精簡版的名稱重新綁到函式庫版本，比的其實是函式庫自己。
+    - 函式庫別名來自 ``from <模組> import <名稱> as <別名>``，而且別名和精簡版的名稱不同。同一節有會執行到、
+      沒換名的 ``from <模組> import <名稱>`` 也是錯誤，不論它在精簡版的定義之前或之後。
     另外，標記區塊本身要用頂層 def／class 定義這個名稱。
 
     驗證：assert 是否在精簡版定義之後、它的運算式經簡單指派追得到哪些名稱、函式庫 import 有沒有用 as 換名、
@@ -281,8 +281,8 @@ def condensed_problems(marker, siblings):
                         unrenamed = True
     if unrenamed:
         reasons.append(
-            f"同一節的 `{library_import}` 沒有用 `as` 換成別的名稱，會把精簡版的 `{name}` 重新綁到函式庫版本，"
-            f"之後比的其實是函式庫自己；請改成 `{library_import} as <別名>`，別名和 `{name}` 不同。"
+            f"同一節的 `{library_import}` 沒有用 `as` 換成別的名稱；請改成 `{library_import} as <別名>`，"
+            f"別名和 `{name}` 不同。"
         )
     elif not aliases:
         reasons.append(
@@ -371,10 +371,16 @@ def fenced_blocks(text):
 
 
 def stray_marker_problems(root):
-    """章檔 fence 裡看起來像標記、卻不在該在位置的行；回傳問題清單。
+    """章檔 fence 裡看起來像標記、卻不在該在位置的字樣；回傳問題清單。
 
-    標記只該出現在一個位置：某一節裡、開頭一行（縮排除外）剛好是 ```python 的 fence 的第一個非空白行
-    （parse_marker 讀的正是這一行）。節的歸屬和 build_course.py 一樣，只看前面最近的節標題。
+    標記只該出現在一個位置：某一節裡、開頭一行（縮排除外）剛好是 ```python 的 fence 的第一個非空白行，而且從那一行
+    的行首（縮排除外）開始（parse_marker 讀的正是這一行）。節的歸屬和 build_course.py 一樣，只看前面最近的節標題。
+
+    驗證：章檔每個 fence（任何語言、縮排或放在 <details> 裡都算）的每一行，任何位置出現 STRAY_MARKER 的字樣都算，
+    包括行尾註解與字串字面值裡的；不在上述位置就報，並寫出不符合的每一條：在導言裡、fence 開頭一行不對、
+    不是區塊第一個非空白行、不從行首開始。
+    不涵蓋：章檔以外的頁面、fence 外的正文與 inline code，以及 STRAY_MARKER 認不出的寫法（例如沒有「自」、
+    也沒接 tiny_perceptron/ 路徑的「# 節錄的重點」）。
     """
     problems = []
     for chapter in sorted((root / "course/chapters").glob("*.md")):
@@ -388,7 +394,8 @@ def stray_marker_problems(root):
         for opener, lines in fenced_blocks(text):
             first = next((number for number, line in lines if line.strip()), None)
             for number, line in lines:
-                if not STRAY_MARKER.match(line):
+                found = STRAY_MARKER.search(line)
+                if not found:
                     continue
                 section = next((lesson for start, lesson in reversed(headings) if start < number), None)
                 reasons = []
@@ -405,6 +412,10 @@ def stray_marker_problems(root):
                     )
                 if number != first:
                     reasons.append("標記要寫在區塊第一行；寫在其他行，不會被當成標記核對。")
+                if line[: found.start()].strip():
+                    reasons.append(
+                        "標記要從行首（縮排除外）的 `#` 開始、獨占一行；寫成行尾註解或接在其他文字後面，不會被當成標記核對。"
+                    )
                 if reasons:
                     head = f"{page} 第 {number} 行（{section or '導言'}）\n  標記行：{line.strip()}"
                     problems.append("\n".join([head, *(textwrap.indent(reason, "  ") for reason in reasons)]))
@@ -636,6 +647,8 @@ BLOCK_LOCATIONS = [
     pytest.param(chapter_text(("9.1", MARKED.replace("```python", "```py"))), [], id="not-the-notebook-fence-language"),
     pytest.param(chapter_text(("9.1", block("import torch", "print(1)"))), [], id="ordinary-fence"),
     pytest.param(chapter_text(("9.1", marker_line(["pack"]) + "\n\n" + PACK)), [], id="not-inside-a-fence"),
+    # build_course.py 的正則在 ````python 裡也找得到 ```python 開頭，照常產生程式格；stray_marker_problems 另外回報它。
+    pytest.param(chapter_text(("9.1", MARKED.replace("```", "````"))), [("9.1", "pack")], id="four-backtick-fence"),
 ]
 
 
@@ -652,6 +665,7 @@ STRAY_REASONS = {
     "intro": "導言裡",
     "fence": "必須剛好是 ```python",
     "line": "標記要寫在區塊第一行",
+    "trailing": "寫成行尾註解",
 }
 STRAY_MARKERS = [
     pytest.param(INTRODUCTION.format(MARKED), {"intro"}, id="before-the-first-section-heading"),
@@ -706,6 +720,30 @@ STRAY_MARKERS = [
         {"line"},
         id="indented-lookalike-on-a-later-line",
     ),
+    pytest.param(
+        chapter_text(
+            (
+                "9.1",
+                block(
+                    "def pack(pair):  # 精簡自 tiny_perceptron/quantization.py：pack（省略輸入範圍檢查）",
+                    "    return pair[0] * 16 + pair[1]",
+                ),
+            )
+        ),
+        {"trailing"},
+        id="marker-as-a-trailing-comment-on-the-first-line",
+    ),
+    pytest.param(
+        chapter_text(("9.1", block("x = 1", "y = 2  # 節錄自 tiny_perceptron/quantization.py：pack"))),
+        {"line", "trailing"},
+        id="marker-as-a-trailing-comment-on-a-later-line",
+    ),
+    pytest.param(
+        chapter_text(("9.1", block("import math", 'note = "# 節錄自 tiny_perceptron/quantization.py：pack"'))),
+        {"line", "trailing"},
+        id="marker-inside-a-string-literal",
+    ),
+    pytest.param(chapter_text(("9.1", MARKED.replace("```", "````"))), {"fence"}, id="four-backtick-fence"),
 ]
 
 
@@ -974,7 +1012,7 @@ def check_lm(*lines):
 SAME = ("", "", "def same(ours, theirs):", "    return torch.allclose(ours(x), theirs(x))", "", "")
 CONDENSED_REASONS = {
     "import": "沒有函式庫版本，就無從核對",
-    "rebind": "重新綁到函式庫版本",
+    "rebind": "沒有用 `as` 換成別的名稱",
     "definition": "沒有用頂層 def／class 定義",
     "no-assert": "沒有會執行到的 `assert`",
     "not-both": "沒有一個同時追溯到",
@@ -1153,6 +1191,20 @@ CONDENSED_SECTIONS = [
         ],
         {"rebind"},
         id="rebinding-import-next-to-a-renamed-one",
+    ),
+    pytest.param(
+        [
+            (
+                "9.1",
+                block("from tiny_perceptron.quantization import pack", "", "print(pack((3, 4)))")
+                + "\n\n"
+                + CONDENSED_PACK
+                + "\n\n"
+                + CHECK_PACK,
+            )
+        ],
+        {"rebind"},
+        id="unrenamed-import-before-the-condensed-definition",
     ),
     pytest.param(
         [

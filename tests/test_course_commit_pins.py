@@ -19,6 +19,9 @@ docs/publishing.md，再加上從這些頁面 fence 外的相對連結 `[文字]
 
 不涵蓋：續行的 `git` 命令（hash 不在 `git` 那一行）、shell 變數、Python 清單形式的命令、正文 inline code 與
 一般敘述裡的 hash。
+PowerShell 以反引號續行的命令也不涵蓋：commands 只把行尾 `\\` 當續行，反引號結尾的每一行各算一條命令。
+git() 設定的 `GIT_NO_LAZY_FETCH` 要 git 2.45 以上才認得；更舊的 git 在 partial clone 裡遇到本機沒有的物件，仍會向
+promisor remote 連網路補抓，補抓成功時，已改寫掉的 commit 會被報成「是 commit，但不是 HEAD 的祖先」。
 """
 
 import ast
@@ -46,7 +49,6 @@ REPOSITORY_URL = re.compile(
 )
 LINK = re.compile(r"\[[^\]]*\]\(([^)\s]+)")
 RUNS_FETCH_SCRIPT = re.compile(r"(?:^|[\s/])fetch_natural_data\.py(?!\S)")
-REVISION_OPTION = re.compile(r"(?<!\S)--revision(?:=|\s+)([0-9A-Fa-f]{40})(?![0-9A-Fa-f])")
 
 
 def code_blocks(text):
@@ -99,14 +101,23 @@ def commands(text):
     return result
 
 
+def option_value(command, option):
+    """命令裡最後一個 option 的值（argparse 以最後一個為準），去掉外層成對的單或雙引號；沒有這個選項時回傳 None。"""
+    values = re.findall(rf"(?<!\S){re.escape(option)}(?:=|\s+)(\S+)", command)
+    if not values:
+        return None
+    value = values[-1]
+    return value[1:-1] if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"" else value
+
+
 def fetch_pins_in(text):
     """(命令第一行的行號, hash)：fenced 程式區塊裡執行 fetch_natural_data.py 的命令的 `--revision` 值。"""
-    return [
-        (number, commit)
-        for number, command in commands(text)
-        if RUNS_FETCH_SCRIPT.search(command)
-        for commit in REVISION_OPTION.findall(command)
-    ]
+    pins = []
+    for number, command in commands(text):
+        revision = option_value(command, "--revision") if RUNS_FETCH_SCRIPT.search(command) else None
+        if revision is not None and COMMIT.fullmatch(revision):
+            pins.append((number, revision))
+    return pins
 
 
 def json_pins_in(text):
@@ -195,7 +206,14 @@ def course_pins(root, reading_pages=READING_PAGES, extract=pins_in, extra_pages=
 
 
 def git(repo, *args):
-    return subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True, encoding="utf-8")
+    """在 repo 執行 git。GIT_NO_LAZY_FETCH=1：partial clone 本機沒有的物件直接報錯，不向 promisor remote 連網路補抓。"""
+    return subprocess.run(
+        ["git", "-C", str(repo), *args],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env={**os.environ, "GIT_NO_LAZY_FETCH": "1"},
+    )
 
 
 def history_unavailable(repo):
@@ -298,6 +316,11 @@ FETCH_TEXTS = [
         id="continued-lines",
     ),
     pytest.param(f"```bash\n{FETCH} --revision={A}\n```\n", [(2, A)], id="equals-sign"),
+    pytest.param(f'```bash\n{FETCH} --revision "{A}" --list\n```\n', [(2, A)], id="double-quoted-revision"),
+    pytest.param(f"```bash\n{FETCH} --revision '{A}'\n```\n", [(2, A)], id="single-quoted-revision"),
+    pytest.param(f'```bash\n{FETCH} --revision="{A}"\n```\n', [(2, A)], id="equals-sign-and-quotes"),
+    pytest.param(f"```bash\n{FETCH} --revision {B} --revision {A}\n```\n", [(2, A)], id="last-revision-wins"),
+    pytest.param(f"```bash\n{FETCH} --revision \"{A}'\n```\n", [], id="mismatched-quotes"),
     pytest.param(
         f"```bash\n{FETCH} --revision {A} --list\n\n{FETCH} \\\n  --revision {B}\n```\n",
         [(2, A), (4, B)],
@@ -533,6 +556,14 @@ def test_commits_outside_the_history_of_head_and_other_objects_are_rejected(hist
     assert ids[which] in problems[0] and "page.md:7" in problems[0] and reason in problems[0]
 
 
+@pytest.mark.parametrize("quote", ['"', "'"], ids=["double-quotes", "single-quotes"])
+def test_a_quoted_revision_of_a_commit_off_the_history_is_rejected(history, quote):
+    repo, ids = history
+    text = fenced(f"{FETCH} \\\n  --revision {quote}{ids['side']}{quote} \\\n  --output data/natural")
+    problems = pin_problems(repo, [("page.md", number, commit) for number, commit in fetch_pins_in(text)])
+    assert len(problems) == 1 and "page.md:4" in problems[0] and "不是 HEAD 的祖先" in problems[0]
+
+
 def test_one_problem_is_reported_for_each_hash_with_every_place_it_is_pinned(history):
     repo, ids = history
     pins = [("a.md", 1, ids["absent"]), ("b.md", 5, ids["absent"]), ("b.md", 6, ids["side"])]
@@ -552,6 +583,64 @@ def test_a_history_can_be_checked_only_when_it_is_complete(history, tmp_path, mo
     # 不讓 git 往上層目錄找到別的 repo。
     monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
     assert "不在 Git 工作目錄" in history_unavailable(outside)
+
+
+def git_version():
+    """`git --version` 的 (主版號, 次版號)；讀不出來時是 (0, 0)。"""
+    found = re.search(r"(\d+)\.(\d+)", subprocess.run(["git", "--version"], capture_output=True, text=True).stdout)
+    return (int(found[1]), int(found[2])) if found else (0, 0)
+
+
+@pytest.fixture
+def partial_clone(tmp_path):
+    """只取 main、不帶檔案內容（--filter=blob:none）的 partial clone；來源 side 分支的 commit 與舊版檔案內容都不在
+    clone 裡，要讀就得向來源補抓。"""
+    if shutil.which("git") is None:
+        pytest.skip("找不到 git 指令")
+    if git_version() < (2, 45):
+        pytest.skip("git 2.45 以上才認得 GIT_NO_LAZY_FETCH")
+    source = tmp_path / "source"
+    source.mkdir()
+    run_git(source, "init", "--initial-branch=main")
+    (source / "a.txt").write_text("old\n", encoding="utf-8")
+    run_git(source, "add", "a.txt")
+    run_git(source, "commit", "-m", "first")
+    ids = {"old_blob": run_git(source, "rev-parse", "HEAD:a.txt")}
+    run_git(source, "checkout", "-b", "side")
+    run_git(source, "commit", "--allow-empty", "-m", "side")
+    ids["side"] = run_git(source, "rev-parse", "HEAD")
+    run_git(source, "checkout", "main")
+    (source / "a.txt").write_text("new\n", encoding="utf-8")
+    run_git(source, "commit", "-am", "second")
+    run_git(source, "config", "uploadpack.allowFilter", "true")
+    clone = tmp_path / "clone"
+    run_git(
+        tmp_path,
+        "clone",
+        "--quiet",
+        "--filter=blob:none",
+        "--single-branch",
+        "--branch",
+        "main",
+        source.as_uri(),
+        str(clone),
+    )
+    return clone, ids
+
+
+def locally_present(repo, oid):
+    """repo 本機有沒有這個物件；用 `git --no-lazy-fetch` 查，查的時候不補抓。"""
+    done = subprocess.run(["git", "--no-lazy-fetch", "-C", str(repo), "cat-file", "-e", oid], capture_output=True)
+    return done.returncode == 0
+
+
+def test_objects_missing_from_a_partial_clone_are_reported_without_fetching_them(partial_clone):
+    clone, ids = partial_clone
+    assert history_unavailable(clone) is None
+    assert not locally_present(clone, ids["side"]) and not locally_present(clone, ids["old_blob"])
+    problems = pin_problems(clone, [("page.md", 3, ids["side"]), ("page.md", 5, ids["old_blob"])])
+    assert len(problems) == 2 and all("不是這個 repo 的 commit 物件" in problem for problem in problems)
+    assert not locally_present(clone, ids["side"]) and not locally_present(clone, ids["old_blob"])
 
 
 # ---- 真實教材 ----------------------------------------------------------------------------------------------
@@ -589,7 +678,9 @@ def test_revisions_given_to_fetch_natural_data_are_ancestors_of_head():
 
 def test_revisions_of_this_repository_in_linked_json_files_are_ancestors_of_head():
     pins = course_pins(ROOT, extract=json_pins_in, suffix=".json")
-    assert pins, f"頁面集合的 .json 裡找不到 repo_id 為 {REPOSITORY} 的 revision，沒有東西可以核對。"
+    assert pins, (
+        f"頁面集合的 .json 裡找不到 repo_id 為 {REPOSITORY}、revision 是 40 位十六進位的物件，沒有東西可以核對。"
+    )
     check_real_pins(pins, "JSON 檔裡本 repo 的 revision ")
 
 
