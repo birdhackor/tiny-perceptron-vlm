@@ -81,7 +81,7 @@
 | 7.14 少量錯誤答案會被學走嗎？ | [閱讀](../course/chapters/07.md#7.14) | [開啟](../notebooks/07/7.14.ipynb) |
 | 7.15 學會新任務會忘記舊任務嗎？ | [閱讀](../course/chapters/07.md#7.15) | [開啟](../notebooks/07/7.15.ipynb) |
 | 7.16 舊例子混回去有用嗎？ | [閱讀](../course/chapters/07.md#7.16) | [開啟](../notebooks/07/7.16.ipynb) |
-| 7.17 為什麼先大量讀文章，再練習當助理？ | [閱讀](../course/chapters/07.md#7.17) | [開啟](../notebooks/07/7.17.ipynb) |
+| 7.17 為什麼先大量讀文章，再練習當助手？ | [閱讀](../course/chapters/07.md#7.17) | [開啟](../notebooks/07/7.17.ipynb) |
 | 7.18 後訓練有哪些不同教法？ | [閱讀](../course/chapters/07.md#7.18) | [開啟](../notebooks/07/7.18.ipynb) |
 | 7.19 回答能寫多長，和前文能放多少，有何不同？ | [閱讀](../course/chapters/07.md#7.19) | [開啟](../notebooks/07/7.19.ipynb) |
 | 7.20 下一個之外，還能一起練習預測什麼？ | [閱讀](../course/chapters/07.md#7.20) | [開啟](../notebooks/07/7.20.ipynb) |
