@@ -13,6 +13,7 @@ grep -n -E '^# (節錄自|精簡自) tiny_perceptron/' course/chapters/*.md
 | 節 | 定義 | 檔案 | 寫法 |
 | --- | --- | --- | --- |
 | 1.2 | `split_documents` | data.py | 原樣節錄 |
+| 2.5 | `ContextMLP` | simple.py | 只說明並連結：查表、拼接、兩個 Linear 與 tanh，以及參數數怎麼算 |
 | 3.6 | `manual_attention` | attention.py | 原樣節錄 |
 | 3.7 | `CausalAttention` | attention.py | 精簡版 |
 | 4.4 | `DenseFFN` | modern.py | 精簡版 |
@@ -25,6 +26,7 @@ grep -n -E '^# (節錄自|精簡自) tiny_perceptron/' course/chapters/*.md
 | 5.7 | `save_checkpoint`、`load_checkpoint` | training.py | 只說明並連結：用表列出存進檔案的欄位 |
 | 5.11 | `fingerprint` | data.py | 原樣節錄 |
 | 6.6 | `ByteTokenizer` | data.py | 原樣節錄 |
+| 6.6 | `ByteLevelBPE` | tokenization.py | 只說明並連結：特殊 token 占 ID 0 到 7，編普通文字時不比對特殊 token，編出這些 ID 就報錯 |
 | 7.1 | `render_chat` | data.py | 原樣節錄 |
 | 7.10 | `pad_batch` | data.py | 原樣節錄 |
 | 7.11 | `toy_conversations` | data.py | 原樣節錄 |
@@ -55,6 +57,7 @@ grep -n -E '^# (節錄自|精簡自) tiny_perceptron/' course/chapters/*.md
 | 13.15 | `FiniteResponsePolicy`、`FiniteValueModel` | posttraining.py | 原樣節錄 |
 | 14.1 | `rope` | modern.py | 精簡版 |
 | 14.2 | `RMSNorm` | modern.py | 原樣節錄 |
+| 14.15 | `write_dataset` | lesson_products/data.py | 只說明並連結：重建的資料與資料 manifest 的 `config`、`files` 相同，`b.jsonl` 每列的 `split`、`world`、`events` 是什麼 |
 | 15.11 | `MoEFFN` | modern.py | 原樣節錄 |
 | 16.5 | `attention_mask` | attention.py | 原樣節錄 |
 | 17.5 | `quantize_symmetric` | quantization.py | 原樣節錄 |
@@ -86,10 +89,10 @@ grep -n -E '^# (節錄自|精簡自) tiny_perceptron/' course/chapters/*.md
 - 11.17：機制已在 [11.14](../../course/chapters/11.md#11.14) 用程式示範：左右對調的兩張圖，4×4 平均摘要相同、完整像素序列不同；本節是設計例。
 - 12.16：機制已在 [12.9](../../course/chapters/12.md#12.9) 與 [7.1](../../course/chapters/07.md#7.1) 用程式示範：`<audio>` 換成聲音特徵，依角色決定哪些位置計分。
 - 19.1：需要下載權重：重做本節的回答要先從 Hugging Face 匿名下載公開 MoE 權重，命令在本機終端機執行。
-- 19.3：機制已在 [19.14](../../course/chapters/19.md#19.14) 用程式示範：`family`、`split_of` 讓同一家族固定分到同一份。
+- 19.3：機制在 [19.14](../../course/chapters/19.md#19.14) 用程式示範：`family`、`split_of` 讓同一家族固定分到同一份。
 - 19.8：機制已在 [13.5](../../course/chapters/13.md#13.5) 與 [13.13](../../course/chapters/13.md#13.13) 用程式示範：DPO 的 `dpo_loss`、PPO 的 `ppo_clipped_objective`；本節只談成品要選哪一種。
 - 19.11：需要下載權重：本節的 CPU 示範要先從 Hugging Face 下載公開推論權重。
-- 19.13：機制已在 [19.2](../../course/chapters/19.md#19.2)、[19.15](../../course/chapters/19.md#19.15) 與 [19.16](../../course/chapters/19.md#19.16) 用程式示範：三個成品的模型各在其中一節節錄或精簡；本節只介紹三者的用途與輸入輸出。
+- 19.13：機制在 [19.2](../../course/chapters/19.md#19.2)、[19.15](../../course/chapters/19.md#19.15) 與 [19.16](../../course/chapters/19.md#19.16) 用程式示範：三個成品的模型各在其中一節節錄或精簡；本節只介紹三者的用途與輸入輸出。
 - 19.18：內容是實測結果：表中的數字取自實驗紀錄與 CPU 執行紀錄。
 - 19.19：需要下載權重：命令先下載 Looped 解題器與機率判斷器的權重，再在本機推論。
 - 19.20：內容是實測結果：驗收表是設定凍結後首次測試的成績。

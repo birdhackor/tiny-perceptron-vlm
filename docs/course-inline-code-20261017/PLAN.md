@@ -7,7 +7,7 @@
 
 作者寫作規則見[AUTHORING.md](AUTHORING.md)，各實作放在哪一節見[PLACEMENT.md](PLACEMENT.md)。
 
-下面的設計決策（D1–D8）與階段表是開工時的計畫；實際做了什麼、結果與待辦見[HANDOFF.md](HANDOFF.md)。
+下面的階段表是開工時的計畫；實際做了什麼、結果與待辦見[HANDOFF.md](HANDOFF.md)。
 
 ## 修訂前的狀況
 
