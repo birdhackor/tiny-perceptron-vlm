@@ -51,9 +51,9 @@ token 不一定是一個中文字。逐 byte 切詞時，一個常見中文字�
 | 梯度下降（gradient descent）、學習率（learning rate，lr） | 更新規則是 `新參數=舊參數−學習率×梯度`；學習率是我們設定的每次步子的比例 | [W.6](first-steps.md#W.6)、[1.12](chapters/01.md#1.12)、[5.1](chapters/05.md#5.1) |
 | 步幅 | 參數在一次更新中實際移動的量，由學習率和更新方向一起算出。用 Adam 時各格的步幅可以不同，共同的學習率不等於每格的步幅 | [5.4](chapters/05.md#5.4) |
 | 最佳化器（optimizer，也叫優化器）、Adam | 管理參數更新的工具：`zero_grad()` 清梯度、`step()` 更新參數。Adam 記下每格過去的梯度通常多大，用這個大小決定這一格這一步走多遠 | [1.13](chapters/01.md#1.13)、[5.4](chapters/05.md#5.4) |
-| 最佳化器狀態（optimizer state）、m、v | 最佳化器替參數保存、下一步更新要用的歷史。Adam 的是每格參數的 m、v 與已更新的次數：m 是過去梯度的加權平均，對應 5.3 的動量（momentum）；v 是梯度平方的加權平均。5.7 存進檢查點的 `optimizer` 欄另外還有學習率等設定 | [5.3](chapters/05.md#5.3)、[5.4](chapters/05.md#5.4)、[5.7](chapters/05.md#5.7)、[15.10](chapters/15.md#15.10) |
+| 最佳化器狀態（optimizer state）、m、v | 最佳化器替參數保存、下一步更新要用的歷史。Adam 的是 m、v 與已更新的次數：m 是過去梯度的加權平均，對應 5.3 的動量（momentum）；v 是梯度平方的加權平均。5.7 存進檢查點的 `optimizer` 欄另外還有學習率等設定 | [5.3](chapters/05.md#5.3)、[5.4](chapters/05.md#5.4)、[5.7](chapters/05.md#5.7)、[15.10](chapters/15.md#15.10) |
 | 檢查點（checkpoint）、父檢查點 | 訓練途中存下的檔案；只恢復參數能照樣預測，要讓下一步也相同，還要恢復最佳化器狀態。上一階段保存、這一階段載入當起點的檢查點叫父檢查點。16.10 的中間特徵重算（activation checkpointing）是另一件事 | [5.7](chapters/05.md#5.7)、[T.4](training.md#T.4)、[16.10](chapters/16.md#16.10) |
-| 輔助代價（auxiliary loss） | 某些設計在主要目標的代價之外，另外加進總代價的一項。本課只有兩處：7.21 裡 MTP 距離 2 分支的代價，以及 MoE 用來鼓勵各組 FFN 分到相近工作量的那一項（15.9） | [4.5](chapters/04.md#4.5)、[7.21](chapters/07.md#7.21)、[15.9](chapters/15.md#15.9) |
+| 輔助代價（auxiliary loss） | 例如 7.21 裡 MTP 距離 2 分支的代價，以及 MoE 用來鼓勵各組 FFN 分到相近工作量的那一項（15.9） | [4.5](chapters/04.md#4.5)、[7.21](chapters/07.md#7.21)、[15.9](chapters/15.md#15.9) |
 | NaN | not a number，不是有效數字；例如一整列分數都是負無限時，softmax 會算出 NaN | [3.6](chapters/03.md#3.6)、[16.7](chapters/16.md#16.7) |
 
 比例高與回答可靠也是兩回事。模型可能很肯定地接出一個錯字；要知道它的信心是否與正確率一致，需要另外檢查，[9.9](chapters/09.md#9.9)會用具體例子說明。
@@ -84,7 +84,7 @@ token 不一定是一個中文字。逐 byte 切詞時，一個常見中文字�
 | 直接偏好最佳化（DPO） | 有同題兩份回答的偏好比較時，直接調整模型對兩份回答的傾向；它需要可靠的比較，以及一個固定參考 | [7.18](chapters/07.md#7.18)、[13.5](chapters/13.md#13.5) |
 | LoRA、rank、adapter | 原權重 W 凍結不更新，另學兩個小矩陣 A、B 組成的修正路，輸出與原路相加；修正路中間剩下的數字個數叫 rank（秩）。可另存的一套 A、B 與設定叫 adapter（適配器），8.9 的兩套叫短答套、比喻套 | [8.8](chapters/08.md#8.8)、[8.9](chapters/08.md#8.9) |
 | MTP（Multi-Token Prediction，多 token 預測） | 在同一個前文位置，要求模型預測不止一個未來的 token；分支依距離命名，例如距離 1、距離 2 | [7.20](chapters/07.md#7.20)、[7.21](chapters/07.md#7.21) |
-| teacher forcing | 訓練時每個位置都拿到資料中的正確前文；自由生成則把自己剛選的字接回去當前文。只預測下一個 token 的一般訓練也這樣做，所以它不等於 MTP | [5.8](chapters/05.md#5.8)、[7.22](chapters/07.md#7.22) |
+| teacher forcing | 訓練時每個位置都拿到資料中的正確前文；只預測下一個 token 的一般訓練也這樣做，所以它不等於 MTP | [5.8](chapters/05.md#5.8)、[7.22](chapters/07.md#7.22) |
 
 ## G.3 模型如何混合線索
 
@@ -238,7 +238,7 @@ token 不一定是一個中文字。逐 byte 切詞時，一個常見中文字�
 
 **Q**　[quantization](chapters/17.md#17.1)（量化） · [query](chapters/03.md#3.2)（Q） · [Qwen](chapters/20.md#20.1)
 
-**R**　[RAG](chapters/0A.md#A.2)（檢索增強生成） · [range calibration](chapters/17.md#17.12)（範圍校準） · [rank](chapters/08.md#8.8)（秩） · [ratio](chapters/13.md#13.12)（機率比） · [reasoning](chapters/07.md#7.23)（推理） · [reasoning effort](chapters/07.md#7.23)（思考投入） · [reference](chapters/13.md#13.4)（參考模型） · [REINFORCE](chapters/0C.md#C.7) · [residual connection](chapters/04.md#4.2)（殘差連線） · [reward](chapters/07.md#7.18)（獎勵） · [reward hacking](chapters/13.md#13.16)（獎勵鑽漏洞） · [reward model](chapters/13.md#13.10)（獎勵模型） · [RL](chapters/07.md#7.18)（強化學習） · [RLHF](chapters/07.md#7.18)（人類回饋強化學習） · [RLVR](chapters/0C.md#C.7)（可驗證獎勵強化學習） · [RMSNorm](chapters/14.md#14.2)（均方根正規化） · [RoPE](chapters/14.md#14.1)（旋轉位置嵌入） · [router](chapters/15.md#15.3)（路由器）
+**R**　[RAG](chapters/0A.md#A.2)（檢索增強生成） · [range calibration](chapters/17.md#17.12)（範圍校準） · [rank](chapters/08.md#8.8)（秩） · [ratio](chapters/13.md#13.12)（機率比） · [reasoning effort](chapters/07.md#7.23)（思考投入） · [reference](chapters/13.md#13.4)（參考模型） · [REINFORCE](chapters/0C.md#C.7) · [residual connection](chapters/04.md#4.2)（殘差連線） · [reward](chapters/07.md#7.18)（獎勵） · [reward hacking](chapters/13.md#13.16)（獎勵鑽漏洞） · [reward model](chapters/13.md#13.10)（獎勵模型） · [RL](chapters/07.md#7.18)（強化學習） · [RLHF](chapters/07.md#7.18)（人類回饋強化學習） · [RLVR](chapters/0C.md#C.7)（可驗證獎勵強化學習） · [RMSNorm](chapters/14.md#14.2)（均方根正規化） · [RoPE](chapters/14.md#14.1)（旋轉位置嵌入） · [router](chapters/15.md#15.3)（路由器）
 
 **S**　[sample rate](chapters/12.md#12.2)（取樣率） · [sampling](chapters/01.md#1.14)（抽樣） · [scale](chapters/17.md#17.2)（刻度） · [Score](chapters/09.md#9.11) · [SFT](chapters/07.md#7.1)（監督式微調） · [shape](first-steps.md#W.3) · [shift](chapters/01.md#1.3)（下一位置對齊） · [sliding-window attention](chapters/16.md#16.12)（滑動視窗注意力） · [softmax](chapters/01.md#1.7) · [special token](chapters/06.md#6.6)（特殊 token） · [spectrogram](chapters/12.md#12.5)（頻譜圖） · [speculative decoding](chapters/16.md#16.14)（推測解碼） · [speech encoder](chapters/12.md#12.15)（語音入口） · [surrogate objective](chapters/13.md#13.13)（替代目標）
 
