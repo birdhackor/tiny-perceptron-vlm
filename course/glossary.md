@@ -17,12 +17,12 @@
 | byte（位元組）、bit（位元） | 一個 byte 有 8 個 bit，能存 0 到 255 之間的一個整數；儲存空間以 byte 計 | [5.9](chapters/05.md#5.9)、[6.1](chapters/06.md#6.1)、[17.1](chapters/17.md#17.1) |
 | 特殊 token（special token）、角色標記 | 不代表任何原文、專門標示結構的 token。本課 ByteTokenizer 的 ID 0 到 7 是 8 個特殊 token，包括 PAD、BOS、EOS，以及標示接下來由誰說話的角色標記 | [6.6](chapters/06.md#6.6) |
 | BOS（開始標記）、EOS（結束標記） | BOS 放在序列開頭，只當前文、不計分；EOS 表示這段到此結束。回答尾端的 EOS 也是有效目標，生成時模型選到它就停 | [6.5](chapters/06.md#6.5)、[7.9](chapters/07.md#7.9) |
-| embedding 表、embedding 向量 | 每個 ID 對應一列可調數字的表叫 embedding 表；用 ID 選出的那一列叫 embedding 向量（也叫嵌入向量）。ID 只選列，數字本身不代表字義 | [2.1](chapters/02.md#2.1) |
+| embedding 表、embedding 向量 | 每個 ID 對應一列可調數字的表叫 embedding 表；用 ID 選出的那一列叫 embedding 向量（也叫嵌入向量）。ID 只選列，ID 的數字（例如 1 或 2）本身不代表字義 | [2.1](chapters/02.md#2.1) |
 | tensor、shape、軸（axis） | tensor 是 PyTorch 保存有規則分組數字的容器，中文常譯為張量；每個可編索引的方向叫一個軸，shape 記每個軸有幾格，兩列三欄就是 `[2, 3]`。文字模型常見的 `[B, T, D]` 依序是幾筆句子、每筆幾個文字位置、每個位置幾個特徵數字 | [W.3](first-steps.md#W.3) |
 | 特徵寬度（D，width）、中間寬度（hidden） | 每個位置存幾個特徵數字叫特徵寬度；FFN 內部先擴大到的特徵數叫中間寬度，例如 4.4 的特徵寬度 4、中間寬度 16 | [2.1](chapters/02.md#2.1)、[4.4](chapters/04.md#4.4) |
 | 參數（parameter） | 模型裡可調、訓練時要改的數字。B 單元說的「工具的參數」是交給工具的輸入值，和這裡的參數是兩回事 | [W.6](first-steps.md#W.6)、[1.2](chapters/01.md#1.2)、[B.1](chapters/0B.md#B.1) |
 | 權重（weight）、偏移（bias，也叫偏置） | Linear 裡各輸入要乘的數叫權重，加總後再加的數叫偏移，兩者都是參數；習慣上也把全部參數統稱權重，例如保存參數的權重檔 | [2.3](chapters/02.md#2.3) |
-| Linear（線性層） | 每套配方把各輸入乘自己的權重、加總，再加偏移，產生一個輸出；只沿最後一個特徵軸計算 | [W.5](first-steps.md#W.5)、[2.3](chapters/02.md#2.3) |
+| Linear（線性層） | 每套配方把各輸入乘自己的權重、加總，預設再加偏移（寫 `bias=False` 時不加），產生一個輸出；只沿最後一個特徵軸計算 | [W.5](first-steps.md#W.5)、[2.3](chapters/02.md#2.3)、[2.4](chapters/02.md#2.4) |
 | 啟用函式（activation function） | 插在線性配方之間、會轉折的非線性規則，例如 2.4 的 ReLU 保留正數、把負數改為 0；4.4 的 FFN 用 GELU | [2.4](chapters/02.md#2.4)、[4.4](chapters/04.md#4.4) |
 | 中間特徵（activation） | 送進一層的輸入，以及計算途中產生、再交給下一層的數字。英文 activation 也用來稱呼上一列的啟用函式；本課把數值叫中間特徵 | [17.11](chapters/17.md#17.11) |
 | JSON | 用文字寫資料的通用格式：大括號包住一組組「欄位名: 值」，寫法和 Python 字典很像，但它是一段字串 | [7.13](chapters/07.md#7.13)、[B.1](chapters/0B.md#B.1) |
@@ -40,20 +40,20 @@ token 不一定是一個中文字。逐 byte 切詞時，一個常見中文字�
 | 接字表（bigram 表） | 列是目前字、欄是下一字，記錄每對相鄰字出現幾次；每列除以自己的總數，得到下一字的條件機率 | [1.5](chapters/01.md#1.5) |
 | logits（候選分數）、softmax | logits 是還沒轉成機率的原始候選分數，能正能負；softmax 把每個分數取指數、再除以總和，換成非負、總和為 1 的機率 | [1.7](chapters/01.md#1.7)、[1.8](chapters/01.md#1.8) |
 | 代價（loss，也叫損失）、交叉熵（cross entropy） | 取正確答案那一格的機率 p，算 `-log(p)`；正確答案得到的機率越少，代價越大，代價不是猜錯題數。多題的代價取平均叫交叉熵 | [W.4](first-steps.md#W.4)、[1.8](chapters/01.md#1.8) |
-| 誤差、成本 | 數值之間的差叫誤差，例如原值與還原值的差叫捨入誤差；9.16 做決策時人工訂的得失叫成本。兩者和代價（loss）是不同的量 | [17.2](chapters/17.md#17.2)、[9.16](chapters/09.md#9.16) |
+| 誤差、成本 | 17.2 把原值與還原值的差叫捨入誤差；9.16 做決策時，人工替每種結果與做法訂的單位數叫成本（例如開錯頁 5 單位）。兩者和代價（loss）是不同的量 | [17.2](chapters/17.md#17.2)、[9.16](chapters/09.md#9.16) |
 | NLL、平均 NLL | 把全部有效目標的代價加總叫 NLL（負對數似然），本課的 NLL 指這個加總；加總後再除以有效目標數叫平均 NLL，訓練時印出的代價就是平均 | [6.5](chapters/06.md#6.5) |
 | 正確答案（ground truth，也叫真值） | 拿來和預測比對的答案；代價取的就是它那一格的機率 | [1.8](chapters/01.md#1.8) |
 | 目標、labels、有效目標 | 每個位置要對上的答案 ID 叫目標，整串叫 labels；寫成 −100 的目標不計代價，其餘真的要計分的位置叫有效目標，個數叫有效目標數。決定哪些位置計代價的設定也叫代價遮罩（loss mask） | [5.2](chapters/05.md#5.2)、[7.1](chapters/07.md#7.1)、[7.24](chapters/07.md#7.24) |
-| 下一位置對齊（shift） | 讓每個位置配上它的下一個位置當答案；做法是建立兩份錯開一格的切片，不修改原文 | [1.3](chapters/01.md#1.3) |
+| 下一位置對齊（shift） | 讓每個位置配上它的下一個位置當答案；做法是建立兩份錯開一個位置的切片，不修改原文 | [1.3](chapters/01.md#1.3) |
 | batch | 同一次計算裡一起處理的幾筆例子 | [5.2](chapters/05.md#5.2) |
 | 梯度（gradient）、導數（derivative） | 參數微動時，「代價改變÷參數改變」在步子趨近零時的極限比例叫導數；對每個參數各算一個導數、排回原位置，就是梯度 | [W.6](first-steps.md#W.6)、[1.9](chapters/01.md#1.9) |
 | 前向計算（forward）、反向傳播（backpropagation） | 從參數依序算到代價叫前向計算；`backward()` 從代價往回走、把每段的敏感度相乘求出梯度，叫反向傳播 | [1.10](chapters/01.md#1.10) |
 | 梯度下降（gradient descent）、學習率（learning rate，lr） | 更新規則是 `新參數=舊參數−學習率×梯度`；學習率是我們設定的每次步子的比例 | [W.6](first-steps.md#W.6)、[1.12](chapters/01.md#1.12)、[5.1](chapters/05.md#5.1) |
 | 步幅 | 參數在一次更新中實際移動的量，由學習率和更新方向一起算出。用 Adam 時各格的步幅可以不同，共同的學習率不等於每格的步幅 | [5.4](chapters/05.md#5.4) |
 | 最佳化器（optimizer，也叫優化器）、Adam | 管理參數更新的工具：`zero_grad()` 清梯度、`step()` 更新參數。Adam 記下每格過去的梯度通常多大，用這個大小決定這一格這一步走多遠 | [1.13](chapters/01.md#1.13)、[5.4](chapters/05.md#5.4) |
-| 最佳化器狀態（optimizer state）、m、v | Adam 替每格參數保存的兩份歷史：m 是過去梯度的加權平均，對應 5.3 的動量（momentum）；v 是梯度平方的加權平均。要接續訓練，得連同已更新的次數一起保存 | [5.3](chapters/05.md#5.3)、[5.4](chapters/05.md#5.4)、[5.7](chapters/05.md#5.7)、[15.10](chapters/15.md#15.10) |
+| 最佳化器狀態（optimizer state）、m、v | 最佳化器替參數保存、下一步更新要用的歷史。Adam 的是每格參數的 m、v 與已更新的次數：m 是過去梯度的加權平均，對應 5.3 的動量（momentum）；v 是梯度平方的加權平均。5.7 存進檢查點的 `optimizer` 欄另外還有學習率等設定 | [5.3](chapters/05.md#5.3)、[5.4](chapters/05.md#5.4)、[5.7](chapters/05.md#5.7)、[15.10](chapters/15.md#15.10) |
 | 檢查點（checkpoint）、父檢查點 | 訓練途中存下的檔案；只恢復參數能照樣預測，要讓下一步也相同，還要恢復最佳化器狀態。上一階段保存、這一階段載入當起點的檢查點叫父檢查點。16.10 的中間特徵重算（activation checkpointing）是另一件事 | [5.7](chapters/05.md#5.7)、[T.4](training.md#T.4)、[16.10](chapters/16.md#16.10) |
-| 輔助代價（auxiliary loss） | 主要代價之外另加進訓練的代價，例如 MTP 距離 2 分支的代價，或 MoE 用來鼓勵各組 FFN 分到相近工作量的那一項 | [4.5](chapters/04.md#4.5)、[7.21](chapters/07.md#7.21)、[15.9](chapters/15.md#15.9) |
+| 輔助代價（auxiliary loss） | 某些設計在主要目標的代價之外，另外加進總代價的一項。本課只有兩處：7.21 裡 MTP 距離 2 分支的代價，以及 MoE 用來鼓勵各組 FFN 分到相近工作量的那一項（15.9） | [4.5](chapters/04.md#4.5)、[7.21](chapters/07.md#7.21)、[15.9](chapters/15.md#15.9) |
 | NaN | not a number，不是有效數字；例如一整列分數都是負無限時，softmax 會算出 NaN | [3.6](chapters/03.md#3.6)、[16.7](chapters/16.md#16.7) |
 
 比例高與回答可靠也是兩回事。模型可能很肯定地接出一個錯字；要知道它的信心是否與正確率一致，需要另外檢查，[9.9](chapters/09.md#9.9)會用具體例子說明。
@@ -75,7 +75,7 @@ token 不一定是一個中文字。逐 byte 切詞時，一個常見中文字�
 
 | 名詞 | 可以怎麼理解 | 完整講解 |
 | --- | --- | --- |
-| 生成、逐 token 生成（也叫自回歸，autoregressive） | 算下一字分配、選一字、接回句尾，再把新字當下一次前文；每次只生成一個 token，接回輸入再算下一個 | [1.14](chapters/01.md#1.14)、[7.20](chapters/07.md#7.20) |
+| 生成、逐 token 生成（也叫自回歸，autoregressive） | 生成是算下一字分配、選一字、接回句尾，再把新字當下一次前文。每次只生成一個 token、接回輸入再算下一個的做法叫逐 token 生成 | [1.14](chapters/01.md#1.14)、[7.20](chapters/07.md#7.20) |
 | 選字規則、greedy、抽樣（sampling，也叫採樣）、溫度（temperature，τ） | 挑下一個字的方法叫選字規則：greedy 總選最高分；抽樣按機率隨機抽，比例越大的字越常被選中。溫度 τ 是先拿來除原分數、再做 softmax 的正數，只控制分配的尖銳程度 | [1.14](chapters/01.md#1.14)、[1.15](chapters/01.md#1.15) |
 | 推論（inference）、推理（reasoning） | 用現在的參數算候選分數；生成就是反覆推論，再選字接回。改溫度改的是推論時用的機率，更新參數才是訓練。推理（reasoning）是另一個詞，例如 7.23 的推理 token | [1.15](chapters/01.md#1.15)、[7.23](chapters/07.md#7.23) |
 | 預訓練（pretraining）、底座（base model） | 先在大量文章上練續寫的階段叫預訓練；已經訓練好、拿來當下一階段起點的模型叫底座，例如預訓練後保存、再拿去做 SFT 的模型 | [7.11](chapters/07.md#7.11) |
@@ -84,7 +84,7 @@ token 不一定是一個中文字。逐 byte 切詞時，一個常見中文字�
 | 直接偏好最佳化（DPO） | 有同題兩份回答的偏好比較時，直接調整模型對兩份回答的傾向；它需要可靠的比較，以及一個固定參考 | [7.18](chapters/07.md#7.18)、[13.5](chapters/13.md#13.5) |
 | LoRA、rank、adapter | 原權重 W 凍結不更新，另學兩個小矩陣 A、B 組成的修正路，輸出與原路相加；修正路中間剩下的數字個數叫 rank（秩）。可另存的一套 A、B 與設定叫 adapter（適配器），8.9 的兩套叫短答套、比喻套 | [8.8](chapters/08.md#8.8)、[8.9](chapters/08.md#8.9) |
 | MTP（Multi-Token Prediction，多 token 預測） | 在同一個前文位置，要求模型預測不止一個未來的 token；分支依距離命名，例如距離 1、距離 2 | [7.20](chapters/07.md#7.20)、[7.21](chapters/07.md#7.21) |
-| teacher forcing | 訓練時用資料中的標準序列當前文；只預測下一個 token 的一般訓練也這樣做，所以它不等於 MTP | [7.22](chapters/07.md#7.22) |
+| teacher forcing | 訓練時每個位置都拿到資料中的正確前文；自由生成則把自己剛選的字接回去當前文。只預測下一個 token 的一般訓練也這樣做，所以它不等於 MTP | [5.8](chapters/05.md#5.8)、[7.22](chapters/07.md#7.22) |
 
 ## G.3 模型如何混合線索
 
@@ -131,15 +131,15 @@ token 不一定是一個中文字。逐 byte 切詞時，一個常見中文字�
 
 | 名詞 | 想解決的問題 | 完整講解 |
 | --- | --- | --- |
-| Dense、MoE（Mixture of Experts，專家混合） | 想保留多套規則，但每個 token 只花少數幾套的計算：Dense 讓每個 token 都用同一組完整 FFN；MoE 準備多組 FFN（每組叫一位 expert），由 router 替每個 token 打分，只留比例最大的 k 位（top-k routing） | [第 15 章開頭](chapters/15.md)、[15.1](chapters/15.md#15.1)、[15.2](chapters/15.md#15.2)、[15.3](chapters/15.md#15.3)、[15.4](chapters/15.md#15.4) |
+| Dense、MoE（Mixture of Experts，專家混合） | Dense 表示每個位置都用完整的一套 FFN，不依當前字只選部分配方。MoE 想保留多套規則，又讓每個 token 只花少數幾套的計算：準備多組 FFN（每組叫一位 expert），由 router 替每個 token 打分，只留比例最大的 k 位（top-k routing） | [4.4](chapters/04.md#4.4)、[第 15 章開頭](chapters/15.md)、[15.1](chapters/15.md#15.1)、[15.2](chapters/15.md#15.2)、[15.3](chapters/15.md#15.3)、[15.4](chapters/15.md#15.4) |
 | 每 token 使用估計、每 token 參數代理 | 報告 MoE 有多大時，要寫明數了哪些部分：每 token 使用估計只數一層 MoE FFN 裡選中的 expert 加 router；每 token 參數代理是全部非 expert 參數加上每層選中 expert 的參數（實驗紀錄欄位 `active_parameter_proxy_per_token`），連整張 embedding 表與位置表都算入。沒被選中的 expert 仍要存著 | [15.10](chapters/15.md#15.10) |
-| thinking effort（也叫 reasoning effort），思考投入；Auto | 使用者對解題資源的偏好；傳入的請求檔位、服務換成的執行設定與實際耗用要分開記。Auto 是服務先根據輸入替每題選預算 | [7.23](chapters/07.md#7.23)、[7.25](chapters/07.md#7.25)、[19.17](chapters/19.md#19.17) |
+| 思考投入（thinking effort，也叫 reasoning effort）；Auto | 使用者對解題資源的偏好；傳入的請求檔位、服務換成的執行設定與實際耗用要分開記。Auto 是服務先根據輸入替每題選預算 | [7.23](chapters/07.md#7.23)、[7.25](chapters/07.md#7.25)、[19.17](chapters/19.md#19.17) |
 | 離線理想上界（oracle） | 多花計算最多能好多少：事後看正確答案，替每題挑答對又最省的檔位；部署時看不到正確答案，所以它不是可以上線的成績。C.3 的已知答案命中率（oracle coverage）是另一個量 | [7.25](chapters/07.md#7.25)、[19.18](chapters/19.md#19.18)、[C.3](chapters/0C.md#C.3) |
 | Looped Transformer（循環式 Transformer） | 想少存參數：只保留一份區塊參數，把上一輪輸出的狀態交回它反覆處理。省下的是參數的儲存，每多一輪仍要多執行一次區塊 | [14.11](chapters/14.md#14.11) |
 | 權重共享（weight tying） | 想少存一張表：輸出層直接用字的 embedding 表當權重。Looped 讓同一個區塊在各輪共用一組參數，是另一種讓同一份參數用在不止一處的做法 | [14.6](chapters/14.md#14.6)、[14.11](chapters/14.md#14.11) |
 | 終止深度（exit depth）、逐輪監督（deep supervision） | 讀出答案的那一輪叫終止深度；一次展開到最大輪數，在多個中間狀態各算代價、再加權成一個總代價，叫逐輪監督 | [14.13](chapters/14.md#14.13)、[14.14](chapters/14.md#14.14) |
 | 讀提示階段（prefill）、逐步生成階段（decode） | 找出等待花在哪裡：一開始處理整段提示叫讀提示階段，之後每次只處理剛加入的 token 叫逐步生成階段。這裡的 decode 不是 1.1 把 ID 轉回文字的解碼 | [16.2](chapters/16.md#16.2) |
-| KV cache（快取） | 保存每層已算好的 K、V，生成下一個 token 時只替新位置計算 | [16.2](chapters/16.md#16.2)、[16.3](chapters/16.md#16.3) |
+| KV cache（快取） | 保存每層已算好的 K、V；生成下一個 token 時只替新位置做新的計算，但仍要讀前面所有已存的 K、V | [16.2](chapters/16.md#16.2)、[16.3](chapters/16.md#16.3) |
 | FlashAttention | 把分數、softmax 與 Value 加權分塊安排，減少大型中間表的保存與搬移，仍得到原來的加權結果 | [16.9](chapters/16.md#16.9) |
 | CUDA | 想在 NVIDIA GPU 上計算：CUDA 是 NVIDIA GPU 的運算環境，命令寫 `--device cuda` 的配方需要它 | [16.8](chapters/16.md#16.8)、[操作頁開頭](training.md) |
 | max_new_tokens | 這次最多新增幾個 token，不包含已送入的前文 | [7.19](chapters/07.md#7.19) |
@@ -204,13 +204,13 @@ token 不一定是一個中文字。逐 byte 切詞時，一個常見中文字�
 
 只收上面各表的英文名詞與縮寫，依英文字母順序排列，不分大小寫，空格、連字號與符號不計。每個詞列一次，連到下定義的地方；括號裡是本課用的中文名稱或符號。decode 在本課有兩個意思，兩個都列出。
 
-**A**　[activation](chapters/17.md#17.11)（中間特徵） · [activation checkpointing](chapters/16.md#16.10)（中間特徵重算） · [activation function](chapters/02.md#2.4)（啟用函式） · [Adam](chapters/05.md#5.4) · [adapter](chapters/08.md#8.9)（適配器） · [advantage](chapters/13.md#13.11)（優勢） · [ASR](chapters/12.md#12.11)（語音辨識） · [attention](chapters/03.md#3.1)（注意力） · [attention head](chapters/03.md#3.7)（注意力頭） · [attention weights](chapters/03.md#3.1)（讀取比例） · [audio encoder](chapters/12.md#12.8)（聲音入口） · [Auto](chapters/07.md#7.25) · [autoregressive](chapters/07.md#7.20)（逐 token 生成） · [auxiliary loss](chapters/04.md#4.5)（輔助代價） · [axis](first-steps.md#W.3)（軸）
+**A**　[activation](chapters/17.md#17.11)（中間特徵） · [activation checkpointing](chapters/16.md#16.10)（中間特徵重算） · [activation function](chapters/02.md#2.4)（啟用函式） · [Adam](chapters/05.md#5.4) · [adapter](chapters/08.md#8.9)（適配器） · [advantage](chapters/13.md#13.11)（優勢） · [ASR](chapters/12.md#12.11)（語音辨識） · [assistant](chapters/06.md#6.6)（助手） · [attention](chapters/03.md#3.1)（注意力） · [attention head](chapters/03.md#3.7)（注意力頭） · [attention weights](chapters/03.md#3.1)（讀取比例） · [audio encoder](chapters/12.md#12.8)（聲音入口） · [Auto](chapters/07.md#7.25) · [autoregressive](chapters/07.md#7.20)（逐 token 生成） · [auxiliary loss](chapters/04.md#4.5)（輔助代價） · [axis](first-steps.md#W.3)（軸）
 
-**B**　[backpropagation](chapters/01.md#1.10)（反向傳播） · [baseline](chapters/13.md#13.11)（基準值） · [base model](chapters/07.md#7.11)（底座） · [batch](chapters/05.md#5.2) · [bias](chapters/02.md#2.3)（偏移） · [bigram](chapters/01.md#1.5)（接字表） · [bit](chapters/05.md#5.9)（位元） · [BOS](chapters/06.md#6.5)（開始標記） · [byte](chapters/05.md#5.9)（位元組）
+**B**　[backpropagation](chapters/01.md#1.10)（反向傳播） · [baseline](chapters/13.md#13.11)（基準值） · [base model](chapters/07.md#7.11)（底座） · [batch](chapters/05.md#5.2) · [bias](chapters/02.md#2.3)（偏移） · [bigram 表](chapters/01.md#1.5)（接字表） · [bit](chapters/05.md#5.9)（位元） · [BOS](chapters/06.md#6.5)（開始標記） · [byte](chapters/05.md#5.9)（位元組）
 
 **C**　[calibration](chapters/09.md#9.9)（校準） · [calibration split](chapters/09.md#9.10)（校準資料） · [causal mask](chapters/03.md#3.6)（因果遮罩） · [checkpoint](chapters/05.md#5.7)（檢查點） · [Choice](chapters/09.md#9.11) · [classification head](chapters/10.md#10.5)（分類頭） · [code point](chapters/06.md#6.1)（碼點） · [concentration](chapters/09.md#9.15)（集中度） · [confidence](chapters/09.md#9.9)（信心） · [context](chapters/02.md#2.5)（上下文） · [context window](chapters/02.md#2.5)（上下文視窗） · [control](chapters/12.md#12.4)（對照） · [critic](chapters/13.md#13.14)（價值模型） · [cross entropy](chapters/01.md#1.8)（交叉熵） · [CUDA](chapters/16.md#16.8)
 
-**D**　decode（[解碼](chapters/01.md#1.1)、[逐步生成階段](chapters/16.md#16.2)） · [deep supervision](chapters/14.md#14.14)（逐輪監督） · [Dense](chapters/15.md#15.1) · [derivative](chapters/01.md#1.9)（導數） · [distillation](chapters/18.md#18.1)（蒸餾） · [DPO](chapters/07.md#7.18)（直接偏好最佳化）
+**D**　decode（[解碼](chapters/01.md#1.1)、[逐步生成階段](chapters/16.md#16.2)） · [deep supervision](chapters/14.md#14.14)（逐輪監督） · [Dense](chapters/04.md#4.4) · [derivative](chapters/01.md#1.9)（導數） · [distillation](chapters/18.md#18.1)（蒸餾） · [DPO](chapters/07.md#7.18)（直接偏好最佳化）
 
 **E**　[embedding](chapters/02.md#2.1)（embedding 表、embedding 向量） · [encode](chapters/01.md#1.1)（編碼） · [EOS](chapters/06.md#6.5)（結束標記） · [exit depth](chapters/14.md#14.13)（終止深度） · [expert](chapters/15.md#15.2)（專家）
 
@@ -226,7 +226,7 @@ token 不一定是一個中文字。逐 byte 切詞時，一個常見中文字�
 
 **K**　[kernel](chapters/17.md#17.10)（計算程式） · [key](chapters/03.md#3.2)（K） · [KL](chapters/13.md#13.14)（KL 散度） · [KV cache](chapters/16.md#16.2)（快取）
 
-**L**　[labels](chapters/05.md#5.2) · [language backbone](chapters/10.md#10.6)（文字核心） · [LayerNorm](chapters/04.md#4.3)（層正規化） · [learning rate](chapters/01.md#1.12)（學習率，lr） · [Linear](chapters/02.md#2.3)（線性層） · [LM head](chapters/04.md#4.6)（輸出層） · [logits](chapters/01.md#1.8)（候選分數） · [Looped Transformer](chapters/14.md#14.11)（循環式 Transformer） · [LoRA](chapters/08.md#8.8) · [loss](chapters/01.md#1.8)（代價） · [loss mask](chapters/07.md#7.24)（代價遮罩）
+**L**　[labels](chapters/05.md#5.2) · [language backbone](chapters/10.md#10.6)（文字核心） · [LayerNorm](chapters/04.md#4.3)（層正規化） · [learning rate](chapters/01.md#1.12)（學習率，lr） · [Linear](chapters/02.md#2.3)（線性層） · [LM head](chapters/04.md#4.6)（輸出層） · [LN](chapters/04.md#4.3)（層正規化） · [logits](chapters/01.md#1.8)（候選分數） · [Looped Transformer](chapters/14.md#14.11)（循環式 Transformer） · [LoRA](chapters/08.md#8.8) · [loss](chapters/01.md#1.8)（代價） · [loss mask](chapters/07.md#7.24)（代價遮罩）
 
 **M**　[max_new_tokens](chapters/07.md#7.19) · [mel](chapters/12.md#12.6)（mel 頻帶） · [MLP](chapters/02.md#2.5)（多層感知器） · [modality](chapters/06.md#6.6)（模態） · [MoE](chapters/15.md)（專家混合） · [momentum](chapters/05.md#5.3)（動量） · [MTP](chapters/07.md#7.20)（多 token 預測）
 
@@ -238,11 +238,11 @@ token 不一定是一個中文字。逐 byte 切詞時，一個常見中文字�
 
 **Q**　[quantization](chapters/17.md#17.1)（量化） · [query](chapters/03.md#3.2)（Q） · [Qwen](chapters/20.md#20.1)
 
-**R**　[RAG](chapters/0A.md#A.2)（檢索增強生成） · [range calibration](chapters/17.md#17.12)（範圍校準） · [rank](chapters/08.md#8.8)（秩） · [ratio](chapters/13.md#13.12)（機率比） · [reasoning effort](chapters/07.md#7.23)（思考投入） · [reference](chapters/13.md#13.4)（參考模型） · [REINFORCE](chapters/0C.md#C.7) · [residual connection](chapters/04.md#4.2)（殘差連線） · [reward](chapters/07.md#7.18)（獎勵） · [reward hacking](chapters/13.md#13.16)（獎勵鑽漏洞） · [reward model](chapters/13.md#13.10)（獎勵模型） · [RL](chapters/07.md#7.18)（強化學習） · [RLHF](chapters/07.md#7.18)（人類回饋強化學習） · [RLVR](chapters/0C.md#C.7)（可驗證獎勵強化學習） · [RMSNorm](chapters/14.md#14.2)（均方根正規化） · [RoPE](chapters/14.md#14.1)（旋轉位置嵌入） · [router](chapters/15.md#15.3)（路由器）
+**R**　[RAG](chapters/0A.md#A.2)（檢索增強生成） · [range calibration](chapters/17.md#17.12)（範圍校準） · [rank](chapters/08.md#8.8)（秩） · [ratio](chapters/13.md#13.12)（機率比） · [reasoning](chapters/07.md#7.23)（推理） · [reasoning effort](chapters/07.md#7.23)（思考投入） · [reference](chapters/13.md#13.4)（參考模型） · [REINFORCE](chapters/0C.md#C.7) · [residual connection](chapters/04.md#4.2)（殘差連線） · [reward](chapters/07.md#7.18)（獎勵） · [reward hacking](chapters/13.md#13.16)（獎勵鑽漏洞） · [reward model](chapters/13.md#13.10)（獎勵模型） · [RL](chapters/07.md#7.18)（強化學習） · [RLHF](chapters/07.md#7.18)（人類回饋強化學習） · [RLVR](chapters/0C.md#C.7)（可驗證獎勵強化學習） · [RMSNorm](chapters/14.md#14.2)（均方根正規化） · [RoPE](chapters/14.md#14.1)（旋轉位置嵌入） · [router](chapters/15.md#15.3)（路由器）
 
 **S**　[sample rate](chapters/12.md#12.2)（取樣率） · [sampling](chapters/01.md#1.14)（抽樣） · [scale](chapters/17.md#17.2)（刻度） · [Score](chapters/09.md#9.11) · [SFT](chapters/07.md#7.1)（監督式微調） · [shape](first-steps.md#W.3) · [shift](chapters/01.md#1.3)（下一位置對齊） · [sliding-window attention](chapters/16.md#16.12)（滑動視窗注意力） · [softmax](chapters/01.md#1.7) · [special token](chapters/06.md#6.6)（特殊 token） · [spectrogram](chapters/12.md#12.5)（頻譜圖） · [speculative decoding](chapters/16.md#16.14)（推測解碼） · [speech encoder](chapters/12.md#12.15)（語音入口） · [surrogate objective](chapters/13.md#13.13)（替代目標）
 
-**T**　[teacher forcing](chapters/07.md#7.22) · [temperature](chapters/01.md#1.15)（溫度） · [temperature scaling](chapters/09.md#9.10)（溫度縮放） · [tensor](first-steps.md#W.3)（張量） · [thinking effort](chapters/07.md#7.23)（思考投入） · [token](chapters/06.md#6.1) · [tokenization](chapters/06.md#6.1)（切詞） · [tokenizer](chapters/06.md#6.1) · [tool call](chapters/0B.md#B.1)（工具請求） · [top-k routing](chapters/15.md#15.4) · [transcript](chapters/12.md#12.11)（轉寫文字）
+**T**　[teacher forcing](chapters/05.md#5.8) · [temperature](chapters/01.md#1.15)（溫度） · [temperature scaling](chapters/09.md#9.10)（溫度縮放） · [tensor](first-steps.md#W.3)（張量） · [thinking effort](chapters/07.md#7.23)（思考投入） · [token](chapters/06.md#6.1) · [tokenization](chapters/06.md#6.1)（切詞） · [tokenizer](chapters/06.md#6.1) · [tool call](chapters/0B.md#B.1)（工具請求） · [top-k routing](chapters/15.md#15.4) · [transcript](chapters/12.md#12.11)（轉寫文字）
 
 **U**　[UTF-8](chapters/06.md#6.1)
 
