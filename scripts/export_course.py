@@ -202,12 +202,16 @@ def section_footer(item, notebook, revision, executed_outputs):
         # 沒附執行結果的建置不能說輸出在上方，與首頁的 home_introduction 一致。
         shown = "本節的程式與 CPU 實際輸出都在上方" if executed_outputs else "本節的程式都在上方"
         note = (
-            f"{shown}，不開 Colab 也能讀完。想自己改數字再跑，可以下載 Notebook 在本機執行，"
-            "或在 Colab 開啟同一份內容（需要 Google 帳號，雲端環境未經本課實測）。"
-            "本機操作見[暖身 W.1](first-steps.md#W.1)。"
+            f"{shown}，不開 Colab 也能讀完。想自己改數字再跑，可以在自己的電腦執行 Notebook："
+            "依[暖身 W.1](first-steps.md#W.1)下載的專案裡已有每一節的 Notebook；"
+            "按「下載本節 .ipynb」存下的也是同一份 Notebook，要放進專案資料夾裡才能在本機執行。"
+            "也可以在 Colab 開啟同一份內容（需要 Google 帳號，雲端環境未經本課實測）。"
         )
     else:
-        note = "本節沒有程式；Notebook 與本頁是同一份內容。"
+        note = (
+            "本節沒有要在 Notebook 執行的 Python 程式；正文若有終端機指令，請在自己電腦的終端機執行。"
+            "Notebook 與本頁是同一份內容。"
+        )
     return (
         '<div class="actions">'
         f'<a class="md-button" href="{item["notebook"]}" download>下載本節 .ipynb</a>'

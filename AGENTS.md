@@ -84,7 +84,7 @@ uv run ruff check . && uv run ruff format .
    ```
 
    再用 `git ls-remote` 核對推上去的 hash 與原 repo 一致。
-2. 在暫存 clone 用 `git filter-repo` 預演：逐檔比對保留檔案的 blob 與 mode 不變，三道審閱檢查的輸出與全套測試結果和改寫前相同。
+2. 在有完整歷史的暫存 clone 用 `git filter-repo` 預演（淺 clone 時 `tests/test_course_commit_pins.py` 會跳過祖先核對）：逐檔比對保留檔案的 blob 與 mode 不變，三道審閱檢查的輸出與全套測試結果和改寫前相同。再拿 `git filter-repo` 產生的 commit-map（`.git/filter-repo/commit-map`）裡每個舊 hash 搜尋整個工作樹，命中處不是出處紀錄的，換成對應的新 hash；GitHub 可能暫時仍回應已改寫掉的 commit，某個 hash 還在不在，要用新 clone 的 `git show` 判斷。
 3. 課文或 notebook 以 `git clone --branch <tag>` 引用的 tag 一起改寫並保留（可用 `git grep -n -e '--branch' -- course notebooks` 找出；目前是第 19 章的 `selftrained-v2`）。
 4. 推送時對每個 ref 用 `--force-with-lease=<ref>:<預期舊值>`，並加 `--atomic`。推完確認 Publish course 與 CI 通過，線上 `build-info.json` 的 `revision` 已更新。
 5. 更新 [開發分支與歷史版本](docs/repository-archives.md)。

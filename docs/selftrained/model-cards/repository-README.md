@@ -60,7 +60,7 @@ MoE每層保存4個專家FFN、每token選2個；Dense每層使用1個同hidden 
 
 ## 固定資料與授權
 
-v2資料清單固定SHA-256為 `3443e3d32ff1e63f8126c2327011be541238765824623af9c8fdcff6b056cb1b`。Git LFS包為程式庫commit `08761dac87a6ef360db95883d9bcd338c44fe76d` 的 `assets/training/selftrained-v2.tar.gz`，壓縮大小67,862,431 bytes，解包內容127,161,811 bytes，包SHA-256為 `0976073a3bc7c331a65cedb4c31d54f5c6e9a5014ff2443698a8e2b8cad7e78a`。
+v2資料清單固定SHA-256為 `3e50d1333553a8ef0351f8e08343c38456721b6ceda418ac73ca33d3ebe4e5ab`。Git LFS包為程式庫commit `4a229b850289a5b8954092d71fcb05686988d526` 的 `assets/training/selftrained-v2.tar.gz`，壓縮大小67,862,431 bytes，解包內容127,161,811 bytes，包SHA-256為 `0976073a3bc7c331a65cedb4c31d54f5c6e9a5014ff2443698a8e2b8cad7e78a`。
 
 包內12個JSONL與8,950個其他檔案（包含圖片、錄音與來源說明），共8,962個固定檔案，逐檔指紋在[manifest](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/selftrained/v2-manifest.json)。訓練／validation／test各28,876／2,435／3,734題；錄音各62／15／30段。問法、格式與衍生材料可能共享來源，題數不是獨立素材數；錄音沒有已知speaker ID，不宣稱不同側由不同說話者錄製。
 

@@ -19,7 +19,7 @@ uv sync --frozen --extra cpu --extra selftrained
 
 重現時保留所用 repository commit；正式發布的 commit 與結果來源見本輪 reproduction capsule。Wrapper 會核對 tracked trainer/model/scripts 的內容與當下 Git HEAD，再記錄實際 source SHA。
 
-資料固定於 [v2-manifest.json](v2-manifest.json)，SHA256 為 `3443e3d32ff1e63f8126c2327011be541238765824623af9c8fdcff6b056cb1b`。壓縮包固定於 Git commit `08761dac87a6ef360db95883d9bcd338c44fe76d` 的 `assets/training/selftrained-v2.tar.gz`，大小 67,862,431 bytes，SHA256 `0976073a3bc7c331a65cedb4c31d54f5c6e9a5014ff2443698a8e2b8cad7e78a`。使用既有 transport helper 驗證 LFS pointer、實際物件與解包上限：
+資料固定於 [v2-manifest.json](v2-manifest.json)，SHA256 為 `3e50d1333553a8ef0351f8e08343c38456721b6ceda418ac73ca33d3ebe4e5ab`。壓縮包固定於 Git commit `4a229b850289a5b8954092d71fcb05686988d526` 的 `assets/training/selftrained-v2.tar.gz`，大小 67,862,431 bytes，SHA256 `0976073a3bc7c331a65cedb4c31d54f5c6e9a5014ff2443698a8e2b8cad7e78a`。使用既有 transport helper 驗證 LFS pointer、實際物件與解包上限：
 
 ```bash
 uv run --frozen --extra cpu --extra selftrained python - <<'PY'
@@ -30,7 +30,7 @@ from scripts.selftrained.hf_transport import materialize_git_lfs, unpack_verifie
 
 repo = Path.cwd()
 manifest_path = repo / "docs/selftrained/v2-manifest.json"
-assert hashlib.sha256(manifest_path.read_bytes()).hexdigest() == "3443e3d32ff1e63f8126c2327011be541238765824623af9c8fdcff6b056cb1b"
+assert hashlib.sha256(manifest_path.read_bytes()).hexdigest() == "3e50d1333553a8ef0351f8e08343c38456721b6ceda418ac73ca33d3ebe4e5ab"
 manifest = json.loads(manifest_path.read_text())
 destination = repo / "data/selftrained-v2"
 assert not destination.exists(), "使用新的資料解包目錄，保留既有檔案"
@@ -55,7 +55,7 @@ PY
 ```bash
 uv run --frozen --extra cpu --extra selftrained python scripts/selftrained/train_local_stage.py \
   --manifest docs/selftrained/v2-manifest.json \
-  --manifest-sha256 3443e3d32ff1e63f8126c2327011be541238765824623af9c8fdcff6b056cb1b \
+  --manifest-sha256 3e50d1333553a8ef0351f8e08343c38456721b6ceda418ac73ca33d3ebe4e5ab \
   --data-root data/selftrained-v2 -- \
   --output-dir checkpoints/selftrained-local/moe-pretrain \
   --stage pretrain --architecture moe --steps 1000 \
@@ -68,7 +68,7 @@ uv run --frozen --extra cpu --extra selftrained python scripts/selftrained/train
 ```bash
 uv run --frozen --extra cpu --extra selftrained python scripts/selftrained/train_local_stage.py \
   --manifest docs/selftrained/v2-manifest.json \
-  --manifest-sha256 3443e3d32ff1e63f8126c2327011be541238765824623af9c8fdcff6b056cb1b \
+  --manifest-sha256 3e50d1333553a8ef0351f8e08343c38456721b6ceda418ac73ca33d3ebe4e5ab \
   --data-root data/selftrained-v2 -- \
   --output-dir checkpoints/selftrained-local/moe-sft \
   --stage sft --architecture moe --steps 8000 \
@@ -101,7 +101,7 @@ Dense 使用 `--architecture dense` 與對應 `dense-*` 目錄，保留自己的
 ```bash
 uv run --frozen --extra cpu --extra selftrained python scripts/selftrained/train_local_stage.py \
   --manifest docs/selftrained/v2-manifest.json \
-  --manifest-sha256 3443e3d32ff1e63f8126c2327011be541238765824623af9c8fdcff6b056cb1b \
+  --manifest-sha256 3e50d1333553a8ef0351f8e08343c38456721b6ceda418ac73ca33d3ebe4e5ab \
   --data-root data/selftrained-v2 -- \
   --output-dir checkpoints/selftrained-local/moe-native \
   --stage joint --architecture moe --steps 4000 \
@@ -123,7 +123,7 @@ Native fresh source 必須是相同 architecture、真正完成的 tool4/numeric
 ```bash
 uv run --frozen --extra cpu --extra selftrained python scripts/selftrained/train_local_stage.py \
   --manifest docs/selftrained/v2-manifest.json \
-  --manifest-sha256 3443e3d32ff1e63f8126c2327011be541238765824623af9c8fdcff6b056cb1b \
+  --manifest-sha256 3e50d1333553a8ef0351f8e08343c38456721b6ceda418ac73ca33d3ebe4e5ab \
   --data-root data/selftrained-v2 -- \
   --output-dir checkpoints/selftrained-local/moe-weighted-attempt2 \
   --stage joint --architecture moe --steps 10000 \

@@ -101,7 +101,7 @@ python scripts/fetch_natural_data.py
 python scripts/fetch_natural_data.py --verify
 ```
 
-程式使用固定公開 Git 版本 `21a24124353487e08881302bbd71614766a489ac`，先核對遠端清單，再核對三個壓縮包和全部解包檔案，最後放到 `data/natural`。第一次下載約70.65 MB；已有完全相同資料會跳過，遇到不同內容則保留原資料並停止。[學生下載入口的實際匿名測試](evidence/data/student-fetch/run.json)記錄了這三包與345個檔案的核對。
+程式使用 `scripts/fetch_natural_data.py` 的 `DEFAULT_REVISION` 指定的公開 Git 版本，先核對遠端清單，再核對三個壓縮包和全部解包檔案，最後放到 `data/natural`。第一次下載約70.65 MB；已有完全相同資料會跳過，遇到不同內容則保留原資料並停止。[學生下載入口的實際匿名測試](evidence/data/student-fetch/run.json)記錄了這三包與345個檔案的核對。
 
 這次核對以整合清單 SHA `7604526c67da31a41940f16f9c87027c73cf2782c63522dbde8c7efbf015db91` 為準，實際讀取解開後的全部 **345 個檔案**，並另外讀取三個壓縮包的全部一般檔案成員：照片包 154 個、中文圖片包 143 個、語音包 48 個。大小與 SHA 全部相符，也檢查了路徑與跨切分來源組別。[完整核對結果](evidence/data/merged-assets-and-archive-audit.json)與[本次使用的核對程式](evidence/data/verify_snapshot.py.txt)公開保存；這證明取得的是指定檔案，並不證明每個標註都無誤。
 

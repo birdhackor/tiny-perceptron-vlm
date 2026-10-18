@@ -13,7 +13,7 @@ from urllib.parse import urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = ROOT / "docs/natural-assistant/manifest.json"
-DEFAULT_REVISION = "21a24124353487e08881302bbd71614766a489ac"
+DEFAULT_REVISION = "2dbb906eff430341da9301cfd0045a109d9f5c26"
 DEFAULT_MANIFEST_SHA256 = "7604526c67da31a41940f16f9c87027c73cf2782c63522dbde8c7efbf015db91"
 REPOSITORY = "birdhackor/tiny-perceptron-vlm"
 MAX_TOTAL_BYTES = 512 * 1024 * 1024

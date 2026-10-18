@@ -14,7 +14,7 @@
 
 三種寫法，標記一字不差（全形「：」「、」「（）」）：
 
-1. **原樣節錄**——fence 只放節錄，第一行是標記，其後逐字貼上函式庫中的頂層定義（用 `sed -n '<起>,<迄>p' tiny_perceptron/<檔案>.py` 複製，不要手打）；多個相鄰定義用「、」列名，中間保留原檔的兩個空行：
+1. **原樣節錄**——fence 只放節錄，第一行是標記，其後逐字貼上函式庫中的頂層定義（用 `sed -n '<起>,<迄>p' tiny_perceptron/<檔案>.py` 複製，不要手打）；多個定義用「、」列名，依標記列出的順序貼上，中間隔兩個空行；不必在原檔相鄰：
 
    ````text
    ```python
@@ -34,10 +34,10 @@
    ```
    ````
 
-   同一節必須 import 函式庫的同名定義（用 `as` 換名，避免覆蓋你剛寫的版本），並用 `assert`（`torch.equal`、`torch.allclose` 或 `==`）確認兩者在本節例子上結果相同。網站是靜態頁面：程式在發布時先執行一次，輸出貼在程式下方；只有 `assert` 的格子沒有輸出，讀者看不出比對過，所以 `assert` 前先 `print` 比對結果（例如 `print("與函式庫版本相同：", same)`）。正文要說明省略了什麼、在哪一節登場。
+   精簡版要寫在標記所在的 fence 裡（頂層的 `class` 或 `def`）。同一節必須 import 函式庫的同名定義，而且用 `as` 換成另一個名稱（例如 `from tiny_perceptron.model import TinyLM as LibraryTinyLM`；不換名會覆蓋你剛寫的版本，之後比的就是函式庫自己）；再在精簡版之後用 `assert`（`torch.equal`、`torch.allclose` 或 `==`）確認兩者在本節例子上結果相同。測試會檢查這個 `assert` 的運算式，順著同一節的指派往回追，要同時用到精簡版與函式庫別名；只用到其中一邊的 `assert`（例如只檢查精簡版輸出的形狀）不算。測試看不出運算式是否真的在比較兩邊，比得對不對仍由執行時的 `assert` 本身核對。網站是靜態頁面：程式在發布時先執行一次，輸出貼在程式下方；只有 `assert` 的格子沒有輸出，讀者看不出比對過，所以 `assert` 前先 `print` 比對結果（例如 `print("與函式庫版本相同：", same)`）。正文要說明省略了什麼、在哪一節登場。
 3. **只說明並連結**——資料產生器、報告輔助與大型成品程式，用一兩句話說它做什麼、輸入輸出是什麼，連到原始碼（相對路徑，例如 `[tiny_perceptron/multimodal.py](../../tiny_perceptron/multimodal.py)`）。
 
-標記之外，不在 fence 第一行加任何 `# 節錄…`／`# 精簡…` 字樣；不加 fence 屬性（`title`、`hl_lines` 等），只有 ```` ```python ```` 開頭的 fence 會變成 Notebook 程式格。
+標記只寫在 fence 第一行；除了標記，fence 裡任何一行都不寫 `# 節錄自…`／`# 精簡自…` 字樣。帶標記的 fence 要放在某一節裡：第一個 `## X.Y` 節標題之前的導言不產生 Notebook，裡面的程式不會執行。fence 開頭一行（縮排除外）要剛好是 ```` ```python ````，不加 fence 屬性（`title`、`hl_lines` 等）：`scripts/build_course.py` 只把 ```` ```python ```` 之後直接換行的開頭當成 Notebook 程式格，```` ```py ````、```` ```python title="…" ```` 或 `python` 後多了空白都不算。標記不符合以上任何一條，`tests/test_course_code_excerpts.py` 都會報錯。
 
 ## 一節裡的順序
 
@@ -83,7 +83,7 @@ for id in <你改過的節>; do $V/python docs/review-tools/section_facts.py "co
 git status --short
 ```
 
-`section_facts.py --execute` 會在新的 CPU 程序依序執行該節全部程式，印出一行 JSON，其中 `execution_exit_code` 應為 0；實際輸出在 JSON 的 `artifact_directory` 下的 `stdout.txt`（位於 Git 忽略的 `outputs/reviewer-tools/runs/`）。確認正文引用的數字與 `stdout.txt` 一致。
+`section_facts.py --execute` 會在新的 CPU 程序依序執行該節全部程式，印出一行 JSON，其中 `execution_exit_code` 應為 0；實際輸出在 JSON 的 `artifact_directory` 下的 `stdout.txt`（位於 Git 忽略的 `outputs/reviewer-tools/runs/`）。確認正文引用的數字與 `stdout.txt` 一致。該節沒有 python fence 時（同一行 JSON 的 `python_fences` 為 0），工具不執行任何程式，`execution_exit_code` 是 2，這是預期結果，不是錯誤。
 
 ## 報告
 

@@ -26,7 +26,7 @@
 .venv-natural/bin/python scripts/fetch_natural_data.py --manifest docs/natural-assistant/manifest.json --output data/natural --verify
 ```
 
-這個入口固定到公開Git版本`21a24124353487e08881302bbd71614766a489ac`，取得自然照片、合成中文字卡與真人華語錄音三包Git LFS資料。程式直接匿名下載，不必另外安裝Git LFS；三包合計70,648,031 bytes，約70.65 MB。包裡已經是這輪所需的小份材料，不需要再下載上游完整照片或錄音大包。
+這個入口固定到`scripts/fetch_natural_data.py`的`DEFAULT_REVISION`指定的公開Git版本，取得自然照片、合成中文字卡與真人華語錄音三包Git LFS資料。程式直接匿名下載，不必另外安裝Git LFS；三包合計70,648,031 bytes，約70.65 MB。包裡已經是這輪所需的小份材料，不需要再下載上游完整照片或錄音大包。
 
 成功時，最後一個指令會顯示`status: verified`與`files_verified: 345`。資料位於`data/natural/vision/`、`data/natural/ocr/`、`data/natural/speech/`；訓練程式用`docs/natural-assistant/manifest.json`配對它們。清單中有272筆訓練題、52筆驗證題與66筆最後測試題；錄音另外分成24／6／12段，沒有用來更新Whisper。
 
