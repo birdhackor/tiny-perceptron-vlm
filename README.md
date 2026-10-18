@@ -6,7 +6,7 @@
 
 **[線上教材](https://birdhackor.github.io/tiny-perceptron-vlm/) · [閱讀路線](course/README.md) · [操作與數學暖身](course/first-steps.md) · [全部小節](course/lessons.md) · [名詞頁](course/glossary.md) · [訓練操作](course/training.md)**
 
-教材預覽版：網站提供正文、SVG 圖解，以及每節程式在 CPU 上實際執行的輸出，可以直接當書讀，不必先安裝；第一次讀從[1.1](course/chapters/01.md#1.1)開始。想自己改程式再跑時，照下方步驟把專案下載到自己的電腦，開啟同一節的 Notebook；或按網站每節頁尾的「在 Colab 開啟」開啟同一份 Notebook，有程式的 Notebook 會先在第一個程式格下載專案並安裝套件。小實驗不必先租 GPU。Colab 需要 Google 帳號，Colab 雲端執行尚未實機驗證。
+教材預覽版：網站提供正文、SVG 圖解，以及每節程式在 CPU 上實際執行的輸出，可以直接當書讀，不必先安裝；第一次讀從[1.1](course/chapters/01.md#1.1)開始。想自己改程式再跑時，照下方步驟把專案下載到自己的電腦，開啟同一節的 Notebook；或按網站每節頁尾的「在 Colab 開啟」開啟同一份 Notebook，有程式的 Notebook 在 Colab 會先在第一個程式格下載專案並安裝套件。小實驗不必先租 GPU。Colab 需要 Google 帳號，Colab 雲端執行尚未實機驗證。
 
 ![文字與識別編號的對照](course/figures/rewrite-01-character-ids.svg)
 
@@ -26,10 +26,10 @@ Thinking effort（思考投入）、Looped Transformer（循環深度）及Jev�
 
 ## 安裝與開啟 Notebook
 
-先安裝 [uv](https://docs.astral.sh/uv/getting-started/installation/) 與用來取得專案的[Git](https://git-scm.com/downloads)。clone 之前先執行 `git config --get filter.lfs.process`：若印出 `git-lfs filter-process`，表示你的 Git 已對所有專案啟用 Git LFS，下面的 `git clone` 會連同全部訓練資料包（目前合計約 328 MB）一起下載；只想先取程式時，把第一行換成 `GIT_LFS_SKIP_SMUDGE=1 git clone https://github.com/birdhackor/tiny-perceptron-vlm.git`，Windows PowerShell 的寫法見[W.1](course/first-steps.md#W.1)。沒有印出任何字，就直接照下面執行。CPU 閱讀與練習：
+先安裝 [uv](https://docs.astral.sh/uv/getting-started/installation/) 與用來取得專案的[Git](https://git-scm.com/downloads)。訓練資料包用 Git LFS（Git 處理大型檔案的擴充工具）保存，下面第一行開頭的 `GIT_LFS_SKIP_SMUDGE=1` 讓 clone 不下載這些資料包；這段設定只在 Git LFS 已啟用時才有作用，沒有安裝 Git LFS 也可以照打。Windows PowerShell 不寫這段開頭，改成先執行 `$env:GIT_LFS_SKIP_SMUDGE="1"`，再執行 `git clone https://github.com/birdhackor/tiny-perceptron-vlm.git`。CPU 閱讀與練習：
 
 ```bash
-git clone https://github.com/birdhackor/tiny-perceptron-vlm.git
+GIT_LFS_SKIP_SMUDGE=1 git clone https://github.com/birdhackor/tiny-perceptron-vlm.git
 cd tiny-perceptron-vlm
 uv sync --frozen --extra cpu --group notebook
 source .venv/bin/activate

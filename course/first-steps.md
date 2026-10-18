@@ -10,12 +10,10 @@
 
 本機方式先準備 [uv](https://docs.astral.sh/uv/getting-started/installation/) 和 [Git](https://git-scm.com/install/)：uv 負責安裝與管理 Python 套件，需要時也會自己下載合適版本的 Python，不必另外安裝；Git 負責下載與管理專案檔案。安裝 Git 後在終端機執行 `git --version`，應顯示版本號。終端機是輸入指令的視窗。
 
-下載專案之前先檢查一件事。本課的訓練資料包用 Git LFS（Git 處理大型檔案的擴充工具）保存；若你的 Git 已對所有專案啟用 Git LFS，`git clone` 會連同全部資料包一起下載，目前合計約 328 MB。執行 `git config --get filter.lfs.process`：沒有印出任何字，表示沒有啟用，照下面三行即可；印出 `git-lfs filter-process`，表示已經啟用，只想先取程式時，把第一行換成 `GIT_LFS_SKIP_SMUDGE=1 git clone https://github.com/birdhackor/tiny-perceptron-vlm.git`。Windows PowerShell 則先執行 `$env:GIT_LFS_SKIP_SMUDGE="1"`，再執行原本的第一行。
-
-下列三行依序下載專案、進入專案資料夾、安裝 CPU 與 Notebook 所需工具；`git clone` 會在終端機目前所在的資料夾裡建立 `tiny-perceptron-vlm` 資料夾。每行完成、回到可輸入狀態後再輸入下一行。
+下列三行依序下載專案、進入專案資料夾、安裝 CPU 與 Notebook 所需工具；`git clone` 會在終端機目前所在的資料夾裡建立 `tiny-perceptron-vlm` 資料夾。本課的訓練資料包用 Git LFS（Git 處理大型檔案的擴充工具）保存，第一行開頭的 `GIT_LFS_SKIP_SMUDGE=1` 讓 clone 不下載這些資料包；這段設定只在 Git LFS 已啟用時才有作用，沒有安裝 Git LFS 也可以照打。Windows PowerShell 不寫這段開頭，改成先執行 `$env:GIT_LFS_SKIP_SMUDGE="1"`，再執行 `git clone https://github.com/birdhackor/tiny-perceptron-vlm.git`。每行完成、回到可輸入狀態後再輸入下一行。
 
 ```bash
-git clone https://github.com/birdhackor/tiny-perceptron-vlm.git
+GIT_LFS_SKIP_SMUDGE=1 git clone https://github.com/birdhackor/tiny-perceptron-vlm.git
 cd tiny-perceptron-vlm
 uv sync --frozen --extra cpu --group notebook
 ```
@@ -84,12 +82,14 @@ assert len(animals) == 2
 
 後面各章還會用到下面這些寫法。不必先背，讀到時忘了再回來查。右欄箭頭左邊是例子，右邊是在 Python 裡執行它得到的結果：引號包住的是文字，方括號是清單，小括號包住的一組值叫 tuple。例子外面包的 `list(...)` 把逐項取出的結果收成清單，好一次看到全部內容；`max` 取出最大的一項，`sum` 把各項加總。
 
+下表 `sorted` 那列的 Unicode 是電腦通用的字元編號標準。
+
 | 寫法 | 白話 | 例子 → 結果 |
 | --- | --- | --- |
 | 切片 `[起:迄]` | 取出一段：從「起」那一項開始，停在「迄」之前；省略表示從頭或到尾，`-1` 表示最後一項 | `[5, 2, 7][:-1]` → `[5, 2]`；`[5, 2, 7][1:]` → `[2, 7]` |
 | `range(n)` | 依序產生 0 到 n−1 的整數，常配合 `for` 重複固定次數 | `list(range(3))` → `[0, 1, 2]` |
 | `set(...)` | 去掉重複，每種只留一個；不保證順序 | `len(set("貓狗貓"))` → `2` |
-| `sorted(...)` | 排好順序的新清單，原資料不變；文字依每個字的 Unicode 編號由小到大排（「狗」是 29399、「貓」是 35987，見 [1.1](chapters/01.md#1.1)）；加 `reverse=True` 改成由大到小 | `sorted([3, 1, 2])` → `[1, 2, 3]`；`sorted([3, 1, 2], reverse=True)` → `[3, 2, 1]`；`sorted(set("貓狗貓"))` → `['狗', '貓']` |
+| `sorted(...)` | 排好順序的新清單，原資料不變；文字依每個字的 Unicode 編號由小到大排（「狗」是 29399、「貓」是 35987）；加 `reverse=True` 改成由大到小 | `sorted([3, 1, 2])` → `[1, 2, 3]`；`sorted([3, 1, 2], reverse=True)` → `[3, 2, 1]`；`sorted(set("貓狗貓"))` → `['狗', '貓']` |
 | `key=len`、`lambda` | `key=` 指定比較前先把每一項換成什麼；`lambda i: ...` 是當場寫的小函式，冒號左邊是輸入、右邊是輸出 | `max(["貓", "小花貓"], key=len)` → `'小花貓'`；`scores = [5, 9, 7]` 時，`max(range(3), key=lambda i: scores[i])` → `1` |
 | `zip(...)` | 把幾份清單按相同位置配成一組組 | `list(zip(["貓", "狗"], [3, 1]))` → `[('貓', 3), ('狗', 1)]` |
 | `dict(zip(...))` | 配好的兩兩一組直接變成字典：左邊當鍵、右邊當值 | `dict(zip(["貓", "狗"], [0, 1]))` → `{'貓': 0, '狗': 1}` |
@@ -317,8 +317,8 @@ print(Path("pyproject.toml").exists())
 print(Path("tiny_perceptron").exists())
 ```
 
-第一行輸出依你電腦而不同。在專案根目錄執行時，後兩行應都是 `True`；若都是 `False`，先看第一行，確認是否站在別的資料夾。這比把所有路徑改成電腦上的絕對位置容易重現。若用終端機執行這段，先照 [W.1](#W.1) 啟用工具箱，再輸入 `python` 並按 Enter，看到 `>>>` 就進入 Python 互動模式；逐行貼上包含 `from pathlib import Path` 在內的程式，輸出會緊接在後。輸入 `exit()` 並按 Enter 可回到終端機指令模式，才能再用 `cd` 切換資料夾。練習先退出 Python，在專案根目錄輸入 `cd notebooks`，再輸入 `python` 進互動模式重跑這段。先預測 `pyproject.toml` 是否還會被找到；核對後用 `exit()` 退出，再 `cd ..` 回到上一層專案根目錄。只換起點，檔案本身仍存在。
+第一行輸出依你電腦而不同。在專案根目錄執行時，後兩行應都是 `True`；若都是 `False`，先看第一行，確認是否站在別的資料夾。這比把所有路徑改成電腦上的絕對位置容易重現。若用終端機執行這段，先在專案根目錄輸入工具箱裡 Python 的路徑並按 Enter：macOS 與 Linux 是 `.venv/bin/python`，Windows PowerShell 是 `.\.venv\Scripts\python.exe`；已照 [W.1](#W.1) 啟用工具箱時，只輸入 `python` 也可以。看到 `>>>` 就進入 Python 互動模式；逐行貼上包含 `from pathlib import Path` 在內的程式，輸出會緊接在後。輸入 `exit()` 並按 Enter 可回到終端機指令模式，才能再用 `cd` 切換資料夾。練習先退出 Python，在專案根目錄輸入 `cd notebooks`，再進互動模式重跑這段：工具箱這時在上一層，路徑要改成 `../.venv/bin/python`（Windows 是 `..\.venv\Scripts\python.exe`），啟用時仍只要輸入 `python`。先預測 `pyproject.toml` 是否還會被找到；核對後用 `exit()` 退出，再 `cd ..` 回到上一層專案根目錄。只換起點，檔案本身仍存在。
 
-紅色錯誤通常會列出哪個檔案、哪行程式，最後一行說明原因。`ModuleNotFoundError: No module named 'torch'` 表示現在的 Python 找不到工具；先確認 Notebook 選 **Tiny Perceptron**，或終端機已啟用 `.venv`，也可以直接用 `.venv/bin/python` 執行（見 [W.1](#W.1)）。`FileNotFoundError` 是找不到指定檔案，先查目前起點和檔名。`KeyError` 是字典中沒有那個鍵，可回看 [W.2](#W.2)。`IndexError` 是索引超出範圍。例如 `animals = ["貓", "狗"]` 從前面用 0、1 編號；取 `animals[2]` 是取第三項，就會超出範圍。`SyntaxError` 則先檢查括號、冒號與縮排。
+紅色錯誤通常會列出哪個檔案、哪行程式，最後一行說明原因。`ModuleNotFoundError: No module named 'torch'` 表示現在的 Python 找不到工具；先確認 Notebook 選 **Tiny Perceptron**，或終端機已啟用 `.venv`；也可以在專案根目錄直接用 `.venv/bin/python` 執行，Windows 是 `.\.venv\Scripts\python.exe`（見 [W.1](#W.1)）。`FileNotFoundError` 是找不到指定檔案，先查目前起點和檔名。`KeyError` 是字典中沒有那個鍵，可回看 [W.2](#W.2)。`IndexError` 是索引超出範圍。例如 `animals = ["貓", "狗"]` 從前面用 0、1 編號；取 `animals[2]` 是取第三項，就會超出範圍。`SyntaxError` 則先檢查括號、冒號與縮排。
 
 模型訓練的指令碼有些預設只檢查資料與流程。這類命令最後印出的那行 JSON 是報告；其中的 `mode` 若是 `dry-run-no-weight-update`，表示這次沒有更新模型；依[操作配方](training.md)加上 `--train` 才正式訓練。不要只因看到報告就以為模型學過了。閱讀錯誤時也採同樣原則：指出程式實際做到了哪一步，再處理阻擋下一步的那個原因。

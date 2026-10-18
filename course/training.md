@@ -32,7 +32,7 @@
 .venv/bin/python scripts/fetch_training_assets.py --asset tinystories
 ```
 
-`--list` 只讀專案裡的清單，列出名稱、筆數、大小與授權，不需要 Git LFS。第二行下載 TinyStories 起步包（357,896 bytes）。clone 時沒有啟用 Git LFS 的話，專案裡的資料包只是 Git LFS 的指標檔；這時工具會先執行 `git lfs pull`，從網路取得實際檔案，電腦沒裝 Git LFS 就會報錯中止。所以先照 [W.1](first-steps.md#W.1) 安裝，並用 `git lfs version` 確認。取得檔案後，工具會自動核對大小與 SHA-256，再解包到 `data/training/`（`--output` 可改位置）。下載不更新模型。打開幾筆，檢查 `text` 或 `messages` 等欄位，再安排訓練、驗證與測試資料。每包的固定來源、授權和內容指紋見[資料說明](../assets/training/README.md)。
+`--list` 只讀專案裡的清單，列出名稱、筆數、大小與授權，不需要 Git LFS。第二行下載 TinyStories 起步包（357,896 bytes）。照 [W.1](first-steps.md#W.1) 的寫法 clone 下來時，專案裡的資料包只是 Git LFS 的指標檔；這時工具會先執行 `git lfs pull`，從網路取得實際檔案，電腦沒裝 Git LFS 就會報錯中止。所以先照 [W.1](first-steps.md#W.1) 安裝，並用 `git lfs version` 確認。取得檔案後，工具會自動核對大小與 SHA-256，再解包到 `data/training/`（`--output` 可改位置）。下載不更新模型。打開幾筆，檢查 `text` 或 `messages` 等欄位，再安排訓練、驗證與測試資料。每包的固定來源、授權和內容指紋見[資料說明](../assets/training/README.md)。
 
 圖片的裁切、錄音的加噪版本，也要跟原始素材放在同一側。先核對圖像尺寸、聲音取樣率與任務答案，不能以為檔案能打開就適合模型。第 19 章的商品圖、字卡與語音需求另有自己的資料清單，第 20 章的資料見[第 20 章資料指引](../docs/natural-assistant/v4/DATA.md)；它們都和這些起步實驗分開記錄。
 
@@ -220,7 +220,7 @@ print("保存隨機起點；沒有更新參數")
 | `tokenizer` | byte 與 BPE 兩種切詞各訓練 400 次 | [tokenizer.json](../docs/course-experiments/results/tokenizer.json)，16.2 秒 |
 | `sft` | 屬性問答 SFT 900 次，另含先預訓練再 SFT 的支線與 UltraChat 小型實跑 | [sft.json](../docs/course-experiments/results/sft.json)，31.7 秒 |
 
-表中的 JSON 是各配方的實驗紀錄。沒有 NVIDIA GPU 時，可以把 `--device cuda` 改成 `--device cpu`，但 CPU 可行性未量測：能不能跑完、要多久都沒有紀錄。指定 `cuda` 而電腦沒有 CUDA 時，工具會直接停下，不會自動改用 CPU；這個工具也只接受 `cpu` 與 `cuda`，不支援 Apple 的 MPS。
+沒有 NVIDIA GPU 時，可以把 `--device cuda` 改成 `--device cpu`，但 CPU 可行性未量測：能不能跑完、要多久都沒有紀錄。指定 `cuda` 而電腦沒有 CUDA 時，工具會直接停下，不會自動改用 CPU；這個工具也只接受 `cpu` 與 `cuda`，不支援 Apple 的 MPS。
 
 各組在 `outputs/course-experiments/course-v1/<組名>/` 保存結果、權重和原始切分。`sft/model.pt` 是直接對話版；`pretrain.pt` 與 `pretrain-sft.pt` 是另一條兩階段支線。後面的固定比較若依賴 `sft/`，先完成這個完整配方，不能拿本節 `checkpoints/attributes.pt` 當成相同模型。
 
@@ -428,7 +428,7 @@ Looped Transformer 用不同輪數訓練的做法與比較方式，見[14.13–1
 <details id="fixed-moe-recipe" markdown="1">
 <summary>現代零件與效率的固定配方；T.10教師需先完成其中的MoE配方</summary>
 
-按[T.1](training.md#T.1)取得TinyStories包後，可選`--experiment modern`或`--experiment moe`重做固定比較，零件分別見[14.2](chapters/14.md#14.2)與[15.4](chapters/15.md#15.4)。兩組的設定、結果位置與作者紀錄如下；第 14、15 章引用的數字都在這兩份實驗紀錄裡：
+按[T.1](training.md#T.1)取得TinyStories包後，可選`--experiment modern`或`--experiment moe`重做固定比較，零件分別見[14.2](chapters/14.md#14.2)與[15.4](chapters/15.md#15.4)。兩組的設定、結果位置與作者紀錄如下：
 
 | 配方 | 設定 | 結果在哪裡 | 作者紀錄（Modal 上的 NVIDIA L4） |
 | --- | --- | --- | --- |
@@ -628,8 +628,8 @@ SHA-256是檔案指紋，Git commit是程式版本；兩者讓你取得同一份
 
 第 19 章另外從隨機參數訓練了 Looped 解題器與機率判斷器兩個成品；用途見[19.13](chapters/19.md#19.13)，實測成績與限制見[19.20](chapters/19.md#19.20)，下載、命令與本機重訓入口見[產品操作](../docs/lesson-products/README.md)。能跑通命令，不代表所有任務都可靠。
 
-完整歷史結果在[實驗紀錄](../docs/course-experiments/README.md)。RAG、工具與推理的實驗紀錄保存各自的原始輸入、輸出及分母。工具要留實際執行結果，以及把結果放回對話後模型生成的回答；只生成請求文字，還沒有完成操作。
+完整歷史結果在[實驗紀錄](../docs/course-experiments/README.md)。RAG、工具與推理的實驗紀錄（JSON）保存各自的原始輸入、輸出及分母。工具要留實際執行結果，以及把結果放回對話後模型生成的回答；只生成請求文字，還沒有完成操作。
 
-工具實驗紀錄 [tools.json](../docs/course-experiments/results/tools.json) 的每一步，`generation.input_ids` 才是模型當時真正收到的輸入；同一步的 `generation.messages` 有些混入了後來才產生的訊息，不能當成當時的輸入。逐步核對時請對照[工具紀錄勘誤](../docs/course-repair-20261008/tool-trace-errata.md)，它附有重建後的當時文字。
+[工具實驗紀錄（JSON）](../docs/course-experiments/results/tools.json)的每一步，`generation.input_ids` 才是模型當時真正收到的輸入；同一步的 `generation.messages` 有些混入了後來才產生的訊息，不能當成當時的輸入。逐步核對時請對照[工具紀錄勘誤](../docs/course-repair-20261008/tool-trace-errata.md)，它附有重建後的當時文字。
 
 </details>

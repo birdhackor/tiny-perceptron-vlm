@@ -22,10 +22,10 @@ Thinking effort, Looped Transformers, and Jev-style typed probabilistic judgment
 
 ## Setup
 
-Install [uv](https://docs.astral.sh/uv/getting-started/installation/) and [Git](https://git-scm.com/downloads) to obtain the project. Before cloning, run `git config --get filter.lfs.process`. If it prints `git-lfs filter-process`, your Git has Git LFS enabled for all repositories, and the `git clone` below also downloads every training data archive (currently about 328 MB in total). To get only the code, replace the first line with `GIT_LFS_SKIP_SMUDGE=1 git clone https://github.com/birdhackor/tiny-perceptron-vlm.git`; the Windows PowerShell form is in [W.1](course/first-steps.md#W.1). If it prints nothing, run the commands below as they are. For CPU exercises:
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/) and [Git](https://git-scm.com/downloads) to obtain the project. The training data archives are stored with Git LFS (a tool for storing large files with Git), and the `GIT_LFS_SKIP_SMUDGE=1` at the start of the first line below keeps the clone from downloading them. It only has an effect when Git LFS is enabled, so you can type it even without Git LFS installed. In Windows PowerShell, leave that prefix out: run `$env:GIT_LFS_SKIP_SMUDGE="1"` first, then `git clone https://github.com/birdhackor/tiny-perceptron-vlm.git`. For CPU exercises:
 
 ```bash
-git clone https://github.com/birdhackor/tiny-perceptron-vlm.git
+GIT_LFS_SKIP_SMUDGE=1 git clone https://github.com/birdhackor/tiny-perceptron-vlm.git
 cd tiny-perceptron-vlm
 uv sync --frozen --extra cpu --group notebook
 source .venv/bin/activate
