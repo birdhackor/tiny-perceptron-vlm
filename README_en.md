@@ -22,7 +22,7 @@ Thinking effort, Looped Transformers, and Jev-style typed probabilistic judgment
 
 ## Setup
 
-Install [uv](https://docs.astral.sh/uv/getting-started/installation/) and [Git](https://git-scm.com/downloads) to obtain the project. The training data archives are stored with Git LFS (a tool for storing large files with Git), and the `GIT_LFS_SKIP_SMUDGE=1` at the start of the first line below keeps the clone from downloading them. It only has an effect when Git LFS is enabled, so you can type it even without Git LFS installed. In Windows PowerShell, leave that prefix out: run `$env:GIT_LFS_SKIP_SMUDGE="1"` first, then `git clone https://github.com/birdhackor/tiny-perceptron-vlm.git`. For CPU exercises:
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/) and [Git](https://git-scm.com/downloads) to obtain the project. The training data archives are stored with Git LFS (a tool for storing large files with Git), and the `GIT_LFS_SKIP_SMUDGE=1` at the start of the first line below keeps the clone from downloading them. You can type it even without Git LFS installed. In Windows PowerShell, leave that prefix out: run `$env:GIT_LFS_SKIP_SMUDGE="1"` first, then `git clone https://github.com/birdhackor/tiny-perceptron-vlm.git`. For CPU exercises:
 
 ```bash
 GIT_LFS_SKIP_SMUDGE=1 git clone https://github.com/birdhackor/tiny-perceptron-vlm.git
