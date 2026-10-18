@@ -238,7 +238,7 @@ print(layer(recipes).tolist())
 
 下面先讓 PyTorch 自動算出導數，再試著調一次旋鈕，最後重新計算代價。輸入 `w=1`，目標固定為 3；`requires_grad=True` 要求工具記錄與 `w` 有關的運算，稍後才能沿著它們計算敏感度。tensor 的概念見 [W.3](#W.3)。
 
-算出導數只是知道方向，真正調整還需要一條規則：從目前的 w 減去「一個倍數乘梯度」，沿梯度相反方向走一小步。這個倍數叫**學習率**（learning rate），這裡選 0.1。`w -= 0.1 * w.grad` 就是這條更新規則的簡寫；`w.grad` 是工具存放此次導數的位置。梯度為負時，減去負數會讓 w 增加。更新放在 `torch.no_grad()` 中，暫時不把這次改參數記成求導運算。0.1 是本例的選擇，是否改善仍要看新的代價。
+算出導數只是知道方向，真正調整還需要一條規則：從目前的 w 減去「一個倍數乘梯度」，沿梯度相反方向走一小步。這個倍數叫**學習率**（learning rate，lr），這裡選 0.1。`w -= 0.1 * w.grad` 就是這條更新規則的簡寫；`w.grad` 是工具存放此次導數的位置。梯度為負時，減去負數會讓 w 增加。更新放在 `torch.no_grad()` 中，暫時不把這次改參數記成求導運算。0.1 是本例的選擇，是否改善仍要看新的代價。
 
 ```python
 import torch
@@ -299,7 +299,7 @@ print(w.item(), (w - 3).square().item())
 | `tiny_perceptron/natural_concepts.py` | [11.14](chapters/11.md#11.14)–11.16、[12.13](chapters/12.md#12.13)–12.14 |
 | `tiny_perceptron/selftrained/` | [12.15](chapters/12.md#12.15)、[19.2](chapters/19.md#19.2)–19.3、[19.5](chapters/19.md#19.5)–19.7、[19.9](chapters/19.md#19.9) |
 | `tiny_perceptron/posttraining.py` | [13.10](chapters/13.md#13.10)–13.11、[13.13](chapters/13.md#13.13)–13.15 |
-| `tiny_perceptron/lesson_products/` | [14.15](chapters/14.md#14.15)、[19.14](chapters/19.md#19.14)、[19.17](chapters/19.md#19.17) |
+| `tiny_perceptron/lesson_products/` | [14.15](chapters/14.md#14.15)、[19.14](chapters/19.md#19.14)–19.17 |
 | `tiny_perceptron/quantization.py` | [17.5](chapters/17.md#17.5)、[17.7](chapters/17.md#17.7)–17.9、[17.14](chapters/17.md#17.14) |
 | `tiny_perceptron/retrieval.py` | [A.3](chapters/0A.md#A.3)、[B.2](chapters/0B.md#B.2)、[B.4](chapters/0B.md#B.4) |
 
