@@ -218,7 +218,7 @@ print("保存隨機起點；沒有更新參數")
 | `text_foundation` | 9 篇顏色與形狀短文的文字訓練，600 次更新 | [text_foundation.json](../docs/course-experiments/results/text_foundation.json)，16.0 秒 |
 | `real_text` | TinyStories 與唐詩各自訓練 800 次 | [real_text.json](../docs/course-experiments/results/real_text.json)，23.9 秒 |
 | `tokenizer` | byte 與 BPE 兩種切詞各訓練 400 次 | [tokenizer.json](../docs/course-experiments/results/tokenizer.json)，16.2 秒 |
-| `sft` | 屬性問答 SFT 900 次，另含先預訓練再 SFT 的支線與 UltraChat 小型實跑 | [sft.json](../docs/course-experiments/results/sft.json)，31.7 秒 |
+| `sft` | 屬性問答 SFT 900 次，另含先練續寫再 SFT 的支線與 UltraChat 小型實跑 | [sft.json](../docs/course-experiments/results/sft.json)，31.7 秒 |
 
 沒有 NVIDIA GPU 時，可以把 `--device cuda` 改成 `--device cpu`，但 CPU 可行性未量測：能不能跑完、要多久都沒有紀錄。指定 `cuda` 而電腦沒有 CUDA 時，工具會直接停下，不會自動改用 CPU；這個工具也只接受 `cpu` 與 `cuda`，不支援 Apple 的 MPS。
 
