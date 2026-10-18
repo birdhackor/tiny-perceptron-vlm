@@ -6,9 +6,13 @@
 
 最簡單的讀法是直接打開[教材網站](https://birdhackor.github.io/tiny-perceptron-vlm/)，不必安裝任何東西。第 1 章起，各節程式的下方都附有用 CPU 實際執行的輸出，可以像讀書一樣從頭讀到尾。本課每節會先交代一個問題，再用小例子說明做法；程式不是需要全部背起來的答案，而是讓你核對「剛才的解釋是否真的會產生這個結果」。暖身各節也可按需閱讀：遇到清單就看 [W.2](#W.2)，遇到數字表的形狀就看 [W.3](#W.3)，不用先修完一套數學課才開始第 1 章。
 
-等某個數字引起好奇、想自己改了再跑，再打開那一節的 Notebook，也就是把正文和可執行程式放在同一份文件的工作頁。有兩種開法。第一種是在自己的電腦執行，步驟在本節下半段；下載的專案裡已經有每一節的 Notebook。頁尾的「下載本節 .ipynb」存下的也是同一份 Notebook，要放進專案資料夾裡才能在本機執行，因為它的第一個程式格會在專案裡找共用的程式。第二種是按頁尾的「在 Colab 開啟」，用 Google 的雲端服務打開同一份內容；這需要 Google 帳號，而且本課還沒有實測過 Colab 的雲端執行。在 Colab 要先跑第一個程式格（「準備本節的工具」），它會下載專案並安裝工具，等它完成才能使用後面的程式；若下載失敗，可以先讀網站正文，或改用本機方式。
+等某個數字引起好奇、想自己改了再跑，再打開那一節的 Notebook，也就是把正文和可執行程式放在同一份文件的工作頁。有兩種開法。第一種是在自己的電腦執行，步驟在本節下半段；下載的專案裡已經有每一節的 Notebook，放在 `notebooks/` 資料夾，直接開那裡的檔案即可。頁尾的「下載本節 .ipynb」存下的也是同一份 Notebook；它的第一個程式格會從檔案所在的資料夾往上層找專案的共用程式，下面的步驟也只從 `notebooks/` 資料夾開檔，所以下載的檔案要放進專案的 `notebooks/` 資料夾才能在本機執行。第二種是按頁尾的「在 Colab 開啟」，用 Google 的雲端服務打開同一份內容；這需要 Google 帳號，而且本課還沒有實測過 Colab 的雲端執行。在 Colab 要先跑第一個程式格（「準備本節的工具」），它會下載專案並安裝工具，等它完成才能使用後面的程式；若下載失敗，可以先讀網站正文，或改用本機方式。
 
-本機方式先準備 [uv](https://docs.astral.sh/uv/getting-started/installation/) 和 [Git](https://git-scm.com/install/)：uv 負責安裝與管理 Python 套件，Git 負責下載與管理專案檔案。安裝 Git 後在終端機執行 `git --version`，應顯示版本號。終端機是輸入指令的視窗；下列三行依序下載專案、進入專案資料夾、安裝 CPU 與 Notebook 所需工具。每行完成、回到可輸入狀態後再輸入下一行。
+本機方式先準備 [uv](https://docs.astral.sh/uv/getting-started/installation/) 和 [Git](https://git-scm.com/install/)：uv 負責安裝與管理 Python 套件，需要時也會自己下載合適版本的 Python，不必另外安裝；Git 負責下載與管理專案檔案。安裝 Git 後在終端機執行 `git --version`，應顯示版本號。終端機是輸入指令的視窗。
+
+下載專案之前先檢查一件事。本課的訓練資料包用 Git LFS（Git 處理大型檔案的擴充工具）保存；若你的 Git 已對所有專案啟用 Git LFS，`git clone` 會連同全部資料包一起下載，目前合計約 328 MB。執行 `git config --get filter.lfs.process`：沒有印出任何字，表示沒有啟用，照下面三行即可；印出 `git-lfs filter-process`，表示已經啟用，只想先取程式時，把第一行換成 `GIT_LFS_SKIP_SMUDGE=1 git clone https://github.com/birdhackor/tiny-perceptron-vlm.git`。Windows PowerShell 則先執行 `$env:GIT_LFS_SKIP_SMUDGE="1"`，再執行原本的第一行。
+
+下列三行依序下載專案、進入專案資料夾、安裝 CPU 與 Notebook 所需工具；`git clone` 會在終端機目前所在的資料夾裡建立 `tiny-perceptron-vlm` 資料夾。每行完成、回到可輸入狀態後再輸入下一行。
 
 ```bash
 git clone https://github.com/birdhackor/tiny-perceptron-vlm.git
@@ -16,9 +20,9 @@ cd tiny-perceptron-vlm
 uv sync --frozen --extra cpu --group notebook
 ```
 
-`uv sync` 根據專案的套件清單建立 `.venv`，這是只供本專案使用的工具箱。`--frozen` 採用已記錄的套件版本；`--extra cpu` 選 CPU 用的 PyTorch；`--group notebook` 加入開工作頁的工具。GPU 選擇另見 [環境說明](../docs/environment.md)，現在用 CPU 足夠做短實驗。下載和安裝需要網路。完成後可在本機 CPU 環境執行本書的小型示範程式；若需要下載新的專案版本、套件或實驗檔案，請保持網路連線。
+`uv sync` 根據專案的套件清單建立 `.venv`，這是只供本專案使用的工具箱。`--frozen` 採用已記錄的套件版本；`--extra cpu` 選 CPU 用的 PyTorch（本課做模型計算的套件）；`--group notebook` 加入開工作頁的工具。GPU 選擇另見 [環境說明](../docs/environment.md)，現在用 CPU 足夠做短實驗。下載和安裝需要網路。完成後可在本機 CPU 環境執行本書的小型示範程式；若需要下載新的專案版本、套件或實驗檔案，請保持網路連線。
 
-在 macOS 或 Linux 執行 `source .venv/bin/activate` 啟用工具箱；Windows PowerShell 執行 `.venv\Scripts\Activate.ps1`。啟用後，`python` 指向剛安裝的 Python 工具箱。不啟用也可以直接寫出工具箱裡 Python 的路徑：macOS 與 Linux 是 `.venv/bin/python`，Windows 是 `.\.venv\Scripts\python.exe`，其後的參數相同；[操作頁](training.md)的命令就用這種寫法。仍在專案資料夾內，接著執行：
+在 macOS 或 Linux 執行 `source .venv/bin/activate` 啟用工具箱；Windows PowerShell 執行 `.venv\Scripts\Activate.ps1`。啟用後，`python` 指向剛安裝的 Python 工具箱。仍在專案資料夾內，接著執行：
 
 ```bash
 python scripts/check_env.py
@@ -26,10 +30,15 @@ python -m ipykernel install --sys-prefix --name tiny-perceptron --display-name "
 jupyter lab notebooks
 ```
 
-<details>
-<summary>Windows PowerShell 擋下啟用腳本時</summary>
+也可以不啟用，直接寫出工具箱裡 Python 的路徑；這時第三行改由這個 Python 啟動 JupyterLab（在瀏覽器裡開工作頁的程式），寫成 `-m jupyterlab`。[操作頁](training.md)的命令就用這種寫法。Windows PowerShell 啟用時若出現含 `PSSecurityException` 的紅色錯誤，是系統的執行原則不允許執行 `Activate.ps1` 這類腳本，不表示工具箱沒有裝好，改用不啟用的寫法即可。macOS 與 Linux：
 
-如果 Windows PowerShell 在啟用時顯示「此系統上已停用指令碼執行」或 `PSSecurityException`，被擋住的是 `Activate.ps1` 啟用腳本，不表示 Python 工具箱沒有裝好。仍在專案資料夾內，改用以下三行，直接指定工具箱裡的 Python，不必先啟用；它們和上面三行做同樣的事：
+```bash
+.venv/bin/python scripts/check_env.py
+.venv/bin/python -m ipykernel install --sys-prefix --name tiny-perceptron --display-name "Tiny Perceptron"
+.venv/bin/python -m jupyterlab notebooks
+```
+
+Windows PowerShell：
 
 ```powershell
 .\.venv\Scripts\python.exe scripts/check_env.py
@@ -37,15 +46,13 @@ jupyter lab notebooks
 .\.venv\Scripts\python.exe -m jupyterlab notebooks
 ```
 
-</details>
-
-第一行檢查 Python 與 PyTorch 能否使用；看到 `compute` 那列為 `OK`（括號中的裝置名稱依電腦而異），且套件沒有「未安裝」或最後的紅色錯誤，就表示計算環境可以使用。第二行登記工作頁要用的執行環境，第三行啟動 JupyterLab，終端機會提供瀏覽器網址。開啟 `01/1.1.ipynb`，選 **Tiny Perceptron**，點進一個程式格並按 **Shift+Enter**。一個程式格叫 cell；負責執行程式格的程序叫 Notebook 執行程序（kernel），可想成工作桌：前面程式格取過的名字還留在桌上，後面的程式格才能使用。
+第一行檢查 Python 與 PyTorch 能否使用；看到 `compute` 那列為 `OK`（括號中的裝置名稱依電腦而異），且套件沒有「未安裝」或紅色錯誤訊息，就表示計算環境可以使用。第二行把工具箱登記成工作頁可以選用的執行環境，名稱叫 **Tiny Perceptron**。第三行啟動 JupyterLab，終端機會提供瀏覽器網址。JupyterLab 從 `notebooks` 資料夾開始列出檔案；在其中開啟 `01/1.1.ipynb`，選 **Tiny Perceptron**，點進一個程式格並按 **Shift+Enter**。一個程式格叫 cell；負責執行程式格的程序叫 Notebook 執行程序（kernel），可想成工作桌：前面程式格取過的名字還留在桌上，後面的程式格才能使用。
 
 因為工作桌會保留前面的結果，更改前面的輸入後，需要重跑依賴它的後續程式格；只跑最後一個程式格，可能仍使用舊資料。第一次開啟、或想檢查整份能否從零重現時，在 JupyterLab 選「Kernel → Restart Kernel and Run All Cells」，清空工作桌再由上到下跑；Colab 則在「執行階段」選單找「重新啟動工作階段並全部執行」（介面也可能稱重新啟動執行階段）。想動手的話，練習打開 [1.1 正文](chapters/01.md#1.1) 對應的工作頁，先執行一次，再把輸入那行 `text = "貓看狗，狗看貓。"` 改成 `text = "鳥看狗，狗看鳥。"`，重啟並全部執行。程式最後的文字輸出應為 `鳥看狗，狗看鳥。`，而非舊句；這就是要核對的還原結果。若看到紅色錯誤，先讀最後一行再查 [W.7](#W.7)，不要急著重裝所有工具。
 
-要試跑暖身中的短程式，可以在 JupyterLab 用工具列的「＋」新增程式格；Colab 則用上方「＋程式碼」。把暖身的整段程式貼入新的程式格，先跑完「準備本節的工具」那一格，再選新的程式格按 Shift+Enter。貼入時保留每行開頭的空格，它們可能是 Python 分辨重複動作範圍的縮排。
+要試跑暖身中的短程式，先開一節的 Notebook（例如 `01/1.1.ipynb`），跑完它的第一個程式格「準備本節的工具」，再用工具列的「＋」新增程式格；Colab 則用上方「＋程式碼」。把暖身的整段程式貼入新的程式格，按 Shift+Enter。貼入時保留每行開頭的空格，因為 Python 靠行首的縮排判斷哪幾行屬於同一段，例如迴圈要重複的那幾行（見 [W.2](#W.2)）。
 
-上面這些步驟都用不到 Git LFS。Git LFS 是 Git 處理大型檔案的擴充工具；本課只有固定的訓練資料包用它保存。只讀教材與跑各節短程式不需要它，要照[操作頁](training.md)下載訓練資料包時才需要：依 [Git LFS 官方指引](https://git-lfs.com/)安裝後，在終端機執行 `git lfs version`，應顯示 `git-lfs/` 開頭的版本號；再到專案根目錄執行一次 `git lfs install --local`，讓這個專案使用它。若你的 Git 早已全域啟用 Git LFS（執行過 `git lfs install`），上面的 `git clone` 會順便下載全部資料包，目前合計約 328 MB；只想先取程式，改照[資料包說明](../assets/training/README.md#取得資料)的方式 clone。
+上面這些步驟不需要安裝 Git LFS；只讀教材與跑各節短程式也不需要它，要照[操作頁](training.md)下載訓練資料包時才需要：依 [Git LFS 官方指引](https://git-lfs.com/)安裝後，在終端機執行 `git lfs version`，應顯示 `git-lfs/` 開頭的版本號；再到專案資料夾裡執行一次 `git lfs install --local`，讓這個專案使用它。
 
 ## W.2 看懂程式如何存取與重複資料
 
@@ -53,9 +60,9 @@ jupyter lab notebooks
 
 `animals = ["貓", "狗"]` 把右邊的清單取名為 `animals`。方括號表示清單（list），逗號分開其中的項目，引號表示文字。`=` 的意思是「讓這個名字指向右邊的結果」，不是數學課的等號。電腦從 0 開始編位置，所以 `animals[0]` 取出「貓」，`animals[1]` 取出「狗」。方括號放在名字後面時，就變成「取出某個位置」。這個位置編號叫索引（index）。
 
-字典（dictionary）則像貼好欄位名稱的表單。`record = {"animal": "貓", "caption": "貓在睡覺"}` 用大括號裝入兩個對應；冒號左邊的名字叫鍵（key），右邊是值（value）。`record["caption"]` 根據鍵取出說明，不是查清單的第幾項。鍵和值都可以是數字或文字，鍵在同一份字典裡不能重複。
+字典（dictionary）則像貼好欄位名稱的表單。`record = {"animal": "貓", "caption": "貓在睡覺"}` 用大括號裝入兩個對應；冒號左邊叫鍵（key），右邊是值（value）。`record["caption"]` 根據鍵取出說明，不是查清單的第幾項。鍵和值都可以是數字或文字，鍵在同一份字典裡不能重複。
 
-下面的輸入是兩個動物名稱和一筆記錄。`len` 計算項目數量；`print` 把括號中的結果顯示出來。先逐行執行，再觀察最後的迴圈怎麼重複同一個動作。
+下面的輸入是兩個動物名稱和一筆記錄。`len` 計算項目數量；`print` 把括號中的結果顯示出來。先把整段貼進程式格執行（做法見 [W.1](#W.1)），再觀察最後的迴圈怎麼重複同一個動作。
 
 ```python
 animals = ["貓", "狗"]
@@ -67,7 +74,7 @@ for animal in animals:
 assert len(animals) == 2
 ```
 
-前兩行輸出依序是 `貓 2` 和 `貓在睡覺`。`for animal in animals:` 每次從清單拿一項，暫時叫它 `animal`；下面縮排四格的 `print` 因而跑兩次，印出 `看到 貓`、`看到 狗`。冒號和縮排告訴 Python 哪些行屬於這個迴圈。`==` 是詢問兩邊是否相等，`assert` 是檢查這個問題的答案：成立就繼續，不成立就停下來顯示錯誤；通過時不會額外印出訊息。
+最先印出的兩行依序是 `貓 2` 和 `貓在睡覺`。`for animal in animals:` 每次從清單拿一項，暫時叫它 `animal`；下面縮排四格的 `print` 因而跑兩次，印出 `看到 貓`、`看到 狗`。冒號和縮排告訴 Python 哪些行屬於這個迴圈。`==` 是詢問兩邊是否相等，`assert` 是檢查這個問題的答案：成立就繼續，不成立就停下來顯示錯誤；通過時不會額外印出訊息。
 
 有時想重複使用一段做法，可以用 `def` 定義函式（function）。例如 `def first(items):` 下一行縮排寫 `return items[0]`，再用 `first(animals)` 呼叫，就會得到第一項；括號裡的材料是輸入，`return` 後面的結果是輸出。後面看見 `import torch` 時，意思是把名叫 `torch` 的工具箱載入，讓程式能使用其中的功能。這些工具會在需要時逐一介紹，現在只要分清「存資料、取資料、重複動作、呼叫做法」。
 
@@ -75,14 +82,14 @@ assert len(animals) == 2
 
 ### 本課會用到的 Python 寫法
 
-後面各章還會用到下面這些寫法。不必先背，讀到時忘了再回來查。右欄箭頭左邊是例子，右邊是在 Python 裡執行它得到的結果：引號包住的是文字，方括號是清單，小括號包住的一組值叫 tuple。
+後面各章還會用到下面這些寫法。不必先背，讀到時忘了再回來查。右欄箭頭左邊是例子，右邊是在 Python 裡執行它得到的結果：引號包住的是文字，方括號是清單，小括號包住的一組值叫 tuple。例子外面包的 `list(...)` 把逐項取出的結果收成清單，好一次看到全部內容；`max` 取出最大的一項，`sum` 把各項加總。
 
 | 寫法 | 白話 | 例子 → 結果 |
 | --- | --- | --- |
 | 切片 `[起:迄]` | 取出一段：從「起」那一項開始，停在「迄」之前；省略表示從頭或到尾，`-1` 表示最後一項 | `[5, 2, 7][:-1]` → `[5, 2]`；`[5, 2, 7][1:]` → `[2, 7]` |
 | `range(n)` | 依序產生 0 到 n−1 的整數，常配合 `for` 重複固定次數 | `list(range(3))` → `[0, 1, 2]` |
 | `set(...)` | 去掉重複，每種只留一個；不保證順序 | `len(set("貓狗貓"))` → `2` |
-| `sorted(...)` | 排好順序的新清單，原資料不變；文字依電腦的文字編碼排序；加 `reverse=True` 改成由大到小 | `sorted([3, 1, 2])` → `[1, 2, 3]`；`sorted([3, 1, 2], reverse=True)` → `[3, 2, 1]`；`sorted(set("貓狗貓"))` → `['狗', '貓']` |
+| `sorted(...)` | 排好順序的新清單，原資料不變；文字依每個字的 Unicode 編號由小到大排（「狗」是 29399、「貓」是 35987，見 [1.1](chapters/01.md#1.1)）；加 `reverse=True` 改成由大到小 | `sorted([3, 1, 2])` → `[1, 2, 3]`；`sorted([3, 1, 2], reverse=True)` → `[3, 2, 1]`；`sorted(set("貓狗貓"))` → `['狗', '貓']` |
 | `key=len`、`lambda` | `key=` 指定比較前先把每一項換成什麼；`lambda i: ...` 是當場寫的小函式，冒號左邊是輸入、右邊是輸出 | `max(["貓", "小花貓"], key=len)` → `'小花貓'`；`scores = [5, 9, 7]` 時，`max(range(3), key=lambda i: scores[i])` → `1` |
 | `zip(...)` | 把幾份清單按相同位置配成一組組 | `list(zip(["貓", "狗"], [3, 1]))` → `[('貓', 3), ('狗', 1)]` |
 | `dict(zip(...))` | 配好的兩兩一組直接變成字典：左邊當鍵、右邊當值 | `dict(zip(["貓", "狗"], [0, 1]))` → `{'貓': 0, '狗': 1}` |
@@ -90,10 +97,10 @@ assert len(animals) == 2
 | `reversed(...)` | 從最後一項往前逐項取出 | `list(reversed(["貓", "狗", "鳥"]))` → `['鳥', '狗', '貓']` |
 | `"".join(...)` | 把一串文字接成一段，引號裡是接縫 | `"".join(["貓", "看", "狗"])` → `'貓看狗'`；`"、".join(["貓", "狗"])` → `'貓、狗'` |
 | 生成式 `[... for ... in ...]` | 對每一項做同一件事，收成新清單；改用小括號時不先存成清單，需要時才逐項算出 | `[x * 2 for x in [1, 2, 3]]` → `[2, 4, 6]`；`sum(x * 2 for x in [1, 2, 3])` → `12` |
-| `next(...)` | 從逐項產生結果的來源取出下一項；配合生成式的 `if`，就是取第一個符合條件的值，找不到時改用第二個值（`None` 表示沒有值） | `next(x for x in [3, 8, 12] if x > 5)` → `8`；`next((x for x in [3] if x > 5), None)` → `None` |
+| `next(...)` | 從小括號生成式這類需要時才逐項算出的來源，取出下一個值；配合生成式的 `if`，就是取第一個符合條件的值，找不到時改用第二個值（`None` 表示沒有值） | `next(x for x in [3, 8, 12] if x > 5)` → `8`；`next((x for x in [3] if x > 5), None)` → `None` |
 | f 字串 | 字串前加 `f`，大括號裡的名字或算式會換成它的值 | `animal = "貓"` 時，`f"看到{animal}"` → `'看到貓'` |
 | `//` | 整數除法：只留整數的商，捨去餘數 | `7 // 2` → `3` |
-| `class` | 定義一種新的物件 | PyTorch 的模型零件都用它定義；[3.7](chapters/03.md#3.7) 第一次出現時才完整說明 |
+| `class` | 定義一種新的物件 | 本頁不舉例；PyTorch 的模型零件都用它定義，[3.7](chapters/03.md#3.7) 第一次用到時才完整說明 |
 
 `while`、`try`／`except` 與位元運算要寫成好幾行，放在下面一起執行：
 
@@ -265,16 +272,17 @@ print(w.item(), (w - 3).square().item())
 | --- | --- |
 | `course/chapters/` | 正文與短程式，依章節編號命名 |
 | `notebooks/` | 可操作的工作頁，例如 `01/1.1.ipynb` |
-| `tiny_perceptron/` | 共用 Python 零件；各檔的實作在哪一節講，見表下的對照 |
+| `tiny_perceptron/` | 共用 Python 零件；各檔的實作在哪一節講，見表下可展開的對照 |
 | `scripts/` | 環境檢查、資料製作、訓練與評估的入口 |
 | `data/` | 本機資料，通常不存入 Git |
-| `checkpoints/` | 儲存模型狀態的檔案，通常不存入 Git |
+| `checkpoints/` | 訓練時存下的檢查點（checkpoint）檔，見 [5.7](chapters/05.md#5.7)；通常不存入 Git |
 | `outputs/` | 報告、執行結果與網頁等產物 |
+| `.venv/` | `uv sync` 建立的工具箱（Python 與套件），不存入 Git |
 
 <details>
 <summary>tiny_perceptron 各檔在哪一節講實作</summary>
 
-下表依各檔第一次出現的閱讀順序排列，列出正文展示或說明該檔零件的小節。
+下表依各檔第一次出現的閱讀順序排列，列出節錄該檔程式、或點名該檔並說明其中零件的小節；只匯入來用的小節不列。
 
 | 檔案 | 在哪一節看到它的實作 |
 | --- | --- |
@@ -284,13 +292,15 @@ print(w.item(), (w - 3).square().item())
 | `tiny_perceptron/modern.py` | [4.4](chapters/04.md#4.4)、[14.1](chapters/14.md#14.1)–14.2、[15.11](chapters/15.md#15.11) |
 | `tiny_perceptron/model.py` | [4.5](chapters/04.md#4.5)–4.6、[5.2](chapters/05.md#5.2) |
 | `tiny_perceptron/training.py` | [5.6](chapters/05.md#5.6)–5.7 |
+| `tiny_perceptron/capstone.py` | [6.6](chapters/06.md#6.6) |
+| `tiny_perceptron/tokenization.py` | [6.6](chapters/06.md#6.6) |
 | `tiny_perceptron/alignment.py` | [8.8](chapters/08.md#8.8)、[9.10](chapters/09.md#9.10)、[13.3](chapters/13.md#13.3)、[13.5](chapters/13.md#13.5)、[18.8](chapters/18.md#18.8)–18.9 |
 | `tiny_perceptron/multimodal.py` | [10.1](chapters/10.md#10.1)–10.2、[10.5](chapters/10.md#10.5)、[10.7](chapters/10.md#10.7)–10.8、[12.1](chapters/12.md#12.1)、[12.6](chapters/12.md#12.6)、[12.8](chapters/12.md#12.8) |
 | `tiny_perceptron/natural_concepts.py` | [11.14](chapters/11.md#11.14)–11.16、[12.13](chapters/12.md#12.13)–12.14 |
+| `tiny_perceptron/selftrained/` | [12.15](chapters/12.md#12.15)、[19.2](chapters/19.md#19.2)–19.3、[19.5](chapters/19.md#19.5)–19.7、[19.9](chapters/19.md#19.9) |
 | `tiny_perceptron/posttraining.py` | [13.10](chapters/13.md#13.10)–13.11、[13.13](chapters/13.md#13.13)–13.15 |
+| `tiny_perceptron/lesson_products/` | [14.15](chapters/14.md#14.15)、[19.14](chapters/19.md#19.14)、[19.17](chapters/19.md#19.17) |
 | `tiny_perceptron/quantization.py` | [17.5](chapters/17.md#17.5)、[17.7](chapters/17.md#17.7)–17.9、[17.14](chapters/17.md#17.14) |
-| `tiny_perceptron/selftrained/` | [19.2](chapters/19.md#19.2)、[19.5](chapters/19.md#19.5)、[19.7](chapters/19.md#19.7) |
-| `tiny_perceptron/lesson_products/` | [19.14](chapters/19.md#19.14)、[19.17](chapters/19.md#19.17) |
 | `tiny_perceptron/retrieval.py` | [A.3](chapters/0A.md#A.3)、[B.2](chapters/0B.md#B.2)、[B.4](chapters/0B.md#B.4) |
 
 </details>
@@ -307,8 +317,8 @@ print(Path("pyproject.toml").exists())
 print(Path("tiny_perceptron").exists())
 ```
 
-第一行輸出依你電腦而不同。在專案根目錄執行時，後兩行應都是 `True`；若都是 `False`，先看第一行，確認是否站在別的資料夾。這比把所有路徑改成電腦上的絕對位置容易重現。若用終端機執行這段，先輸入 `python` 並按 Enter，看到 `>>>` 就進入 Python 互動模式；逐行貼上包含 `from pathlib import Path` 在內的程式，輸出會緊接在後。輸入 `exit()` 並按 Enter 可回到終端機指令模式，才能再用 `cd` 切換資料夾。練習先退出 Python，在專案根目錄輸入 `cd notebooks`，再輸入 `python` 進互動模式重跑這段。先預測 `pyproject.toml` 是否還會被找到；核對後用 `exit()` 退出，再 `cd ..` 回到上一層專案根目錄。只換起點，檔案本身仍存在。
+第一行輸出依你電腦而不同。在專案根目錄執行時，後兩行應都是 `True`；若都是 `False`，先看第一行，確認是否站在別的資料夾。這比把所有路徑改成電腦上的絕對位置容易重現。若用終端機執行這段，先照 [W.1](#W.1) 啟用工具箱，再輸入 `python` 並按 Enter，看到 `>>>` 就進入 Python 互動模式；逐行貼上包含 `from pathlib import Path` 在內的程式，輸出會緊接在後。輸入 `exit()` 並按 Enter 可回到終端機指令模式，才能再用 `cd` 切換資料夾。練習先退出 Python，在專案根目錄輸入 `cd notebooks`，再輸入 `python` 進互動模式重跑這段。先預測 `pyproject.toml` 是否還會被找到；核對後用 `exit()` 退出，再 `cd ..` 回到上一層專案根目錄。只換起點，檔案本身仍存在。
 
 紅色錯誤通常會列出哪個檔案、哪行程式，最後一行說明原因。`ModuleNotFoundError: No module named 'torch'` 表示現在的 Python 找不到工具；先確認 Notebook 選 **Tiny Perceptron**，或終端機已啟用 `.venv`，也可以直接用 `.venv/bin/python` 執行（見 [W.1](#W.1)）。`FileNotFoundError` 是找不到指定檔案，先查目前起點和檔名。`KeyError` 是字典中沒有那個鍵，可回看 [W.2](#W.2)。`IndexError` 是索引超出範圍。例如 `animals = ["貓", "狗"]` 從前面用 0、1 編號；取 `animals[2]` 是取第三項，就會超出範圍。`SyntaxError` 則先檢查括號、冒號與縮排。
 
-模型訓練的指令碼有些預設只檢查資料與流程。報告中的 `dry-run-no-weight-update` 表示這次沒有更新模型；依[操作配方](training.md)加上 `--train` 才正式訓練。不要只因看到報告檔就以為模型學過了。閱讀錯誤時也採同樣原則：指出程式實際做到了哪一步，再處理阻擋下一步的那個原因。
+模型訓練的指令碼有些預設只檢查資料與流程。這類命令最後印出的那行 JSON 是報告；其中的 `mode` 若是 `dry-run-no-weight-update`，表示這次沒有更新模型；依[操作配方](training.md)加上 `--train` 才正式訓練。不要只因看到報告就以為模型學過了。閱讀錯誤時也採同樣原則：指出程式實際做到了哪一步，再處理阻擋下一步的那個原因。

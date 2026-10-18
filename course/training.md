@@ -6,8 +6,8 @@
 
 - **在哪裡執行。** 這頁的命令都在本機的終端機執行，起點是有 `pyproject.toml` 的專案根目錄；它們不是 Notebook 的程式格，這頁也沒有對應的 Notebook。本課沒有在 Colab 實測過這些命令，請在自己的電腦上跑。第一次安裝請看 [W.1](first-steps.md#W.1)，檔案位置請看 [W.7](first-steps.md#W.7)。
 - **需要什麼。** 照 W.1 裝好 `.venv` 就能跑本機練習。用 `fetch_training_assets.py --asset` 下載資料包時需要 Git LFS，安裝與確認方式也在 W.1。命令寫 `--device cuda` 的固定配方需要 NVIDIA GPU，以及 CUDA 版的安裝（選擇見[環境說明](../docs/environment.md)）；沒有 NVIDIA GPU 時能否改用 CPU 跑完，各配方都未量測。下載公開模型需要連上 Hugging Face。
-- **Python 怎麼寫。** 命令一律寫成 `.venv/bin/python …`，直接使用專案工具箱裡的 Python，不必先啟用 `.venv`。Windows PowerShell 把這段路徑換成 `.venv\Scripts\python.exe`，其餘參數不變。沒寫 `--device` 的命令由工具自動選裝置：有 NVIDIA GPU 時用 CUDA，Apple Silicon 可能用 MPS，否則用 CPU；本課沒有在 MPS 上驗證整套訓練，想固定用 CPU 就加 `--device cpu`。
-- **要花多久。** 有作者實測紀錄的命令會寫出時間與硬體，數字取自實驗紀錄的 `elapsed_seconds`，只算實驗本身的訓練、評估與存檔，不含安裝、啟動與下載。沒有寫出時間的命令都沒有量測紀錄，各節的本機訓練會再註明「未量測」。`train.py` 的報告有 `seconds` 欄，可以記下你自己這次訓練迴圈花的秒數。
+- **Python 怎麼寫。** 命令一律寫成 `.venv/bin/python …`，直接使用專案工具箱裡的 Python，不必先啟用 `.venv`。Windows PowerShell 把這段路徑換成 `.\.venv\Scripts\python.exe`，其餘參數不變。沒寫 `--device` 的命令由工具自動選裝置：有 NVIDIA GPU 時用 CUDA，Apple Silicon 可能用 MPS，否則用 CPU；本課沒有在 MPS 上驗證整套訓練，想固定用 CPU 就加 `--device cpu`。
+- **要花多久。** 有作者實驗紀錄（JSON，這是機器可讀的完整結果）的命令會寫出時間與硬體，數字取自紀錄裡的 `elapsed_seconds`，只算實驗本身，不含安裝、啟動與下載。沒有寫出時間的命令都沒有量測紀錄，各節的本機訓練會再註明「未量測」。`train.py` 的報告有 `seconds` 欄，可以記下你自己這次訓練迴圈花的秒數。
 
 自己的報告和模型放在 `outputs/` 與 `checkpoints/`，不要用課程的歷史數字代替自己的結果。
 
@@ -123,7 +123,7 @@ mkdir -p outputs checkpoints
 .venv/bin/python -m scripts.course_experiments.run --experiment simple_models --device cpu
 ```
 
-作者在 Modal 雲端容器的 CPU 上跑過一次，`elapsed_seconds` 為 4.3 秒。結果在 `outputs/course-experiments/course-v1/simple_models/`；作者的結果與完整設定見[實驗紀錄（JSON）](../docs/course-experiments/results/simple_models.json)，這是機器可讀的完整結果。公開學生包只含推論所需狀態；精確接續原訓練所需的完整檔案，見[5.7](chapters/05.md#5.7)。
+作者在 Modal 雲端容器的 CPU 上跑過一次，`elapsed_seconds` 為 4.3 秒。結果在 `outputs/course-experiments/course-v1/simple_models/`；作者的結果與完整設定見[實驗紀錄（JSON）](../docs/course-experiments/results/simple_models.json)。公開學生包只含推論所需狀態；精確接續原訓練所需的完整檔案，見[5.7](chapters/05.md#5.7)。
 
 </details>
 
@@ -288,7 +288,7 @@ PKU-SafeRLHF 起步包標示 CC-BY-NC-4.0；它與本課原創盒子題的授權
 
 每條命令最後印出一份 JSON，依序確認三件事：
 
-1. **留出了什麼。** 留出題是報告裡的 `holdout`：不拿來更新參數，在這裡當驗證用，決定要不要接續下一步。圖片留出兩張藍色圖，方形、圓形各一張，圖形中心比置中的位置往右移 1 像素；同樣往右移的紅、綠圖仍在訓練裡，所以留出的是沒見過的「藍色加右移」組合。聲音留出 180 Hz 的低音與 1000 Hz 的高音。類別編號是方形 0、圓形 1，低音 0、高音 1。
+1. **留出了什麼。** 留出題不拿來更新參數，在這裡當驗證用，決定要不要接續下一步。圖片留出兩張藍色圖，方形、圓形各一張，圖形中心比置中的位置往右移 1 像素；同樣往右移的紅、綠圖仍在訓練裡，所以留出的是沒見過的「藍色加右移」組合。聲音留出 180 Hz 的低音與 1000 Hz 的高音。類別編號是方形 0、圓形 1，低音 0、高音 1。
 2. **這次真的訓練了。** 命令有 `--train`，`mode` 應為 `train`；若是 `dry-run-no-weight-update`，表示只檢查通路，尚未完成這次訓練。
 3. **留出題全對才接續。** `holdout_examples` 應為 2，`holdout_accuracy` 要等於 1；0.5 只是答對一題。存下的檔案存在，不能代替這項檢查。
 
@@ -343,7 +343,7 @@ PKU-SafeRLHF 起步包標示 CC-BY-NC-4.0；它與本課原創盒子題的授權
 
 自己的圖像紀錄可寫成 `{"image":"images/12.png","question":"read digits","answer":"12"}`，路徑相對 JSONL。這個局部工具會轉 RGB 並縮至 16×16，可能丟失細字；聲音入口要求非空、取樣率16kHz的單聲道檔案，即每秒保存16,000個聲音數字，不會自動重新取樣。取樣率不同於前面`--frequency`所設定的單音音高頻率，區別見[12.1](chapters/12.md#12.1)。輸入必須和模型學過的任務匹配。
 
-做數字圖的正常／空白／錯配對照，可用 `prepare_ocr.py` 產生資料，再以 `train.py --task vision` 訓練，並用 `evaluate_modal.py --ablation none`、`blank`、`shuffle` 檢查同一批題目。錯配報告的 `donor_row` 指出換入圖來源；它仍對原答案計分，要另外核對生成是否符合換入圖。完整欄位見[11.13](chapters/11.md#11.13)及 [OCR 實驗紀錄](../docs/course-experiments/results/ocr.json)。
+做數字圖的正常／空白／錯配對照，可用 `prepare_ocr.py` 產生資料，再以 `train.py --task vision` 訓練，並用 `evaluate_modal.py --ablation none`、`blank`、`shuffle` 檢查同一批題目。錯配報告的 `donor_row` 指出換入圖來源；它仍拿原圖的正確答案（`target`）計分，要另外核對生成是否符合換入圖。完整欄位見[11.13](chapters/11.md#11.13)及 [OCR 實驗紀錄（JSON）](../docs/course-experiments/results/ocr.json)。
 
 </details>
 
@@ -379,7 +379,7 @@ PKU-SafeRLHF 起步包標示 CC-BY-NC-4.0；它與本課原創盒子題的授權
 .venv/bin/python -m scripts.course_experiments.run --experiment dpo --device cuda
 ```
 
-作者在 Modal 的 NVIDIA L4 上的紀錄是 18.7 秒；改用 CPU 的可行性未量測。`dpo/` 保存策略模型、固定參考與偏好切分；`preference` 欄核對候選比較，`arithmetic` 欄核對實際生成，各自有分母。完整格式見 [DPO 實驗紀錄](../docs/course-experiments/results/dpo.json)。
+作者在 Modal 的 NVIDIA L4 上的紀錄是 18.7 秒；改用 CPU 的可行性未量測。`dpo/` 保存策略模型、固定參考與偏好切分；`preference` 欄核對候選比較，`arithmetic` 欄核對實際生成，各自有分母。完整格式見 [DPO 實驗紀錄（JSON）](../docs/course-experiments/results/dpo.json)。
 
 想逐步理解獎勵、價值模型與 PPO，可另跑獨立 CPU 選卡例子：
 
@@ -455,7 +455,7 @@ Looped Transformer 用不同輪數訓練的做法與比較方式，見[14.13–1
 
 推論先暖機，再在計時兩側等待 GPU 完成；保存多次抽樣與中位數。記錄提示長度、生成長度、精度、後端與工作範圍。訓練計時是否含反向傳播和更新，也要寫清楚。
 
-PyTorch已配置記憶體是交給張量的空間，不等於整張GPU用量。保存量測前基線、過程峰值與新增量；不要只比較新增量便宣稱整張卡節省同樣倍數。詳細操作見[16.1](chapters/16.md#16.1)與[效率實驗紀錄](../docs/course-experiments/results/efficiency.json)。
+PyTorch已配置記憶體是交給張量的空間，不等於整張GPU用量。保存量測前基線、過程峰值與新增量；不要只比較新增量便宣稱整張卡節省同樣倍數。詳細操作見[16.1](chapters/16.md#16.1)與[效率實驗紀錄（JSON）](../docs/course-experiments/results/efficiency.json)。
 
 FlashAttention是分塊安排注意力計算、減少中間表儲存與搬移的方法，見[16.9](chapters/16.md#16.9)。PyTorch的SDPA是呼叫這套注意力計算的介面，實際可能選不同後端，見[16.8](chapters/16.md#16.8)。要獨立核驗是否用了Flash實作，執行：
 
@@ -463,7 +463,7 @@ FlashAttention是分塊安排注意力計算、減少中間表儲存與搬移的
 .venv/bin/python -m scripts.course_experiments.run --experiment flash_probe --device cuda
 ```
 
-作者在 L4 上的紀錄是 4.5 秒。它只測固定Q/K/V的注意力前向計算與反向傳播；Q用來查詢、K供比較、V是混合的內容數字，見[3.4](chapters/03.md#3.4)，不訓練整個模型。報告的`results.verification_passed=true`只表示`supported_routes`至少有一條已核驗Flash後端的路線，而且這個集合內的路線都已完成；其他路線仍可能失敗。先查看各路線的`status`、後端核驗與數值容差，再以`results.schedule_completed`和`results.status`判讀整次探針是否完成，以及是否有不支援的路線。未執行或未完成時，先看原因，不據此聲稱使用成功。還要核對記憶體範圍，不能由SDPA這個API名稱推定已用Flash；完整條件在 [flash_probe 實驗紀錄](../docs/course-experiments/results/flash_probe.json)。
+作者在 L4 上的紀錄是 4.5 秒。它只測固定Q/K/V的注意力前向計算與反向傳播；Q用來查詢、K供比較、V是混合的內容數字，見[3.4](chapters/03.md#3.4)，不訓練整個模型。報告的`results.verification_passed=true`只表示`supported_routes`至少有一條已核驗Flash後端的路線，而且這個集合內的路線都已完成；其他路線仍可能失敗。先查看各路線的`status`、後端核驗與數值容差，再以`results.schedule_completed`和`results.status`判讀整次探針是否完成，以及是否有不支援的路線。未執行或未完成時，先看原因，不據此聲稱使用成功。還要核對記憶體範圍，不能由SDPA這個API名稱推定已用Flash；完整條件在 [flash_probe 實驗紀錄（JSON）](../docs/course-experiments/results/flash_probe.json)。
 
 </details>
 
@@ -542,7 +542,7 @@ for path in paths:
 .venv/bin/python -m scripts.course_experiments.run --experiment quantization --device cpu
 ```
 
-作者的紀錄是在 Modal 的 NVIDIA L4 上用 `--device cuda` 跑的，7.8 秒；照上面用 CPU 跑的時間未量測。這個配方另做120次更新才轉換，和上面的單獨 `quantize.py` 不同；不能互換成績。它保存浮點、4-bit、8-bit與共同題目，格式見[量化實驗紀錄](../docs/course-experiments/results/quantization.json)。[17.14](chapters/17.md#17.14)介紹QAT：讓訓練先適應模擬的量化誤差；真正的低位元 kernel（計算程式）仍需格式與硬體支援。
+作者的紀錄是在 Modal 的 NVIDIA L4 上用 `--device cuda` 跑的，7.8 秒；照上面用 CPU 跑的時間未量測。這個配方另做120次更新才轉換，和上面的單獨 `quantize.py` 不同；不能互換成績。它保存浮點、4-bit、8-bit與共同題目，格式見[量化實驗紀錄（JSON）](../docs/course-experiments/results/quantization.json)。[17.14](chapters/17.md#17.14)介紹QAT：讓訓練先適應模擬的量化誤差；真正的低位元 kernel（計算程式）仍需格式與硬體支援。
 
 </details>
 
@@ -585,7 +585,7 @@ for path in paths:
 <details>
 <summary>原始資料、教師與多模態路線</summary>
 
-完整教師、學生、對照與生成見[蒸餾實驗紀錄](../docs/course-experiments/results/distillation.json)，不同任務有各自分母，不用單一數字代表全部能力。
+完整教師、學生、對照與生成見[蒸餾實驗紀錄（JSON）](../docs/course-experiments/results/distillation.json)，不同任務有各自分母，不用單一數字代表全部能力。
 
 多模態蒸餾使用固定 `vqa` 與 `joint` 兩份教師，以及各自的原始切分。先完成[T.4](training.md#T.4)的固定 `sft`，再按[T.6](training.md#T.6)的固定配方完成 `encoders`、`projector`、`vqa`，接著在相容的 CUDA 環境依序執行：
 

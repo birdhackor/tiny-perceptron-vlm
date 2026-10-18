@@ -6,13 +6,13 @@
 
 **[線上教材](https://birdhackor.github.io/tiny-perceptron-vlm/) · [閱讀路線](course/README.md) · [操作與數學暖身](course/first-steps.md) · [全部小節](course/lessons.md) · [名詞頁](course/glossary.md) · [訓練操作](course/training.md)**
 
-教材預覽版：網站提供正文、SVG 圖解，以及每節程式在 CPU 上實際執行的輸出，可以直接當書讀，不必先安裝。想自己改程式再跑時，可以下載本節 `.ipynb` 依下方步驟在本機執行，或按頁尾的「在 Colab 開啟」開啟同一份 Notebook；有程式的 Notebook 會在第一個程式格準備專案與套件，小實驗不必先租 GPU。Colab 需要 Google 帳號，Colab 雲端執行尚未實機驗證。
+教材預覽版：網站提供正文、SVG 圖解，以及每節程式在 CPU 上實際執行的輸出，可以直接當書讀，不必先安裝；第一次讀從[1.1](course/chapters/01.md#1.1)開始。想自己改程式再跑時，照下方步驟把專案下載到自己的電腦，開啟同一節的 Notebook；或按網站每節頁尾的「在 Colab 開啟」開啟同一份 Notebook，有程式的 Notebook 會先在第一個程式格下載專案並安裝套件。小實驗不必先租 GPU。Colab 需要 Google 帳號，Colab 雲端執行尚未實機驗證。
 
 ![文字與識別編號的對照](course/figures/rewrite-01-character-ids.svg)
 
 ## 教材提供什麼
 
-20章與A／B延伸及C推理計算單元，共312份逐課Notebook；加上閱讀指南、暖身、訓練操作與名詞頁，共338個編號小節。前段只用小矩陣、接字表、MLP與手寫注意力；後段才加入多token預測（MTP）、現代架構、Dense／MoE、長上下文、cache／SDPA、量化與蒸餾。每節聚焦一個問題，可以回跳，也不必一路訓練同一個模型。
+20章與A／B延伸及C推理計算單元，共312份逐課Notebook；閱讀指南、暖身、訓練操作與名詞頁另有26個編號小節，合計338個編號小節。前段只用小矩陣、接字表、MLP與手寫注意力；後段才加入多token預測（MTP）、現代架構、Dense／MoE、長上下文、cache／SDPA、量化與蒸餾。每節聚焦一個問題，可以回跳，也不必一路訓練同一個模型。
 
 用幾個字看懂運作後，[7.17](course/chapters/07.md#7.17)解釋為什麼常先預訓練，再做後訓練；[第13章](course/chapters/13.md)逐步介紹偏好回饋、獎勵模型、PPO與DPO。指令遵循分開檢查內容、指定範圍、格式與停止；長上下文則分開討論容納長度、位置表示、計算成本與資訊使用。
 
@@ -20,13 +20,13 @@
 
 [第20章](course/chapters/20.md#20.1)是成熟模型的應用延伸：Qwen3-VL處理圖文，Whisper先把語音轉成文字。它另有[操作](docs/natural-assistant/v4/STUDENT.md)、[資料](docs/natural-assistant/v4/DATA.md)與[訓練](docs/natural-assistant/v4/TRAINING.md)指引。上游模型的能力與自行訓練主線分開驗收。
 
-第一次讀可以直接從[1.1](course/chapters/01.md#1.1)開始。Python、tensor、機率、矩陣與梯度有按需暖身；想自己改程式再跑時，再在本機或 Colab 開啟同一節 Notebook。各章的訓練命令集中在[操作頁](course/training.md)，來源與實測證據見[驗證範圍](docs/validation.md)。
+Python、tensor、機率、矩陣與梯度有[按需暖身](course/first-steps.md)。各章的訓練命令集中在[操作頁](course/training.md)，來源與實測證據見[驗證範圍](docs/validation.md)。
 
-Thinking effort（思考投入）、Looped Transformer（循環深度）及Jev式機率判斷已納入必修，分別見[7.23](course/chapters/07.md#7.23)、[14.11](course/chapters/14.md#14.11)與[9.11](course/chapters/09.md#9.11)。C.1–C.5接在第7章後。第19章擴成[三成品路線](course/chapters/19.md#19.13)：MoE 助理、有限文字的 Looped 解題器、獨立的機率判斷器，再接 Auto effort。Looped 解題器與機率判斷器已在 NVIDIA L4 完成訓練，設定凍結後才在測試資料上評估：Looped 解題器的兩盒追蹤答對 2928/2956、三數加法 2/42；機率判斷器在固定測試題的候選判斷上全對，但換一種說法就會出錯。固定下載與命令見[產品操作](docs/lesson-products/README.md)，完整分母、變化測試與限制見[19.20](course/chapters/19.md#19.20)。
+Thinking effort（思考投入）、Looped Transformer（循環深度）及Jev式機率判斷已納入必修，分別見[7.23](course/chapters/07.md#7.23)、[14.11](course/chapters/14.md#14.11)與[9.11](course/chapters/09.md#9.11)。C.1–C.5接在第7章後。第19章的[三個成品](course/chapters/19.md#19.13)是 MoE 助理、有限文字的 Looped 解題器與獨立的機率判斷器，使用者依任務選用；機率判斷器還能接到 Looped 解題器，先判斷題目是否支援、資訊是否齊全，再依規則選 Looped 解題器要跑的輪數，這叫 Auto effort（見[19.17](course/chapters/19.md#19.17)）。Looped 解題器與機率判斷器已在 NVIDIA L4 完成訓練，設定凍結後才在測試資料上評估：Looped 解題器的兩盒追蹤答對 2928/2956、三數加法 2/42；機率判斷器在固定測試題的候選判斷上全對，但換一種說法就會出錯。固定下載與命令見[產品操作](docs/lesson-products/README.md)，完整分母、變化測試與限制見[19.20](course/chapters/19.md#19.20)。
 
 ## 安裝與開啟 Notebook
 
-先安裝 [uv](https://docs.astral.sh/uv/getting-started/installation/) 與用來取得專案的[Git](https://git-scm.com/downloads)。CPU 閱讀與練習：
+先安裝 [uv](https://docs.astral.sh/uv/getting-started/installation/) 與用來取得專案的[Git](https://git-scm.com/downloads)。clone 之前先執行 `git config --get filter.lfs.process`：若印出 `git-lfs filter-process`，表示你的 Git 已對所有專案啟用 Git LFS，下面的 `git clone` 會連同全部訓練資料包（目前合計約 328 MB）一起下載；只想先取程式時，把第一行換成 `GIT_LFS_SKIP_SMUDGE=1 git clone https://github.com/birdhackor/tiny-perceptron-vlm.git`，Windows PowerShell 的寫法見[W.1](course/first-steps.md#W.1)。沒有印出任何字，就直接照下面執行。CPU 閱讀與練習：
 
 ```bash
 git clone https://github.com/birdhackor/tiny-perceptron-vlm.git
@@ -38,7 +38,9 @@ python -m ipykernel install --sys-prefix --name tiny-perceptron --display-name "
 jupyter lab notebooks
 ```
 
-Windows PowerShell 啟用指令是 `.venv\Scripts\Activate.ps1`。選擇 **Tiny Perceptron** kernel，先開啟 `notebooks/01/1.1.ipynb`。詳細操作見[暖身指南](course/first-steps.md)。只讀教材與跑各節短程式不需要 Git LFS；要下載訓練資料包時才需要，安裝與確認方式見[W.1](course/first-steps.md#W.1)。
+Windows PowerShell 啟用指令是 `.venv\Scripts\Activate.ps1`；不啟用的寫法見[W.1](course/first-steps.md#W.1)。JupyterLab 從 `notebooks` 資料夾列出檔案；選擇 **Tiny Perceptron** kernel，先開啟其中的 `01/1.1.ipynb`。詳細操作見[暖身指南](course/first-steps.md)。只讀教材與跑各節短程式不需要 Git LFS；要下載訓練資料包時才需要，安裝與確認方式見[W.1](course/first-steps.md#W.1)。
+
+上面的命令裝的是 CPU 用的 PyTorch，在 Apple Silicon 的 Mac 上也能用。要改用其他安裝選擇時，把 `uv sync` 那一行換成下表的寫法：
 
 | 環境 | 安裝選擇 |
 | --- | --- |
