@@ -84,11 +84,11 @@ uv run ruff check . && uv run ruff format .
    ```
 
    再用 `git ls-remote` 核對推上去的 hash 與原 repo 一致。
-2. 在有完整歷史、不是 partial clone 的暫存 clone 用 `git filter-repo` 預演（淺 clone 時 `tests/test_course_commit_pins.py` 會跳過祖先核對）：逐檔比對保留檔案的 blob 與 mode 不變，三道審閱檢查的輸出和改寫前相同。`tests/test_course_data_pins.py` 讀舊版本檔案的核對也要完整歷史，在淺 clone 與 partial clone 裡都會跳過。全套測試裡，這兩個檔核對釘選 commit 的測試，遇到被改寫的 commit 會失敗：頁面、JSON 與 `scripts/fetch_natural_data.py` 釘的還是舊 hash，暫存 clone 裡已經沒有這些 commit；其他測試的結果要和改寫前相同。再拿 `git filter-repo` 產生的 commit-map（`.git/filter-repo/commit-map`）裡每個舊 hash 搜尋整個工作樹，命中處不是出處紀錄的，換成對應的新 hash；對到 40 個 0 的是改寫後變空、被刪掉的 commit，不能照換，要改釘仍存在、而且那處讀取的檔內容相同的 commit；GitHub 可能暫時仍回應已改寫掉的 commit，某個 hash 還在不在，要用新 clone 的 `git show` 判斷。換過 hash 的檔若有 SHA-256 被別處引用（例如 `docs/selftrained/v2-manifest.json`），引用處（出處與審閱紀錄除外）也要換成新值，這兩個測試檔才會全部通過；改到模型卡範本 `docs/selftrained/model-cards/repository-README.md` 時，線上的卡片要另外重新發布，見[交接文件](docs/course-inline-code-20261017/HANDOFF.md)〈合併到 `main` 之前要決定的事〉的模型卡那一項。
+2. 在有完整歷史、不是 partial clone 的暫存 clone 用 `git filter-repo` 預演（淺 clone 時 `tests/test_course_commit_pins.py` 會跳過祖先核對）：逐檔比對保留檔案的 blob 與 mode 不變，三道審閱檢查的輸出和改寫前相同。`tests/test_course_data_pins.py` 讀舊版本檔案的核對也要完整歷史，在淺 clone 與 partial clone 裡都會跳過。全套測試裡，這兩個檔核對釘選 commit 的測試，遇到被改寫的 commit 會失敗：頁面、JSON 與 `scripts/fetch_natural_data.py` 釘的還是舊 hash，暫存 clone 裡已經沒有這些 commit；其他測試的結果要和改寫前相同。再拿 `git filter-repo` 產生的 commit-map（`.git/filter-repo/commit-map`）裡每個舊 hash 搜尋整個工作樹，命中處不是出處與審閱紀錄的，換成對應的新 hash；對到 40 個 0 的是改寫後變空、被刪掉的 commit，不能照換，要改釘仍存在、而且那處讀取的檔內容相同的 commit；GitHub 可能暫時仍回應已改寫掉的 commit，某個 hash 還在不在，要用新 clone 的 `git show` 判斷。換過 hash 的檔若有 SHA-256 被別處引用（例如 `docs/selftrained/v2-manifest.json`），引用處（出處與審閱紀錄除外）也要換成新值，這兩個測試檔才會全部通過；改到模型卡範本 `docs/selftrained/model-cards/repository-README.md` 時，線上的卡片要另外重新發布，見[交接文件](docs/course-inline-code-20261017/HANDOFF.md)〈合併到 `main` 之前要決定的事〉的模型卡那一項。
 
    換 hash 改到的檔若以 SHA-256 記在發布檢查核對的審閱紀錄裡（生效輪次的凍結紀錄，或現行工具重放的舊輪次紀錄；例如章檔與 Notebook、`docs/natural-assistant/v4/` 的文件、`docs/selftrained/v2-manifest.json`），三道審閱檢查會失敗，推送後 Publish course 也不會更新網站。這就是改了凍結檔；哪些檔光靠重新審閱解不開，見「凍結檔案」。
 3. 課文或 notebook 以 `git clone --branch <tag>` 引用的 tag 一起改寫並保留（可用 `git grep -n -e '--branch' -- course notebooks` 找出；目前是第 19 章的 `selftrained-v2`）。
-4. 推送時對每個 ref 用 `--force-with-lease=<ref>:<預期舊值>`，並加 `--atomic`。推完確認 Publish course 與 CI 通過，線上 `build-info.json` 的 `revision` 已更新。
+4. 推送前先照「凍結檔案」處理第 2 步改到的凍結檔；推送時對每個 ref 用 `--force-with-lease=<ref>:<預期舊值>`，並加 `--atomic`。推完確認 Publish course 與 CI 通過，線上 `build-info.json` 的 `revision` 已更新。
 5. 更新 [開發分支與歷史版本](docs/repository-archives.md)。
 
 原因：repo 內的紀錄以完整 hash 引用大量 commit；改寫後，這些 hash 只在封存 repo 有效。
