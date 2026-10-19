@@ -1,0 +1,242 @@
+diff --git a/docs/review-tools/baseline_replay.py b/docs/review-tools/baseline_replay.py
+index f87362dc..d09a04ca 100644
+--- a/docs/review-tools/baseline_replay.py
++++ b/docs/review-tools/baseline_replay.py
+@@ -135,9 +135,12 @@ def require_preserved_identity(tables, where, entry):
+ 
+ def checked_restores(root, supplements):
+     """A段：建立暫存目錄前，對三份清單的每一筆核對路徑形式、來源與重複；補充另核舊身分。"""
+-    freeze = json.loads((root / FREEZE).read_bytes())
++    # 驗證：兩份既有清單都經repo_file讀，清單本身與從repo根起的每一段上層都不是symlink、實際位置不離開repo，
++    # 而且是普通檔案；不符就在開檔之前拒絕，這時還沒建暫存目錄。
++    # 不涵蓋：清單內容與清單本身的SHA，這裡只管讀到的是repo內哪個檔；也不防檢查之後才被換掉的路徑。
++    freeze = json.loads(repo_file(root, FREEZE, "還原清單 " + FREEZE))
+     # 不另核overlay本身的SHA：要靠新manifest把它列進implementation才綁得住。
+-    overlay = json.loads((root / OVERLAY).read_bytes())
++    overlay = json.loads(repo_file(root, OVERLAY, "還原清單 " + OVERLAY))
+     listed = [
+         (f"{FREEZE} {kind}[{name!r}]", entry, False)
+         for kind in ("source_files", "criteria", "figures", "notebooks")
+@@ -166,17 +169,34 @@ def checked_restores(root, supplements):
+     return restores
+ 
+ 
++def checked_tracked_names(root):
++    """列出要複製進暫存樹的追蹤檔；建立暫存目錄前，先核對每個名稱的上層。"""
++    # 驗證：git ls-files每個名稱的上層從repo根起每一段都不是symlink、實際位置不離開repo，葉節點是symlink的名稱也一樣核；
++    # 同一個上層只核一次，全部核完才建暫存目錄，之後才有link或copy。
++    # 不涵蓋：葉節點本身；它在工作樹裡是symlink時，不論git記成symlink還是普通檔，都照舊複製連結本身、不核它指到哪裡，
++    # 暫存樹裡跟著它讀的程式可能讀到repo外。這個例外只適用於追蹤檔的複製；同一個檔被當作清單、還原來源或舊身分依據讀取時，
++    # 仍經repo_file核對。也不防檢查之後才被換掉的上層。
++    names = [name for name in subprocess.check_output(["git", "ls-files", "-z"], cwd=root).decode().split("\0") if name]
++    checked = set()
++    for name in names:
++        parent = PurePosixPath(name).parent.as_posix()
++        if parent not in checked:
++            no_redirect(root, parent, f"追蹤檔 {name!r} 的上層", "repo")
++            checked.add(parent)
++    return names
++
++
+ def replay(root=ROOT, supplements=()):
+     root = Path(root).resolve()
+     restores = checked_restores(root, supplements)
++    names = checked_tracked_names(root)
+     # 驗證：outputs/review-baseline-replay與它在repo內的每一段上層都不是symlink，暫存樹不會建到repo外。
+     # 不涵蓋：之後才被換掉的路徑；暫存樹建好後會連同暫存目錄再核一次。
+     cache = no_redirect(root, CACHE, "重放暫存根", "repo")
+     cache.mkdir(parents=True, exist_ok=True)
+     with tempfile.TemporaryDirectory(prefix="immutable-baseline-", dir=cache) as folder:
+         target = Path(folder)
+-        names = subprocess.check_output(["git", "ls-files", "-z"], cwd=root).decode().split("\0")
+-        for name in filter(None, names):
++        for name in names:
+             source, destination = root / name, target / name
+             if not source.exists():
+                 continue
+@@ -203,7 +223,9 @@ def replay(root=ROOT, supplements=()):
+             if destination.exists() or destination.is_symlink():
+                 destination.unlink()
+             destination.write_bytes(raw)
+-        # 重放執行的是現行root的composite_review與它載入的程式；它們與舊契約不相容時，還原清單補不回來。
++        # 重放執行的是現行root的composite_review與它再載入的程式；它們與舊契約不相容時，還原清單補不回來。
++        # 不涵蓋：這些程式碼載入時都不核路徑；SHA核對都在載入之後，擋不住已執行的程式改變判定。
++        # 驗證程式可信、只讀，是重放的前提。
+         spec = importlib.util.spec_from_file_location(
+             "preserved_composite", root / "docs/review-tools/composite_review.py"
+         )
+diff --git a/tests/test_incremental_revision_review.py b/tests/test_incremental_revision_review.py
+index 1c3a80e1..0a0361b9 100644
+--- a/tests/test_incremental_revision_review.py
++++ b/tests/test_incremental_revision_review.py
+@@ -1,7 +1,9 @@
+ """審閱閘門遇到遺漏、改檔與假順序必須拒絕；此處全是虛構測試資料。"""
+ 
++import builtins
+ import hashlib
+ import importlib.util
++import io
+ import json
+ import os
+ import re
+@@ -714,6 +716,160 @@ def test_redirect_hidden_from_is_symlink_is_still_caught_by_its_real_location(tm
+     assert replay_tool.no_redirect(base, "plain/x.txt", "標籤", "暫存目錄") == base / "plain/x.txt"
+ 
+ 
++@pytest.fixture
++def opened_files(monkeypatch):
++    """記下經內建open或io.open以路徑開啟的每個檔的實際位置，才看得到拒絕之前有沒有讀過外部檔。"""
++    opened = []
++    original = io.open
++
++    def recording(file, *args, **kwargs):
++        if isinstance(file, (str, bytes, os.PathLike)):
++            opened.append(Path(os.path.realpath(os.fsdecode(file))))
++        return original(file, *args, **kwargs)
++
++    monkeypatch.setattr(io, "open", recording)
++    monkeypatch.setattr(builtins, "open", recording)
++    # Path.read_bytes必須經過這裡；哪天不經過，記錄會是空的，用到它的斷言就白白通過。
++    Path(__file__).read_bytes()
++    assert opened == [Path(os.path.realpath(__file__))]
++    opened.clear()
++    return opened
++
++
++@pytest.mark.parametrize("linked", ["list", "parent"])
++@pytest.mark.parametrize("name", [FREEZE, OVERLAY], ids=["freeze", "overlay"])
++def test_existing_restore_list_behind_a_symlink_is_rejected_before_it_is_opened(
++    baseline, kept_trees, opened_files, name, linked
++):
++    # 清單本身或它的上層目錄搬到repo外，再用symlink接回；外部檔是同一份合法JSON，照舊直接讀的實作會接受它。
++    require_symlinks(baseline.repo.parent)
++    redirected = name if linked == "list" else name.rsplit("/", 1)[0]
++    moved = baseline.outside / "moved"
++    (baseline.repo / redirected).rename(moved)
++    (baseline.repo / redirected).symlink_to(moved, target_is_directory=linked == "parent")
++    with pytest.raises(ValueError, match=exactly(f"還原清單 {name} 經過 symlink：{redirected!r}")):
++        replay_tool.replay(baseline.repo)
++    outside = Path(os.path.realpath(baseline.outside))
++    assert [path for path in opened_files if path.is_relative_to(outside)] == []
++    assert_no_replay_tree(baseline, kept_trees)
++
++
++@pytest.mark.parametrize("branch", ["hardlink", "copy"])
++@pytest.mark.parametrize(
++    ("redirected", "first"), [("scripts", "scripts/fetch.py"), ("lib/nested", "lib/nested/inner.txt")]
++)
++def test_tracked_directory_redirected_outside_is_rejected_before_any_source_is_linked_or_copied(
++    baseline, monkeypatch, redirected, first, branch
++):
++    # 追蹤的普通目錄搬到repo外再用symlink接回，外部內容與原檔相同。
++    # lib/a.txt排在lib/nested/inner.txt之前：已核過的上層lib不能讓下一層的lib/nested跟著免核。
++    require_symlinks(baseline.repo.parent)
++    save(baseline.repo, "lib/a.txt", b"lib top\n", raw=True)
++    save(baseline.repo, "lib/nested/inner.txt", b"lib nested\n", raw=True)
++    baseline.track()
++    moved = baseline.outside / "moved"
++    (baseline.repo / redirected).rename(moved)
++    (baseline.repo / redirected).symlink_to(moved, target_is_directory=True)
++    sources = []
++    link, copy = replay_tool.os.link, replay_tool.shutil.copy2
++
++    def recording_link(source, destination, *args, **kwargs):
++        sources.append(source)
++        if branch == "copy":
++            raise OSError("hard link refused by test")
++        return link(source, destination, *args, **kwargs)
++
++    def recording_copy(source, destination, *args, **kwargs):
++        sources.append(source)
++        return copy(source, destination, *args, **kwargs)
++
++    monkeypatch.setattr(replay_tool.os, "link", recording_link)
++    monkeypatch.setattr(replay_tool.shutil, "copy2", recording_copy)
++    with pytest.raises(ValueError, match=exactly(f"追蹤檔 {first!r} 的上層 經過 symlink：{redirected!r}")):
++        replay_tool.replay(baseline.repo)
++    repo = Path(os.path.realpath(baseline.repo))
++    assert [source for source in sources if not Path(os.path.realpath(source)).is_relative_to(repo)] == []
++
++
++# 從links/指回上一層AGENTS.md的相對target。Windows不把相對target裡的/當分隔符，那樣建的連結指不到檔，
++# 所以用os.path.join組成各平台自己的分隔符。
++AGENTS_FROM_LINKS = os.path.join("..", "AGENTS.md")
++
++
++class RecordingModule:
++    """代替重放模組裡的os或shutil：列出的函式先記下第一個引數再照原樣呼叫，其餘屬性照舊取自原模組。
++
++    只換重放模組自己用的名稱；全域換掉os.readlink，連os.path.realpath內部的呼叫也會被記到。
++    """
++
++    def __init__(self, module, calls, *names):
++        self.module = module
++        for name in names:
++            setattr(self, name, self.recording(getattr(module, name), calls))
++
++    @staticmethod
++    def recording(function, calls):
++        def call(path, *args, **kwargs):
++            calls.append(path)
++            return function(path, *args, **kwargs)
++
++        return call
++
++    def __getattr__(self, name):
++        return getattr(self.module, name)
++
++
++@pytest.mark.parametrize("mirrored", [True, False], ids=["target_mirrored_outside", "target_missing_outside"])
++def test_tracked_symlink_alone_in_a_redirected_folder_is_rejected_by_its_parent_check(
++    baseline, kept_trees, monkeypatch, mirrored
++):
++    # links/裡只有一個追蹤中的symlink，沒有普通檔先替它觸發上層檢查：葉節點是symlink的名稱也要核上層。
++    # links/整個搬到repo外再用symlink接回後，指回上一層AGENTS.md的相對連結改指向外部那一層；
++    # 一個案例在那裡放同內容的AGENTS.md，另一個案例沒有，連結指不到檔，只核存在的名稱的實作會跳過它。
++    require_symlinks(baseline.repo.parent)
++    save(baseline.repo, "AGENTS.md", b"agents current\n", raw=True)
++    (baseline.repo / "links").mkdir()
++    (baseline.repo / "links/CLAUDE.md").symlink_to(AGENTS_FROM_LINKS)
++    baseline.track()
++    require_tracked_symlink(baseline, "links/CLAUDE.md")
++    if mirrored:
++        save(baseline.outside, "AGENTS.md", b"agents current\n", raw=True)
++    moved = baseline.outside / "moved"
++    (baseline.repo / "links").rename(moved)
++    (baseline.repo / "links").symlink_to(moved, target_is_directory=True)
++    calls = []
++    monkeypatch.setattr(replay_tool, "os", RecordingModule(os, calls, "link", "readlink"))
++    monkeypatch.setattr(replay_tool, "shutil", RecordingModule(shutil, calls, "copy2"))
++    with pytest.raises(ValueError, match=exactly("追蹤檔 'links/CLAUDE.md' 的上層 經過 symlink：'links'")):
++        replay_tool.replay(baseline.repo)
++    # 看上層的實際位置：os.readlink不跟著葉節點走，link與copy收到的葉節點不是symlink。
++    repo = Path(os.path.realpath(baseline.repo))
++    assert [path for path in calls if not Path(os.path.realpath(Path(path).parent)).is_relative_to(repo)] == []
++    assert_no_replay_tree(baseline, kept_trees)
++
++
++@pytest.mark.parametrize(
++    ("link", "target"),
++    [("CLAUDE.md", "AGENTS.md"), ("links/CLAUDE.md", AGENTS_FROM_LINKS)],
++    ids=["root", "alone_in_folder"],
++)
++def test_tracked_file_symlink_is_still_copied_as_a_link_and_the_replay_passes(baseline, kept_trees, link, target):
++    # 比照根目錄的CLAUDE.md：追蹤中的檔案symlink指向repo內的檔，暫存樹裡照樣是同一個連結。
++    # 根目錄的CLAUDE.md排在AGENTS.md之後；連葉節點一起核、每個上層又只核第一個檔的實作會跳過它。
++    # links/裡只有這個連結，那種實作一定會核到它。
++    require_symlinks(baseline.repo.parent)
++    save(baseline.repo, "AGENTS.md", b"agents current\n", raw=True)
++    (baseline.repo / link).parent.mkdir(parents=True, exist_ok=True)
++    (baseline.repo / link).symlink_to(target)
++    baseline.track()
++    require_tracked_symlink(baseline, link)
++    result = replay_tool.replay(baseline.repo)
++    assert result["failures"] == []
++    (tree,) = kept_trees
++    assert (tree / link).is_symlink()
++    assert os.readlink(tree / link) == target
++
++
+ ALIAS_COUNT = "重放基準 archive_index 裡 original_path 等於 freeze01 引用的項目有 {} 筆，必須恰好一筆：" + repr(
+     FREEZE01_ORIGINAL
+ )
