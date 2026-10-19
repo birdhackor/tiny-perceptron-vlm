@@ -172,6 +172,15 @@ def notebook(section_id, title, body, source):
     }
 
 
+def repo_relative(path, root):
+    """回傳 path 相對於 root、以 / 分隔的路徑。
+
+    lesson-index.json 與 lessons.md 已提交進 Git，網站與 Colab 網址、scripts/check_site.py 的比對也用這些字串，
+    所以每個作業系統都要寫出同一個字串；str(Path) 在 Windows 上會寫成反斜線。
+    """
+    return path.relative_to(root).as_posix()
+
+
 def build(check=False):
     index, stale = [], []
     sources = (ROOT / "course/chapters").glob("*.md")
@@ -192,8 +201,8 @@ def build(check=False):
                 {
                     "id": section_id,
                     "title": title,
-                    "source": str(source.relative_to(ROOT)),
-                    "notebook": str(target.relative_to(ROOT)),
+                    "source": repo_relative(source, ROOT),
+                    "notebook": repo_relative(target, ROOT),
                 }
             )
     if not index:

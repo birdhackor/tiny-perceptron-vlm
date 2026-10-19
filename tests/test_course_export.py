@@ -3,7 +3,7 @@
 import copy
 import json
 from html.parser import HTMLParser
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 import pytest
 
@@ -222,16 +222,6 @@ def test_download_and_colab_are_equal_buttons_with_the_links_the_site_check_expe
     assert [download["class"], colab["class"]] == ["md-button", "md-button"]
 
 
-def test_footer_links_use_slashes_when_the_index_was_built_on_windows(make_notebook):
-    # build_course 在 Windows 上把 notebook 路徑寫成反斜線；頁尾的兩個網址仍要用 /。
-    windows_item = {**ITEM, "notebook": ITEM["notebook"].replace("/", "\\")}
-    download, colab = anchors_of(section_footer(windows_item, make_notebook(CODE), "abc123", True))
-    assert download["href"] == ITEM["notebook"]
-    assert colab["href"] == (
-        f"https://colab.research.google.com/github/{export_course.REPOSITORY}/blob/abc123/{ITEM['notebook']}"
-    )
-
-
 COURSE_FILES = {
     "course/chapters/01.md": (
         "# 第 1 章\n\n導言。\n\n"
@@ -253,14 +243,19 @@ COURSE_FILES = {
 }
 
 
-def build_fake_site(root, monkeypatch, executed):
-    """在假的課程根目錄建置三節（有程式、只有文字、只有圖解），回傳各節產生的 Markdown 頁面。"""
+def build_fake_course(root, monkeypatch):
+    """在假的課程根目錄寫入三節（有程式、只有文字、只有圖解），用 build_course 產生 Notebook、索引與小節表。"""
     for relative, text in COURSE_FILES.items():
         path = root / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8", newline="\n")
     monkeypatch.setattr(build_course, "ROOT", root)
     build_course.build()
+
+
+def build_fake_site(root, monkeypatch, executed):
+    """在假的課程根目錄建置三節（有程式、只有文字、只有圖解），回傳各節產生的 Markdown 頁面。"""
+    build_fake_course(root, monkeypatch)
     executed_root = None
     if executed:
         executed_root = root / "outputs/notebooks"
@@ -305,3 +300,35 @@ def test_the_published_footer_claims_outputs_only_for_a_build_with_executed_note
     executed = build_fake_site(tmp_path / "executed", monkeypatch, executed=True)
     assert "輸出" in note_of(executed["1.1"]) and "輸出" not in note_of(plain["1.1"])
     assert note_of(executed["1.2"]) == note_of(plain["1.2"])
+
+
+# ---- 索引與小節表裡的路徑 ----------------------------------------------------------------------------------------
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_index_paths_use_slashes_even_for_windows_paths():
+    # PureWindowsPath 在任何作業系統上都照 Windows 的規則；對它取 str() 會得到反斜線。
+    root = PureWindowsPath(r"C:\Users\student\tiny-perceptron-vlm")
+    assert build_course.repo_relative(root / r"course\chapters\01.md", root) == "course/chapters/01.md"
+    assert build_course.repo_relative(root / r"notebooks\01\1.1.ipynb", root) == "notebooks/01/1.1.ipynb"
+
+
+def test_rebuilt_index_and_lesson_table_use_the_slash_paths_of_the_committed_files(tmp_path, monkeypatch):
+    # 主機的路徑寫法只有在 Windows 上跑這條時才看得到；轉換本身由
+    # test_index_paths_use_slashes_even_for_windows_paths 在每個作業系統上核對。
+    committed = {
+        item["id"]: item
+        for item in json.loads((REPOSITORY_ROOT / "course/lesson-index.json").read_text(encoding="utf-8"))
+    }
+    committed_table = (REPOSITORY_ROOT / "course/lessons.md").read_text(encoding="utf-8")
+    build_fake_course(tmp_path, monkeypatch)
+    rebuilt = json.loads((tmp_path / "course/lesson-index.json").read_text(encoding="utf-8"))
+    table = (tmp_path / "course/lessons.md").read_text(encoding="utf-8")
+    assert [item["id"] for item in rebuilt] == ["1.1", "1.2", "1.3"]
+    for item in rebuilt:
+        expected = {"source": "course/chapters/01.md", "notebook": f"notebooks/01/{item['id']}.ipynb"}
+        assert {key: item[key] for key in expected} == expected
+        assert {key: committed[item["id"]][key] for key in expected} == expected
+        for link in (f"[閱讀](../{expected['source']}#{item['id']})", f"[開啟](../{expected['notebook']})"):
+            assert link in table and link in committed_table
