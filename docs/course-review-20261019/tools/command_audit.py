@@ -12,13 +12,15 @@
 import argparse
 import hashlib
 import json
-import os
+import posixpath
 import re
 import shlex
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 
 ROOT = Path(__file__).resolve().parents[3]
+# 讀者 session 在這個 repo 的 POSIX shell 裡執行，命令裡的絕對路徑以它為根。
+SESSION_ROOT = ROOT.as_posix()
 FORBIDDEN_TOP = ("course/", "notebooks/", "scripts/", "tiny_perceptron/", "tests/")
 FORBIDDEN_IN_CODE = re.compile(r"(?<![\w.-])(?:course|notebooks|scripts|tiny_perceptron|tests)/")
 HISTORY = {"log", "show", "diff", "grep", "blame", "cat-file", "ls-files", "ls-tree", "rev-list"}
@@ -84,20 +86,22 @@ def simple_commands(text):
     return groups
 
 
-def path_token(token):
+def path_token(token, root):
     """命令裡像路徑的字：回傳 ("repo", repo 相對路徑)、("outside", 原字) 或 None（不是路徑）。
 
+    路徑照 POSIX 解讀，與稽核在哪個作業系統上跑無關；root 是 session 裡的 repo 根目錄。
     含空白、引號或大括號的字當成資料（例如寫進 checkpoint 的 JSON），不是路徑。
     """
     text = token.split("=", 1)[1] if token.startswith("--") and "=" in token else token
     if "/" not in text or any(ch in text for ch in " \t\n{}\"'"):
         return None
     # 不解析符號連結：.venv/bin/python 連到 repo 外的 Python，但命令寫的是 repo 內的路徑。
-    candidate = Path(os.path.normpath(text if text.startswith("/") else ROOT / text))
-    try:
-        return "repo", candidate.relative_to(ROOT).as_posix()
-    except ValueError:
-        return "outside", text
+    candidate = posixpath.normpath(posixpath.join(root, text))
+    if candidate == root:
+        return "repo", "."
+    if candidate.startswith(root + "/"):
+        return "repo", candidate[len(root) + 1 :]
+    return "outside", text
 
 
 class ReaderPolicy:
@@ -173,7 +177,7 @@ class ReaderPolicy:
         return findings
 
 
-def audit(policy, logs, rollouts):
+def audit(policy, logs, rollouts, root=SESSION_ROOT):
     commands, searches, images = [], [], []
     for log in logs:
         for event in events(log):
@@ -196,7 +200,7 @@ def audit(policy, logs, rollouts):
                 for word in words[1:]:
                     if word == policy.task:
                         continue
-                    found = path_token(word)
+                    found = path_token(word, root)
                     if found is None:
                         continue
                     kind, path = found
@@ -215,7 +219,7 @@ def audit(policy, logs, rollouts):
                 continue
             code = body.get("input") or ""
             for raw in VIEW_IMAGE.findall(code):
-                found = path_token(json.loads(f'"{raw}"'))
+                found = path_token(json.loads(f'"{raw}"'), root)
                 path = found[1] if found else raw
                 level = None if path in policy.pngs else "violation"
                 images.append({"at": event.get("timestamp"), "path": path, "level": level})
