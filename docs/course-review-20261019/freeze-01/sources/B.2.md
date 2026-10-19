@@ -1,0 +1,75 @@
+## B.2 文字怎麼變成有效呼叫？
+
+模型生成了一段 JSON：工具 add，參數 a＝2、b＝3。外層程式先把文字讀成欄位，這叫**解析**；再依工具規則核對內容，這叫**驗證**；兩關都通過才執行。解析只確認結構讀得出來，驗證才確認內容被允許：一份格式完整的 `delete_all` 請求解析得出來，但它不在本例允許的工具清單裡。
+
+本例只允許 add 與 multiply；最外層只能有 `name`、`arguments` 兩個欄位，參數只能有數字 a、b。允許的工具名稱清單叫 **allowlist**（允許清單）；事先規定請求要有哪些欄位、每個欄位是什麼型別，這份規定叫 **schema**。下面把三份請求交給課程函式庫的 `call_tool`：
+
+```python
+from tiny_perceptron.retrieval import call_tool
+
+requests = [
+    '{"name":"add","arguments":{"a":2,"b":3}}',
+    '{"name":"delete_all","arguments":{"a":2,"b":3}}',
+    '{"name":"add","arguments":{"a":true,"b":3}}',
+]
+for text in requests:
+    try:
+        print("結果", call_tool(text))
+    except ValueError as error:
+        print("拒絕", error)
+```
+
+第一份真的算出 5；第二份是未知工具，被拒絕；第三份的 a 是 JSON 的 `true`，也被拒絕。`try` 底下的呼叫若丟出 `ValueError`，程式就跳到 `except`，印出拒絕的理由（`try`／`except` 見 [W.2](../first-steps.md#W.2)）。`call_tool` 的原始碼如下，原始碼檔案開頭有 `import json`：
+
+```python
+# 節錄自 tiny_perceptron/retrieval.py：call_tool
+def call_tool(request):
+    if isinstance(request, str):
+        request = json.loads(request)
+    if set(request) != {"name", "arguments"} or request["name"] not in ("add", "multiply"):
+        raise ValueError("只接受 add/multiply 與明確 arguments")
+    args = request["arguments"]
+    if not isinstance(args, dict) or set(args) != {"a", "b"}:
+        raise ValueError("arguments 需要且只接受 a、b")
+    if any(type(v) not in (int, float) for v in args.values()):
+        raise ValueError("a、b 必須是數字，bool 或程式字串都不接受")
+    a, b = args["a"], args["b"]
+    return a + b if request["name"] == "add" else a * b
+```
+
+`isinstance(request, str)` 問「收到的是不是字串」：是的話先用 `json.loads` 把 JSON 文字解析成 Python 字典；已經是字典（[B.3](0B.md#B.3) 會這樣用）就直接往下。接著是三道驗證，每道不通過都用 `raise ValueError(...)` 丟出錯誤並停止，括號裡的文字就是上面印出的拒絕理由。
+
+第一道：`set(request)` 取出字典所有的鍵（`set` 見 W.2），必須恰好是 `{"name", "arguments"}`，多一個或少一個欄位都不行；`request["name"] not in ("add", "multiply")` 要求名稱在允許清單裡。第二道：`arguments` 必須是字典，而且只有 a、b 兩個鍵。第三道：`args.values()` 取出所有參數值；`any(...)` 括號裡的 `type(v) not in (int, float) for v in args.values()` 是生成式（見 W.2）：讓 v 依次是每個參數值，逐一檢查；只要有一項成立，`any` 就是 True。`type(v)` 是值的確切型別；只要有一個參數的型別不是 int 或 float，就拒絕。三道都通過後，`a, b = args["a"], args["b"]` 同時取出兩個值；最後一行的 `A if 條件 else B` 在條件成立時取 A、否則取 B，所以名稱是 add 就相加，否則相乘。
+
+為什麼要用 `type` 比對確切型別？下面把第三份請求解析開來看。這段要用 `json.loads`，所以先載入 `json`：
+
+```python
+import json
+
+parsed = json.loads(requests[2])
+a = parsed["arguments"]["a"]
+print("第三份的 a 解析成", a, type(a))
+print("isinstance(a, int)", isinstance(a, int), "type(a) in (int, float)", type(a) in (int, float))
+```
+
+JSON 的 `true` 解析成 Python 的 `True`，型別是 bool。Python 把 bool 當成 int 的一種（True 可以當 1 用），所以 `isinstance(a, int)` 是 True；若 `call_tool` 用 `isinstance` 檢查，true 就會被當成 1 而通過。改用 `type(a) in (int, float)` 比對確切型別，得到 False，才擋得下。字串 `"2"` 的型別是 str，同樣被擋下，不會被偷偷當成數字。
+
+通過驗證只說明請求合乎規定，還要回查原題。原題是 2+3，請求若寫 2+4，照樣合法地傳回 6：這是模型選錯參數，不是程式算錯。解析、驗證、實際執行各自留下紀錄，才能分清錯在哪一站。
+
+通過驗證也不保證結果可用。兩個合法的大數相乘，可能超出 Python 小數（float）能保存的範圍，這叫**溢位**（overflow）：例如 `1e308 * 1e308` 得到 `inf`（無限大），`1e308` 是 1×10³⁰⁸ 的寫法。正文的 `call_tool` 不檢查結果，照樣傳回 `inf`；工具實驗的外層程式在 `call_tool` 傳回之後才檢查，結果不是有限的數字（例如 `inf`）就記下「工具已執行」並停止，不把它當成功。這個外層程式在呼叫 `call_tool` 之前，還多做一道更嚴格的 JSON 檢查，它多擋了哪些輸入，見補充區。
+
+練習把第一段 `requests` 第三項裡的 `true` 改成 `2.5`，先預測：通過驗證，結果是 5.5，第三段印出的型別是 float；再改成 `"2"`，那一項變成 `'{"name":"add","arguments":{"a":"2","b":3}}'`，預測會被拒絕，理由和 true 相同，第三段印出的型別是 str。
+
+<details>
+<summary>補充：特殊數值與故障注入</summary>
+
+先說明幾個特殊數值。`1e308` 是科學記號，表示 1×10³⁰⁸；Python 的 float 存得下它，但能保存的範圍有限。`1e999` 表示 1×10⁹⁹⁹，超出 float 的範圍，Python 讀進來會變成 Infinity（無限大），常印成 `inf`。`NaN` 是 Not a Number 的縮寫，表示「不是有效數字」的特殊值。**有限**的 float 指既不是正負無限大、也不是 NaN 的數。
+
+工具實驗的外層程式在 `call_tool` 之前，另做嚴格的 JSON 解析（[applications.py](../../scripts/course_experiments/applications.py) 的 `_parse_json_action`）：拒絕 `NaN`、`Infinity`、會變成非有限 float 的 `1e999`，也拒絕任何一層出現重複的欄位名。單用正文那段 `call_tool`，沒有這些檢查：`json.loads` 會把 `1e999` 讀成 `inf`，而 `inf` 的型別是 float，照樣通過。只有解析成功、內容也符合 add／multiply 的允許清單，才真正執行。模型生成的文字若混進特殊 token（special token，[6.6](06.md#6.6)），例如 user 的角色標記，它不是 JSON 文字的一部分，會在解析前就被拒絕；正常結束時生成的 EOS 則是結束標記（[7.9](07.md#7.9)）。
+
+實驗紀錄另外保存七份人工的故障注入：不完整的 JSON、最外層是陣列（如 `[]`）、未知工具、bool、`NaN`、`1e999` 與重複的 name，全部被拒絕。這裡的一份工具請求必須是帶 name、arguments 的 JSON 物件，不能把一個陣列當成一份請求；這和正文程式用來依次試三份文字的 `requests` 清單是兩回事。這七份測的是外層的檢查程式，沒有算進 20 題的模型成績，結果在[實驗紀錄 tools.json](../../docs/course-experiments/results/tools.json)的 `results.injected_protocol_checks_not_model_scores`。
+
+有限的輸入也可能乘到溢位：`1e308×1e308` 的兩個輸入都有限，結果卻是 `inf`。工具實驗遇到這種情況，會記下 `executed=true`（已執行）、`finite_result=false`（結果不是有限數）與字串 `"inf"`，以 `invalid_tool_result` 停止；真正的呼叫次數仍算一次，也不會把非有限的數字寫進 JSON。這條分支由 [CPU 回歸測試](../../tests/test_application_protocols.py)檢查；工具實驗的小數字題目沒有遇到溢位。
+
+</details>
+

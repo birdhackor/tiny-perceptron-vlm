@@ -1,0 +1,36 @@
+## C.2 最後答對代表過程正確嗎？
+
+問 2+2，回答寫「2+2=5；5−1=4」。結尾的 4 是對的，第一步卻錯了。只讀最後一個數字，會把這份回答當成完全正確；要知道過程對不對，得分開查三件事：每條等式算得對不對、每一步是否接著前一步的結果，以及這些步驟是不是只用了題目給的數字。
+
+先把回答寫成程式能檢查的形式。每一步記成三個數 `(a, b, claimed)`，意思是「宣稱 a+b=claimed」；減 1 寫成加 −1，所以第二步是 `(5, -1, 4)`。`question` 是題目給的數字，`truth` 是正確答案：
+
+```python
+question = [2, 2]
+truth = 2 + 2
+steps = [(2, 2, 5), (5, -1, 4)]
+valid = [a + b == claimed for a, b, claimed in steps]
+linked = [steps[i][0] == steps[i - 1][2] for i in range(1, len(steps))]
+used = [steps[0][0]] + [b for a, b, claimed in steps]
+print("等式算對", valid)
+print("接上前步", linked)
+print("只用題目的數字", sorted(used) == sorted(question))
+print("最後答案對", steps[-1][2] == truth)
+```
+
+`valid` 逐步重算 `a + b`，和宣稱的 `claimed` 比較，得到 `[False, True]`：2+2 不是 5，5+(−1) 是 4。`linked` 用 `range(1, len(steps))` 從第二步（索引 1）開始，比較這一步的起點 `steps[i][0]` 和前一步的結果 `steps[i - 1][2]`，得到 `[True]`：第二步確實從前一步寫下的 5 接著算。`used` 收集每一步新加進來的數：第一步的 a，再加上每一步的 b，得到 `[2, 2, -1]`；用 `sorted` 排好後和題目的 `[2, 2]` 不同，印出 False，因為 −1 不是題目給的。最後一行的 `steps[-1]` 是最後一步，它宣稱的 4 等於正確答案，印出 True。
+
+三項檢查各抓不同的錯。第二步接得很好，卻救不了錯的第一步；反過來，若只把第一步改成 `(2, 2, 4)`，兩條等式都對了，第二步卻還從 5 開始，接續就變成 False。
+
+像這樣依明確規則核對回答的程式，叫**驗證器（verifier）**；它做的核對叫驗算。說一個驗證器可靠時，要說清它驗了哪幾項。上面幾項只適用於這種加法題，不是能檢查任何文字的通用證明器。
+
+真實模型的錯誤，也常藏在格式完全正確的回答裡。[C.1](0C.md#C.1) 的步驟支線在測試題 `(5+0)+3=?` 生成過 `5+0=5;5+3=10;answer=10`：格式能解析，兩步也接上了，但 5+3 不是 10，最後答案跟著錯。實驗的驗證器逐份檢查兩條等式、前後接續、步驟用的是不是正是題目的 a、b、c，以及最後答案，四項全過才接受。即使全過，也只說明這份文字算對了，不能證明模型內部真的照這些步驟計算。
+
+練習：把 `steps` 改成 `[(2, 2, 4), (4, 3, 7), (7, -3, 4)]`，也就是先加 3、再減 3 繞一圈。先預測：等式 `[True, True, True]`、接續 `[True, True]`、最後答案都對，只有「只用題目的數字」是 False，因為 `used` 變成 `[2, 2, 3, -3]`，多了題目沒有的 3 與 −3。這份回答每條等式都對，卻無緣無故多做一步再抵銷掉，不是在解原題。
+
+<details>
+<summary>補充：完整紀錄</summary>
+
+步驟支線的全部候選在[實驗紀錄 reasoning.json](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/course-experiments/results/reasoning.json) 的 `results.comparison.steps.budgets`：這個清單的每一項各對應一個 `candidate_count`，也就是每題讓模型生成幾份回答；每一項的 `samples` 是 24 道題的清單，裡面每一筆才是一道題；那一筆的 `candidates` 是這題抽到的各份候選，其中 `equations_valid`、`linked`、`task_operands_valid` 與 `final_correct`，分別是兩條等式算對、前後接續、用了題目的 a、b、c，以及最後答案正確。
+
+</details>
+

@@ -1,0 +1,60 @@
+## C.7 Reward 怎麼改變輸出機率？
+
+只在「答3」與「答4」兩個回答之間選。一開始兩個分數都是 0，機率各 0.5。這次人為指定選了答4，拿到獎勵 1；這類選擇平常預期能拿 0.5 分，這個預期分數就是 [13.11](13.md#13.11) 的基準值（baseline）。獎勵減基準值是優勢（advantage）：1−0.5=0.5，表示這次比預期好 0.5。我們希望提高答4的機率，但不是一次就讓它變成必選。
+
+這裡的策略（policy）就是 [13.4](13.md#13.4) 那種會被更新、實際作答的模型：讀入情境，輸出每個動作的機率。本例把它簡化到極點：沒有輸入，只有兩個可調的分數，經過 softmax 得到答3與答4的機率。更新用的代價是 `-(reward - baseline) * logp(action)`，其中 `logp(action)` 是所選動作機率的 log。優勢為正時，讓代價下降，就是提高所選動作的 log 機率；優勢為負時方向相反。像這樣用「優勢 × 所選動作的 log 機率」決定更新方向的方法，叫**策略梯度（policy gradient）**，本節是它最小的例子。
+
+```python
+import torch
+
+logits = torch.tensor([0.0, 0.0], requires_grad=True)
+action = 1
+reward, baseline = 1.0, 0.5
+before = logits.detach().softmax(0)
+loss = -(reward - baseline) * logits.log_softmax(0)[action]
+loss.backward()
+with torch.no_grad():
+    updated = logits - 0.1 * logits.grad
+    after = updated.softmax(0)
+print("梯度", logits.grad.tolist())
+print("新分數", updated.tolist())
+print("前機率", before.tolist())
+print("後機率", [round(p, 6) for p in after.tolist()])
+```
+
+程式把答3、答4依序放在索引 0、1，所以 `action = 1` 代表選了答4；`reward, baseline = 1.0, 0.5` 一次替兩個名字賦值。`logits` 是兩個回答的分數，`requires_grad=True` 讓 PyTorch 記錄它們參與的計算。`softmax(0)` 沿第 0 軸把分數換成機率；`log_softmax(0)` 一次算出兩項機率的 log，`[action]` 取出答4那一項，就是公式裡的 `logp(action)`。`before` 先用 `detach()` 留一份不記錄計算的舊機率，好在更新後比較。`loss.backward()` 把代價對兩個分數的梯度存進 `logits.grad`；接著在 `torch.no_grad()` 裡用學習率 0.1 減去梯度，得到新分數，這是 [1.12](01.md#1.12) 的更新規則。最後一行的 `[round(p, 6) for p in …]` 把每個機率縮到小數六位再印。
+
+梯度是 `[0.25, -0.25]`。每個分數的梯度等於優勢 ×（該動作的機率 − 是否被選）：答3 是 0.5×(0.5−0)=0.25，答4 是 0.5×(0.5−1)=−0.25。減去梯度後，新分數約 `[-0.025, 0.025]`，機率變成 `[0.487503, 0.512497]`：答4只從 0.5 稍微升到約 0.5125。PyTorch 只對 `logits` 求導；獎勵與基準值是寫死的數字，梯度不會穿過打分的規則。
+
+下圖把這次更新畫成上下兩框：上框是更新前的兩個分數與機率，箭頭旁是這次的優勢與學習率，下框是更新後的分數與機率；方框裡每一行的兩個數字依序對應答3、答4。
+
+![順序固定為答3與答4，更新分數後答4機率由0.5稍升至0.512497。](../figures/rewrite-C-policy-update.svg)
+
+分數各動了 0.025，機率卻只動了約 0.0125：分數的變化量，不等於 softmax 之後機率的變化量。
+
+這裡沒有抽樣，也沒有訓練語言模型：動作是人工指定的，直接調兩個分數。基準值是拿來比較這次獎勵的預期分數，不是正確答案；扣掉它，才分得出這次是高於還是低於預期。真正的訓練要先依策略的機率抽出動作、拿到獎勵，再更新產生分數的參數；合適的基準值能減少抽樣帶來的更新起伏，這個固定動作的短例沒有量這項效果。用能直接驗算的正確答案給獎勵的強化學習，常叫**可驗證獎勵強化學習**（Reinforcement Learning with Verifiable Rewards，RLVR）；它會更新參數，和 [C.5](0C.md#C.5) 參數不變的作答計算不同。
+
+即使單次更新照預期改變了機率，仍要在測試題檢查整體行為與評分漏洞。本單元的實驗用嚴格評分訓練 [C.6](0C.md#C.6) 的有限動作策略：訓練時每批抽樣的平均獎勵，從第 1 次更新的約 0.05 升到第 1,200 次的約 0.61；可是在 24 道測試題上，最高機率的動作從 1 題答對變成全錯，例如 `(0+3)+3=?` 應答 6，卻選 7。用寬鬆評分訓練的那支則學會了列舉。參數確實更新了、訓練獎勵也變高了，都不能代替在新題上的能力。
+
+練習：把 `reward, baseline = 1.0, 0.5` 改成 `reward, baseline = 0.0, 0.5`。先預測：優勢變成 −0.5，梯度變成 `[-0.25, 0.25]`，更新後答4的機率降到約 0.487503。執行核對後，用「這次比預期差」說明方向。決定機率升降的是獎勵減基準值的正負，不是獎勵本身：獎勵 0 不是負數，答4的機率仍然下降。
+
+<details>
+<summary>補充：有限動作策略的訓練，與重做本單元實驗</summary>
+
+實驗另外訓練了一個有限動作策略，直接讀三個 0 到 5 的整數。例如數字 2 用六格 `[0,0,1,0,0,0]` 表示：只有它對應的那一格是 1，其餘是 0，這叫 one-hot；三個數各用六格接在一起，就是 18 格輸入。一個兩層的小網路把它轉成 17 個動作的分數：兩層都是 [2.3](02.md#2.3) 的線性層，中間夾一個 [2.4](02.md#2.4) 介紹的啟用函式（2.4 用 ReLU，這裡用 tanh）。前 16 個動作分別答 0 到 15，最後一個是列舉，兩種評分見 [C.6](0C.md#C.6)。這個小策略不是語言模型，和 C.1 的短答支線、步驟支線是不同的模型。
+
+訓練用 REINFORCE，這是一種策略梯度方法：每次從訓練題抽 64 題，依目前策略的機率各抽一個動作、換成對應的文字，再用嚴格評分或寬鬆評分給獎勵。優勢是獎勵減基準值，代價是「優勢 × 所選動作的 log 機率」取平均再加負號，和主例的形式相同。基準值是最近各批平均獎勵的移動平均：每批之後，新基準值 = 0.95 × 舊基準值 + 0.05 × 這批的平均獎勵。代價另外加了一小項（係數 0.005），讓機率不要太早全集中到一個動作上。梯度交給 AdamW 更新參數（[5.4](05.md#5.4)、[5.5](05.md#5.5)），學習率 0.003，共更新 1,200 次。
+
+兩支從同一份隨機參數出發，一支用嚴格評分、一支用寬鬆評分，訓練完都在同樣 24 道測試題檢查。嚴格評分支線的結果見正文；寬鬆評分支線每題抽 16 次、共 384 個動作全是列舉，寬鬆評分 384/384、嚴格評分 0/384。這是 24 道題的重複抽樣，不是 384 道不同的題。這個策略選的是事先寫好的文字，沒有逐 token 生成，也沒有對 C.1 的兩支語言模型做強化學習。完整配方在 [scripts/course_experiments/applications.py](../../scripts/course_experiments/applications.py) 的 `_reinforce`。結果在[實驗紀錄 reasoning.json](https://github.com/birdhackor/tiny-perceptron-vlm/blob/main/docs/course-experiments/results/reasoning.json) 的 `results.reinforce`：`strict` 是嚴格評分支線、`weak_proxy` 是寬鬆評分支線；各自的 `training.reward_history` 記下第 1 次與之後每 100 次更新那一批的抽樣平均獎勵，`before` 與 `after` 是訓練前後在測試題的成績，其中 `greedy_accuracy` 是最高機率動作答對的題數與分母。可見的步驟、多份候選一致和高獎勵，都不能單獨證明輸出文字反映了模型內部的推理。
+
+**選讀：重做本單元的實驗。** 先照 [W.1](../first-steps.md#W.1) 在專案根目錄準備 Python 環境。實驗會用到一個固定的公開資料包，它存在 Git LFS 裡：Git LFS 是 Git 的延伸工具，讓 Git 另外下載大型資料檔，要先依[官方指引](https://git-lfs.com/)安裝；只下載需要的資料包的方式，見[資料包說明](../../assets/training/README.md#取得資料)。下面三行依序在本專案啟用 Git LFS、只下載這個實驗要的資料包，再完整重做短答與步驟兩支的 SFT、多候選評估，以及有限動作策略的兩種評分比較：
+
+```bash
+git lfs install --local
+git lfs pull --include='assets/training/gsm8k-v1.tar.gz' --exclude=''
+python scripts/course_experiments/run.py --experiment reasoning --device cpu
+```
+
+上文的數字來自 NVIDIA L4 顯示卡上的一次完整執行，整個實驗（訓練、評估與存檔）約 46 秒，見紀錄的 `elapsed_seconds`；本課沒有在 CPU 上跑這個實驗的計時紀錄，抽樣結果也可能和上文不完全相同。有自己的 CUDA 環境才改用 `--device cuda`。結果存在 `outputs/course-experiments/course-v1/reasoning/`，其中 `result.json` 的 `results` 欄位結構和上文的實驗紀錄相同，可以拿來核對資料切分與各項分母。語言模型和有限動作策略是不同的產物：`policy-*.pt` 不是 TinyLM 的權重檔，不能交給語言模型的推論程式。這個指令也會跑一段 GSM8K 長紀錄的資料流程檢查（紀錄的 `results.gsm8k_training_pilot`），它不是算術成績；本單元引用的成績都來自上文合成的 24 道測試題。
+
+</details>
