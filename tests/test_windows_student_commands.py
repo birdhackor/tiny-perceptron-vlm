@@ -16,9 +16,11 @@ git clone 之前先有 LONG_PATHS 且其他命令不另外設 core.longpaths、w
 LONG_PATHS，以及 Windows PowerShell 5.1 與 PowerShell 7 都跑。kernel 核對（workflow 某一步 env 裡的 KERNEL_CHECKS
 程式；這裡載入它的函式來用）從頁面取的 W.1 改字練習原句、新句、期望輸出，與 W.6 第一行輸出的期望值，各對到頁面上
 剛好一句，原輸入行在 notebooks/01/1.1.ipynb 的程式格裡剛好一行。觸發條件是預設觸發：push 與 pull_request 的 paths
-相同、第一條是 '**'、其餘每條都是 '!<樹>/**' 而且那棵樹在 repo 裡；排除的樹不寫在四頁的程式區塊、workflow 每一步的
-run: 與 env、KERNEL_CHECKS 執行的 Notebook 程式格，以及 workflow 會執行的 repo 內 Python 檔（python_run_by_workflow：
-Invoke-Page 執行的腳本與模組，連同它們在 repo 內匯入的模組）裡；on: 區塊本身寫著排除樣式，不掃。
+相同、第一條是 '**'、其餘每條都是 '!<樹>/**' 而且那棵樹在 repo 裡。排除的樹的名字，不以一整串（各段在檔案文字裡以單一個
+/ 或反斜線相連）出現在四頁的程式區塊、workflow 的 env 與每一步的 run:、env、KERNEL_CHECKS 執行的 Notebook 程式格，以及
+workflow 會執行的 repo 內 Python 檔（python_run_by_workflow：Invoke-Page 執行的腳本與模組，連同它們在 repo 內匯入的模組）
+裡；on: 區塊本身寫著排除樣式，不掃。workflow 檔本身、四頁、KERNEL_CHECKS 執行的 Notebook 與 python_run_by_workflow 列的檔，
+repo 內的 POSIX 路徑都不以任何排除的樹加 / 開頭。
 
 觸發條件的讀檔集合：排除的樹裡不能有頁面命令或 workflow 會讀的檔。這份集合由三種來源合起來推出。(a) 在本機用
 sys.addaudithook 收 open 事件，執行 workflow 會跑、又能在本機安全執行的 Python 頁面命令（check_env.py、
@@ -29,9 +31,10 @@ docs/course-experiments/plan.json 替 workflow 所跑實驗指定的模組、Get
 的程式格與 KERNEL_CHECKS，連同它們在 repo 內匯入的模組，找出寫死的 repo 路徑（ROOT /、Path(__file__)、字面的 .json、
 .jsonl、.tar.gz、.ipynb、.svg）。(c) workflow 自己的 PowerShell 讀的檔：Get-PageCode 讀的頁面、Assert-CheckEnv 讀的
 scripts/check_env.py、Assert-LfsPointers 讀的 assets/training/*.tar.gz、JupyterLab 探測讀的 notebooks/01/1.1.ipynb。
-(b) 與 (c) 裡寫出來的路徑有沒有落在排除的樹，這個測試每次都核對；(a) 實際開啟的檔，以及下面〈不涵蓋〉列的看不到的
-地方，要在新增或改動 Invoke-Page、Get-PageCode 或 KERNEL_CHECKS，或 runner 那一側新讀了檔時，照三種來源重推一次，確認
-讀到的檔都不在排除的樹裡。
+讀到的檔落不落在排除的樹，這個檔每次核對的只有兩件事：test_excluded_trees_are_not_named_where_the_workflow_reads 核對
+排除的樹的名字不以一整串出現在上面列的地方；test_known_workflow_reads_are_outside_excluded_trees 核對那幾類已知會讀的檔
+不在排除的樹底下。(a) 實際開啟的檔、(b) 與 (c) 裡不是一整串寫出的路徑，以及下面〈不涵蓋〉列的看不到的地方，要在新增或改動
+Invoke-Page、Get-PageCode 或 KERNEL_CHECKS，或 runner 那一側新讀了檔時，照三種來源重推一次，確認讀到的檔都不在排除的樹裡。
 
 不涵蓋：
 - 開頭不是 COMMAND_START、又不在 Windows 句子裡帶 PowerShell 寫法的 inline code（例如只寫腳本名的 `train.py --task vision`）。
@@ -40,14 +43,20 @@ scripts/check_env.py、Assert-LfsPointers 讀的 assets/training/*.tar.gz、Jupy
 - Get-PageCode 取用的 Python 程式內容不比對（CI 執行時直接從頁面讀）。
 - KERNEL_CHECKS 從頁面讀的值以外，頁面寫給讀者核對的預期值（例如 W.7 印出的 `True`、training.md 的 `holdout_examples` 2、kernel 名稱 Tiny Perceptron）沒有和 workflow 的核對值互相釘住，頁面改了預期值而 workflow 照舊核對舊值，這裡不會失敗。
 - Skip-Page 的 -Reason 與註解寫的理由對不對；workflow 的命令在 Windows 上是否真的成功，要看 CI 本身。
+- 排除的樹的名字只在一整串寫出時比對得到，不是一整串寫出的路徑都看不到：用變數組出的、分段拼接的（Python 的 `ROOT / "docs" / "x"`、`Path("docs", "x")`、`os.path.join`，PowerShell 的 `Join-Path`），以及 Python 字串裡把反斜線跳脫成兩個字元的寫法。排除安不安全，靠的是 workflow 排除旁的分類理由與新增排除時照三種來源的推導，不靠這個檔的測試。
 - 讀檔集合的推導看不到用變數組出的路徑（例如 fetch_training_assets.py 從清單取的資料包路徑）、子程序讀的檔（git、git lfs、uv 與它呼叫的建置工具、jupyter、kernel）、只在 Windows 才走的分支；它們讀到的檔若落在排除的樹裡，改了它不會觸發。
 - git clone、checkout、status --porcelain 與 ls-files 經手排除樹裡每個檔的路徑：排除樹裡新增只差大小寫的兩個路徑時，學生 clone 出的工作樹不完整，這裡不跑；Windows 不允許的檔名（例如含 `:`）會讓每次 push 都跑的 ci.yml 在 windows-latest 取出檔案時失敗。
 - 一次改到超過 3,000 個檔、而 GitHub 先列出的 3,000 個都在排除的樹裡時，GitHub 不跑這個 workflow。
 - course/first-steps.md W.1 在瀏覽器裡的操作：選 Tiny Perceptron、點進程式格按 Shift+Enter、選單的 Restart Kernel and Run All Cells、用工具列的「＋」新增程式格貼上暖身程式。kernel 執行程式格這件事，由 KERNEL_CHECKS 用 nbclient 代替瀏覽器核對。
 - course/first-steps.md W.1 在 Colab 開啟與執行，以及把網站頁尾下載的 .ipynb 放進 notebooks/ 再開：CI 不經過網站與 Colab。
 
-頁面要讀者核對、Windows CI 不核的結果，一項一行。CI 照頁面的命令與程式執行；練習的改法或期望值只寫在句子裡時，要核對
-就得把句意寫死成 workflow 裡的程式，頁面改了練習，那份副本也不會跟著變，所以不核：
+Windows CI 只核 workflow 裡旁邊以 `# 頁面說：` 引了頁面原話的結果，頁面要讀者核對的其他結果，CI 都不核。下面記的是
+其中容易被誤以為有核的，以及不核的理由，不宣稱列盡；另有一些記在 workflow 核對旁的註解，例如 Assert-CheckEnv 的紅色
+錯誤只靠結束碼。入列準則：
+頁面明確要讀者核對、確認、檢查、比較或查看的結果，寫成「應為／應看到／應顯示／要等於」這類期望的結果，讀者用來判斷的
+條件（「看到…就表示」），以及寫「希望」的答案；描述命令做什麼、工具自己核對的事、給維護者的流程與一般建議不算。下面的
+引文沒有釘住頁面，頁面改寫後可能對不上。練習的改法或期望值只寫在句子裡時，要核對就得把句意寫死成 workflow 裡的程式，
+頁面改了練習，那份副本也不會跟著變，所以不核：
 - course/first-steps.md W.2「核對時應看到 `鳥 3` 和三行「看到」」：要換掉清單與最後檢查的哪兩行、要數的「三行」只寫在句子裡。
 - course/first-steps.md W.2「動物清單的輸出應不受影響」：頁面沒寫 `caption` 要改成什麼。
 - course/first-steps.md W.3「核對應得到 `[80, 90]` 與 `[70, 80, 105]`」：改法「從 80 改成 110」只寫在句子裡，程式印出的也是 tensor 的寫法。
@@ -66,6 +75,8 @@ scripts/check_env.py、Assert-LfsPointers 讀的 assets/training/*.tar.gz、Jupy
 - course/training.md T.4「用同樣的資料、題號、生成上限比較前後」：沒有期望值。
 - course/training.md T.5「再檢查兩者是否都遵守格式」：檢查的是讀者自己寫的短答與比喻。
 - course/training.md T.5「把 validation 的提問、理想回答與生成並排」：沒有期望值。
+- course/training.md T.5「需要另看比喻是否有用」：沒有期望值；style 的訓練與評估有跑，CI 只核對評估 JSON 解得開，沒有看生成。
+- course/training.md T.5「也要看正常題有沒有被過度拒絕」：沒有期望值；safety 的訓練與評估有跑，CI 只核對評估 JSON 解得開，沒有看生成。
 - course/training.md T.5「若多了比喻卻把答案數字改錯，就沒有完成目標」：這是讀者評估自己訓練的模型的判準，頁面沒說這次訓練的模型一定答對。
 - course/training.md T.5 固定配方「`lora/` 的 adapter 要載入原始浮點底座並核對指紋」：固定配方用 `--device cuda`，這裡不跑。
 - course/training.md T.5 固定配方「使用或分享前，先核對資料授權」：要讀的是授權說明，沒有命令輸出。
@@ -85,6 +96,7 @@ scripts/check_env.py、Assert-LfsPointers 讀的 assets/training/*.tar.gz、Jupy
 - course/training.md T.9「分別說明「保存變小了嗎」與「相同題目是否維持回答」」：沒有期望值。
 - course/training.md T.10「核對下列六個檔案都已產生」：產生它們的 sft、style、moe 固定配方用 `--device cuda`，這裡不跑。
 - course/training.md T.10「先選同寬度的兩支，用相同題目檢查」與「希望答案是 `square,high`」：學生要用那三組固定配方的教師，這裡不跑。
+- course/training.md T.10「核對整份相同題目，並一起記學生參數、教師成本與有效目標數」：沒有期望值；這一節的命令全部不跑，蒸餾要先有那三組 `--device cuda` 固定配方的教師。
 - course/training.md T.11 補充區「逐步核對時請對照工具紀錄勘誤」：要讀的是實驗紀錄，沒有命令輸出。
 """
 
@@ -747,9 +759,9 @@ def test_workflow_triggers_and_shells():
 
 
 def test_excluded_trees_are_not_named_where_the_workflow_reads():
-    """排除的樹不能寫在四頁的程式區塊、workflow 的 env 與每一步的 run:、env、KERNEL_CHECKS 執行的 Notebook 程式格，
-    以及 workflow 會執行的 repo 內 Python 檔（python_run_by_workflow）裡；on: 區塊本身寫著排除樣式，不掃。這裡只擋寫
-    出來的路徑，用變數組出的路徑與其他看不到的地方見檔頭。"""
+    """排除的樹的名字以一整串出現（各段在檔案文字裡以單一個 / 或反斜線相連，前後不接路徑字元）時報錯。掃的是四頁的程式
+    區塊、workflow 的 env 與每一步的 run:、env、KERNEL_CHECKS 執行的 Notebook 程式格，以及 python_run_by_workflow 列的檔；
+    on: 區塊本身寫著排除樣式，不掃。不是一整串寫出的路徑這裡看不到，見檔頭〈不涵蓋〉。"""
     document = load_workflow()
     sources = []
     for page in PAGES:
@@ -776,5 +788,22 @@ def test_excluded_trees_are_not_named_where_the_workflow_reads():
         problems += [f"{where}：寫到排除的樹 {tree}" for where, text in sources if written.search(text)]
     assert not problems, (
         "workflow 會讀的地方寫到觸發條件排除的樹；這些樹改了，Windows CI 不會跑。拿掉那幾條排除，或改掉這些路徑：\n"
+        + "\n".join(problems)
+    )
+
+
+def test_known_workflow_reads_are_outside_excluded_trees():
+    """workflow 檔本身、四頁、KERNEL_CHECKS 執行的 Notebook，以及 python_run_by_workflow 列的檔，這些已知會讀的檔不在
+    排除的樹底下。比對的是 repo 內的 POSIX 路徑是否以「<樹>/」開頭；這依賴 TREE_EXCLUSION 把每條排除限定成 '!<樹>/**'，
+    寫法不符的排除不在 excluded_trees() 裡，由 test_workflow_triggers_and_shells 報錯。排除的樹裡另有哪些檔被讀，這裡看
+    不到。"""
+    known = [WORKFLOW, *PAGES, kernel_checks()["NOTEBOOK"]]
+    # 用 as_posix()，不用 str()：ci.yml 在 windows-latest 也跑這個測試，str() 在 Windows 用反斜線，比對永遠不會命中。
+    known += [path.relative_to(ROOT).as_posix() for path in python_run_by_workflow()]
+    problems = [
+        f"{path} 在排除的樹 {tree} 底下" for tree in excluded_trees() for path in known if path.startswith(tree + "/")
+    ]
+    assert not problems, (
+        "觸發條件排除了 workflow 已知會讀的檔所在的樹；只改到這些檔時，Windows CI 不會跑。拿掉那幾條排除：\n"
         + "\n".join(problems)
     )

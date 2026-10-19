@@ -96,7 +96,7 @@ uv run ruff check . && uv run ruff format .
 ## GitHub Actions
 
 - push 到 `main` 會觸發 Publish course 與 CI；`ci.yml` 的 push 沒有限制分支，推任何 tag 也會觸發 CI。
-- `windows-student-commands.yml` 在任何 branch 的 push 或 pull request 執行，只有改到的每個檔都落在它 `paths` 用 `!` 排除的審閱紀錄目錄裡時才不跑；在 Windows 上照入口頁跑學生指令，不用 secrets，不連 Modal 與 Hugging Face。
+- `windows-student-commands.yml` 在任何 branch 的 push 或 pull request 執行。改到的每個檔都落在它 `paths` 用 `!` 排除的審閱紀錄目錄裡時不跑；commit 訊息帶 `[skip ci]` 這類跳過字串，或一次改到超過 3,000 個檔、而 GitHub 先列出的 3,000 個都在排除的目錄裡時，也不跑。它在 Windows 上照入口頁跑學生指令，不用 secrets，不連 Modal 與 Hugging Face。
 - 其他 workflow 只能手動觸發，可能啟動 Modal 計費運算或發布到 Hugging Face。沒有作者明確同意，不要觸發。
 
 ## 判斷失敗是否為回歸
