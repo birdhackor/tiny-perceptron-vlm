@@ -16,11 +16,12 @@ git clone 之前先有 LONG_PATHS 且其他命令不另外設 core.longpaths、w
 LONG_PATHS，以及 Windows PowerShell 5.1 與 PowerShell 7 都跑。kernel 核對（workflow 某一步 env 裡的 KERNEL_CHECKS
 程式；這裡載入它的函式來用）從頁面取的 W.1 改字練習原句、新句、期望輸出，與 W.6 第一行輸出的期望值，各對到頁面上
 剛好一句，原輸入行在 notebooks/01/1.1.ipynb 的程式格裡剛好一行。觸發條件是預設觸發：push 與 pull_request 的 paths
-相同、第一條是 '**'、其餘每條都是 '!<樹>/**' 而且那棵樹在 repo 裡。排除的樹的名字，不以一整串（各段在檔案文字裡以單一個
-/ 或反斜線相連）出現在四頁的程式區塊、workflow 的 env 與每一步的 run:、env、KERNEL_CHECKS 執行的 Notebook 程式格，以及
-workflow 會執行的 repo 內 Python 檔（python_run_by_workflow：Invoke-Page 執行的腳本與模組，連同它們在 repo 內匯入的模組）
-裡；on: 區塊本身寫著排除樣式，不掃。workflow 檔本身、四頁、KERNEL_CHECKS 執行的 Notebook 與 python_run_by_workflow 列的檔，
-repo 內的 POSIX 路徑都不以任何排除的樹加 / 開頭。
+相同、第一條是 '**'、其餘每條都是 '!<樹>/**'（<樹> 的寫法見 TREE_EXCLUSION）而且那棵樹在 repo 裡。排除的樹的名字，不以
+一整串（各段在檔案文字裡以單一個 / 或反斜線相連）出現在四頁的程式區塊、workflow 的 env 與每一步的 run:、env、
+KERNEL_CHECKS 執行的 Notebook 程式格，以及 python_run_by_workflow 列的檔裡；on: 區塊本身寫著排除樣式，不掃。workflow 檔
+本身、四頁、KERNEL_CHECKS 執行的 Notebook 與 python_run_by_workflow 列的檔，repo 內的 POSIX 路徑都不以任何排除的樹加 /
+開頭。workflow 每一處 `# 頁面說：` 的引文，以及下面〈不涵蓋〉裡以四頁之一開頭的各項中的「」引文，都要在頁面上找得到，
+比對方式見 test_page_quotes_appear_on_the_pages。
 
 觸發條件的讀檔集合：排除的樹裡不能有頁面命令或 workflow 會讀的檔。這份集合由三種來源合起來推出。(a) 在本機用
 sys.addaudithook 收 open 事件，執行 workflow 會跑、又能在本機安全執行的 Python 頁面命令（check_env.py、
@@ -32,9 +33,11 @@ docs/course-experiments/plan.json 替 workflow 所跑實驗指定的模組、Get
 .jsonl、.tar.gz、.ipynb、.svg）。(c) workflow 自己的 PowerShell 讀的檔：Get-PageCode 讀的頁面、Assert-CheckEnv 讀的
 scripts/check_env.py、Assert-LfsPointers 讀的 assets/training/*.tar.gz、JupyterLab 探測讀的 notebooks/01/1.1.ipynb。
 讀到的檔落不落在排除的樹，這個檔每次核對的只有兩件事：test_excluded_trees_are_not_named_where_the_workflow_reads 核對
-排除的樹的名字不以一整串出現在上面列的地方；test_known_workflow_reads_are_outside_excluded_trees 核對那幾類已知會讀的檔
-不在排除的樹底下。(a) 實際開啟的檔、(b) 與 (c) 裡不是一整串寫出的路徑，以及下面〈不涵蓋〉列的看不到的地方，要在新增或改動
-Invoke-Page、Get-PageCode 或 KERNEL_CHECKS，或 runner 那一側新讀了檔時，照三種來源重推一次，確認讀到的檔都不在排除的樹裡。
+排除的樹的名字不以一整串出現在上面列的地方；
+test_workflow_file_pages_notebook_and_python_run_by_workflow_are_outside_excluded_trees 核對 workflow 檔本身、四頁、
+KERNEL_CHECKS 執行的 Notebook 與 python_run_by_workflow 列的檔不在排除的樹底下。(a) 實際開啟的檔、(b) 與 (c) 裡不是一整串
+寫出的路徑，以及下面〈不涵蓋〉列的看不到的地方，要在新增或改動 Invoke-Page、Get-PageCode 或 KERNEL_CHECKS，或 runner 那一側
+新讀了檔時，照三種來源重推一次，確認讀到的檔都不在排除的樹裡。
 
 不涵蓋：
 - 開頭不是 COMMAND_START、又不在 Windows 句子裡帶 PowerShell 寫法的 inline code（例如只寫腳本名的 `train.py --task vision`）。
@@ -54,9 +57,11 @@ Windows CI 只核 workflow 裡旁邊以 `# 頁面說：` 引了頁面原話的�
 其中容易被誤以為有核的，以及不核的理由，不宣稱列盡；另有一些記在 workflow 核對旁的註解，例如 Assert-CheckEnv 的紅色
 錯誤只靠結束碼。入列準則：
 頁面明確要讀者核對、確認、檢查、比較或查看的結果，寫成「應為／應看到／應顯示／要等於」這類期望的結果，讀者用來判斷的
-條件（「看到…就表示」），以及寫「希望」的答案；描述命令做什麼、工具自己核對的事、給維護者的流程與一般建議不算。下面的
-引文沒有釘住頁面，頁面改寫後可能對不上。練習的改法或期望值只寫在句子裡時，要核對就得把句意寫死成 workflow 裡的程式，
-頁面改了練習，那份副本也不會跟著變，所以不核：
+條件（「看到…就表示」），以及寫「希望」的答案；描述命令做什麼、工具自己核對的事、給維護者的流程與一般建議不算。
+`# 頁面說：` 的引文裡每個子句，要嘛有核對程式比對它，要嘛緊接的註解寫明不核或只核一部分；其餘用「……」略去。只核一部分
+時，要用收窄句說出核了哪一半，不能只靠略去把它藏起來。引文從哪裡開始、到哪裡結束見 workflow_quotes；它和〈不涵蓋〉裡以
+四頁之一開頭的各項中的「」引文，由 test_page_quotes_appear_on_the_pages 核對還在頁面上。練習的改法或期望值只寫在句子裡
+時，要核對就得把句意寫死成 workflow 裡的程式，頁面改了練習，那份副本也不會跟著變，所以不核：
 - course/first-steps.md W.2「核對時應看到 `鳥 3` 和三行「看到」」：要換掉清單與最後檢查的哪兩行、要數的「三行」只寫在句子裡。
 - course/first-steps.md W.2「動物清單的輸出應不受影響」：頁面沒寫 `caption` 要改成什麼。
 - course/first-steps.md W.3「核對應得到 `[80, 90]` 與 `[70, 80, 105]`」：改法「從 80 改成 110」只寫在句子裡，程式印出的也是 tensor 的寫法。
@@ -113,9 +118,11 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ".github/workflows/windows-student-commands.yml"
 PAGES = ("README.md", "README_en.md", "course/first-steps.md", "course/training.md")
-# 觸發條件裡排除一棵樹的寫法：'!'、樹的路徑、'/**'。路徑裡不能有 GitHub 路徑樣式的特殊字元（* ? + [ ] !），
-# 否則排除的就不只那一棵樹。
-TREE_EXCLUSION = re.compile(r"!(?P<tree>[^/*?+\[\]!][^*?+\[\]!]*)/\*\*")
+# 觸發條件裡排除一棵樹的寫法：'!'、樹的路徑、'/**'。路徑以 / 分段，每一段都不能是空的、. 或 ..，也不能含 GitHub
+# 路徑樣式的特殊字元（* ? + [ ] !）。含特殊字元時，排除的就不只那一棵樹；./x、a//b、a/../b 這類寫法，(ROOT / 樹).is_dir()
+# 照樣通過，兩道排除測試卻都看不到，GitHub 是否先把它們正規化又沒有文件可查。
+TREE_SEGMENT = r"(?!\.\.?/)[^/*?+\[\]!]+"
+TREE_EXCLUSION = re.compile(rf"!(?P<tree>{TREE_SEGMENT}(?:/{TREE_SEGMENT})*)/\*\*")
 # workflow 某一步 env 裡的 Python 程式：用登記好的 kernel 執行 W.1 的改字練習與 W.6 的程式。
 KERNEL_CHECKS = "PAGE_KERNEL_CHECKS"
 # 命令裡啟動 Python 的那個字（反斜線先換成 /）：python，或結尾是 python.exe 的路徑。
@@ -734,6 +741,111 @@ def test_kernel_checks_find_their_page_sentences():
         pytest.fail(f"KERNEL_CHECKS 在頁面或 Notebook 上找不到它要的句子或那一行：{error}")
 
 
+# workflow 引頁面原話的註解記號；引文從記號之後開始，範圍見 workflow_quotes。
+PAGE_QUOTE = "# 頁面說："
+# 同一行裡的 Markdown 連結（含圖片）：比對引文與頁面之前，只留方括號裡的連結文字。
+LINK = re.compile(r"!?\[([^\]\n]*)\]\([^)\n]*\)")
+
+
+def workflow_quotes():
+    """workflow 每一處 `# 頁面說：` 的 (行號, 引文, 問題)。引文從記號之後開始，到第一個「。」為止（含這個「。」）；在那之前
+    先碰到以「……」結尾的行，就到那一行的結尾為止；兩者都還沒出現時，接著讀下一行註解（去掉 # 與前後空白）。下一行不是
+    註解、或又是一處 `# 頁面說：` 時，引文沒有結束，問題寫明這件事。同一行在第一個「。」之後的字是旁邊的說明，不算引文：
+    要引兩句就寫兩行；頁面的句子沒在引到的地方結束時，引文以「……」收尾；表格的儲存格之間用「……」隔開。"""
+    lines = read(WORKFLOW).split("\n")
+    found = []
+    for index, line in enumerate(lines):
+        if PAGE_QUOTE not in line:
+            continue
+        quote, following, problem = line.split(PAGE_QUOTE, 1)[1].strip(), index + 1, None
+        while "。" not in quote and not quote.endswith("……"):
+            comment = lines[following].strip() if following < len(lines) else ""
+            if not comment.startswith("#") or PAGE_QUOTE in comment:
+                problem = "引文要在第一個「。」或以「……」結尾的那一行結束"
+                break
+            quote += comment[1:].strip()
+            following += 1
+        if "。" in quote:
+            quote = quote[: quote.index("。") + 1]
+        found.append((index + 1, quote, problem))
+    return found
+
+
+def flatten(text):
+    """比對用的寫法：同一行裡的 Markdown 連結只留連結文字，再去掉 `**`、反引號與所有空白。"""
+    return re.sub(r"\s+", "", LINK.sub(r"\1", text).replace("**", "").replace("`", ""))
+
+
+def in_order(quote, flat_page):
+    """引文經 flatten 之後以「…」切段（一個或連續幾個；`…` 去掉反引號後也是），各段依序出現在 flat_page 裡時為真；
+    切完一段都沒有時為假。"""
+    parts = [part for part in re.split(r"…+", flatten(quote)) if part]
+    if not parts:
+        return False
+    position = 0
+    for part in parts:
+        position = flat_page.find(part, position)
+        if position < 0:
+            return False
+        position += len(part)
+    return True
+
+
+def bracketed(text):
+    """text 裡最外層「」的內容，裡面可以再有「」；括號不成對時回傳 None。"""
+    found, depth, start = [], 0, 0
+    for position, char in enumerate(text):
+        if char == "「":
+            depth += 1
+            if depth == 1:
+                start = position + 1
+        elif char == "」":
+            depth -= 1
+            if depth < 0:
+                return None
+            if depth == 0:
+                found.append(text[start:position])
+    return found if depth == 0 else None
+
+
+def not_covered_page_items():
+    """檔頭「不涵蓋：」那一行之後，以「- 」加四頁之一開頭的每一行：(頁, 那一行)。每一項都寫成一行，這裡不讀接續行。"""
+    lines = (__doc__ or "").split("\n")
+    if "不涵蓋：" not in lines:
+        return []
+    items = [line for line in lines[lines.index("不涵蓋：") + 1 :] if line.startswith("- ")]
+    return [(words[1], item) for item in items if len(words := item.split()) > 1 and words[1] in PAGES]
+
+
+def test_page_quotes_appear_on_the_pages():
+    """workflow 每一處 `# 頁面說：` 的引文（範圍見 workflow_quotes）要在四頁之一找得到；檔頭〈不涵蓋〉裡以四頁之一開頭的
+    每一項，其中最外層「」裡的每段引文要在那一項開頭的頁面找得到。比對前，引文與頁面都經 flatten，引文再以「…」切段，
+    各段要在同一頁依序找得到。引文沒有照 workflow_quotes 的規則結束、某一項的「」不成對、workflow 沒有任何 `# 頁面說：`，
+    或檔頭找不到以四頁之一開頭的〈不涵蓋〉項目時，也會失敗。這裡只核引文還在頁面上：引文旁的核對是否仍和頁面句子一樣強、
+    〈不涵蓋〉那一項的理由是否仍成立，都不在這裡核；頁面留著同樣的字而意思改變時，這裡不會失敗。"""
+    pages = {page: flatten(read(page)) for page in PAGES}
+    quotes, problems = workflow_quotes(), []
+    assert quotes, f"{WORKFLOW} 沒有任何 `# 頁面說：`"
+    for number, quote, problem in quotes:
+        if problem:
+            problems.append(f"{WORKFLOW}:{number}：{problem}：{quote}")
+        elif not any(in_order(quote, text) for text in pages.values()):
+            problems.append(f"{WORKFLOW}:{number}：「{quote}」不在四頁的任何一頁上")
+    items = not_covered_page_items()
+    assert items, "檔頭找不到「不涵蓋：」那一行，或它底下沒有以四頁之一開頭的項目"
+    for page, item in items:
+        found = bracketed(item)
+        if found is None:
+            problems.append(f"檔頭〈不涵蓋〉這一項的「」不成對：{item}")
+        problems += [
+            f"檔頭〈不涵蓋〉：「{quote}」不在 {page} 上" for quote in found or [] if not in_order(quote, pages[page])
+        ]
+    assert not problems, (
+        "頁面上找不到這些引文。頁面改了句子時，先重新判斷引文旁的核對是否仍和頁面的新句子一樣強（〈不涵蓋〉的項目則重新"
+        "判斷它寫的理由是否仍成立），再照新句子改引文；只改引文不夠。\n" + "\n".join(problems)
+    )
+
+
 def test_workflow_triggers_and_shells():
     document = load_workflow()
     triggers = document["on"]
@@ -744,7 +856,10 @@ def test_workflow_triggers_and_shells():
     assert push == pull, f"push 與 pull_request 的 paths 要完全相同：\npush：{push}\npull_request：{pull}"
     assert push[:1] == ["**"], f"paths 第一條要是 '**'，改到任何檔都跑，之後只用 '!' 排除不讀的樹；現在是 {push[:1]}"
     malformed = [path for path in push[1:] if not TREE_EXCLUSION.fullmatch(path)]
-    assert not malformed, f"'**' 之後每一條都要寫成 '!<樹>/**'，一次排除一整棵樹：{malformed}"
+    assert not malformed, (
+        f"'**' 之後每一條都要寫成 '!<樹>/**'，一次排除一整棵樹；<樹> 以 / 分段，每一段都不能是空的、. 或 ..，"
+        f"也不能含 * ? + [ ] !：{malformed}"
+    )
     missing = [tree for tree in excluded_trees() if not (ROOT / tree).is_dir()]
     assert not missing, f"這些排除的樹在 repo 裡不存在，排除與旁邊的理由都已經沒有對象：{missing}"
     for name, job in document["jobs"].items():
@@ -756,6 +871,26 @@ def test_workflow_triggers_and_shells():
         assert job["defaults"]["run"]["shell"] == "${{ matrix.shell }}", f"{name} 的 run 步驟要照 matrix 選 shell"
         overridden = [step.get("name", "") for step in job["steps"] if "run" in step and "shell" in step]
         assert not overridden, f"這些步驟改用別的 shell，沒有照 matrix 跑兩種 PowerShell：{overridden}"
+
+
+@pytest.mark.parametrize(
+    ("pattern", "accepted"),
+    [
+        pytest.param("!docs/technical-reviews/**", True, id="兩段一般的名字"),
+        pytest.param("!.github/workflows/**", True, id="以點開頭的資料夾名"),
+        pytest.param("!./notebooks/**", False, id="./ 開頭"),
+        pytest.param("!docs//technical-reviews/**", False, id="中間兩個 /"),
+        pytest.param("!docs/../notebooks/**", False, id=".. 段"),
+        pytest.param("!docs/./technical-reviews/**", False, id=". 段"),
+        pytest.param("!notebooks//**", False, id="結尾多一個 /"),
+        pytest.param("!docs/*-reviews/**", False, id="含特殊字元"),
+    ],
+)
+def test_tree_exclusion_verdicts(pattern, accepted):
+    """逐一核對 TREE_EXCLUSION 對幾種寫法的判定：兩段一般的名字、以點開頭的資料夾名要接受；./ 開頭、中間或結尾多一個 /、
+    . 或 .. 段、含特殊字元的寫法要不接受。"""
+    verdict = "接受" if accepted else "不接受"
+    assert bool(TREE_EXCLUSION.fullmatch(pattern)) is accepted, f"TREE_EXCLUSION 應該{verdict} {pattern}"
 
 
 def test_excluded_trees_are_not_named_where_the_workflow_reads():
@@ -792,7 +927,7 @@ def test_excluded_trees_are_not_named_where_the_workflow_reads():
     )
 
 
-def test_known_workflow_reads_are_outside_excluded_trees():
+def test_workflow_file_pages_notebook_and_python_run_by_workflow_are_outside_excluded_trees():
     """workflow 檔本身、四頁、KERNEL_CHECKS 執行的 Notebook，以及 python_run_by_workflow 列的檔，這些已知會讀的檔不在
     排除的樹底下。比對的是 repo 內的 POSIX 路徑是否以「<樹>/」開頭；這依賴 TREE_EXCLUSION 把每條排除限定成 '!<樹>/**'，
     寫法不符的排除不在 excluded_trees() 裡，由 test_workflow_triggers_and_shells 報錯。排除的樹裡另有哪些檔被讀，這裡看
