@@ -5,14 +5,20 @@ course/training.md 的寫法跑學生命令。workflow 與頁面是兩份副本�
 改寫、新增或刪除，而 workflow 沒跟著改，就在這裡失敗，訊息指出頁面與行號。
 
 驗證：依頁面寫明的 Windows 換法，推出讀者實際輸入的命令序列，再和 workflow 裡 Invoke-Page（執行）與 Skip-Page
-（不跑，理由寫在呼叫處的註解）標了該頁的命令依序逐條比對。命令取自 shell 類 fenced 區塊的每一行（MACOS_ONLY_BLOCKS
-除外），以及 fence 外的 inline code——開頭是命令（COMMAND_START），或在提到 Windows／PowerShell 的句子裡帶 PowerShell
-才有的寫法（POWERSHELL_ONLY）；說明裡提到的命令名稱與其他平台的寫法列在 NOT_WINDOWS。頁面的換法由 REPLACEMENTS（bash
-行換成同頁句子裡給 Windows 的寫法）與 PREFIXES（整頁的 `.venv/bin/python` 換成 Windows 路徑）表示。另外核對 workflow
-的 Get-PageCode 找得到它要取的 Python 程式、觸發路徑涵蓋這些檔案，以及 Windows PowerShell 5.1 與 PowerShell 7 都跑。
+（不跑，-Reason 是印進記錄的簡短理由，完整理由寫在呼叫處的註解）標了該頁的命令依序逐條比對。命令取自 shell 類 fenced
+區塊的每一行（MACOS_ONLY_BLOCKS 除外），以及 fence 外的 inline code——開頭是命令（COMMAND_START），或在提到
+Windows／PowerShell 的句子裡帶 PowerShell 才有的寫法（POWERSHELL_ONLY）；說明裡提到的命令名稱與其他平台的寫法列在
+NOT_WINDOWS。標成 text 這類純文字（PLAIN_LANGUAGES）的區塊不比對，但其中有一行符合 COMMAND_START 就報錯；fence 外出現
+HTML 的 <code> 或 <pre> 也報錯，因為這裡只認得反引號與 fenced 區塊，寫在 HTML 裡的命令看不到。頁面的換法由
+REPLACEMENTS（bash 行換成同頁句子裡給 Windows 的寫法）與 PREFIXES（整頁的 `.venv/bin/python` 換成 Windows 路徑）表示。
+另外核對 workflow 的 Get-PageCode 找得到它要取的 Python 程式、每個 Skip-Page 都有 -Reason、push 與 pull_request 的
+paths 都涵蓋 TRIGGER_PATHS，以及 Windows PowerShell 5.1 與 PowerShell 7 都跑。
 不涵蓋：開頭不是 COMMAND_START、又不在 Windows 句子裡帶 PowerShell 寫法的 inline code（例如只寫腳本名的
-`train.py --task vision`）；句意只認錨點文字，換法句子改了措辭只會報「找不到」；續行的命令逐行比對；Get-PageCode 取用的
-Python 程式內容不比對（CI 執行時直接從頁面讀）；workflow 的命令在 Windows 上是否真的成功，要看 CI 本身。
+`train.py --task vision`）；純文字區塊裡開頭不符合 COMMAND_START 的命令（例如前面帶 `PS>` 提示字元的行）；句意只認
+錨點文字，換法句子改了措辭只會報「找不到」；續行的命令逐行比對；Get-PageCode 取用的 Python 程式內容不比對（CI 執行時
+直接從頁面讀）；頁面寫給讀者核對的預期值（例如 W.7 印出的 `True`、training.md 的 `holdout_examples` 2、`01/1.1.ipynb`、
+kernel 名稱 Tiny Perceptron）沒有和 workflow 的核對值互相釘住，頁面改了預期值而 workflow 照舊核對舊值，這裡不會失敗；
+Skip-Page 的 -Reason 與註解寫的理由對不對；workflow 的命令在 Windows 上是否真的成功，要看 CI 本身。
 """
 
 import difflib
@@ -26,12 +32,30 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ".github/workflows/windows-student-commands.yml"
 PAGES = ("README.md", "README_en.md", "course/first-steps.md", "course/training.md")
-TRIGGER_PATHS = (*PAGES, "pyproject.toml", "uv.lock", WORKFLOW, "tests/test_windows_student_commands.py")
+# 這些檔改了，頁面命令的結果就可能不同，Windows CI 要重跑：頁面跑的程式、決定指標檔的 .gitattributes、決定 Python 版本的
+# .python-version，以及兩條 --list 命令讀的清單。
+TRIGGER_PATHS = (
+    *PAGES,
+    "pyproject.toml",
+    "uv.lock",
+    "scripts/**",
+    "tiny_perceptron/**",
+    "assets/training/manifest.json",
+    ".gitattributes",
+    ".python-version",
+    "docs/course-experiments/public-models.json",
+    WORKFLOW,
+    "tests/test_windows_student_commands.py",
+)
 
 FENCE = re.compile(r"^\s*(`{3,}|~{3,})(.*)$")
 SHELL_LANGUAGES = {"bash", "sh", "shell", "zsh", "fish", "console", "powershell", "pwsh", "ps1", "ps", "cmd", "bat"}
-OTHER_LANGUAGES = {"python", "json", "jsonl", "text", "txt", "plaintext", "yaml", "toml", "output"}
+# 純文字區塊不比對命令，但其中有一行符合 COMMAND_START 就報錯：讀者照樣會把它打進 PowerShell。
+PLAIN_LANGUAGES = {"text", "txt", "plaintext", "output"}
+OTHER_LANGUAGES = {"python", "json", "jsonl", "yaml", "toml", *PLAIN_LANGUAGES}
 SPAN = re.compile(r"(?<!`)(`+)(?!`)(.+?)(?<!`)\1(?!`)")
+# fence 外的 HTML code 元素。這裡不解析 HTML，寫在裡面的命令看不到，所以出現就報錯。
+HTML_CODE = re.compile(r"<(?:code|pre)\b", re.IGNORECASE)
 # 句子在這些標點之後結束；英文的句點、分號後面要接空白或行尾。
 TERMINATOR = re.compile(r"[。；！？]|[.;!?](?=\s|$)")
 WINDOWS_WORDS = ("Windows", "PowerShell")
@@ -110,6 +134,7 @@ NOT_WINDOWS = {
 
 CALL = re.compile(
     r"^[ \t]*(?:\$\w+[ \t]*=[ \t]*)?(?P<verb>Invoke-Page|Skip-Page)[ \t]+-Pages[ \t]+(?P<pages>\S+)"
+    r"(?:[ \t]+-Reason[ \t]+'(?P<reason>(?:[^'\n]|'')*)')?"
     r"(?:[ \t]+-Stdin[ \t]+\$\w+)?[ \t]+-Commands[ \t]+(?:@'\n(?P<block>.*?)\n'@|'(?P<line>(?:[^'\n]|'')*)')",
     re.M | re.S,
 )
@@ -225,6 +250,13 @@ def windows_commands(page):
     """(命令, 問題)：照頁面寫明的 Windows 換法，依頁面順序列出 Windows 讀者在 PowerShell 輸入的命令。"""
     problems = []
     blocks, prose = split_page(read(page))
+    for number, line in prose:
+        masked, _ = sentences(line)
+        if HTML_CODE.search(masked):
+            problems.append(
+                f"{page}:{number}：fence 外有 HTML 的 <code> 或 <pre>，這個測試不支援；寫在裡面的命令不會被比對，"
+                "請改用反引號的 inline code 或 fenced 區塊"
+            )
     spans = [span for number, line in prose for span in spans_in(number, line)]
     picked = {
         id(span)
@@ -244,6 +276,13 @@ def windows_commands(page):
 
     lines = []
     for start, language, body in blocks:
+        if language in PLAIN_LANGUAGES:
+            problems += [
+                f"{page}:{number}：標成「{language}」的區塊裡，「{content.strip()}」看起來是命令；"
+                "shell 命令請標 bash 或 powershell，這個測試才會比對它"
+                for number, content in body
+                if COMMAND_START.match(content.strip())
+            ]
         if language in OTHER_LANGUAGES:
             continue
         if language not in SHELL_LANGUAGES:
@@ -333,6 +372,13 @@ def workflow_copies():
                 unknown = [page for page in pages if page not in PAGES]
                 if unknown:
                     problems.append(f"{WORKFLOW}：步驟「{step.get('name', '')}」的 -Pages 有不認得的頁面 {unknown}")
+                if match["verb"] == "Skip-Page" and not (match["reason"] or "").strip():
+                    problems.append(
+                        f"{WORKFLOW}：步驟「{step.get('name', '')}」的 Skip-Page 沒有 -Reason；"
+                        "記錄裡要印出不跑的理由，讀記錄的人才分得出「這裡沒跑」與「前面已經跑過」"
+                    )
+                if match["verb"] == "Invoke-Page" and match["reason"] is not None:
+                    problems.append(f"{WORKFLOW}：步驟「{step.get('name', '')}」的 Invoke-Page 不收 -Reason")
                 body = match["block"].split("\n") if match["block"] is not None else [match["line"].replace("''", "'")]
                 copies.extend(
                     Copy(step.get("name", ""), match["verb"], pages, line.strip()) for line in body if line.strip()
@@ -376,8 +422,52 @@ def test_page_windows_commands_match_workflow(page):
     copies, _ = workflow_copies()
     problems += compare(page, commands, [copy for copy in copies if page in copy.pages])
     assert not problems, (
-        "頁面與 workflow 的 Windows 命令要一起改；不跑的命令寫進 Skip-Page，並在註解寫理由。\n" + "\n".join(problems)
+        "頁面與 workflow 的 Windows 命令要一起改；不跑的命令寫進 Skip-Page，-Reason 寫印進記錄的簡短理由，"
+        "註解寫完整理由。\n" + "\n".join(problems)
     )
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        pytest.param(
+            "```text\nRemove-Item -Recurse -Force .venv\n```\n", "x.md:2：標成「text」", id="text 區塊裡的 cmdlet"
+        ),
+        pytest.param(
+            "```output\ngit clone https://github.com/birdhackor/tiny-perceptron-vlm.git\n```\n",
+            "x.md:2：標成「output」",
+            id="output 區塊裡的 git",
+        ),
+        pytest.param(
+            "```plaintext\n  .\\.venv\\Scripts\\python.exe scripts/check_env.py\n```\n",
+            "x.md:2：標成「plaintext」",
+            id="plaintext 區塊裡縮排的 Windows 路徑",
+        ),
+        pytest.param('```txt\n$env:GIT_LFS_SKIP_SMUDGE="1"\n```\n', "x.md:2：標成「txt」", id="txt 區塊裡的環境變數"),
+        pytest.param(
+            "```text\ncourse/chapters/     正文\nuv sync --frozen --extra cpu --group notebook\n```\n",
+            "x.md:3：標成「text」",
+            id="text 區塊第二行才是命令",
+        ),
+        pytest.param(
+            "或先執行 <code>Set-ExecutionPolicy -Scope CurrentUser RemoteSigned</code>。\n",
+            "x.md:1：fence 外有 HTML",
+            id="句子裡的 code 元素",
+        ),
+        pytest.param("<pre>\ngit lfs install --local\n</pre>\n", "x.md:1：fence 外有 HTML", id="跨行的 pre 元素"),
+        pytest.param("說明 <CODE>uv sync</CODE> 的用途。\n", "x.md:1：fence 外有 HTML", id="大寫的 CODE 元素"),
+        pytest.param("```text\ncourse/chapters/     教材正文與短程式\n```\n", None, id="專案結構不是命令"),
+        pytest.param("HTML 的 `<code>` 標籤只是舉例。\n", None, id="反引號裡的 code 字樣"),
+    ],
+)
+def test_commands_in_plain_blocks_or_html_code_are_reported(monkeypatch, text, expected):
+    """寫在純文字區塊或 HTML code 元素裡的命令，比對時看不到，所以要報錯並指出行號；不是命令的內容不報。"""
+    monkeypatch.setitem(globals(), "read", lambda relative: text)
+    _, problems = windows_commands("x.md")
+    if expected is None:
+        assert not problems, problems
+    else:
+        assert any(problem.startswith(expected) for problem in problems), problems
 
 
 def test_workflow_page_calls_are_recognized():

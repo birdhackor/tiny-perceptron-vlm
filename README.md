@@ -26,7 +26,7 @@ Thinking effort（思考投入）、Looped Transformer（循環深度）及Jev�
 
 ## 安裝與開啟 Notebook
 
-先安裝 [uv](https://docs.astral.sh/uv/getting-started/installation/) 與用來取得專案的[Git](https://git-scm.com/downloads)。訓練資料包用 Git LFS（Git 處理大型檔案的擴充工具）保存，下面第一行開頭的 `GIT_LFS_SKIP_SMUDGE=1` 讓 clone 不下載這些資料包；沒有安裝 Git LFS 也可以照打。Windows PowerShell 不寫這段開頭，改成先執行 `$env:GIT_LFS_SKIP_SMUDGE="1"`，再執行 `git clone https://github.com/birdhackor/tiny-perceptron-vlm.git`。CPU 閱讀與練習：
+先安裝 [uv](https://docs.astral.sh/uv/getting-started/installation/) 與用來取得專案的[Git](https://git-scm.com/downloads)。訓練資料包用 Git LFS（Git 處理大型檔案的擴充工具）保存，下面第一行開頭的 `GIT_LFS_SKIP_SMUDGE=1` 讓 clone 不下載這些資料包；沒有安裝 Git LFS 也可以照打。Windows PowerShell 不寫這段開頭，改成先執行 `$env:GIT_LFS_SKIP_SMUDGE="1"`，再執行 `git clone -c core.longpaths=true https://github.com/birdhackor/tiny-perceptron-vlm.git`。專案裡有些檔的路徑很深，Windows 上的 Git 預設建不出超過 260 字元的路徑，少了 `-c core.longpaths=true`，clone 會在取出檔案時失敗。CPU 閱讀與練習：
 
 ```bash
 GIT_LFS_SKIP_SMUDGE=1 git clone https://github.com/birdhackor/tiny-perceptron-vlm.git
