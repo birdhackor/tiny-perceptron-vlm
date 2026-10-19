@@ -40,6 +40,7 @@
   - 你的 artifact 目錄 `docs/technical-reviews/artifacts/review-20261019-1-15/`。
 - 不修改其他任何檔；碰到寫入被拒就停下回報。不 commit、不 push、不用 git stash、不觸發任何 GitHub workflow、不跑長時間訓練。
 - 執行輸出要複製進 artifact 目錄，報告引用 artifact 目錄裡的檔與它的 SHA-256；不要引用 `/tmp` 或其他暫存位置的檔。
+- `section_facts.py --execute` 會在 `outputs/reviewer-tools/runs/<時間>/` 寫執行紀錄（被 gitignore），這是工具本來的設計，不算越界；不要改寫或繞過它的路徑限制。報告要引用的執行結果，從那裡複製進你的 artifact 目錄。
 - 原始判斷：`docs/course-review-20261019/reviews/rv1019_technical_1-15/technical-1-15-original-01.json`。格式照規約，另外：
   - `source` 寫 `course/chapters/01.md#1.15`，`lesson_id` 寫 `1.15`；
   - `source_freeze` 寫 `{"path": "docs/course-review-20261019/freeze-01.json", "sha256": "71bd28f633f6b1ae3fce6e6279239f261893b42055e70974b142d25b9a45b5c0"}`；
