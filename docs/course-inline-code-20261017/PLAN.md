@@ -30,7 +30,7 @@
 
 **D3 不把輸出寫進 Markdown。** Notebook 與正文須一致（`scripts/build_course.py --check`），網站已顯示實際輸出；正文只引用 1–3 個值得觀察的數字，並以實際執行核對。
 
-**D4 Colab 的位置。** 頁尾保留 Colab 與 Notebook 下載兩個入口（`scripts/check_site.py` 要求每節都有），改成同級的一般按鈕，文字說明「程式與輸出都在上方，不開 Colab 也能讀完」；沒有程式的小節改寫成「本節沒有程式」。README、閱讀指南與 W.1 同步改口：先當書讀，想自己改再在本機或 Colab 開 Notebook。
+**D4 Colab 的位置。** 頁尾保留 Colab 與 Notebook 下載兩個入口（`scripts/check_site.py` 要求每節都有），改成同級的一般按鈕；按鈕下的說明由 `scripts/export_course.py` 的 `section_footer` 依本節有沒有教材程式選出：有程式的小節說程式都在上方、不開 Colab 也能讀完，沒有程式的小節說本節沒有要在 Notebook 執行的 Python 程式。README、閱讀指南與 W.1 同步改口：先當書讀，想自己改再在本機或 Colab 開 Notebook。
 
 **D5 37 節無 Python 程式的小節。** 只在能用 20 行左右、離線 CPU 程式呈現本節機制，且不會把成品或實測結果簡化成錯誤印象時補程式；行數只算本節為呈現機制寫的示範程式，不算同節原樣節錄的函式庫定義（屬 D1）；8.16 是唯一的例外，三段共 48 行；操作命令、需要下載權重或資料包、需要實測的小節維持文字，頁尾照 D4 說明。
 
