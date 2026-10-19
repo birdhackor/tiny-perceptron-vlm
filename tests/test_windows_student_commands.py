@@ -20,8 +20,14 @@ LONG_PATHS，以及 Windows PowerShell 5.1 與 PowerShell 7 都跑。kernel 核�
 一整串（各段在檔案文字裡以單一個 / 或反斜線相連）出現在四頁的程式區塊、workflow 的 env 與每一步的 run:、env、
 KERNEL_CHECKS 執行的 Notebook 程式格，以及 python_run_by_workflow 列的檔裡；on: 區塊本身寫著排除樣式，不掃。workflow 檔
 本身、四頁、KERNEL_CHECKS 執行的 Notebook 與 python_run_by_workflow 列的檔，repo 內的 POSIX 路徑都不以任何排除的樹加 /
-開頭。workflow 每一處 `# 頁面說：` 的引文，以及下面〈不涵蓋〉裡以四頁之一開頭的各項中的「」引文，都要在頁面上找得到，
+開頭。workflow 每一處 `# 頁面說：` 的引文，以及下面〈不涵蓋〉裡 not_covered_page_items 收的各項中的「」引文，都要在頁面上找得到，
 比對方式見 test_page_quotes_appear_on_the_pages。
+這些比對裡，引文往頁面查的函式（test_page_quotes_appear_on_the_pages 直接或間接呼叫的，read 除外）與 KERNEL_CHECKS 裡
+main、run 以外的函式是單向比對：抽少了或挑錯了，比對仍會通過。所以它們的 docstring 與錯誤訊息宣稱的每個結果，都要有
+一例餵假資料的案例，放在以該函式命名的參數化測試裡。推出頁面命令與取出 workflow 副本的函式不逐個結果補這種案例：compare 對
+頁面推出的命令與 workflow 的副本做序列比對，一邊漏抽或多抽，另一邊多出或缺少的那條就會報出；兩邊同時看不到的寫法比對
+不出來，〈不涵蓋〉列了其中一些。下面講觸發條件讀檔集合的兩道測試，用到的函式也是單向，同樣不逐個結果補這種案例，理由見
+〈不涵蓋〉裡講排除安不安全的那句。
 
 觸發條件的讀檔集合：排除的樹裡不能有頁面命令或 workflow 會讀的檔。這份集合由三種來源合起來推出。(a) 在本機用
 sys.addaudithook 收 open 事件，執行 workflow 會跑、又能在本機安全執行的 Python 頁面命令（check_env.py、
@@ -60,10 +66,13 @@ Windows CI 只核 workflow 裡旁邊以 `# 頁面說：` 引了頁面原話的�
 條件（「看到…就表示」），以及寫「希望」的答案；描述命令做什麼、工具自己核對的事、給維護者的流程與一般建議不算。
 `# 頁面說：` 的引文裡每個子句，要嘛有核對程式比對它，要嘛緊接的註解寫明不核或只核一部分；其餘用「……」略去。只核一部分
 時，要用收窄句說出核了哪一半，不能只靠略去把它藏起來。前提子句也算子句；workflow 照頁面做了的事（命令由命令的釘選核對）
-算核到。「緊接」指收窄句與引文在同一段註解裡、中間沒有程式行，前後都可以。引文從哪裡開始、到哪裡結束見 workflow_quotes；
-引文引到含「。」的 inline code 時，要留反引號，或把那段寫成 `…`，原因見 cut_at_full_stop。引文和〈不涵蓋〉裡以四頁之一
-開頭的各項中的「」引文，由 test_page_quotes_appear_on_the_pages 核對還在頁面上。練習的改法或期望值只寫在句子裡時，要核對
-就得把句意寫死成 workflow 裡的程式，頁面改了練習，那份副本也不會跟著變，所以不核：
+算核到。只說同一則引文裡某個結果的意思、理由或用途，沒有引入新的可核對事實的子句，跟著那個結果算，寫在它前面或後面都
+一樣；引入新事實（另一個輸出、另一個裝置、另一個檔）就是另一個子句，照同樣的規則核對或收窄。「緊接」指收窄句與引文在同一段
+註解裡、中間沒有程式行，前後都可以。引文從哪裡開始、到哪裡結束見 workflow_quotes；頁面句子的句尾「。」在「」裡時，整句
+引文讀不到句尾，引文以「……」收尾。含「。」的 inline code，引文要嘛把那段寫成 `…`，要嘛留著反引號，後者只限用一個反引號
+包住的 code，原因見 cut_at_full_stop。引文和〈不涵蓋〉裡 not_covered_page_items 收的各項中的「」引文，由
+test_page_quotes_appear_on_the_pages 核對還在頁面上。練習的改法或期望值只寫在句子裡時，要核對就得把句意寫死成 workflow
+裡的程式，頁面改了練習，那份副本也不會跟著變，所以不核：
 - course/first-steps.md W.2「核對時應看到 `鳥 3` 和三行「看到」」：要換掉清單與最後檢查的哪兩行、要數的「三行」只寫在句子裡。
 - course/first-steps.md W.2「動物清單的輸出應不受影響」：頁面沒寫 `caption` 要改成什麼。
 - course/first-steps.md W.3「核對應得到 `[80, 90]` 與 `[70, 80, 105]`」：改法「從 80 改成 110」只寫在句子裡，程式印出的也是 tensor 的寫法。
@@ -111,6 +120,7 @@ import ast
 import difflib
 import json
 import re
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -743,18 +753,199 @@ def test_kernel_checks_find_their_page_sentences():
         pytest.fail(f"KERNEL_CHECKS 在頁面或 Notebook 上找不到它要的句子或那一行：{error}")
 
 
+@pytest.mark.parametrize(
+    ("text", "expected", "message"),
+    [
+        pytest.param("執行後第一行輸出 `1.0 4.0 -4.0`，確認代價 4、梯度 -4。", "1.0 4.0 -4.0", None, id="剛好一句"),
+        pytest.param("執行後輸出 `1.0 4.0 -4.0`。", None, "appears 0 times", id="找不到"),
+        pytest.param(
+            "第一行輸出 `1.0`，確認代價 4。改了之後第一行輸出 `2.0`，確認代價 1。", None, "appears 2 times", id="兩句"
+        ),
+    ],
+)
+def test_one_sentence_returns_the_code_of_the_only_match_or_fails(text, expected, message):
+    """拿 KERNEL_CHECKS 的 W6_FIRST_LINE 與假的頁面文字，逐一核對 one_sentence：剛好一句時回傳那句的 inline code；找不到或
+    有兩句時以 SystemExit 失敗，訊息寫出找到幾句。"""
+    checks = kernel_checks()
+    arguments = (checks["W6_FIRST_LINE"], text, "the first W.6 output line")
+    if message is None:
+        assert checks["one_sentence"](*arguments) == expected
+    else:
+        with pytest.raises(SystemExit, match=message):
+            checks["one_sentence"](*arguments)
+
+
+@pytest.mark.parametrize(
+    ("text", "expected", "message"),
+    [
+        pytest.param(
+            '再把輸入那行 `text = "狗看鳥"` 改成 `text = "鳥看狗"`，重啟並全部執行。'
+            "程式最後的文字輸出應為 `鳥看狗`，而非舊句。",
+            ('text = "狗看鳥"', 'text = "鳥看狗"', "鳥看狗"),
+            None,
+            id="依序回傳原輸入行、新輸入行與期望輸出",
+        ),
+        pytest.param(
+            '再把輸入那行 `text = "狗看鳥"` 改成 `text = "狗看鳥"`，重啟並全部執行。'
+            "程式最後的文字輸出應為 `狗看鳥`，而非舊句。",
+            None,
+            "replaces an input line with the same line",
+            id="新舊輸入行相同",
+        ),
+    ],
+)
+def test_exercise_returns_the_old_and_new_lines_and_the_output_or_fails_on_the_same_line(text, expected, message):
+    """拿假的頁面文字逐一核對 KERNEL_CHECKS 的 exercise：依序回傳 (原輸入行, 新輸入行, 期望輸出)；新舊輸入行相同時以
+    SystemExit 失敗。"""
+    checks = kernel_checks()
+    if message is None:
+        assert checks["exercise"](text) == expected
+    else:
+        with pytest.raises(SystemExit, match=message):
+            checks["exercise"](text)
+
+
+# replace_input_line 案例裡的原輸入行與新輸入行。
+OLD_LINE, NEW_LINE = 'text = "狗看鳥"', 'text = "鳥看狗"'
+
+
+@pytest.mark.parametrize(
+    ("cells", "expected"),
+    [
+        pytest.param(
+            [
+                {"cell_type": "markdown", "source": ["# 1.1\n"]},
+                {"cell_type": "code", "source": ["import tiny_perceptron\n"]},
+                {"cell_type": "code", "source": [OLD_LINE + "\n", "print(text)"]},
+            ],
+            (2, [["# 1.1\n"], ["import tiny_perceptron\n"], NEW_LINE + "\nprint(text)"]),
+            id="json 讀入的 Notebook：source 是逐行的清單",
+        ),
+        pytest.param(
+            [
+                {"cell_type": "markdown", "source": "# 1.1"},
+                {"cell_type": "code", "source": "import tiny_perceptron"},
+                {"cell_type": "code", "source": OLD_LINE + "\nprint(text)"},
+            ],
+            (2, ["# 1.1", "import tiny_perceptron", NEW_LINE + "\nprint(text)"]),
+            id="nbformat 讀入的 Notebook：source 是字串",
+        ),
+        pytest.param(
+            [
+                {"cell_type": "code", "source": "# 原本是 " + OLD_LINE + "\nif True:\n    " + OLD_LINE},
+                {"cell_type": "code", "source": OLD_LINE + "\nprint(text)"},
+            ],
+            (1, ["# 原本是 " + OLD_LINE + "\nif True:\n    " + OLD_LINE, NEW_LINE + "\nprint(text)"]),
+            id="整行相等才算，只含有它或縮排過的行不算",
+        ),
+        pytest.param(
+            [{"cell_type": "markdown", "source": OLD_LINE}, {"cell_type": "code", "source": OLD_LINE}],
+            (1, [OLD_LINE, NEW_LINE]),
+            id="Markdown 格裡的同一行不算",
+        ),
+        pytest.param([{"cell_type": "code", "source": 'text = "貓"'}], "0 code lines", id="找不到"),
+        pytest.param(
+            [{"cell_type": "code", "source": OLD_LINE + "\nprint(text)"}, {"cell_type": "code", "source": OLD_LINE}],
+            "2 code lines",
+            id="兩行相等",
+        ),
+    ],
+)
+def test_replace_input_line_replaces_the_only_equal_code_line_or_fails(cells, expected):
+    """拿假的 Notebook 逐一核對 KERNEL_CHECKS 的 replace_input_line：程式格裡恰好一行等於原輸入行時，在傳進來的 Notebook
+    裡把那一行換成新輸入行、其餘不動，回傳那一格在 cells 裡的索引（Markdown 格也算進索引）；source 是 json 讀入的清單或
+    nbformat 讀入的字串都一樣。Markdown 格裡的、只含有它或縮排過的行不算；找不到或兩行相等時以 SystemExit 失敗，訊息寫出
+    有幾行。"""
+    checks = kernel_checks()
+    notebook = {"cells": deepcopy(cells)}
+    if isinstance(expected, str):
+        with pytest.raises(SystemExit, match=expected):
+            checks["replace_input_line"](notebook, OLD_LINE, NEW_LINE)
+    else:
+        index, sources = expected
+        assert checks["replace_input_line"](notebook, OLD_LINE, NEW_LINE) == index
+        assert [cell["source"] for cell in notebook["cells"]] == sources
+
+
+@pytest.mark.parametrize(
+    ("outputs", "expected", "message"),
+    [
+        pytest.param(
+            [
+                {"output_type": "stream", "name": "stdout", "text": "字表\n編號："},
+                {"output_type": "stream", "name": "stdout", "text": "1 2 3\n鳥看狗\n"},
+            ],
+            ["字表", "編號：1 2 3", "鳥看狗"],
+            None,
+            id="一行分在兩段 stdout",
+        ),
+        pytest.param(
+            [
+                {"output_type": "stream", "name": "stdout", "text": "甲\n"},
+                {"output_type": "stream", "name": "stderr", "text": "UserWarning: 警告\n"},
+                {"output_type": "stream", "name": "stdout", "text": "乙\n"},
+            ],
+            ["甲", "乙"],
+            None,
+            id="stderr 不算",
+        ),
+        pytest.param(
+            [
+                {"output_type": "stream", "name": "stdout", "text": "甲\n"},
+                {"output_type": "execute_result", "execution_count": 1, "data": {"text/plain": "3"}, "metadata": {}},
+            ],
+            None,
+            "execute_result",
+            id="還有運算式的值",
+        ),
+        pytest.param(
+            [
+                {"output_type": "stream", "name": "stdout", "text": "甲\n"},
+                {"output_type": "display_data", "data": {"image/png": "iVBORw0KGgo="}, "metadata": {}},
+            ],
+            None,
+            "display_data",
+            id="還有圖",
+        ),
+        pytest.param(
+            [
+                {"output_type": "stream", "name": "stdout", "text": "甲\n"},
+                {"output_type": "error", "ename": "ValueError", "evalue": "x", "traceback": []},
+            ],
+            None,
+            "error",
+            id="還有錯誤",
+        ),
+    ],
+)
+def test_printed_lines_join_stdout_before_splitting_or_fail_on_other_outputs(outputs, expected, message):
+    """拿和 KERNEL_CHECKS 執行後同樣形狀的輸出（text 是字串；它的 NotebookClient 沒有開 coalesce_streams，每個 stream
+    訊息各一筆）逐一核對 printed_lines：各段 stdout 依序接起來再分行，stderr 不算；還有運算式的值、圖或錯誤時以 SystemExit
+    失敗，訊息寫出是哪一種。"""
+    checks = kernel_checks()
+    if message is None:
+        assert checks["printed_lines"]({"outputs": outputs}) == expected
+    else:
+        with pytest.raises(SystemExit, match=message):
+            checks["printed_lines"]({"outputs": outputs})
+
+
 # workflow 引頁面原話的註解記號；引文從記號之後開始，範圍見 workflow_quotes。
 PAGE_QUOTE = "# 頁面說："
-# 同一行裡的 Markdown 連結（含圖片）：比對引文與頁面之前，只留方括號裡的連結文字。
+# 同一行裡的 Markdown 行內連結 `[文字](網址)`（含圖片）：比對引文與頁面之前，只留方括號裡的文字。參考式連結
+# `[文字][標籤]` 與自動連結 `<網址>` 原樣留著。
 LINK = re.compile(r"!?\[([^\]\n]*)\]\([^)\n]*\)")
 
 
 def cut_at_full_stop(text):
     """text 從開頭到反引號與「」以外的第一個「。」為止（含這個「。」）；沒有這種「。」時回傳 None。反引號一個一個算，每遇到
     一個就在 code 裡外切換，所以用兩個反引號包起來的 inline code，這裡當成 code 外的字。code 外的「」可以巢狀；code 裡的「」
-    不算，前面沒有 `「` 可以對應的 `」` 也不算。這裡只看 text 自己的字：引文引到含「。」的 inline code 卻拿掉了反引號時，
-    分不出那個「。」在 code 裡，引文會在那裡被截斷，後半不受 test_page_quotes_appear_on_the_pages 核對，所以這種引文要留
-    反引號，或把那段寫成 `…`。引文從 inline code 或「」的中間開始時，同樣分不出開頭那段的「。」在 code 或「」裡。"""
+    不算，前面沒有 `「` 可以對應的 `」` 也不算。反引號逐個切換、沒關的 code 與 `「` 一直算到 text 的結尾，是因為
+    workflow_quotes 一行一行接起註解、每接一行就截一次，前一行可能停在 code 或「」裡；先成對遮掉 code（例如用 SPAN）或「」
+    再找「。」，前一行沒關的那段裡的「。」就會在接上下一行之前被當成句尾。這裡只看 text 自己的字：引文引到含「。」的
+    inline code 卻拿掉了反引號時，分不出那個「。」在 code 裡，引文會在那裡被截斷，後半不受
+    test_page_quotes_appear_on_the_pages 核對，所以這種引文要留反引號（只限用一個反引號包住的 code），或把那段寫成 `…`。
+    引文從 inline code 或「」的中間開始時，同樣分不出開頭那段的「。」在 code 或「」裡。"""
     code, depth = False, 0
     for position, char in enumerate(text):
         if char == "`":
@@ -794,7 +985,7 @@ def workflow_quotes():
 
 
 def flatten(text):
-    """比對用的寫法：同一行裡的 Markdown 連結只留連結文字，再去掉 `**`、反引號與所有空白。"""
+    """比對用的寫法：同一行裡的 Markdown 行內連結（寫法見 LINK）只留方括號裡的文字，再去掉 `**`、反引號與所有空白。"""
     return re.sub(r"\s+", "", LINK.sub(r"\1", text).replace("**", "").replace("`", ""))
 
 
@@ -831,7 +1022,8 @@ def bracketed(text):
 
 
 def not_covered_page_items():
-    """檔頭「不涵蓋：」那一行之後，以「- 」加四頁之一開頭的每一行：(頁, 那一行)。每一項都寫成一行，這裡不讀接續行。"""
+    """檔頭「不涵蓋：」那一行之後，以「- 」開頭、用空白切開後第二個詞是四頁之一的每一行：(頁, 那一行)。頁名後面直接接
+    標點的行（例如「- course/training.md：」）不算，也不報錯。每一項都寫成一行，這裡不讀接續行。"""
     lines = (__doc__ or "").split("\n")
     if "不涵蓋：" not in lines:
         return []
@@ -840,10 +1032,10 @@ def not_covered_page_items():
 
 
 def test_page_quotes_appear_on_the_pages():
-    """workflow 每一處 `# 頁面說：` 的引文（範圍見 workflow_quotes）要在四頁之一找得到；檔頭〈不涵蓋〉裡以四頁之一開頭的
-    每一項，其中最外層「」裡的每段引文要在那一項開頭的頁面找得到。比對前，引文與頁面都經 flatten，引文再以「…」切段，
+    """workflow 每一處 `# 頁面說：` 的引文（範圍見 workflow_quotes）要在四頁之一找得到；not_covered_page_items 從檔頭
+    〈不涵蓋〉收的每一項，其中最外層「」裡的每段引文要在那一項的頁面找得到。比對前，引文與頁面都經 flatten，引文再以「…」切段，
     各段要在同一頁依序找得到。引文沒有照 workflow_quotes 的規則結束、某一項的「」不成對、workflow 沒有任何 `# 頁面說：`，
-    或檔頭找不到以四頁之一開頭的〈不涵蓋〉項目時，也會失敗。這裡只核引文還在頁面上：引文旁的核對是否仍和頁面句子一樣強、
+    或 not_covered_page_items 一項都沒收到時，也會失敗。這裡只核引文還在頁面上：引文旁的核對是否仍和頁面句子一樣強、
     〈不涵蓋〉那一項的理由是否仍成立，都不在這裡核；頁面留著同樣的字而意思改變時，這裡不會失敗。"""
     pages = {page: flatten(read(page)) for page in PAGES}
     quotes, malformed, missing = workflow_quotes(), [], []
@@ -854,7 +1046,7 @@ def test_page_quotes_appear_on_the_pages():
         elif not any(in_order(quote, text) for text in pages.values()):
             missing.append(f"{WORKFLOW}:{number}：「{quote}」不在四頁的任何一頁上")
     items = not_covered_page_items()
-    assert items, "檔頭找不到「不涵蓋：」那一行，或它底下沒有以四頁之一開頭的項目"
+    assert items, "檔頭找不到「不涵蓋：」那一行，或它底下沒有 not_covered_page_items 收得到的項目"
     for page, item in items:
         found = bracketed(item)
         if found is None:
@@ -868,9 +1060,8 @@ def test_page_quotes_appear_on_the_pages():
     if missing:
         sections.append(
             "頁面上找不到這些引文。頁面改了句子時，workflow 的引文要先重新判斷旁邊的核對是否仍和頁面的新句子一樣強，"
-            "再照檔頭的引文規則改引文：只引有核對比對、或緊接的註解寫明不核或只核一部分的子句，其餘用「……」略去，而不是"
-            "直接把新句子整句抄回來；〈不涵蓋〉的項目要先重新判斷它寫的理由是否仍成立，再改「」裡的引文。\n"
-            + "\n".join(missing)
+            "再照檔頭的引文規則改引文，而不是直接把新句子整句抄回來；〈不涵蓋〉的項目要先重新判斷它寫的理由是否仍成立，"
+            "再改「」裡的引文。\n" + "\n".join(missing)
         )
     assert not sections, "\n\n".join(sections)
 
@@ -936,6 +1127,8 @@ def test_page_quotes_appear_on_the_pages():
             "……Run All Cells」，清空工作桌再由上到下跑。",
             id="前面沒有 `「` 的 `」`",
         ),
+        pytest.param("程式最後的文字輸出應為 `鳥看狗，狗看鳥。", None, id="沒關的反引號之後的「。」"),
+        pytest.param("例如「顏色=紅；形狀=圓。", None, id="沒關的 `「` 之後的「。」"),
         pytest.param(
             "程式最後的文字輸出應為 鳥看狗，狗看鳥。，而非舊句；這就是要核對的還原結果。",
             "程式最後的文字輸出應為 鳥看狗，狗看鳥。",
@@ -943,13 +1136,16 @@ def test_page_quotes_appear_on_the_pages():
         ),
         pytest.param("……狗看鳥。`，而非舊句；這就是要核對的還原結果。", "……狗看鳥。", id="限制：從 code 中間開始"),
         pytest.param("……形狀=圓。」。這個工具以字元為單位。", "……形狀=圓。", id="限制：從「」中間開始"),
+        pytest.param(
+            "輸入 ``a。b`` 之後按 Enter。旁邊的說明。", "輸入 ``a。", id="限制：兩個反引號包住的 code 裡的「。」"
+        ),
     ],
 )
 def test_cut_at_full_stop_skips_backticks_and_brackets(text, expected):
     """逐一核對 cut_at_full_stop 截到哪裡：反引號裡的「。」在開頭、中間、緊接句尾之前與結尾，以及兩段反引號之間的「。」；
     「」裡的「。」在同樣四個位置，以及兩組「」之間的「。」；巢狀「」；反引號與「」都有、反引號裡的 `「`、前面沒有 `「` 的
-    `」`；一般句子、沒有「。」、以「……」結尾的片段（另一例的反引號裡有「。」）；以及它 docstring 寫的限制：拿掉反引號的
-    code、從 code 或「」中間開始時，裡面的「。」被當成句尾。"""
+    `」`；沒關的反引號與 `「` 之後的「。」；一般句子、沒有「。」、以「……」結尾的片段（另一例的反引號裡有「。」）；以及它
+    docstring 寫的限制：拿掉反引號的 code、從 code 或「」中間開始、用兩個反引號包住的 code，裡面的「。」被當成句尾。"""
     assert cut_at_full_stop(text) == expected
 
 
@@ -966,12 +1162,198 @@ def test_cut_at_full_stop_skips_backticks_and_brackets(text, expected):
             [(1, "例如「顏色=紅；形狀=圓。」這種短文，共十二篇。", None)],
             id="「」裡的「。」，引文接到下一行",
         ),
+        pytest.param(
+            "          # 頁面說：程式最後的文字輸出應為 `鳥看狗，狗看鳥。\n"
+            "          # `，而非舊句；這就是要核對的還原結果。旁邊的說明。\n",
+            [(1, "程式最後的文字輸出應為 `鳥看狗，狗看鳥。`，而非舊句；這就是要核對的還原結果。", None)],
+            id="inline code 跨過註解換行，換行前的那段裡有「。」",
+        ),
+        pytest.param(
+            "          # 頁面說：例如「顏色=紅；形狀=圓。\n          # 」這種短文，共十二篇。旁邊的說明。\n",
+            [(1, "例如「顏色=紅；形狀=圓。」這種短文，共十二篇。", None)],
+            id="「」跨過註解換行，換行前的那段裡有「。」",
+        ),
+        pytest.param(
+            "          # 頁面說：先用 --list 查看名稱，\n          # 再下載所選包……\n          # 旁邊的說明。\n",
+            [(1, "先用 --list 查看名稱，再下載所選包……", None)],
+            id="接到以「……」結尾的那一行為止",
+        ),
+        pytest.param(
+            "# 頁面說：這兩次沒有更新。--train 開啟更新……\n",
+            [(1, "這兩次沒有更新。", None)],
+            id="同一行先有「。」再以「……」結尾",
+        ),
+        pytest.param(
+            "# 頁面說：mode……應為 dry-run-no-weight-update，\n# 有效目標數應大於零。\n",
+            [(1, "mode……應為 dry-run-no-weight-update，有效目標數應大於零。", None)],
+            id="行中間的「……」不結束引文",
+        ),
+        pytest.param(
+            "x = 1\nAssert-Paths checkpoints/start.pt  # 頁面說：這兩次沒有更新。\n",
+            [(2, "這兩次沒有更新。", None)],
+            id="記號前面有程式",
+        ),
+        pytest.param(
+            "# 頁面說：這兩次沒有更新。\nforeach ($name in 'a', 'b') { }\n# 頁面說：--train 開啟更新……\n",
+            [(1, "這兩次沒有更新。", None), (3, "--train 開啟更新……", None)],
+            id="兩處記號各一則",
+        ),
     ],
 )
-def test_workflow_quotes_end_where_cut_at_full_stop_cuts(monkeypatch, text, expected):
-    """餵一份假的 workflow 給 workflow_quotes，核對反引號裡或「」裡的「。」不讓引文提早結束，引文接到下一行註解時也一樣。"""
+def test_workflow_quotes_find_each_quote_and_where_it_ends(monkeypatch, text, expected):
+    """餵一份假的 workflow 給 workflow_quotes，核對每一處 `# 頁面說：`（前面有程式也算）各回傳記號那一行的行號與引文；
+    引文到 cut_at_full_stop 截到的「。」或以「……」結尾的那一行為止：反引號裡或「」裡的「。」不讓引文提早結束，code 或
+    「」跨過註解換行時也一樣；同一行先有「。」、再以「……」結尾時截在「。」，行中間的「……」不結束引文。"""
     monkeypatch.setitem(globals(), "read", lambda relative: text)
     assert workflow_quotes() == expected
+
+
+# workflow_quotes 回報引文沒有結束時的問題欄。
+QUOTE_WITHOUT_END = "引文要在反引號與「」以外的第一個「。」或以「……」結尾的那一行結束"
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        pytest.param(
+            "          # 頁面說：在專案根目錄執行時，後兩行應都是 True\n"
+            "          Invoke-Page -Pages course/first-steps.md -Stdin $code -Commands '.\\.venv\\Scripts\\python.exe'\n",
+            [(1, "在專案根目錄執行時，後兩行應都是 True", QUOTE_WITHOUT_END)],
+            id="下一行不是註解",
+        ),
+        pytest.param(
+            "          # 頁面說：先預測 pyproject.toml 是否還會被找到\n"
+            "          # 頁面說：核對後用 exit() 退出，再 cd .. 回到上一層專案根目錄。\n",
+            [
+                (1, "先預測 pyproject.toml 是否還會被找到", QUOTE_WITHOUT_END),
+                (2, "核對後用 exit() 退出，再 cd .. 回到上一層專案根目錄。", None),
+            ],
+            id="下一行又是一處 `# 頁面說：`",
+        ),
+        pytest.param(
+            "# 頁面說：先用 --list 查看名稱，\n# 再下載所選包",
+            [(1, "先用 --list 查看名稱，再下載所選包", QUOTE_WITHOUT_END)],
+            id="引文還沒結束檔案就結束",
+        ),
+    ],
+)
+def test_workflow_quotes_report_a_quote_that_does_not_end(monkeypatch, text, expected):
+    """餵一份假的 workflow 給 workflow_quotes，核對引文還沒碰到結束它的「。」或以「……」結尾的行，就遇到不是註解的行、
+    又一處 `# 頁面說：`，或檔案結束時，問題欄寫明引文沒有結束，引文欄是到那時為止接起來的字。"""
+    monkeypatch.setitem(globals(), "read", lambda relative: text)
+    assert workflow_quotes() == expected
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        pytest.param("見[入口頁](../README.md)的說明", "見入口頁的說明", id="連結只留連結文字"),
+        pytest.param("![流程圖](figures/a.svg)之後", "流程圖之後", id="圖片只留方括號裡的文字"),
+        pytest.param("見[入口\n頁](../README.md)", "見[入口頁](../README.md)", id="跨行的連結不換"),
+        pytest.param("**粗體**與 2*3", "粗體與2*3", id="去掉 `**`，單一個 `*` 留著"),
+        pytest.param("執行 `git lfs version` 核對", "執行gitlfsversion核對", id="去掉反引號"),
+        pytest.param("a b\n\tc　d", "abcd", id="去掉所有空白：空格、換行、tab 與全形空白"),
+        pytest.param("見[入口頁][readme]的說明", "見[入口頁][readme]的說明", id="參考式連結不換"),
+        pytest.param("見 <https://example.com> 的說明", "見<https://example.com>的說明", id="自動連結不換"),
+    ],
+)
+def test_flatten_keeps_link_text_and_drops_bold_marks_backticks_and_whitespace(text, expected):
+    """逐一核對 flatten：同一行裡的行內連結（含圖片）只留方括號裡的文字，跨行的連結、參考式連結與自動連結不換；去掉
+    `**`（單一個 `*` 留著）、反引號與所有空白。"""
+    assert flatten(text) == expected
+
+
+@pytest.mark.parametrize(
+    ("quote", "expected"),
+    [
+        pytest.param("先用 --list 查看名稱……再用 --asset NAME 下載", True, id="連續的「……」切段，各段依序找得到"),
+        pytest.param("先用 …--list 查看名稱", True, id="單一個「…」也切段"),
+        pytest.param("**先用**`…`查看名稱", True, id="引文也先 flatten，`…` 去掉反引號後切段"),
+        pytest.param("再用……先用", False, id="各段順序顛倒"),
+        pytest.param("查看名稱……名稱，再用", False, id="後一段和前一段重疊"),
+        pytest.param("先用……再用 --asset X 下載", False, id="有一段找不到"),
+        pytest.param("……", False, id="切完一段都沒有"),
+    ],
+)
+def test_in_order_is_true_only_when_every_part_is_found_in_order(quote, expected):
+    """逐一核對 in_order：引文先 flatten，再以一個或連續幾個「…」切段（`…` 也算）；各段依序、不重疊地出現在頁面裡時為真，
+    順序顛倒、和前一段重疊、有一段找不到，或切完一段都沒有時為假。"""
+    page = flatten("先用 `--list` 查看名稱，再用 `--asset NAME` 下載、核對並解包所選包；將 NAME 換成清單中的名稱。")
+    assert in_order(quote, page) is expected
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        pytest.param(
+            "- course/training.md T.9「希望答案是`blue`」與「這一題先讓你查看前後有沒有改變」：沒有期望值。",
+            ["希望答案是`blue`", "這一題先讓你查看前後有沒有改變"],
+            id="兩組「」各回傳裡面的字",
+        ),
+        pytest.param(
+            "- course/training.md T.9「分別說明「保存變小了嗎」與「相同題目是否維持回答」」：沒有期望值。",
+            ["分別說明「保存變小了嗎」與「相同題目是否維持回答」"],
+            id="巢狀「」只回傳最外層的整段",
+        ),
+        pytest.param("- Skip-Page 的 -Reason 與註解寫的理由對不對。", [], id="沒有「」"),
+        pytest.param(
+            "- course/training.md T.1「打開幾筆，檢查 `text` 或 `messages` 等欄位：沒有期望值。", None, id="少一個 `」`"
+        ),
+        pytest.param("- course/training.md T.1 打開幾筆」：沒有期望值。", None, id="多一個 `」`"),
+    ],
+)
+def test_bracketed_returns_the_outermost_contents_or_none_when_unbalanced(text, expected):
+    """逐一核對 bracketed：每組最外層「」回傳裡面的字，巢狀時回傳外層的整段（裡面的「」留著）；沒有「」時回傳空的清單；
+    少一個或多一個 `」` 時回傳 None。"""
+    assert bracketed(text) == expected
+
+
+@pytest.mark.parametrize(
+    ("doc", "expected"),
+    [
+        pytest.param(
+            "說明。\n\n不涵蓋：\n- README.md 甲「乙」：理由。\n- course/training.md T.1「丙」：理由。\n",
+            [
+                ("README.md", "- README.md 甲「乙」：理由。"),
+                ("course/training.md", "- course/training.md T.1「丙」：理由。"),
+            ],
+            id="「不涵蓋：」之後以「- 」加頁名開頭的行",
+        ),
+        pytest.param(
+            "- README.md 前面「甲」：理由。\n不涵蓋：\n- README_en.md 後面「乙」：理由。\n",
+            [("README_en.md", "- README_en.md 後面「乙」：理由。")],
+            id="「不涵蓋：」之前的項目不算",
+        ),
+        pytest.param(
+            "不涵蓋：\n- 讀檔集合看不到 course/training.md 的「甲」。\n- course/first-steps.md W.7「乙」：理由。\n",
+            [("course/first-steps.md", "- course/first-steps.md W.7「乙」：理由。")],
+            id="「- 」之後不是頁名的項目不算",
+        ),
+        pytest.param(
+            "不涵蓋：\n- README.md 甲「乙」：理由。\n\n另一段說明。\n- course/training.md T.3「丙」：理由。\n",
+            [
+                ("README.md", "- README.md 甲「乙」：理由。"),
+                ("course/training.md", "- course/training.md T.3「丙」：理由。"),
+            ],
+            id="隔著一段說明的後一串項目也算",
+        ),
+        pytest.param(
+            "不涵蓋：\n- README.md 甲「乙\n  丙」：理由。\n", [("README.md", "- README.md 甲「乙")], id="接續行不讀"
+        ),
+        pytest.param(
+            "不涵蓋：\n- course/training.md：甲「乙」。\n- course/training.md T.1「丙」：理由。\n",
+            [("course/training.md", "- course/training.md T.1「丙」：理由。")],
+            id="頁名後面直接接標點的行不算",
+        ),
+        pytest.param("說明。\n- README.md 甲「乙」：理由。\n", [], id="沒有「不涵蓋：」那一行"),
+    ],
+)
+def test_not_covered_page_items_list_the_page_lines_after_the_heading(monkeypatch, doc, expected):
+    """把檔頭換成假的字串，逐一核對 not_covered_page_items：「不涵蓋：」那一行之後，以「- 」、頁名與空白開頭的每一行都算，
+    隔著別的段落也算；那一行之前的、「- 」之後不是頁名的、頁名後面直接接標點的不算；接續行不讀；沒有「不涵蓋：」那一行時
+    回傳空的清單。"""
+    monkeypatch.setitem(globals(), "__doc__", doc)
+    assert not_covered_page_items() == expected
 
 
 def test_workflow_triggers_and_shells():
