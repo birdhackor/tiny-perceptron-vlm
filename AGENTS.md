@@ -96,6 +96,7 @@ uv run ruff check . && uv run ruff format .
 ## GitHub Actions
 
 - push 到 `main` 會觸發 Publish course 與 CI；`ci.yml` 的 push 沒有限制分支，推任何 tag 也會觸發 CI。
+- `windows-student-commands.yml` 在任何 branch 的 push 或 pull request 改到它 `paths` 列的檔案時執行，在 Windows 上照入口頁跑學生指令；不用 secrets，不連 Modal 與 Hugging Face。
 - 其他 workflow 只能手動觸發，可能啟動 Modal 計費運算或發布到 Hugging Face。沒有作者明確同意，不要觸發。
 
 ## 判斷失敗是否為回歸
