@@ -59,9 +59,11 @@ Windows CI 只核 workflow 裡旁邊以 `# 頁面說：` 引了頁面原話的�
 頁面明確要讀者核對、確認、檢查、比較或查看的結果，寫成「應為／應看到／應顯示／要等於」這類期望的結果，讀者用來判斷的
 條件（「看到…就表示」），以及寫「希望」的答案；描述命令做什麼、工具自己核對的事、給維護者的流程與一般建議不算。
 `# 頁面說：` 的引文裡每個子句，要嘛有核對程式比對它，要嘛緊接的註解寫明不核或只核一部分；其餘用「……」略去。只核一部分
-時，要用收窄句說出核了哪一半，不能只靠略去把它藏起來。引文從哪裡開始、到哪裡結束見 workflow_quotes；它和〈不涵蓋〉裡以
-四頁之一開頭的各項中的「」引文，由 test_page_quotes_appear_on_the_pages 核對還在頁面上。練習的改法或期望值只寫在句子裡
-時，要核對就得把句意寫死成 workflow 裡的程式，頁面改了練習，那份副本也不會跟著變，所以不核：
+時，要用收窄句說出核了哪一半，不能只靠略去把它藏起來。前提子句也算子句；workflow 照頁面做了的事（命令由命令的釘選核對）
+算核到。「緊接」指收窄句與引文在同一段註解裡、中間沒有程式行，前後都可以。引文從哪裡開始、到哪裡結束見 workflow_quotes；
+引文引到含「。」的 inline code 時，要留反引號，或把那段寫成 `…`，原因見 cut_at_full_stop。引文和〈不涵蓋〉裡以四頁之一
+開頭的各項中的「」引文，由 test_page_quotes_appear_on_the_pages 核對還在頁面上。練習的改法或期望值只寫在句子裡時，要核對
+就得把句意寫死成 workflow 裡的程式，頁面改了練習，那份副本也不會跟著變，所以不核：
 - course/first-steps.md W.2「核對時應看到 `鳥 3` 和三行「看到」」：要換掉清單與最後檢查的哪兩行、要數的「三行」只寫在句子裡。
 - course/first-steps.md W.2「動物清單的輸出應不受影響」：頁面沒寫 `caption` 要改成什麼。
 - course/first-steps.md W.3「核對應得到 `[80, 90]` 與 `[70, 80, 105]`」：改法「從 80 改成 110」只寫在句子裡，程式印出的也是 tensor 的寫法。
@@ -747,27 +749,47 @@ PAGE_QUOTE = "# 頁面說："
 LINK = re.compile(r"!?\[([^\]\n]*)\]\([^)\n]*\)")
 
 
+def cut_at_full_stop(text):
+    """text 從開頭到反引號與「」以外的第一個「。」為止（含這個「。」）；沒有這種「。」時回傳 None。反引號一個一個算，每遇到
+    一個就在 code 裡外切換，所以用兩個反引號包起來的 inline code，這裡當成 code 外的字。code 外的「」可以巢狀；code 裡的「」
+    不算，前面沒有 `「` 可以對應的 `」` 也不算。這裡只看 text 自己的字：引文引到含「。」的 inline code 卻拿掉了反引號時，
+    分不出那個「。」在 code 裡，引文會在那裡被截斷，後半不受 test_page_quotes_appear_on_the_pages 核對，所以這種引文要留
+    反引號，或把那段寫成 `…`。引文從 inline code 或「」的中間開始時，同樣分不出開頭那段的「。」在 code 或「」裡。"""
+    code, depth = False, 0
+    for position, char in enumerate(text):
+        if char == "`":
+            code = not code
+        elif code:
+            continue
+        elif char == "「":
+            depth += 1
+        elif char == "」":
+            depth = max(depth - 1, 0)
+        elif char == "。" and depth == 0:
+            return text[: position + 1]
+    return None
+
+
 def workflow_quotes():
-    """workflow 每一處 `# 頁面說：` 的 (行號, 引文, 問題)。引文從記號之後開始，到第一個「。」為止（含這個「。」）；在那之前
-    先碰到以「……」結尾的行，就到那一行的結尾為止；兩者都還沒出現時，接著讀下一行註解（去掉 # 與前後空白）。下一行不是
-    註解、或又是一處 `# 頁面說：` 時，引文沒有結束，問題寫明這件事。同一行在第一個「。」之後的字是旁邊的說明，不算引文：
-    要引兩句就寫兩行；頁面的句子沒在引到的地方結束時，引文以「……」收尾；表格的儲存格之間用「……」隔開。"""
+    """workflow 每一處 `# 頁面說：` 的 (行號, 引文, 問題)。引文從記號之後開始，到 cut_at_full_stop 截到的「。」為止（反引號與
+    「」以外的第一個「。」，含這個「。」）；在那之前先碰到以「……」結尾的行，就到那一行的結尾為止；兩者都還沒出現時，接著讀
+    下一行註解（去掉 # 與前後空白）。下一行不是註解、或又是一處 `# 頁面說：` 時，引文沒有結束，問題寫明這件事。同一行在那個
+    「。」之後的字是旁邊的說明，不算引文：要引兩句就寫兩行；頁面的句子沒在引到的地方結束時，引文以「……」收尾；表格的儲存格
+    之間用「……」隔開。"""
     lines = read(WORKFLOW).split("\n")
     found = []
     for index, line in enumerate(lines):
         if PAGE_QUOTE not in line:
             continue
         quote, following, problem = line.split(PAGE_QUOTE, 1)[1].strip(), index + 1, None
-        while "。" not in quote and not quote.endswith("……"):
+        while cut_at_full_stop(quote) is None and not quote.endswith("……"):
             comment = lines[following].strip() if following < len(lines) else ""
             if not comment.startswith("#") or PAGE_QUOTE in comment:
-                problem = "引文要在第一個「。」或以「……」結尾的那一行結束"
+                problem = "引文要在反引號與「」以外的第一個「。」或以「……」結尾的那一行結束"
                 break
             quote += comment[1:].strip()
             following += 1
-        if "。" in quote:
-            quote = quote[: quote.index("。") + 1]
-        found.append((index + 1, quote, problem))
+        found.append((index + 1, cut_at_full_stop(quote) or quote, problem))
     return found
 
 
@@ -824,26 +846,132 @@ def test_page_quotes_appear_on_the_pages():
     或檔頭找不到以四頁之一開頭的〈不涵蓋〉項目時，也會失敗。這裡只核引文還在頁面上：引文旁的核對是否仍和頁面句子一樣強、
     〈不涵蓋〉那一項的理由是否仍成立，都不在這裡核；頁面留著同樣的字而意思改變時，這裡不會失敗。"""
     pages = {page: flatten(read(page)) for page in PAGES}
-    quotes, problems = workflow_quotes(), []
+    quotes, malformed, missing = workflow_quotes(), [], []
     assert quotes, f"{WORKFLOW} 沒有任何 `# 頁面說：`"
     for number, quote, problem in quotes:
         if problem:
-            problems.append(f"{WORKFLOW}:{number}：{problem}：{quote}")
+            malformed.append(f"{WORKFLOW}:{number}：{problem}：{quote}")
         elif not any(in_order(quote, text) for text in pages.values()):
-            problems.append(f"{WORKFLOW}:{number}：「{quote}」不在四頁的任何一頁上")
+            missing.append(f"{WORKFLOW}:{number}：「{quote}」不在四頁的任何一頁上")
     items = not_covered_page_items()
     assert items, "檔頭找不到「不涵蓋：」那一行，或它底下沒有以四頁之一開頭的項目"
     for page, item in items:
         found = bracketed(item)
         if found is None:
-            problems.append(f"檔頭〈不涵蓋〉這一項的「」不成對：{item}")
-        problems += [
+            malformed.append(f"檔頭〈不涵蓋〉這一項的「」不成對：{item}")
+        missing += [
             f"檔頭〈不涵蓋〉：「{quote}」不在 {page} 上" for quote in found or [] if not in_order(quote, pages[page])
         ]
-    assert not problems, (
-        "頁面上找不到這些引文。頁面改了句子時，先重新判斷引文旁的核對是否仍和頁面的新句子一樣強（〈不涵蓋〉的項目則重新"
-        "判斷它寫的理由是否仍成立），再照新句子改引文；只改引文不夠。\n" + "\n".join(problems)
-    )
+    sections = []
+    if malformed:
+        sections.append("這些引文的寫法不合規則，還沒有和頁面比對；照每一行寫的問題改寫法：\n" + "\n".join(malformed))
+    if missing:
+        sections.append(
+            "頁面上找不到這些引文。頁面改了句子時，workflow 的引文要先重新判斷旁邊的核對是否仍和頁面的新句子一樣強，"
+            "再照檔頭的引文規則改引文：只引有核對比對、或緊接的註解寫明不核或只核一部分的子句，其餘用「……」略去，而不是"
+            "直接把新句子整句抄回來；〈不涵蓋〉的項目要先重新判斷它寫的理由是否仍成立，再改「」裡的引文。\n"
+            + "\n".join(missing)
+        )
+    assert not sections, "\n\n".join(sections)
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        pytest.param(
+            "安裝 Git 後在終端機執行 git --version，應顯示版本號。終端機是輸入指令的視窗。",
+            "安裝 Git 後在終端機執行 git --version，應顯示版本號。",
+            id="一般句子",
+        ),
+        pytest.param("第三行啟動 JupyterLab，終端機會提供瀏覽器網址", None, id="沒有「。」"),
+        pytest.param("第三行啟動 JupyterLab……", None, id="以「……」結尾的片段"),
+        pytest.param(
+            '`text = "鳥看狗，狗看鳥。"` 是改後的輸入那行。旁邊的說明。',
+            '`text = "鳥看狗，狗看鳥。"` 是改後的輸入那行。',
+            id="反引號裡的「。」在開頭",
+        ),
+        pytest.param(
+            "程式最後的文字輸出應為 `鳥看狗，狗看鳥。`，而非舊句；這就是要核對的還原結果。旁邊的說明。",
+            "程式最後的文字輸出應為 `鳥看狗，狗看鳥。`，而非舊句；這就是要核對的還原結果。",
+            id="反引號裡的「。」在中間",
+        ),
+        pytest.param(
+            "程式最後的文字輸出應為 `鳥看狗，狗看鳥。`。旁邊的說明。",
+            "程式最後的文字輸出應為 `鳥看狗，狗看鳥。`。",
+            id="反引號裡的「。」緊接在句尾之前",
+        ),
+        pytest.param("程式最後的文字輸出應為 `鳥看狗，狗看鳥。`", None, id="反引號裡的「。」在結尾"),
+        pytest.param("程式最後的文字輸出應為 `鳥看狗，狗看鳥。`……", None, id="以「……」結尾、反引號裡有「。」"),
+        pytest.param("先輸入 `a`。再輸入 `b`。", "先輸入 `a`。", id="兩段反引號之間的「。」"),
+        pytest.param(
+            "「先執行一次。再改輸入那行」是練習的兩步。旁邊的說明。",
+            "「先執行一次。再改輸入那行」是練習的兩步。",
+            id="「」裡的「。」在開頭",
+        ),
+        pytest.param(
+            "例如「顏色=紅；形狀=圓。」這種短文，共十二篇。旁邊的說明。",
+            "例如「顏色=紅；形狀=圓。」這種短文，共十二篇。",
+            id="「」裡的「。」在中間",
+        ),
+        pytest.param(
+            "預設資料是短文，例如「顏色=紅；形狀=圓。」。旁邊的說明。",
+            "預設資料是短文，例如「顏色=紅；形狀=圓。」。",
+            id="「」裡的「。」緊接在句尾之前",
+        ),
+        pytest.param("預設資料是短文，例如「顏色=紅；形狀=圓。」", None, id="「」裡的「。」在結尾"),
+        pytest.param("先讀「甲」。再讀「乙」。", "先讀「甲」。", id="兩組「」之間的「。」"),
+        pytest.param(
+            "先讀「題目「2+3」等於多少。」，再作答。旁邊的說明。",
+            "先讀「題目「2+3」等於多少。」，再作答。",
+            id="巢狀「」",
+        ),
+        pytest.param(
+            "在「重啟。」之後輸入 `run。`，再按 Enter。旁邊的說明。",
+            "在「重啟。」之後輸入 `run。`，再按 Enter。",
+            id="反引號與「」都有",
+        ),
+        pytest.param("輸入 `「。` 之後按 Enter。旁邊的說明。", "輸入 `「。` 之後按 Enter。", id="反引號裡的 `「`"),
+        pytest.param(
+            "……Run All Cells」，清空工作桌再由上到下跑。旁邊的說明。",
+            "……Run All Cells」，清空工作桌再由上到下跑。",
+            id="前面沒有 `「` 的 `」`",
+        ),
+        pytest.param(
+            "程式最後的文字輸出應為 鳥看狗，狗看鳥。，而非舊句；這就是要核對的還原結果。",
+            "程式最後的文字輸出應為 鳥看狗，狗看鳥。",
+            id="限制：拿掉反引號的 code 裡的「。」",
+        ),
+        pytest.param("……狗看鳥。`，而非舊句；這就是要核對的還原結果。", "……狗看鳥。", id="限制：從 code 中間開始"),
+        pytest.param("……形狀=圓。」。這個工具以字元為單位。", "……形狀=圓。", id="限制：從「」中間開始"),
+    ],
+)
+def test_cut_at_full_stop_skips_backticks_and_brackets(text, expected):
+    """逐一核對 cut_at_full_stop 截到哪裡：反引號裡的「。」在開頭、中間、緊接句尾之前與結尾，以及兩段反引號之間的「。」；
+    「」裡的「。」在同樣四個位置，以及兩組「」之間的「。」；巢狀「」；反引號與「」都有、反引號裡的 `「`、前面沒有 `「` 的
+    `」`；一般句子、沒有「。」、以「……」結尾的片段（另一例的反引號裡有「。」）；以及它 docstring 寫的限制：拿掉反引號的
+    code、從 code 或「」中間開始時，裡面的「。」被當成句尾。"""
+    assert cut_at_full_stop(text) == expected
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        pytest.param(
+            "# 頁面說：程式最後的文字輸出應為 `鳥看狗，狗看鳥。`，而非舊句；這就是要核對的還原結果。旁邊的說明。\n",
+            [(1, "程式最後的文字輸出應為 `鳥看狗，狗看鳥。`，而非舊句；這就是要核對的還原結果。", None)],
+            id="反引號裡的「。」",
+        ),
+        pytest.param(
+            "# 頁面說：例如「顏色=紅；形狀=圓。」這種短文，\n# 共十二篇。旁邊的說明。\n",
+            [(1, "例如「顏色=紅；形狀=圓。」這種短文，共十二篇。", None)],
+            id="「」裡的「。」，引文接到下一行",
+        ),
+    ],
+)
+def test_workflow_quotes_end_where_cut_at_full_stop_cuts(monkeypatch, text, expected):
+    """餵一份假的 workflow 給 workflow_quotes，核對反引號裡或「」裡的「。」不讓引文提早結束，引文接到下一行註解時也一樣。"""
+    monkeypatch.setitem(globals(), "read", lambda relative: text)
+    assert workflow_quotes() == expected
 
 
 def test_workflow_triggers_and_shells():
@@ -878,17 +1006,26 @@ def test_workflow_triggers_and_shells():
     [
         pytest.param("!docs/technical-reviews/**", True, id="兩段一般的名字"),
         pytest.param("!.github/workflows/**", True, id="以點開頭的資料夾名"),
-        pytest.param("!./notebooks/**", False, id="./ 開頭"),
-        pytest.param("!docs//technical-reviews/**", False, id="中間兩個 /"),
-        pytest.param("!docs/../notebooks/**", False, id=".. 段"),
-        pytest.param("!docs/./technical-reviews/**", False, id=". 段"),
-        pytest.param("!notebooks//**", False, id="結尾多一個 /"),
-        pytest.param("!docs/*-reviews/**", False, id="含特殊字元"),
+        pytest.param("!/docs/**", False, id="空段在第一段"),
+        pytest.param("!docs//technical-reviews/**", False, id="空段在中間"),
+        pytest.param("!notebooks//**", False, id="空段在最後一段"),
+        pytest.param("!./notebooks/**", False, id=". 在第一段"),
+        pytest.param("!docs/./technical-reviews/**", False, id=". 在中間"),
+        pytest.param("!docs/./**", False, id=". 在最後一段"),
+        pytest.param("!../notebooks/**", False, id=".. 在第一段"),
+        pytest.param("!docs/../notebooks/**", False, id=".. 在中間"),
+        pytest.param("!docs/../**", False, id=".. 在最後一段"),
+        pytest.param("!docs/*-reviews/**", False, id="最後一段含 *"),
+        pytest.param("!doc?/technical-reviews/**", False, id="第一段含 ?"),
+        pytest.param("!docs/technical-reviews+/x/**", False, id="中間含 +"),
+        pytest.param("!docs/[technical-reviews/**", False, id="最後一段含 ["),
+        pytest.param("!docs]/technical-reviews/**", False, id="第一段含 ]"),
+        pytest.param("!docs/!technical-reviews/x/**", False, id="中間含 !"),
     ],
 )
 def test_tree_exclusion_verdicts(pattern, accepted):
-    """逐一核對 TREE_EXCLUSION 對幾種寫法的判定：兩段一般的名字、以點開頭的資料夾名要接受；./ 開頭、中間或結尾多一個 /、
-    . 或 .. 段、含特殊字元的寫法要不接受。"""
+    """逐一核對 TREE_EXCLUSION 對幾種寫法的判定：兩段一般的名字、以點開頭的資料夾名要接受；空段、. 段、.. 段在第一段、
+    中間、最後一段各一例，以及 * ? + [ ] ! 各一例（分在第一段、中間、最後一段），都要不接受。"""
     verdict = "接受" if accepted else "不接受"
     assert bool(TREE_EXCLUSION.fullmatch(pattern)) is accepted, f"TREE_EXCLUSION 應該{verdict} {pattern}"
 
