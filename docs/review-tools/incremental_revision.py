@@ -397,6 +397,67 @@ def check_dispositions(root, manifest, selected, live, tasks, sealed):
     require(actual == expected, "reported issues and dispositions differ")
 
 
+def baseline_supplements(root, manifest):
+    """讀候選manifest指定的補充還原清單，驗外層格式後交給重放；欄位缺席時不補。"""
+    # 驗證：清單讀得到、位元組等於manifest記的SHA、是JSON物件，schema_version為1，files是list，每筆恰好三個字串欄位。
+    # 不涵蓋：每筆的路徑、來源、重複與舊身分，由baseline_replay在建立暫存目錄前核對。
+    if "baseline_supplements" not in manifest:
+        return []
+    reference = manifest["baseline_supplements"]
+    try:
+        raw = artifact(root, reference)
+    except OSError as error:
+        raise ValueError(f"補充還原清單讀不到（{type(error).__name__}）：{reference['path']}") from None
+    name = reference["path"]
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        raise ValueError("補充還原清單不是合法的 JSON：" + name) from None
+    require(isinstance(data, dict), "補充還原清單不是 JSON 物件：" + name)
+    version = data.get("schema_version")
+    require(type(version) is int and version == 1, "補充還原清單的 schema_version 不是 1：" + name)
+    files = data.get("files")
+    require(isinstance(files, list), "補充還原清單的 files 不是 list：" + name)
+    for i, entry in enumerate(files):
+        require(
+            isinstance(entry, dict)
+            and set(entry) == {"live_path", "path", "sha256"}
+            and all(isinstance(value, str) for value in entry.values()),
+            f"補充還原清單 {name} 的 files[{i}] 必須是只含 live_path、path、sha256 三個字串欄位的物件",
+        )
+    return files
+
+
+def check_tool_audit(root, manifest, task_roles, sealed):
+    """工具審閱要對著現行工具位元組通過，並在宣告的階段收件。"""
+    audit_ref = manifest["tool_audit"]
+    audit = document(root, audit_ref["report"])
+    require(
+        audit.get("verdict") == "pass" and task_roles.get(owner(audit)) == "technical",
+        "incremental tools lack independent pass",
+    )
+    checked = {item["path"]: item["sha256"] for item in audit.get("checked_files", [])}
+    for name in (
+        "docs/review-tools/incremental_revision.py",
+        "docs/review-tools/baseline_replay.py",
+        "docs/review-tools/phase7_review.py",
+        "docs/course-revision-20261016/tools/reader.py",
+        "docs/course-revision-20261016/tools/freeze_sources.py",
+        "tests/test_incremental_revision_review.py",
+    ):
+        require(checked.get(name) == sha(local(root, name).read_bytes()), "tool audit version stale: " + name)
+    if "baseline_supplements" in manifest:
+        # 驗證：checked_files列了候選manifest指定的補充還原清單，SHA等於它現在的位元組；清單一改，舊報告就過期。
+        # 不涵蓋：清單指到的舊副本；它們由清單裡的sha256與重放時的舊身分核對綁住。
+        name = manifest["baseline_supplements"]["path"]
+        require(name in checked, "工具審閱的 checked_files 沒有列補充還原清單：" + name)
+        require(
+            checked[name] == sha(local(root, name).read_bytes()),
+            "工具審閱核對的補充還原清單不是現行版本：" + name,
+        )
+    require_collected(audit_ref, "technical", sealed, [audit_ref["report"]])
+
+
 def audit_manifest(root, path, stage="all"):
     root = Path(root).resolve()
     failures, records = [], []
@@ -404,7 +465,10 @@ def audit_manifest(root, path, stage="all"):
         require(stage in {"reader", "technical", "all"}, "unknown review stage")
         manifest = json.loads(Path(path).read_bytes())
         require(manifest.get("review_policy") == POLICY and manifest.get("schema_version") == 2, "wrong policy")
-        baseline = module("revision_baseline_replay", root / "docs/review-tools/baseline_replay.py").replay(root)
+        supplements = baseline_supplements(root, manifest)
+        baseline = module("revision_baseline_replay", root / "docs/review-tools/baseline_replay.py").replay(
+            root, supplements
+        )
         require(not baseline["failures"], "preserved baseline failed: " + repr(baseline["failures"]))
         original = document(root, manifest["baseline_freeze"])
         original_policy = json.loads((root / "docs/course-publish-20261008/review-manifest.json").read_bytes())
@@ -608,23 +672,7 @@ def audit_manifest(root, path, stage="all"):
                     require(not errors, pid + ": " + repr(errors))
             records.append({"page_id": pid, "source_sha256": page["source_sha256"]})
         if stage in {"technical", "all"}:
-            audit_ref = manifest["tool_audit"]
-            audit = document(root, audit_ref["report"])
-            require(
-                audit.get("verdict") == "pass" and task_roles.get(owner(audit)) == "technical",
-                "incremental tools lack independent pass",
-            )
-            checked = {item["path"]: item["sha256"] for item in audit.get("checked_files", [])}
-            for name in (
-                "docs/review-tools/incremental_revision.py",
-                "docs/review-tools/baseline_replay.py",
-                "docs/review-tools/phase7_review.py",
-                "docs/course-revision-20261016/tools/reader.py",
-                "docs/course-revision-20261016/tools/freeze_sources.py",
-                "tests/test_incremental_revision_review.py",
-            ):
-                require(checked.get(name) == sha(local(root, name).read_bytes()), "tool audit version stale: " + name)
-            require_collected(audit_ref, "technical", sealed, [audit_ref["report"]])
+            check_tool_audit(root, manifest, task_roles, sealed)
         check_dispositions(root, manifest, selected, live, task_roles, sealed)
         if stage == "all":
             dependency = document(root, manifest["dependency_audit"])

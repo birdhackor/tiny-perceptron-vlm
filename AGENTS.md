@@ -68,7 +68,7 @@ uv run ruff check . && uv run ruff format .
 
 ## 凍結檔案
 
-- 生效輪次以 SHA-256 綁定實作檔、課文與部分文件。改到其中任何一個，發布檢查會回報類似 `implementation drift` 或 `current source/figure/notebook freeze stale` 的錯誤，網站就無法更新，直到重新審閱、更新凍結紀錄，並重估受影響頁面的閱讀時間。例外是現行工具（`docs/review-tools/baseline_replay.py`）每次檢查都會重放一個舊輪次：那一輪以 SHA-256 記下、又不在重放還原清單（重放前先換回舊版的檔）裡的實作與技術輸入（例如 `scripts/fetch_natural_data.py`、`docs/selftrained/v2-manifest.json`），改了會報 `preserved baseline failed`，只開新一輪審閱、更新凍結紀錄也不會通過；做法與限制見[交接文件](docs/course-inline-code-20261017/HANDOFF.md)〈合併到 `main` 之前要決定的事〉。
+- 生效輪次以 SHA-256 綁定實作檔、課文與部分文件。改到其中任何一個，發布檢查會回報類似 `implementation drift` 或 `current source/figure/notebook freeze stale` 的錯誤，網站就無法更新，直到重新審閱、更新凍結紀錄，並重估受影響頁面的閱讀時間。例外是現行工具（`docs/review-tools/baseline_replay.py`）每次檢查都會重放一個舊輪次：那一輪以 SHA-256 記下、又不在重放還原清單（重放前先換回舊版的檔）裡的實作與技術輸入（例如 `scripts/fetch_natural_data.py`、`docs/selftrained/v2-manifest.json`），改了會報 `preserved baseline failed`。這時新一輪的 manifest 要用 `baseline_supplements` 指向自己的補充還原清單（例如 `docs/course-review-20261019/baseline-supplements.json`）：每一筆把一個這類檔換回 repo 內保存、SHA-256 等於舊輪次所記的副本，清單也要列進那一輪的工具審閱。做法與限制見[交接文件](docs/course-inline-code-20261017/HANDOFF.md)〈合併到 `main` 之前要決定的事〉。
 - 提交任何修改前都跑上面三道檢查。新工具或新 CI 檢查優先做成新檔案；新增的腳本與 workflow 不受凍結影響，但新增的課文頁面仍要審閱。必須改凍結檔時，當成教材修改，走 [逐節審閱標準](docs/editorial-guide.md)。
 - 不要為了讓檢查通過而改寫既有審閱紀錄或其中的 hash；紀錄本身也以 SHA-256 封存。
 
