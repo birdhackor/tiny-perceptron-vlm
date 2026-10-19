@@ -39,7 +39,7 @@ token 不一定是一個中文字。逐 byte 切詞時，一個常見中文字�
 | --- | --- | --- |
 | 接字表（bigram 表） | 列是目前字、欄是下一字，記錄每對相鄰字出現幾次；每列除以自己的總數，得到下一字的條件機率 | [1.5](chapters/01.md#1.5) |
 | logits（候選分數）、softmax | logits 是還沒轉成機率的原始候選分數，能正能負；softmax 把每個分數取指數、再除以總和，換成非負、總和為 1 的機率 | [1.7](chapters/01.md#1.7)、[1.8](chapters/01.md#1.8) |
-| 代價（loss，也叫損失）、交叉熵（cross entropy） | 取正確答案那一格的機率 p，算 `-log(p)`；正確答案得到的機率越少，代價越大，代價不是猜錯題數。多題的代價取平均叫交叉熵 | [W.4](first-steps.md#W.4)、[1.8](chapters/01.md#1.8) |
+| 代價（loss，也叫損失）、交叉熵（cross entropy，CE） | 取正確答案那一格的機率 p，算 `-log(p)`；正確答案得到的機率越少，代價越大，代價不是猜錯題數。多題的代價取平均叫交叉熵 | [W.4](first-steps.md#W.4)、[1.8](chapters/01.md#1.8)、[9.14](chapters/09.md#9.14) |
 | 誤差、成本 | 17.2 把原值與還原值的差叫捨入誤差；9.16 做決策時，人工替每種結果與做法訂的單位數叫成本（例如開錯頁 5 單位）。兩者和代價（loss）是不同的量 | [17.2](chapters/17.md#17.2)、[9.16](chapters/09.md#9.16) |
 | NLL、平均 NLL | 把全部有效目標的代價加總叫 NLL（負對數似然），本課的 NLL 指這個加總；加總後再除以有效目標數叫平均 NLL，訓練時印出的代價就是平均 | [6.5](chapters/06.md#6.5) |
 | 正確答案（ground truth，也叫真值） | 拿來和預測比對的答案；代價取的就是它那一格的機率 | [1.8](chapters/01.md#1.8) |
@@ -208,7 +208,7 @@ token 不一定是一個中文字。逐 byte 切詞時，一個常見中文字�
 
 **B**　[backpropagation](chapters/01.md#1.10)（反向傳播） · [baseline](chapters/13.md#13.11)（基準值） · [base model](chapters/07.md#7.11)（底座） · [batch](chapters/05.md#5.2) · [bias](chapters/02.md#2.3)（偏移） · [bigram 表](chapters/01.md#1.5)（接字表） · [bit](chapters/05.md#5.9)（位元） · [BOS](chapters/06.md#6.5)（開始標記） · [byte](chapters/05.md#5.9)（位元組）
 
-**C**　[calibration](chapters/09.md#9.9)（校準） · [calibration split](chapters/09.md#9.10)（校準資料） · [causal mask](chapters/03.md#3.6)（因果遮罩） · [checkpoint](chapters/05.md#5.7)（檢查點） · [Choice](chapters/09.md#9.11) · [classification head](chapters/10.md#10.5)（分類頭） · [code point](chapters/06.md#6.1)（碼點） · [concentration](chapters/09.md#9.15)（集中度） · [confidence](chapters/09.md#9.9)（信心） · [context](chapters/02.md#2.5)（上下文） · [context window](chapters/02.md#2.5)（上下文視窗） · [control](chapters/12.md#12.4)（對照） · [critic](chapters/13.md#13.14)（價值模型） · [cross entropy](chapters/01.md#1.8)（交叉熵） · [CUDA](chapters/16.md#16.8)
+**C**　[calibration](chapters/09.md#9.9)（校準） · [calibration split](chapters/09.md#9.10)（校準資料） · [causal mask](chapters/03.md#3.6)（因果遮罩） · [CE](chapters/09.md#9.14)（交叉熵） · [checkpoint](chapters/05.md#5.7)（檢查點） · [Choice](chapters/09.md#9.11) · [classification head](chapters/10.md#10.5)（分類頭） · [code point](chapters/06.md#6.1)（碼點） · [concentration](chapters/09.md#9.15)（集中度） · [confidence](chapters/09.md#9.9)（信心） · [context](chapters/02.md#2.5)（上下文） · [context window](chapters/02.md#2.5)（上下文視窗） · [control](chapters/12.md#12.4)（對照） · [critic](chapters/13.md#13.14)（價值模型） · [cross entropy](chapters/01.md#1.8)（交叉熵） · [CUDA](chapters/16.md#16.8)
 
 **D**　decode（[解碼](chapters/01.md#1.1)、[逐步生成階段](chapters/16.md#16.2)） · [deep supervision](chapters/14.md#14.14)（逐輪監督） · [Dense](chapters/04.md#4.4) · [derivative](chapters/01.md#1.9)（導數） · [distillation](chapters/18.md#18.1)（蒸餾） · [DPO](chapters/07.md#7.18)（直接偏好最佳化）
 
