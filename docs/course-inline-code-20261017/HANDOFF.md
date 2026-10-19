@@ -22,7 +22,7 @@ branch `course-inline-code-20261017`，從 `b05ebda3527789e4b6c550ad20271ababce2
 
 ## 這個 branch 改了什麼
 
-- **實作進正文**：55 段原樣節錄或精簡版，另有 16 個定義只在正文說明、不貼程式；位置見[配置表](PLACEMENT.md)。改版前沒有程式的 37 節裡，25 節補了程式，其餘 12 節維持文字。
+- **實作進正文**：55 段原樣節錄或精簡版，另有 17 個定義只在正文說明、不貼程式；位置見[配置表](PLACEMENT.md)。改版前沒有程式的 37 節裡，26 節補了程式，其餘 11 節維持文字。
 - **守衛**：`tests/test_course_code_excerpts.py` 核對節錄與精簡版；`tests/test_course_commit_pins.py`、`tests/test_course_data_pins.py` 核對學生頁釘住的 commit 與資料包。
 - **頁尾**：Colab 與 Notebook 下載改成同級按鈕，說明程式與輸出都在頁面上（`scripts/export_course.py` 的 `section_footer`）。
 - **用語**：依 [TERMS.md](TERMS.md) 統一全書用語，[名詞頁](../../course/glossary.md)照它補齊並加英文與縮寫索引。

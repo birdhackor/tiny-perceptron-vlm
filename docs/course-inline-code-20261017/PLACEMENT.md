@@ -69,6 +69,7 @@ grep -n -E '^# (節錄自|精簡自) tiny_perceptron/' course/chapters/*.md
 | 18.9 | `distillation_loss` | alignment.py | 原樣節錄 |
 | 19.2 | `LimitedAssistant` | selftrained/model.py | 精簡版 |
 | 19.2 | `SelftrainedConfig` | selftrained/model.py | 只說明：和預設值不同的四項與其餘預設 |
+| 19.3 | `read_records` | selftrained/dataset.py | 只說明並連結：依序檢查必要欄位、`id`、`split`、`group_id` 與消息格式，同一個 `group_id` 出現在兩份資料就報錯、不回傳任何記錄 |
 | 19.5 | `RecordEncoder` | selftrained/dataset.py | 精簡版 |
 | 19.5 | `CharacterTokenizer` | selftrained/tokenizer.py | 只說明並連結：特殊 token 的編號與 `build` 收哪些字 |
 | 19.6 | `decode_ocr` | selftrained/model.py | 原樣節錄 |
@@ -89,7 +90,6 @@ grep -n -E '^# (節錄自|精簡自) tiny_perceptron/' course/chapters/*.md
 - 11.17：機制已在 [11.14](../../course/chapters/11.md#11.14) 用程式示範：左右對調的兩張圖，4×4 平均摘要相同、完整像素序列不同；本節是設計例。
 - 12.16：機制已在 [12.9](../../course/chapters/12.md#12.9) 與 [7.1](../../course/chapters/07.md#7.1) 用程式示範：`<audio>` 換成聲音特徵，依角色決定哪些位置計分。
 - 19.1：需要下載權重：重做本節的回答要先從 Hugging Face 匿名下載公開 MoE 權重，命令在本機終端機執行。
-- 19.3：機制在 [19.14](../../course/chapters/19.md#19.14) 用程式示範：`family`、`split_of` 讓同一家族固定分到同一份。
 - 19.8：機制已在 [13.5](../../course/chapters/13.md#13.5) 與 [13.13](../../course/chapters/13.md#13.13) 用程式示範：DPO 的 `dpo_loss`、PPO 的 `ppo_clipped_objective`；本節只談成品要選哪一種。
 - 19.11：需要下載權重：本節的 CPU 示範要先從 Hugging Face 下載公開推論權重。
 - 19.13：機制在 [19.2](../../course/chapters/19.md#19.2)、[19.15](../../course/chapters/19.md#19.15) 與 [19.16](../../course/chapters/19.md#19.16) 用程式示範：三個成品的模型各在其中一節節錄或精簡；本節只介紹三者的用途與輸入輸出。
