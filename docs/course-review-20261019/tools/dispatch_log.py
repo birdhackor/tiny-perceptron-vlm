@@ -200,7 +200,9 @@ def main():
     finished = sub.add_parser("finished")
     finished.add_argument("task")
     finished.add_argument("--log", required=True, type=Path, help="這一次的 --json 輸出")
-    finished.add_argument("--output", required=True, type=Path, help="這一次的 -o 輸出")
+    finished.add_argument(
+        "--output", required=True, type=Path, help="這一次的 -o 輸出；turn.failed 時 Codex 可能沒寫，記成 null"
+    )
     args = parser.parse_args()
     if not TASK.fullmatch(args.task):
         raise SystemExit("task 必須是 /root/ 加上英數字、底線或連字號")
@@ -255,13 +257,18 @@ def main():
                 "rollout 最後一個 turn 的累計用量與這份 log 不同，那不是這一次的 turn；"
                 "finished 要在這一次結束後、下一次續談前執行。差異（log, rollout）：" + json.dumps(mismatch)
             )
+        output = None
+        if args.output.exists():
+            output = {"path": str(args.output.resolve()), "sha256": sha(args.output)}
+        elif end.get("type") != "turn.failed":
+            raise SystemExit("找不到這一次的 -o 輸出：" + str(args.output))
         append(
             {
                 "event": "finished",
                 "task": args.task,
                 "thread": thread,
                 "log": {"path": str(args.log.resolve()), "sha256": sha(args.log)},
-                "output": {"path": str(args.output.resolve()), "sha256": sha(args.output)},
+                "output": output,
                 "log_end": end.get("type"),
                 "rollout": {"source": str(source), "copy": str(copy), "sha256": sha(copy)},
                 "turn": turn,
