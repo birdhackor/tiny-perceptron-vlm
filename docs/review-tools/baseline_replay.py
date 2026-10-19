@@ -171,10 +171,11 @@ def checked_restores(root, supplements):
 
 def checked_tracked_names(root):
     """列出要複製進暫存樹的追蹤檔；建立暫存目錄前，先核對每個名稱的上層。"""
-    # 驗證：git ls-files每個名稱的上層從repo根起每一段都不是symlink、實際位置不離開repo；
+    # 驗證：git ls-files每個名稱的上層從repo根起每一段都不是symlink、實際位置不離開repo，葉節點是symlink的名稱也一樣核；
     # 同一個上層只核一次，全部核完才建暫存目錄，之後才有link或copy。
     # 不涵蓋：葉節點本身；它在工作樹裡是symlink時，不論git記成symlink還是普通檔，都照舊複製連結本身、不核它指到哪裡，
-    # 暫存樹裡跟著它讀的程式可能讀到repo外。也不防檢查之後才被換掉的上層。
+    # 暫存樹裡跟著它讀的程式可能讀到repo外。這個例外只適用於追蹤檔的複製；同一個檔被當作清單、還原來源或舊身分依據讀取時，
+    # 仍經repo_file核對。也不防檢查之後才被換掉的上層。
     names = [name for name in subprocess.check_output(["git", "ls-files", "-z"], cwd=root).decode().split("\0") if name]
     checked = set()
     for name in names:
@@ -222,7 +223,9 @@ def replay(root=ROOT, supplements=()):
             if destination.exists() or destination.is_symlink():
                 destination.unlink()
             destination.write_bytes(raw)
-        # 重放執行的是現行root的composite_review與它載入的程式；它們與舊契約不相容時，還原清單補不回來。
+        # 重放執行的是現行root的composite_review與它再載入的程式；它們與舊契約不相容時，還原清單補不回來。
+        # 不涵蓋：這些程式碼載入時都不核路徑；SHA核對都在載入之後，擋不住已執行的程式改變判定。
+        # 驗證程式可信、只讀，是重放的前提。
         spec = importlib.util.spec_from_file_location(
             "preserved_composite", root / "docs/review-tools/composite_review.py"
         )

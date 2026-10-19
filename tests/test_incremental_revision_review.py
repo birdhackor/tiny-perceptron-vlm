@@ -791,9 +791,66 @@ def test_tracked_directory_redirected_outside_is_rejected_before_any_source_is_l
     assert [source for source in sources if not Path(os.path.realpath(source)).is_relative_to(repo)] == []
 
 
+# 從links/指回上一層AGENTS.md的相對target。Windows不把相對target裡的/當分隔符，那樣建的連結指不到檔，
+# 所以用os.path.join組成各平台自己的分隔符。
+AGENTS_FROM_LINKS = os.path.join("..", "AGENTS.md")
+
+
+class RecordingModule:
+    """代替重放模組裡的os或shutil：列出的函式先記下第一個引數再照原樣呼叫，其餘屬性照舊取自原模組。
+
+    只換重放模組自己用的名稱；全域換掉os.readlink，連os.path.realpath內部的呼叫也會被記到。
+    """
+
+    def __init__(self, module, calls, *names):
+        self.module = module
+        for name in names:
+            setattr(self, name, self.recording(getattr(module, name), calls))
+
+    @staticmethod
+    def recording(function, calls):
+        def call(path, *args, **kwargs):
+            calls.append(path)
+            return function(path, *args, **kwargs)
+
+        return call
+
+    def __getattr__(self, name):
+        return getattr(self.module, name)
+
+
+@pytest.mark.parametrize("mirrored", [True, False], ids=["target_mirrored_outside", "target_missing_outside"])
+def test_tracked_symlink_alone_in_a_redirected_folder_is_rejected_by_its_parent_check(
+    baseline, kept_trees, monkeypatch, mirrored
+):
+    # links/裡只有一個追蹤中的symlink，沒有普通檔先替它觸發上層檢查：葉節點是symlink的名稱也要核上層。
+    # links/整個搬到repo外再用symlink接回後，指回上一層AGENTS.md的相對連結改指向外部那一層；
+    # 一個案例在那裡放同內容的AGENTS.md，另一個案例沒有，連結指不到檔，只核存在的名稱的實作會跳過它。
+    require_symlinks(baseline.repo.parent)
+    save(baseline.repo, "AGENTS.md", b"agents current\n", raw=True)
+    (baseline.repo / "links").mkdir()
+    (baseline.repo / "links/CLAUDE.md").symlink_to(AGENTS_FROM_LINKS)
+    baseline.track()
+    require_tracked_symlink(baseline, "links/CLAUDE.md")
+    if mirrored:
+        save(baseline.outside, "AGENTS.md", b"agents current\n", raw=True)
+    moved = baseline.outside / "moved"
+    (baseline.repo / "links").rename(moved)
+    (baseline.repo / "links").symlink_to(moved, target_is_directory=True)
+    calls = []
+    monkeypatch.setattr(replay_tool, "os", RecordingModule(os, calls, "link", "readlink"))
+    monkeypatch.setattr(replay_tool, "shutil", RecordingModule(shutil, calls, "copy2"))
+    with pytest.raises(ValueError, match=exactly("追蹤檔 'links/CLAUDE.md' 的上層 經過 symlink：'links'")):
+        replay_tool.replay(baseline.repo)
+    # 看上層的實際位置：os.readlink不跟著葉節點走，link與copy收到的葉節點不是symlink。
+    repo = Path(os.path.realpath(baseline.repo))
+    assert [path for path in calls if not Path(os.path.realpath(Path(path).parent)).is_relative_to(repo)] == []
+    assert_no_replay_tree(baseline, kept_trees)
+
+
 @pytest.mark.parametrize(
     ("link", "target"),
-    [("CLAUDE.md", "AGENTS.md"), ("links/CLAUDE.md", "../AGENTS.md")],
+    [("CLAUDE.md", "AGENTS.md"), ("links/CLAUDE.md", AGENTS_FROM_LINKS)],
     ids=["root", "alone_in_folder"],
 )
 def test_tracked_file_symlink_is_still_copied_as_a_link_and_the_replay_passes(baseline, kept_trees, link, target):
