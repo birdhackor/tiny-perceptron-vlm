@@ -28,7 +28,7 @@ python -m ipykernel install --sys-prefix --name tiny-perceptron --display-name "
 jupyter lab notebooks
 ```
 
-也可以不啟用，直接寫出工具箱裡 Python 的路徑；這時第三行改由這個 Python 啟動 JupyterLab（在瀏覽器裡開工作頁的程式），寫成 `-m jupyterlab`。[操作頁](training.md)的命令就用這種寫法。Windows PowerShell 啟用時若出現含 `PSSecurityException` 的紅色錯誤，是系統的執行原則不允許執行 `Activate.ps1` 這類腳本，不表示工具箱沒有裝好，改用不啟用的寫法即可。macOS 與 Linux：
+也可以不啟用，直接寫出工具箱裡 Python 的路徑；這時第三行改由這個 Python 啟動 JupyterLab（在瀏覽器裡開工作頁的程式），寫成 `-m jupyterlab`。[操作頁](training.md)的命令就用這種寫法。Windows PowerShell 啟用時若出現紅色錯誤，說啟用腳本無法載入，並提到 `about_Execution_Policies`（Windows PowerShell 5.1 還會列出 `PSSecurityException`），是系統的執行原則不允許執行 `Activate.ps1` 這類腳本，不表示工具箱沒有裝好，改用不啟用的寫法即可。macOS 與 Linux：
 
 ```bash
 .venv/bin/python scripts/check_env.py
