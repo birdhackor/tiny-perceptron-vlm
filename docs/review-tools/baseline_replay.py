@@ -135,9 +135,12 @@ def require_preserved_identity(tables, where, entry):
 
 def checked_restores(root, supplements):
     """A段：建立暫存目錄前，對三份清單的每一筆核對路徑形式、來源與重複；補充另核舊身分。"""
-    freeze = json.loads((root / FREEZE).read_bytes())
+    # 驗證：兩份既有清單都經repo_file讀，清單本身與從repo根起的每一段上層都不是symlink、實際位置不離開repo，
+    # 而且是普通檔案；不符就在開檔之前拒絕，這時還沒建暫存目錄。
+    # 不涵蓋：清單內容與清單本身的SHA，這裡只管讀到的是repo內哪個檔；也不防檢查之後才被換掉的路徑。
+    freeze = json.loads(repo_file(root, FREEZE, "還原清單 " + FREEZE))
     # 不另核overlay本身的SHA：要靠新manifest把它列進implementation才綁得住。
-    overlay = json.loads((root / OVERLAY).read_bytes())
+    overlay = json.loads(repo_file(root, OVERLAY, "還原清單 " + OVERLAY))
     listed = [
         (f"{FREEZE} {kind}[{name!r}]", entry, False)
         for kind in ("source_files", "criteria", "figures", "notebooks")
@@ -166,17 +169,33 @@ def checked_restores(root, supplements):
     return restores
 
 
+def checked_tracked_names(root):
+    """列出要複製進暫存樹的追蹤檔；建立暫存目錄前，先核對每個名稱的上層。"""
+    # 驗證：git ls-files每個名稱的上層從repo根起每一段都不是symlink、實際位置不離開repo；
+    # 同一個上層只核一次，全部核完才建暫存目錄，之後才有link或copy。
+    # 不涵蓋：葉節點本身；它在工作樹裡是symlink時，不論git記成symlink還是普通檔，都照舊複製連結本身、不核它指到哪裡，
+    # 暫存樹裡跟著它讀的程式可能讀到repo外。也不防檢查之後才被換掉的上層。
+    names = [name for name in subprocess.check_output(["git", "ls-files", "-z"], cwd=root).decode().split("\0") if name]
+    checked = set()
+    for name in names:
+        parent = PurePosixPath(name).parent.as_posix()
+        if parent not in checked:
+            no_redirect(root, parent, f"追蹤檔 {name!r} 的上層", "repo")
+            checked.add(parent)
+    return names
+
+
 def replay(root=ROOT, supplements=()):
     root = Path(root).resolve()
     restores = checked_restores(root, supplements)
+    names = checked_tracked_names(root)
     # 驗證：outputs/review-baseline-replay與它在repo內的每一段上層都不是symlink，暫存樹不會建到repo外。
     # 不涵蓋：之後才被換掉的路徑；暫存樹建好後會連同暫存目錄再核一次。
     cache = no_redirect(root, CACHE, "重放暫存根", "repo")
     cache.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="immutable-baseline-", dir=cache) as folder:
         target = Path(folder)
-        names = subprocess.check_output(["git", "ls-files", "-z"], cwd=root).decode().split("\0")
-        for name in filter(None, names):
+        for name in names:
             source, destination = root / name, target / name
             if not source.exists():
                 continue
