@@ -11,11 +11,13 @@ Windows／PowerShell 的句子裡帶 PowerShell 才有的寫法（POWERSHELL_ONL
 NOT_WINDOWS。標成 text 這類純文字（PLAIN_LANGUAGES）的區塊不比對，但其中有一行符合 COMMAND_START 就報錯；fence 外出現
 HTML 的 <code> 或 <pre> 也報錯，因為這裡只認得反引號與 fenced 區塊，寫在 HTML 裡的命令看不到。頁面的換法由
 REPLACEMENTS（bash 行換成同頁句子裡給 Windows 的寫法）與 PREFIXES（整頁的 `.venv/bin/python` 換成 Windows 路徑）表示。
-另外核對 workflow 的 Get-PageCode 找得到它要取的 Python 程式、每個 Skip-Page 都有 -Reason、push 與 pull_request 的
-paths 都涵蓋 TRIGGER_PATHS，以及 Windows PowerShell 5.1 與 PowerShell 7 都跑。
+另外核對 workflow 的 Get-PageCode 找得到它要取的 Python 程式、每個 Skip-Page 都有 -Reason、頁面上 Windows 讀者的
+git clone 之前先有 LONG_PATHS 且其他命令不另外設 core.longpaths、workflow 在 clone 之前用 Invoke-Page 執行
+LONG_PATHS、push 與 pull_request 的 paths 都涵蓋 TRIGGER_PATHS，以及 Windows PowerShell 5.1 與 PowerShell 7 都跑。
 不涵蓋：開頭不是 COMMAND_START、又不在 Windows 句子裡帶 PowerShell 寫法的 inline code（例如只寫腳本名的
 `train.py --task vision`）；純文字區塊裡開頭不符合 COMMAND_START 的命令（例如前面帶 `PS>` 提示字元的行）；句意只認
-錨點文字，換法句子改了措辭只會報「找不到」；續行的命令逐行比對；Get-PageCode 取用的 Python 程式內容不比對（CI 執行時
+錨點文字，換法句子改了措辭只會報「找不到」；換法句子以外的 inline code 命令依所在行號和程式區塊的命令排序，句子寫的
+先後（例如「clone 之後再執行」）不比對；續行的命令逐行比對；Get-PageCode 取用的 Python 程式內容不比對（CI 執行時
 直接從頁面讀）；頁面寫給讀者核對的預期值（例如 W.7 印出的 `True`、training.md 的 `holdout_examples` 2、`01/1.1.ipynb`、
 kernel 名稱 Tiny Perceptron）沒有和 workflow 的核對值互相釘住，頁面改了預期值而 workflow 照舊核對舊值，這裡不會失敗；
 Skip-Page 的 -Reason 與註解寫的理由對不對；workflow 的命令在 Windows 上是否真的成功，要看 CI 本身。
@@ -91,6 +93,9 @@ REPLACEMENTS = {
         ("mkdir -p outputs checkpoints", "Windows PowerShell 把 `mkdir -p outputs checkpoints` 換成"),
     ],
 }
+# Windows 讀者在 git clone 之前先執行的長路徑設定。在 windows-latest 上觀察到：clone 帶 -c core.longpaths=true 時，
+# 取出檔案仍報 Filename too long；先執行這一行、clone 不帶 -c，檔案就取得出來。
+LONG_PATHS = "git config --global core.longpaths true"
 # 整頁命令開頭的路徑換法：(原寫法所在的錨點, Windows 寫法所在的錨點)；兩者都取錨點之後的第一段 inline code。
 PREFIXES = {
     "course/training.md": ("命令一律寫成", "Windows PowerShell 把這段路徑換成"),
@@ -425,6 +430,35 @@ def test_page_windows_commands_match_workflow(page):
         "頁面與 workflow 的 Windows 命令要一起改；不跑的命令寫進 Skip-Page，-Reason 寫印進記錄的簡短理由，"
         "註解寫完整理由。\n" + "\n".join(problems)
     )
+
+
+def test_windows_clone_comes_after_global_long_paths():
+    """頁面教 Windows 讀者 git clone 之前先執行 LONG_PATHS，其他命令不另外設 core.longpaths（例如 clone 的 -c）；
+    workflow 也在 clone 之前用 Invoke-Page 執行它。"""
+    problems, clones = [], []
+    for page in PAGES:
+        commands, _ = windows_commands(page)
+        enabled = False
+        for command in commands:
+            if command.text == LONG_PATHS:
+                enabled = True
+            elif "core.longpaths" in command.text:
+                problems.append(f"{page}:{command.line}：`{command.text}` 另外設了 core.longpaths")
+            elif re.match(r"git\s+clone\b", command.text):
+                clones.append(command)
+                if not enabled:
+                    problems.append(f"{page}:{command.line}：`{command.text}` 之前沒有 `{LONG_PATHS}`")
+    # workflow 那一側：比對只看命令文字，寫進 Skip-Page 也對得上，所以另外核對它真的在 clone 之前執行。
+    runs = [copy.text for copy in workflow_copies()[0] if copy.verb == "Invoke-Page"]
+    first_clone = next((index for index, text in enumerate(runs) if re.match(r"git\s+clone\b", text)), len(runs))
+    if LONG_PATHS not in runs[:first_clone]:
+        problems.append(f"{WORKFLOW}：要先用 Invoke-Page 執行 `{LONG_PATHS}`，再用 Invoke-Page 執行 git clone")
+    headline = (
+        f"Windows 讀者要在 git clone 之前先執行 `{LONG_PATHS}`，這個全域設定讓之後的 clone 與切換版本都允許長路徑；"
+        "在 windows-latest 上，clone 帶 -c core.longpaths=true 時，取出檔案仍報 Filename too long。"
+    )
+    assert not problems, headline + "\n" + "\n".join(problems)
+    assert clones, "頁面上找不到 Windows 讀者的 git clone；取得專案的寫法改了，這個測試要跟著改"
 
 
 @pytest.mark.parametrize(

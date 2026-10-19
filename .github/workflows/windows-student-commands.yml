@@ -447,8 +447,9 @@ jobs:
                 if ($result -ne 'OK') { throw ('jupyter probe: ' + $result) }
             }
         run: |
-          # 學生的 Git for Windows 預設不開長路徑（core.longpaths）。runner 若開著，少了頁面 -c core.longpaths=true 的 clone
-          # 也會成功，CI 就看不到學生會遇到的失敗；所以明確設成學生預設，再到不屬於任何 repo 的資料夾核對有效值。
+          # 學生的 Git for Windows 預設不開長路徑（core.longpaths）。runner 若開著，頁面少了 git config --global
+          # core.longpaths true 那一行，clone 也會成功，CI 就看不到學生會遇到的失敗；所以明確設成學生預設，再到不屬於任何
+          # repo 的資料夾核對有效值。入口頁的步驟照頁面執行那一行之後，同樣在 repo 外核對。
           git config --global core.longpaths false
           if ($LASTEXITCODE -ne 0) { throw 'git config failed' }
           Push-Location -LiteralPath $env:RUNNER_TEMP
@@ -496,9 +497,20 @@ jobs:
           Invoke-Page -Pages course/first-steps.md -Commands 'git --version' | Tee-Object -Variable shown
           # 頁面說：安裝 Git 後在終端機執行 git --version，應顯示版本號。
           if (('' + $shown) -notmatch '^git version \d') { throw ('unexpected git --version output: ' + $shown) }
+          # 頁面說：設定 core.longpaths 的那一行讓這台電腦上的 Git 都允許長路徑，之後的 clone 與切換版本也適用。
+          # 在 windows-latest 上觀察到：clone 帶 -c core.longpaths=true 時，取出檔案仍報 Filename too long；先執行這一行、
+          # clone 不帶 -c，檔案就取得出來。
+          Invoke-Page -Pages README.md,README_en.md,course/first-steps.md -Commands 'git config --global core.longpaths true'
+          # 頁面以外：到不屬於任何 repo 的資料夾核對有效值，確認這一行設的值在 clone 之前就生效。
+          Push-Location -LiteralPath $env:RUNNER_TEMP
+          try { $longpaths = git config --get core.longpaths } finally { Pop-Location }
+          Write-Host ('core.longpaths outside any repository: ' + $longpaths)
+          if ($longpaths -cne 'true') {
+              throw ('core.longpaths is "{0}" outside any repository after the page''s git config --global line; expected true' -f $longpaths)
+          }
           Invoke-Page -Pages README.md,README_en.md,course/first-steps.md -Commands @'
           $env:GIT_LFS_SKIP_SMUDGE="1"
-          git clone -c core.longpaths=true https://github.com/birdhackor/tiny-perceptron-vlm.git
+          git clone https://github.com/birdhackor/tiny-perceptron-vlm.git
           cd tiny-perceptron-vlm
           '@
           # 頁面說的指標檔，指的是頁面 clone 取得的預設 branch，所以在切到受測 commit 之前核對。
@@ -507,9 +519,9 @@ jobs:
           Write-PathLengths
           # 頁面以外：頁面的 git clone 取得預設 branch。這裡要測的是觸發這次執行的 commit（push 的 commit、
           # pull_request 的合併結果），所以在同一個資料夾取那個 commit 並切過去。GIT_LFS_SKIP_SMUDGE 仍在這個
-          # shell 裡，切換時資料包同樣只留指標檔。長路徑不另外設定，只靠頁面 clone 的 -c 留在 .git/config 的值。
-          git config --show-origin --get core.longpaths
-          Assert-LastExit 'git config --get core.longpaths'
+          # shell 裡，切換時資料包同樣只留指標檔。長路徑不另外設定，用的是頁面那行 git config --global 設的值。
+          # 切換只重寫兩個 commit 之間不同的檔，所以頁面說的「切換版本也適用」，這裡只測到預設 branch 與受測 commit
+          # 之間有差異的長路徑檔。
           git fetch --no-tags $env:TESTED_REPOSITORY $env:TESTED_SHA
           Assert-LastExit 'git fetch'
           git checkout --quiet --detach FETCH_HEAD
