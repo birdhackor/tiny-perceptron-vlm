@@ -57,13 +57,13 @@ OpenAssistant的訓練／驗證／測試題來自40／8／12個家族（依對�
 
 ## 3. 中文讀字：合成文件與真實招牌各練一件事
 
-合成文件來自 [NVIDIA OCR-Synthetic-Multilingual-v1](https://huggingface.co/datasets/nvidia/OCR-Synthetic-Multilingual-v1) 的繁體中文部分。它們是合成文件，不是自然街拍。這份教學包取出有來源轉寫的文字區域，保留單行與多行兩種題型，讓模型練習原樣抄寫。
+合成文件來自 [NVIDIA OCR-Synthetic-Multilingual-v1](https://huggingface.co/datasets/nvidia/OCR-Synthetic-Multilingual-v1) 的繁體中文部分。它們是合成文件，不是自然街拍。這份教學包取出有來源轉寫的文字區域，保留單行與多行兩種題型，讓模型練習原樣抄寫。「繁體中文部分」是上游的分桶名稱（`zh_hant`），桶裡也有簡體字或簡繁混排的文字；本包照原樣保留，不轉換字形，見[OCR 來源清單](data/ocr-sources.json)的 `limits`。
 
 裁切要同時看文字和範圍。如果只指定抄寫一行，裁切裡卻留了隔壁行的一角，讀者和模型都可能不知道該不該抄它。本包記錄原頁、裁切位置、目標文字與範圍判準；同原頁的全部裁切留在同一個家族。多行題另外指定閱讀順序，不能只因字都出現便算完成。
 
 真實文字照片另取自 [Wikimedia Commons](https://commons.wikimedia.org/) 個別署名與授權的作品，提供招牌、路牌或背景中的中文字。訓練可以用清楚區域，留出題則按題目指定整圖或目標區域，保留文字與周圍情境。斜拍、反光、背景和字距，都可能與合成文件不同，結果要分開看。
 
-Commons 的繁中轉寫同樣由 AI 助理（不是第 20 章交付的助理）實際查看圖像後編寫，並非上游另附的人工中文標準答案。逐張來源、作者、授權與修改記錄在[OCR 來源清單](data/ocr-sources.json)，題目及原樣文字在[OCR 標註](data/ocr-labels.jsonl)。NVIDIA 資料採 CC BY 4.0；Commons 每張按自己的 CC BY 4.0、CC BY 3.0 或 CC0 條件處理，不把全部照片統一視為 MIT。
+Commons 的中文轉寫同樣由 AI 助理（不是第 20 章交付的助理）實際查看圖像後編寫，並非上游另附的人工中文標準答案。轉寫照圖中原本的字形，不換成繁體：Commons 抄寫題的 `language` 欄只有一題測試題是 `zh_hans`（招牌上是簡體字），其餘都是 `zh_hant`。逐張來源、作者、授權與修改記錄在[OCR 來源清單](data/ocr-sources.json)，題目及原樣文字在[OCR 標註](data/ocr-labels.jsonl)。NVIDIA 資料採 CC BY 4.0；Commons 每張按自己的 CC BY 4.0、CC BY 3.0 或 CC0 條件處理，不把全部照片統一視為 MIT。
 
 是否有中文字另有題型。看見字但讀不清，和完全沒有中文字，是不同情況；英文圖也不能自動被當成中文字圖。CER 是字元錯誤率，把插入、刪除和替換的字數加總，再除以參考文字的字數。參考文字為空時，沒有可除的字數，因此有字／無字另列判準。逐字、正規化與行序的差別見[20.10](../../../course/chapters/20.md#20.10)和[20.11](../../../course/chapters/20.md#20.11)。
 

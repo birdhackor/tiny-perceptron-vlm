@@ -14,7 +14,7 @@
 
 把 `blind-packet.json`、`grades-template.json` 與實際來源圖片交給 fresh reviewer。**不要提供 `private-map.json` 或原始 candidate filenames。** packet 只有隨機 A/B/C、完整原始回答、正式問題／上下文／rubric／參考示例、來源圖片位置及 decoder-complete 狀態。别名映射使用 private nonce 的 hash commitment 固定，評分後可連同 map 一起 commit，供選版追查。
 
-目前需要 303 個人工 semantic grade（每候選 84 photo、9 text chat、4 typed-reference voice、4 actual-ASR voice），其餘 31 個 exact 題由程式按既有 runtime normalization 重算。每個人工 grade 需填 Boolean `passed`、非空 `reason`；完成的 photo 回答必須實際看圖，填 `source_image_inspected: true`。若 decoder 未確認 EOS，答案本就判錯、adapter 不 eligible；此時不需要為 semantic grading 再看圖，但仍要記錄 grade 與理由，不能縮小分母。
+目前需要 303 個由評分者逐題判定的 semantic grade（每候選 84 photo、9 text chat、4 typed-reference voice、4 actual-ASR voice），其餘 31 個 exact 題由程式按既有 runtime normalization 重算。v4 實際兩次 validation 的評分者都是 fresh AI subagent，不是真人：`validation-protocol.json` 與 `validation-protocol-lower-lr.json` 的 `manual_grading.grader` 都是「Fresh independent subagent, actual source inspection for photo/region judgments」；`docs/natural-assistant/evidence/v4-runtime/` 下 `validation-37215395335` 與 `validation-37219466611` 兩份 `blind-review/combined/grades.json` 的頂層 `grader`，各列三個 photo 評分者與一個 dialogue 評分者。每個 semantic grade 需填 Boolean `passed`、非空 `reason`；完成的 photo 回答必須實際看圖，填 `source_image_inspected: true`。若 decoder 未確認 EOS，答案本就判錯、adapter 不 eligible；此時不需要為 semantic grading 再看圖，但仍要記錄 grade 與理由，不能縮小分母。
 
 reviewer 在模板頂層填 `grader`，保存為 `grades.json`。其 `blind_packet_sha256`、case ID 與 alias 不得改動。使用：
 
@@ -26,8 +26,8 @@ reviewer 在模板頂層填 `grader`，保存為 `grades.json`。其 `blind_pack
   --output outputs/natural-v4/validation-selection/validation-run-id
 ```
 
-輸出 `scores.json` 的完整 counts、EOS／nonregression gates 與精確整數 macro；`selection.json` 是現有 Modal pre-test gate 可接受的 signature，綁定 actual validation result、manifest、protocol、人工 grade、blind packet、scoring SHA，以及選中 archive 的 train-run／checkpoint／safetensors SHA。先審查並 commit 決策，再執行一次新 test。
+輸出 `scores.json` 的完整 counts、EOS／nonregression gates 與精確整數 macro；`selection.json` 是現有 Modal pre-test gate 可接受的 signature，綁定 actual validation result、manifest、protocol、semantic grade、blind packet、scoring SHA，以及選中 archive 的 train-run／checkpoint／safetensors SHA。先審查並 commit 決策，再執行一次新 test。
 
 輸入驗證會拒絕不同 manifest／ASR pin、漏或重複 generation／grade、未知題目、候選 ASR user 不同、候選數不完整、別名映射被改動，或舊 packet 對上新的 artifacts。`result.variant.completed` 只算行數，程式另逐行檢查 raw EOS，且接受恰好第 384 個 token 是 EOS。primary 直接比較整數 `/75600`；真 tie 保留 base 或較早 archive，`base minus 1` 的 minimum 將下界限制為 0。
 
-base fallback 仍可能有判錯或 decoder 未完成的題目；選 base 不代表所有能力測試通過。現有 Modal guard 驗證的是已完成 validation 與權重綁定，並不自行重算人工 rubric；本 scorer 的 grade／packet／scores 證據要連同 selection 一起保存。
+base fallback 仍可能有判錯或 decoder 未完成的題目；選 base 不代表所有能力測試通過。現有 Modal guard 驗證的是已完成 validation 與權重綁定，並不自行重判評分者依 rubric 給的 semantic grade；本 scorer 的 grade／packet／scores 證據要連同 selection 一起保存。
