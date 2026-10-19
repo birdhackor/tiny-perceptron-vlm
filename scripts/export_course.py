@@ -190,7 +190,9 @@ def code_markdown(source):
 
 def section_footer(item, notebook, revision, executed_outputs):
     """每節頁尾：Notebook 下載與 Colab 兩個同級入口，以及依本節有沒有教材程式選出的說明。"""
-    colab = f"https://colab.research.google.com/github/{REPOSITORY}/blob/{revision}/{item['notebook']}"
+    # lesson-index 的 notebook 路徑由 build_course 以 str(Path) 寫入，在 Windows 上是反斜線；網址一律用 /。
+    path = item["notebook"].replace("\\", "/")
+    colab = f"https://colab.research.google.com/github/{REPOSITORY}/blob/{revision}/{path}"
     # 只有圖解的小節，Notebook 裡也有準備工具與圖解用的程式格；這兩種都不算教材程式。
     has_code = any(
         cell["cell_type"] == "code"
@@ -214,7 +216,7 @@ def section_footer(item, notebook, revision, executed_outputs):
         )
     return (
         '<div class="actions">'
-        f'<a class="md-button" href="{item["notebook"]}" download>下載本節 .ipynb</a>'
+        f'<a class="md-button" href="{path}" download>下載本節 .ipynb</a>'
         f'<a class="md-button" href="{html.escape(colab, quote=True)}" target="_blank" rel="noopener">在 Colab 開啟 ↗</a>'
         f"</div>\n\n{note}"
     )

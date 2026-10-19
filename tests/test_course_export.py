@@ -222,6 +222,16 @@ def test_download_and_colab_are_equal_buttons_with_the_links_the_site_check_expe
     assert [download["class"], colab["class"]] == ["md-button", "md-button"]
 
 
+def test_footer_links_use_slashes_when_the_index_was_built_on_windows(make_notebook):
+    # build_course 在 Windows 上把 notebook 路徑寫成反斜線；頁尾的兩個網址仍要用 /。
+    windows_item = {**ITEM, "notebook": ITEM["notebook"].replace("/", "\\")}
+    download, colab = anchors_of(section_footer(windows_item, make_notebook(CODE), "abc123", True))
+    assert download["href"] == ITEM["notebook"]
+    assert colab["href"] == (
+        f"https://colab.research.google.com/github/{export_course.REPOSITORY}/blob/abc123/{ITEM['notebook']}"
+    )
+
+
 COURSE_FILES = {
     "course/chapters/01.md": (
         "# 第 1 章\n\n導言。\n\n"
