@@ -55,9 +55,12 @@ def test_reader_commands_from_the_instructions_are_not_flagged(tmp_path):
         f"shasum -a 256 {ROOT}/docs/course-revision-20261016/frozen-figures/"
         "65f29ee754f2bb61393cb2cbf79048329058c16ec24b9b16dbb2e142fa2c4e92.svg",
         "ls docs/course-review-20261019/reviews/rv1019_reader_ch01/drafts",
+        ".venv/bin/python docs/course-review-20261019/tools/executed_outputs.py show "
+        + "a" * 32
+        + f" --reviewer {TASK}",
     )
     result = AUDIT.audit(policy(), [log], [])
-    assert result["commands_total"] == 5
+    assert result["commands_total"] == 6
     assert result["flagged_commands"] == []
 
 
@@ -72,6 +75,8 @@ def test_reader_commands_from_the_instructions_are_not_flagged(tmp_path):
         "curl -s https://example.com",
         "cat outputs/course-inline-code-20261017/pub/orders/rv-content.md",
         "cat docs/course-repair-20261017/manifest-final-01.json",
+        "cat docs/course-review-20261019/executed-outputs-ch01.json",
+        "cat docs/course-review-20261019/output-access/x.json",
         ".venv/bin/python -c 'print(open(\"course/chapters/01.md\").read())'",
     ],
 )

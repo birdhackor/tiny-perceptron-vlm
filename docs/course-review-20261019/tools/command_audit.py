@@ -114,6 +114,7 @@ class ReaderPolicy:
             ".agents/skills/clear-tutorial/",
             "docs/course-revision-20261016/tools/reader.py",
             "docs/course-review-20261019/tools/check_reader_original.py",
+            "docs/course-review-20261019/tools/executed_outputs.py",
             f"docs/course-review-20261019/reviews/{name}/",
         )
 
