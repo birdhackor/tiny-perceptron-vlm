@@ -13,17 +13,84 @@ HTML 的 <code> 或 <pre> 也報錯，因為這裡只認得反引號與 fenced �
 REPLACEMENTS（bash 行換成同頁句子裡給 Windows 的寫法）與 PREFIXES（整頁的 `.venv/bin/python` 換成 Windows 路徑）表示。
 另外核對 workflow 的 Get-PageCode 找得到它要取的 Python 程式、每個 Skip-Page 都有 -Reason、頁面上 Windows 讀者的
 git clone 之前先有 LONG_PATHS 且其他命令不另外設 core.longpaths、workflow 在 clone 之前用 Invoke-Page 執行
-LONG_PATHS、push 與 pull_request 的 paths 都涵蓋 TRIGGER_PATHS，以及 Windows PowerShell 5.1 與 PowerShell 7 都跑。
-不涵蓋：開頭不是 COMMAND_START、又不在 Windows 句子裡帶 PowerShell 寫法的 inline code（例如只寫腳本名的
-`train.py --task vision`）；純文字區塊裡開頭不符合 COMMAND_START 的命令（例如前面帶 `PS>` 提示字元的行）；句意只認
-錨點文字，換法句子改了措辭只會報「找不到」；換法句子以外的 inline code 命令依所在行號和程式區塊的命令排序，句子寫的
-先後（例如「clone 之後再執行」）不比對；續行的命令逐行比對；Get-PageCode 取用的 Python 程式內容不比對（CI 執行時
-直接從頁面讀）；頁面寫給讀者核對的預期值（例如 W.7 印出的 `True`、training.md 的 `holdout_examples` 2、`01/1.1.ipynb`、
-kernel 名稱 Tiny Perceptron）沒有和 workflow 的核對值互相釘住，頁面改了預期值而 workflow 照舊核對舊值，這裡不會失敗；
-Skip-Page 的 -Reason 與註解寫的理由對不對；workflow 的命令在 Windows 上是否真的成功，要看 CI 本身。
+LONG_PATHS，以及 Windows PowerShell 5.1 與 PowerShell 7 都跑。kernel 核對（workflow 某一步 env 裡的 KERNEL_CHECKS
+程式；這裡載入它的函式來用）從頁面取的 W.1 改字練習原句、新句、期望輸出，與 W.6 第一行輸出的期望值，各對到頁面上
+剛好一句，原輸入行在 notebooks/01/1.1.ipynb 的程式格裡剛好一行。觸發條件是預設觸發：push 與 pull_request 的 paths
+相同、第一條是 '**'、其餘每條都是 '!<樹>/**' 而且那棵樹在 repo 裡；排除的樹不寫在四頁的程式區塊、workflow 每一步的
+run: 與 env、KERNEL_CHECKS 執行的 Notebook 程式格，以及 workflow 會執行的 repo 內 Python 檔（python_run_by_workflow：
+Invoke-Page 執行的腳本與模組，連同它們在 repo 內匯入的模組）裡；on: 區塊本身寫著排除樣式，不掃。
+
+觸發條件的讀檔集合：排除的樹裡不能有頁面命令或 workflow 會讀的檔。這份集合由三種來源合起來推出。(a) 在本機用
+sys.addaudithook 收 open 事件，執行 workflow 會跑、又能在本機安全執行的 Python 頁面命令（check_env.py、
+fetch_training_assets.py 與 fetch_course_models.py 的 --list、scripts.course_experiments.run 對 workflow 所跑實驗的
+--list-assets、各腳本的 --help、W.7 的頁面程式）與 KERNEL_CHECKS（要用裝了 Notebook 套件的環境），記下開啟的追蹤檔；
+kernel 是另一個程序，audit hook 看不到它執行程式格時開的檔，那些程式格由 (b) 掃。(b) 靜態掃描 Invoke-Page 執行的 Python 進入點、
+docs/course-experiments/plan.json 替 workflow 所跑實驗指定的模組、Get-PageCode 取的頁面程式、notebooks/01/1.1.ipynb
+的程式格與 KERNEL_CHECKS，連同它們在 repo 內匯入的模組，找出寫死的 repo 路徑（ROOT /、Path(__file__)、字面的 .json、
+.jsonl、.tar.gz、.ipynb、.svg）。(c) workflow 自己的 PowerShell 讀的檔：Get-PageCode 讀的頁面、Assert-CheckEnv 讀的
+scripts/check_env.py、Assert-LfsPointers 讀的 assets/training/*.tar.gz、JupyterLab 探測讀的 notebooks/01/1.1.ipynb。
+(b) 與 (c) 裡寫出來的路徑有沒有落在排除的樹，這個測試每次都核對；(a) 實際開啟的檔，以及下面〈不涵蓋〉列的看不到的
+地方，要在新增或改動 Invoke-Page、Get-PageCode 或 KERNEL_CHECKS，或 runner 那一側新讀了檔時，照三種來源重推一次，確認
+讀到的檔都不在排除的樹裡。
+
+不涵蓋：
+- 開頭不是 COMMAND_START、又不在 Windows 句子裡帶 PowerShell 寫法的 inline code（例如只寫腳本名的 `train.py --task vision`）。
+- 純文字區塊裡開頭不符合 COMMAND_START 的命令（例如前面帶 `PS>` 提示字元的行）。
+- 句意只認錨點文字，換法句子改了措辭只會報「找不到」；換法句子以外的 inline code 命令依所在行號和程式區塊的命令排序，句子寫的先後（例如「clone 之後再執行」）不比對；續行的命令逐行比對。
+- Get-PageCode 取用的 Python 程式內容不比對（CI 執行時直接從頁面讀）。
+- KERNEL_CHECKS 從頁面讀的值以外，頁面寫給讀者核對的預期值（例如 W.7 印出的 `True`、training.md 的 `holdout_examples` 2、kernel 名稱 Tiny Perceptron）沒有和 workflow 的核對值互相釘住，頁面改了預期值而 workflow 照舊核對舊值，這裡不會失敗。
+- Skip-Page 的 -Reason 與註解寫的理由對不對；workflow 的命令在 Windows 上是否真的成功，要看 CI 本身。
+- 讀檔集合的推導看不到用變數組出的路徑（例如 fetch_training_assets.py 從清單取的資料包路徑）、子程序讀的檔（git、git lfs、uv 與它呼叫的建置工具、jupyter、kernel）、只在 Windows 才走的分支；它們讀到的檔若落在排除的樹裡，改了它不會觸發。
+- git clone、checkout、status --porcelain 與 ls-files 經手排除樹裡每個檔的路徑：排除樹裡新增只差大小寫的兩個路徑時，學生 clone 出的工作樹不完整，這裡不跑；Windows 不允許的檔名（例如含 `:`）會讓每次 push 都跑的 ci.yml 在 windows-latest 取出檔案時失敗。
+- 一次改到超過 3,000 個檔、而 GitHub 先列出的 3,000 個都在排除的樹裡時，GitHub 不跑這個 workflow。
+- course/first-steps.md W.1 在瀏覽器裡的操作：選 Tiny Perceptron、點進程式格按 Shift+Enter、選單的 Restart Kernel and Run All Cells、用工具列的「＋」新增程式格貼上暖身程式。kernel 執行程式格這件事，由 KERNEL_CHECKS 用 nbclient 代替瀏覽器核對。
+- course/first-steps.md W.1 在 Colab 開啟與執行，以及把網站頁尾下載的 .ipynb 放進 notebooks/ 再開：CI 不經過網站與 Colab。
+
+頁面要讀者核對、Windows CI 不核的結果，一項一行。CI 照頁面的命令與程式執行；練習的改法或期望值只寫在句子裡時，要核對
+就得把句意寫死成 workflow 裡的程式，頁面改了練習，那份副本也不會跟著變，所以不核：
+- course/first-steps.md W.2「核對時應看到 `鳥 3` 和三行「看到」」：要換掉清單與最後檢查的哪兩行、要數的「三行」只寫在句子裡。
+- course/first-steps.md W.2「動物清單的輸出應不受影響」：頁面沒寫 `caption` 要改成什麼。
+- course/first-steps.md W.3「核對應得到 `[80, 90]` 與 `[70, 80, 105]`」：改法「從 80 改成 110」只寫在句子裡，程式印出的也是 tensor 的寫法。
+- course/first-steps.md W.4「再執行核對，應約為 `1.386`」：「在清單加入 `0.25`」沒寫出改後的那一行。
+- course/first-steps.md W.5「先預測兩杯成本都增加 3，再執行核對」：改法「把偏移的 5 改成 8」與期望「增加 3」只寫在句子裡。
+- course/first-steps.md W.6「再試 1.1，應到 5.4、代價 5.76」與「核對這兩個結果」：改法「把學習率 0.1 改成 0.6」只寫在句子裡。
+- course/first-steps.md W.7「看到 `>>>` 就進入 Python 互動模式」：CI 把程式從管線送進 Python，是腳本模式，不印 `>>>`。
+- course/first-steps.md W.7 錯誤訊息那段的「先確認 Notebook 選 **Tiny Perceptron**」「先查目前起點和檔名」「先檢查括號、冒號與縮排」：只在出現那個錯誤時才做，沒有期望值。
+- course/training.md T.1「打開幾筆，檢查 `text` 或 `messages` 等欄位」：沒有期望值。
+- course/training.md T.1「先核對圖像尺寸、聲音取樣率與任務答案」：對象是讀者自己的素材，頁面沒有命令也沒有期望值。
+- course/training.md T.3「打開前後 JSON，分別計算兩個 loss 的「更新後減更新前」」：沒有期望值。
+- course/training.md T.3「核對 MLP 自己的前後報告，再比較不同模型」：沒有期望值。
+- course/training.md T.4 評估 JSON 的欄位表（「要核對什麼」那一欄）：寫的是各欄的意思，沒有期望值；文字模式匹配率為 `null` 另有核對。
+- course/training.md T.4「從該筆 `messages` 找問題，再和 `samples` 的目標及生成並排」：沒有期望值。
+- course/training.md T.4「`--limit all` 選全檔，仍要確認是否有跳過題」：沒有期望值。
+- course/training.md T.4「用同樣的資料、題號、生成上限比較前後」：沒有期望值。
+- course/training.md T.5「再檢查兩者是否都遵守格式」：檢查的是讀者自己寫的短答與比喻。
+- course/training.md T.5「把 validation 的提問、理想回答與生成並排」：沒有期望值。
+- course/training.md T.5「若多了比喻卻把答案數字改錯，就沒有完成目標」：這是讀者評估自己訓練的模型的判準，頁面沒說這次訓練的模型一定答對。
+- course/training.md T.5 固定配方「`lora/` 的 adapter 要載入原始浮點底座並核對指紋」：固定配方用 `--device cuda`，這裡不跑。
+- course/training.md T.5 固定配方「使用或分享前，先核對資料授權」：要讀的是授權說明，沒有命令輸出。
+- course/training.md T.6「依序確認三件事」的「留出了什麼」：pretrain_encoders.py 印出的 JSON 只有留出題數，沒有記下留出哪幾題。
+- course/training.md T.6「效果仍以驗證題核對」：沒有期望值。
+- course/training.md T.6「希望答案依序為 `circle`、`high`、`square,low`」與「再看結束是否完整」：頁面寫「希望」，沒說模型一定答對；結束是否完整沒有期望值。
+- course/training.md T.6「檢查文字能力時，要用其中的文字核心評估同一份文字驗證題」：頁面沒給命令，也沒有期望值。
+- course/training.md T.6 補充區「要另外核對生成是否符合換入圖」：頁面沒給這條的命令。
+- course/training.md T.7「先看 `chosen`、`rejected` 是否符合自己的判準」：判準由讀者自訂。
+- course/training.md T.7「再對其餘驗證題做相同檢查」與「確認新階段沒有破壞它們」：沒有期望值。
+- course/training.md T.8「但仍須查看是否有跳過題」：沒有期望值。
+- course/training.md T.8「把平均代價、有效目標數與逐筆生成並排」：沒有期望值。
+- course/training.md T.8 固定配方「是否支援某精度須看報告」：固定配方用 `--device cuda`，這裡不跑。
+- course/training.md T.8 固定配方 flash_probe「先查看各路線的`status`」與「還要核對記憶體範圍」：固定配方用 `--device cuda`，這裡不跑。
+- course/training.md T.9「希望答案是`blue`」與「這一題先讓你查看前後有沒有改變」：頁面寫「希望」，沒說模型一定答對；前後有沒有改變沒有期望值。
+- course/training.md T.9「在三份JSON中用相同`row`找回同一筆提問與目標」：沒有期望值。
+- course/training.md T.9「分別說明「保存變小了嗎」與「相同題目是否維持回答」」：沒有期望值。
+- course/training.md T.10「核對下列六個檔案都已產生」：產生它們的 sft、style、moe 固定配方用 `--device cuda`，這裡不跑。
+- course/training.md T.10「先選同寬度的兩支，用相同題目檢查」與「希望答案是 `square,high`」：學生要用那三組固定配方的教師，這裡不跑。
+- course/training.md T.11 補充區「逐步核對時請對照工具紀錄勘誤」：要讀的是實驗紀錄，沒有命令輸出。
 """
 
+import ast
 import difflib
+import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -34,21 +101,13 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ".github/workflows/windows-student-commands.yml"
 PAGES = ("README.md", "README_en.md", "course/first-steps.md", "course/training.md")
-# 這些檔改了，頁面命令的結果就可能不同，Windows CI 要重跑：頁面跑的程式、決定指標檔的 .gitattributes、決定 Python 版本的
-# .python-version，以及兩條 --list 命令讀的清單。
-TRIGGER_PATHS = (
-    *PAGES,
-    "pyproject.toml",
-    "uv.lock",
-    "scripts/**",
-    "tiny_perceptron/**",
-    "assets/training/manifest.json",
-    ".gitattributes",
-    ".python-version",
-    "docs/course-experiments/public-models.json",
-    WORKFLOW,
-    "tests/test_windows_student_commands.py",
-)
+# 觸發條件裡排除一棵樹的寫法：'!'、樹的路徑、'/**'。路徑裡不能有 GitHub 路徑樣式的特殊字元（* ? + [ ] !），
+# 否則排除的就不只那一棵樹。
+TREE_EXCLUSION = re.compile(r"!(?P<tree>[^/*?+\[\]!][^*?+\[\]!]*)/\*\*")
+# workflow 某一步 env 裡的 Python 程式：用登記好的 kernel 執行 W.1 的改字練習與 W.6 的程式。
+KERNEL_CHECKS = "PAGE_KERNEL_CHECKS"
+# 命令裡啟動 Python 的那個字（反斜線先換成 /）：python，或結尾是 python.exe 的路徑。
+PYTHON_COMMAND = re.compile(r"(?:.*/)?python(?:\.exe)?")
 
 FENCE = re.compile(r"^\s*(`{3,}|~{3,})(.*)$")
 SHELL_LANGUAGES = {"bash", "sh", "shell", "zsh", "fish", "console", "powershell", "pwsh", "ps1", "ps", "cmd", "bat"}
@@ -178,6 +237,128 @@ def read(relative):
 
 def load_workflow():
     return yaml.load(read(WORKFLOW), Loader=yaml.BaseLoader)
+
+
+def excluded_trees():
+    """觸發條件排除的樹：push 的 paths 在第一條之後、寫成 '!<樹>/**' 的每一條。寫法不符的條目不在這裡，
+    由 test_workflow_triggers_and_shells 報錯。"""
+    paths = load_workflow()["on"]["push"]["paths"]
+    return [match["tree"] for match in map(TREE_EXCLUSION.fullmatch, paths[1:]) if match]
+
+
+def kernel_checks_source():
+    """(步驟名稱, KERNEL_CHECKS 的 Python 程式)。"""
+    found = [
+        (step.get("name", ""), step["env"][KERNEL_CHECKS])
+        for job in load_workflow()["jobs"].values()
+        for step in job.get("steps", [])
+        if KERNEL_CHECKS in (step.get("env") or {})
+    ]
+    assert len(found) == 1, f"{WORKFLOW} 要剛好一個步驟在 env 寫 {KERNEL_CHECKS}，現在有 {len(found)} 個"
+    return found[0]
+
+
+def kernel_checks():
+    """KERNEL_CHECKS 那段 Python 程式當成模組載入，回傳它的名稱空間。這裡只用到不需要 Notebook 套件的部分：
+    nbformat 與 nbclient 在它的 main() 裡才 import，載入時不執行 main()。"""
+    name, source = kernel_checks_source()
+    namespace = {"__name__": KERNEL_CHECKS}
+    exec(compile(source, f"{WORKFLOW} 步驟「{name}」的 {KERNEL_CHECKS}", "exec"), namespace)
+    return namespace
+
+
+def page_code_anchors():
+    """workflow 每個 Get-PageCode 的 (頁, 錨點)。"""
+    return [
+        (match["page"], match["anchor"].replace("''", "'"))
+        for job in load_workflow()["jobs"].values()
+        for step in job.get("steps", [])
+        for match in PAGE_CODE.finditer(step.get("run", ""))
+    ]
+
+
+def page_code(page, anchor):
+    """Get-PageCode 取的程式：含錨點的第一行之後的第一個 python 程式區塊。找不到時回傳空字串，由
+    test_page_code_anchors_point_at_python_blocks 報錯。"""
+    text = read(page)
+    first = next((number for number, line in enumerate(text.split("\n"), 1) if anchor in line), None)
+    blocks = [body for start, language, body in split_page(text)[0] if first and start > first and language == "python"]
+    return "\n".join(line for _, line in blocks[0]) if blocks else ""
+
+
+def repo_module(name, directory, level=0):
+    """import 的模組名稱對到的 repo 內檔案；第三方套件與標準函式庫回傳 None。level 是相對匯入的點數；沒有點時先找
+    repo 根，再找程式所在的資料夾（python scripts/x.py 執行時，scripts/ 在 sys.path 上）。"""
+    if level:
+        base = directory
+        for _ in range(level - 1):
+            base = base.parent
+        bases = [base]
+    else:
+        bases = [ROOT, directory]
+    for base in bases:
+        candidate = base.joinpath(*name.split(".")) if name else base
+        for path in (candidate.with_suffix(".py"), candidate / "__init__.py"):
+            if path.is_file():
+                return path.resolve()
+    return None
+
+
+def imported_repo_files(source, directory):
+    """一段 Python 程式匯入的 repo 內檔案；寫在函式裡的 import 也算。"""
+    found = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            level, names = 0, [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            prefix = node.module or ""
+            level = node.level
+            names = [prefix, *(".".join(filter(None, (prefix, alias.name))) for alias in node.names)]
+        else:
+            continue
+        for name in names:
+            parts = name.split(".")
+            for depth in range(1, len(parts) + 1):
+                if path := repo_module(".".join(parts[:depth]), directory, level):
+                    found.add(path)
+    return found
+
+
+def python_run_by_workflow():
+    """workflow 會執行的 repo 內 Python 檔：Invoke-Page 執行的腳本與 -m 模組、scripts.course_experiments.run 依
+    plan.json 用名字載入的同資料夾模組（整個資料夾都算），以及這些檔、Get-PageCode 取的頁面程式、KERNEL_CHECKS 與它
+    執行的 Notebook 程式格在 repo 內匯入的模組，任何深度。"""
+    queue = []
+    for copy in workflow_copies()[0]:
+        words = copy.text.replace("\\", "/").split()
+        position = next((index for index, word in enumerate(words) if PYTHON_COMMAND.fullmatch(word)), None)
+        if copy.verb != "Invoke-Page" or position is None:
+            continue
+        target = words[position + 1 : position + 3]
+        if target[:1] == ["-m"] and len(target) == 2:
+            queue.append(repo_module(target[1], ROOT))
+            if target[1] == "scripts.course_experiments.run":
+                queue += (ROOT / "scripts/course_experiments").glob("*.py")
+        elif target and (ROOT / target[0]).is_file():
+            queue.append(ROOT / target[0])
+    snippets = [(page_code(page, anchor), ROOT) for page, anchor in page_code_anchors()]
+    snippets.append((kernel_checks_source()[1], ROOT))
+    notebook = kernel_checks()["NOTEBOOK"]
+    snippets += [
+        ("".join(cell["source"]), (ROOT / notebook).parent)
+        for cell in json.loads(read(notebook))["cells"]
+        if cell["cell_type"] == "code"
+    ]
+    for source, directory in snippets:
+        queue += imported_repo_files(source, directory)
+    found = set()
+    while queue:
+        path = queue.pop()
+        if path is None or (path := path.resolve()) in found:
+            continue
+        found.add(path)
+        queue += imported_repo_files(path.read_text(encoding="utf-8"), path.parent)
+    return sorted(found)
 
 
 def split_page(text):
@@ -511,12 +692,7 @@ def test_workflow_page_calls_are_recognized():
 
 
 def test_page_code_anchors_point_at_python_blocks():
-    found, problems = [], []
-    for job in load_workflow()["jobs"].values():
-        for step in job.get("steps", []):
-            found += [
-                (match["page"], match["anchor"].replace("''", "'")) for match in PAGE_CODE.finditer(step.get("run", ""))
-            ]
+    found, problems = page_code_anchors(), []
     assert found, f"{WORKFLOW} 沒有 Get-PageCode；頁面上要讀者複製的 Python 程式改由誰取？"
     for page, anchor in found:
         text = read(page)
@@ -531,13 +707,34 @@ def test_page_code_anchors_point_at_python_blocks():
     assert not problems, "\n".join(problems)
 
 
+def test_kernel_checks_find_their_page_sentences():
+    """KERNEL_CHECKS 從頁面取 W.1 改字練習的原句、新句、期望輸出，與 W.6 第一行輸出的期望值：每一句在頁面上剛好一處，
+    原輸入行在 Notebook 的程式格裡剛好一行。頁面的句子或 Notebook 那一行改到對不上時，三種作業系統的 pytest 都會在這裡
+    失敗，不必等 Windows CI。"""
+    checks = kernel_checks()
+    page = read(checks["PAGE"])
+    notebook = json.loads(read(checks["NOTEBOOK"]))
+    try:
+        old, new, _ = checks["exercise"](page)
+        checks["replace_input_line"](notebook, old, new)
+        checks["one_sentence"](checks["W6_FIRST_LINE"], page, "the first W.6 output line")
+    except SystemExit as error:
+        pytest.fail(f"KERNEL_CHECKS 在頁面或 Notebook 上找不到它要的句子或那一行：{error}")
+
+
 def test_workflow_triggers_and_shells():
     document = load_workflow()
     triggers = document["on"]
     assert "workflow_dispatch" in triggers
     for event in ("push", "pull_request"):
-        missing = [path for path in TRIGGER_PATHS if path not in triggers[event]["paths"]]
-        assert not missing, f"{event} 的 paths 少了 {missing}；這些檔案改了，Windows CI 要重跑"
+        assert "paths-ignore" not in triggers[event], f"{event} 不用 paths-ignore；排除寫成 paths 裡 '**' 之後的 '!'"
+    push, pull = triggers["push"]["paths"], triggers["pull_request"]["paths"]
+    assert push == pull, f"push 與 pull_request 的 paths 要完全相同：\npush：{push}\npull_request：{pull}"
+    assert push[:1] == ["**"], f"paths 第一條要是 '**'，改到任何檔都跑，之後只用 '!' 排除不讀的樹；現在是 {push[:1]}"
+    malformed = [path for path in push[1:] if not TREE_EXCLUSION.fullmatch(path)]
+    assert not malformed, f"'**' 之後每一條都要寫成 '!<樹>/**'，一次排除一整棵樹：{malformed}"
+    missing = [tree for tree in excluded_trees() if not (ROOT / tree).is_dir()]
+    assert not missing, f"這些排除的樹在 repo 裡不存在，排除與旁邊的理由都已經沒有對象：{missing}"
     for name, job in document["jobs"].items():
         assert job["runs-on"] == "windows-latest", f"{name} 要在 windows-latest 跑"
         shells = job["strategy"]["matrix"]["shell"]
@@ -547,3 +744,37 @@ def test_workflow_triggers_and_shells():
         assert job["defaults"]["run"]["shell"] == "${{ matrix.shell }}", f"{name} 的 run 步驟要照 matrix 選 shell"
         overridden = [step.get("name", "") for step in job["steps"] if "run" in step and "shell" in step]
         assert not overridden, f"這些步驟改用別的 shell，沒有照 matrix 跑兩種 PowerShell：{overridden}"
+
+
+def test_excluded_trees_are_not_named_where_the_workflow_reads():
+    """排除的樹不能寫在四頁的程式區塊、workflow 的 env 與每一步的 run:、env、KERNEL_CHECKS 執行的 Notebook 程式格，
+    以及 workflow 會執行的 repo 內 Python 檔（python_run_by_workflow）裡；on: 區塊本身寫著排除樣式，不掃。這裡只擋寫
+    出來的路徑，用變數組出的路徑與其他看不到的地方見檔頭。"""
+    document = load_workflow()
+    sources = []
+    for page in PAGES:
+        blocks, _ = split_page(read(page))
+        sources += [(f"{page}:{start} 的程式區塊", "\n".join(line for _, line in body)) for start, _, body in blocks]
+    sources += [(f"{WORKFLOW} 的 env {key}", value) for key, value in (document.get("env") or {}).items()]
+    for job in document["jobs"].values():
+        for step in job.get("steps", []):
+            where = f"{WORKFLOW} 步驟「{step.get('name', '')}」"
+            if "run" in step:
+                sources.append((f"{where}的 run", step["run"]))
+            sources += [(f"{where}的 env {key}", value) for key, value in (step.get("env") or {}).items()]
+    notebook = kernel_checks()["NOTEBOOK"]
+    sources += [
+        (f"{notebook} 的程式格 {number}", "".join(cell["source"]))
+        for number, cell in enumerate(json.loads(read(notebook))["cells"])
+        if cell["cell_type"] == "code"
+    ]
+    sources += [(str(path.relative_to(ROOT)), path.read_text(encoding="utf-8")) for path in python_run_by_workflow()]
+    problems = []
+    for tree in excluded_trees():
+        # 用 / 或 \ 分隔都算；前後還接著路徑字元的不算，例如名字以這棵樹開頭的另一棵樹。
+        written = re.compile(r"(?<![\w.-])" + r"[/\\]".join(map(re.escape, tree.split("/"))) + r"(?![\w.-])")
+        problems += [f"{where}：寫到排除的樹 {tree}" for where, text in sources if written.search(text)]
+    assert not problems, (
+        "workflow 會讀的地方寫到觸發條件排除的樹；這些樹改了，Windows CI 不會跑。拿掉那幾條排除，或改掉這些路徑：\n"
+        + "\n".join(problems)
+    )
