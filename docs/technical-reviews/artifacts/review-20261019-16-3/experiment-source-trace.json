@@ -1,0 +1,55 @@
+{
+  "recorded_experiment_revision": "48a4f3e912b483d70aee57c42c2aac226534a9a6",
+  "expected_code_sha256": "1ad0b0789318236d5e1a8fc1117cb65758bbd6e3ad62dc2d646a111ae1ea37a3",
+  "checked_revisions": [
+    {
+      "revision": "59b84a9654623f845bab591c09ab09085f90f457",
+      "sha256": "7d91f0bce271d18cd3bfbc15e8c44fd7677c92fe5796a13835ec49ab426b3fc1",
+      "matches_recorded_code": false
+    },
+    {
+      "revision": "a5133f444e0dca2347635f74f8ac83a27bb203d4",
+      "sha256": "1ad0b0789318236d5e1a8fc1117cb65758bbd6e3ad62dc2d646a111ae1ea37a3",
+      "matches_recorded_code": true
+    }
+  ],
+  "matched_revision": "a5133f444e0dca2347635f74f8ac83a27bb203d4",
+  "function_source": {
+    "_clone_config": "def _clone_config(source, ctx, **changes):\n    seed(ctx.seed)\n    target = TinyLM(replace(source.config, **changes)).to(ctx.device)\n    return target, _copy_matching(source, target)",
+    "_fixed_decode": "def _fixed_decode(model, ids, tokens, cached):\n    sequence, state = ids.clone(), None\n    for _ in range(tokens):\n        current = sequence if state is None else sequence[:, -1:]\n        result = model(current, cache=state)\n        sequence = torch.cat((sequence, result[\"logits\"][:, -1].argmax(-1, keepdim=True)), 1)\n        state = result[\"cache\"] if cached else None\n    return sequence",
+    "_cache_probe": "def _cache_probe(model, ctx):\n    model.eval()\n    tok = ByteTokenizer()\n    prefix = [tok.bos_id] + tok.encode(\"Once upon a time, a girl\")\n    prefix = prefix[: max(1, model.config.max_length - 16)]\n    ids = torch.tensor([prefix], device=ctx.device)\n    tokens = min(12, model.config.max_length - ids.shape[1])\n    full, cached = _fixed_decode(model, ids, tokens, False), _fixed_decode(model, ids, tokens, True)\n    sequence, state, errors = ids.clone(), None, []\n    for _ in range(tokens):\n        reference = model(sequence)[\"logits\"][:, -1]\n        current = sequence if state is None else sequence[:, -1:]\n        result = model(current, cache=state)\n        errors.append(float((reference - result[\"logits\"][:, -1]).abs().max()))\n        sequence = torch.cat((sequence, reference.argmax(-1, keepdim=True)), 1)\n        state = result[\"cache\"]\n    cache = model(ids)[\"cache\"]\n    return {\n        \"prompt_tokens\": ids.shape[1],\n        \"generated_tokens\": tokens,\n        \"generated_ids_full\": full[0, ids.shape[1] :].tolist(),\n        \"generated_ids_cached\": cached[0, ids.shape[1] :].tolist(),\n        \"generated_text\": tok.decode(full[0, ids.shape[1] :].tolist()),\n        \"identical_greedy_ids\": bool(torch.equal(full, cached)),\n        \"per_step_logit_max_error\": errors,\n        \"prefill_cache_bytes\": sum(t.numel() * t.element_size() for pair in cache for t in pair),\n        \"prefill\": _benchmark(lambda: model(ids), ctx.device),\n        \"full_recompute_decode\": _benchmark(lambda: _fixed_decode(model, ids, tokens, False), ctx.device),\n        \"cached_decode\": _benchmark(lambda: _fixed_decode(model, ids, tokens, True), ctx.device),\n        \"benchmark_note\": \"固定輸出步數，包含prefill；計時路線不因EOS提前停止，實際文本同列記錄。\",\n    }",
+    "run_efficiency": "def run_efficiency(ctx):\n    started = time.perf_counter()\n    data = _sft_dataset(ctx)\n    initial = load_lm(ctx.dependency(\"sft\"), ctx.device)\n    examples = text_examples(data[\"train\"], mode=\"sft\", max_length=initial.config.max_length)\n    heads = 4 if initial.config.width % 4 == 0 else initial.config.heads\n    models, trained = {}, {}\n    for name, kv in ((\"mha\", heads), (\"gqa\", 1)):\n        model, shared = _clone_config(initial, ctx, heads=heads, kv_heads=kv, experts=0, backend=\"manual\")\n        training = _train(\n            model, data[\"train\"], ctx, name=name, steps=_steps(ctx, 100), mode=\"sft\", deadline=started + 345\n        )\n        trained[name] = model\n        models[name] = {\n            \"model\": _description(model),\n            \"copied_initial_tables\": shared,\n            \"training\": training,\n            \"heldout\": _heldout(model, data, \"sft\"),\n            \"cache\": _cache_probe(model, ctx),\n        }\n    base = trained[\"mha\"]\n    sdpa = _sdpa_probe(base, examples, ctx)\n    packing = _packing_probe(base, data[\"train\"], ctx)\n    accumulation = _accumulation_probe(base, _mechanism_examples(data[\"train\"], base.config.max_length), ctx)\n    recomputation = _checkpoint_probe(base, examples, ctx)\n    update_variants = {}\n    final_models = {}\n    for name in (\"ordinary\", \"accumulated\", \"activation_checkpoint\", \"sdpa\"):\n        model = copy.deepcopy(base)\n        forward = None\n        if name == \"activation_checkpoint\":\n\n            def forward(ids, valid=None, model=model):\n                return _checkpoint_forward(model, ids, valid=valid)\n\n        if name == \"sdpa\":\n            for block in model.blocks:\n                block.attention.backend = \"sdpa\"\n            model.config.backend = \"sdpa\"\n        training = _train(\n            model,\n            data[\"train\"],\n            ctx,\n            name=name,\n            steps=_steps(ctx, 40),\n            mode=\"sft\",\n            batch_size=8,\n            forward=forward,\n            micro_sizes=[3, 5] if name == \"accumulated\" else None,\n            deadline=started + 345,\n        )\n        update_variants[name] = {\"training\": training, \"heldout\": _heldout(model, data, \"sft\")}\n        final_models[name] = model\n    reference = final_models[\"ordinary\"].state_dict()\n    for name in (\"accumulated\", \"activation_checkpoint\", \"sdpa\"):\n        update_variants[name][\"weight_max_error_from_ordinary_after_updates\"] = max(\n            float((reference[key] - final_models[name].state_dict()[key]).abs().max()) for key in reference\n        )\n    (ctx.output / \"model.pt\").write_bytes((ctx.output / \"ordinary.pt\").read_bytes())\n    packing[\"actual_updates\"] = _packing_updates(base, data, ctx, steps=_steps(ctx, 40), deadline=started + 345)\n    compilation = _compile_probe(base, ctx, timeout=min(150, max(0, int(started + 535 - time.perf_counter()))))\n    return {\n        \"seed\": ctx.seed,\n        \"source\": \"sft/model.pt\",\n        \"step_scale\": getattr(ctx, \"step_scale\", 1.0),\n        \"runtime\": _runtime(ctx),\n        \"dataset\": _data_report(data),\n        \"models\": models,\n        \"manual_vs_sdpa\": sdpa,\n        \"packing\": packing,\n        \"accumulation\": accumulation,\n        \"activation_checkpoint\": recomputation,\n        \"update_variants\": update_variants,\n        \"compile\": compilation,\n        \"seconds\": time.perf_counter() - started,\n        \"gqa_note\": \"GQA變形的K/V投影重新固定seed初始化，再以同資料短續訓。\"\n        \"不是直接把訓練好的MHA權重重排就宣稱等價；兩模型各自核對cache一致。\",\n        \"timing_note\": \"暖機後重複同步量測中位數；所有時間均為當次硬體，不以SDPA名稱推定Flash後端。\",\n    }"
+  },
+  "current_function_matches": {
+    "_clone_config": true,
+    "_fixed_decode": true,
+    "_cache_probe": true,
+    "run_efficiency": true
+  },
+  "model_inputs_match_recorded_code": {
+    "tiny_perceptron/model.py": true,
+    "tiny_perceptron/attention.py": true,
+    "tiny_perceptron/data.py": true,
+    "tiny_perceptron/modern.py": true
+  },
+  "command_argv": [
+    [
+      "git",
+      "log",
+      "--all",
+      "--format=%H",
+      "--",
+      "scripts/course_experiments/architecture.py"
+    ],
+    [
+      "git",
+      "show",
+      "59b84a9654623f845bab591c09ab09085f90f457:scripts/course_experiments/architecture.py"
+    ],
+    [
+      "git",
+      "show",
+      "a5133f444e0dca2347635f74f8ac83a27bb203d4:scripts/course_experiments/architecture.py"
+    ]
+  ]
+}
