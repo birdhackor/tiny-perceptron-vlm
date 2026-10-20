@@ -48,14 +48,15 @@ def sections(source):
         yield match[1], raw[heading.start() : end]
 
 
-def _hash_file(root, path, digest, errors, label):
+def _hash_file(root, path, digest, errors, label, earlier=()):
+    """earlier 是除了現行位元組以外也承認的較早版本 SHA-256。"""
     if not _text(path) or not isinstance(digest, str) or not HASH.fullmatch(digest):
         errors.append(f"{label}: 需要相對路徑與SHA-256")
         return
     target = (root / path).resolve()
     if Path(path).is_absolute() or not target.is_relative_to(root.resolve()) or not target.is_file():
         errors.append(f"{label}: 本地證據檔不存在或超出repo：{path}")
-    elif hashlib.sha256(target.read_bytes()).hexdigest() != digest:
+    elif hashlib.sha256(target.read_bytes()).hexdigest() != digest and digest not in earlier:
         errors.append(f"{label}: 證據版本已改變：{path}")
 
 
@@ -101,7 +102,7 @@ def _artifacts(root, value, errors):
     return result
 
 
-def _sources(root, value, artifacts, errors):
+def _sources(root, value, artifacts, errors, earlier_files=None):
     result = _items(value, errors, "sources")
     for identifier, source in result.items():
         label, kind = f"source {identifier}", _kind(source.get("kind"))
@@ -129,7 +130,9 @@ def _sources(root, value, artifacts, errors):
             path = source.get("path")
             if _text(path) and (root / path).resolve().is_relative_to((root / "docs/technical-sources").resolve()):
                 errors.append(f"{label}: technical-sources是候選庫，不是程式契約")
-            _hash_file(root, path, source.get("sha256"), errors, label)
+            # 較早版本只承認給 earlier_files 裡有的那個路徑；其他檔仍要等於現行位元組。
+            earlier = earlier_files.get(path, ()) if earlier_files and isinstance(path, str) else ()
+            _hash_file(root, path, source.get("sha256"), errors, label, earlier)
             if not _text(source.get("version")) or not _text(source.get("inspection_note")):
                 errors.append(f"{label}: 程式來源需要版本與實際讀取記錄")
         elif kind == "derivation":
@@ -210,10 +213,15 @@ def _claims(value, sources, artifacts, errors):
     return result
 
 
-def _validate(root, source, lesson_id, body, report, reviewer_owners, reader_tasks):
+def _validate(root, source, lesson_id, body, report, reviewer_owners, reader_tasks, earlier_versions=None):
+    """earlier_versions：除了現行版本以外也承認的較早版本，{"source_sha256": 這一節正文的較早版本 SHA-256,
+    "files": {檔案路徑: 那個檔的較早版本 SHA-256}}；只用在報告的 source_sha256 與 repository_code 來源的 SHA-256。
+    None 時只認現行版本。
+    """
     errors = []
     if not isinstance(report, dict):
         return ["報告必須是JSON object"]
+    earlier_versions = earlier_versions or {}
     if (
         type(report.get("schema_version")) is not int
         or report.get("schema_version") != 1
@@ -228,7 +236,10 @@ def _validate(root, source, lesson_id, body, report, reviewer_owners, reader_tas
         or (fragment and fragment != lesson_id)
     ):
         errors.append("報告來源／小節編號不符")
-    if report.get("source_sha256") != hashlib.sha256(body.encode("utf-8")).hexdigest():
+    recorded = report.get("source_sha256")
+    if recorded != hashlib.sha256(body.encode("utf-8")).hexdigest() and not (
+        isinstance(recorded, str) and recorded in earlier_versions.get("source_sha256", ())
+    ):
         errors.append("事實審閱不是目前小節原文")
     if report.get("verdict") != "pass":
         errors.append("審閱要求修訂／尚未核實")
@@ -258,7 +269,7 @@ def _validate(root, source, lesson_id, body, report, reviewer_owners, reader_tas
     for figure in sorted(referenced | set(figures)):
         _hash_file(root, figure, figures.get(figure), errors, "figure")
     artifacts = _artifacts(root, report.get("artifacts"), errors)
-    sources = _sources(root, report.get("sources"), artifacts, errors)
+    sources = _sources(root, report.get("sources"), artifacts, errors, earlier_versions.get("files"))
     claims = _claims(report.get("claims"), sources, artifacts, errors)
     if not claims:
         applicability = report.get("applicability")

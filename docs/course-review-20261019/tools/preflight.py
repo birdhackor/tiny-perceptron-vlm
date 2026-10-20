@@ -16,13 +16,14 @@ all 三個角色都核。
 哪一段，錯誤訊息保留閘門的英文原文，方便和閘門的輸出對照。intake 模式的 reader_closure 拆開執行，見
 intake_reader_closure。搬來的段落以 TRANSCRIBED 綁住閘門原始碼；閘門改了，tool_errors 會要求重新對照。
 
-輸出 JSON：shared 是各頁共用的派工表、seal 與派工時間窗；pages[頁]["page"] 是頁層級的凍結核對，其餘鍵是
-角色；coordinator_checks 另列三項協調者要查、閘門不查或只查一部分的事，不和閘門的檢查混在一起；failing 列出
-有錯的位置。
+輸出 JSON：shared 是各頁共用的派工表、seal、派工時間窗與作者補丁清單；pages[頁]["page"] 是頁層級的凍結核對，
+其餘鍵是角色；coordinator_checks 另列三項協調者要查、閘門不查或只查一部分的事，不和閘門的檢查混在一起；草稿帶
+author_patches 時，author_patches 列出靠作者補丁才對上的頁與靠的補丁 id；failing 列出有錯的位置。
 只要有任何錯誤就 exit 1；pending_seal 不算錯。
 
 驗證：草稿各頁的頁層級凍結核對（目前清單 6 欄等於凍結檔、snapshot 是目前正文），各角色的 inherit 條件、
-section-composite 的小節涵蓋與 _validate、review 證據的收件、owner、派工範圍、版本、verdict、圖與原始判斷、
+section-composite 的小節涵蓋與 _validate、review 證據的收件、owner、派工範圍、版本（含倒退作者補丁得到的較早版本，
+用閘門的 author_patches、file_versions、page_versions）、verdict、圖與原始判斷、
 reader 的 session 與 reader_closure、technical 的 _validate；派工表、seal 先後與派工時間窗。協調者另核：reader 的
 basis 版本有一個列在 sessions、讀完全部單元的 session 讀過；每個 session 的閱讀計畫存在、SHA 相符、main_pages
 含該頁、凍結檔與 session 相同；technical 報告的 figure_sha256 恰好等於凍結檔這一頁的圖。
@@ -51,9 +52,9 @@ CAUGHT = (ValueError, KeyError, TypeError, OSError, StopIteration, RuntimeError,
 FIELDS = ("source", "selector", "source_sha256", "figures_sha256", "notebook", "notebook_sha256")
 # 本工具與 issue_inventory.py 搬寫內聯檢查時，閘門對應原始碼（gate_segments）的 SHA-256。
 TRANSCRIBED = {
-    "audit_manifest": "6d524e6e9b1242bcaf8341dc1b8de44c23fdd9d35956e155c0515000c1f8d479",
+    "audit_manifest": "d018868b8d6f9029540288d0265c13913b8f21f32080ee55b1725f121ef1e121",
     "reader_closure": "3107611701489ad4dfe4a6d415c968499a44770633e4d43897dbb90d8dc514ed",
-    "check_dispositions": "f84efefb01bd4a11253292ce9ce2596b0505939720d0e76cd2c3c9ee4f859088",
+    "check_dispositions": "2b2fc1079b9dfe08f0bcdcb5e291ef9ee63c833d112a6188e04b7dbc6dc6db23",
 }
 
 
@@ -250,7 +251,44 @@ def setup(root, draft, mode, stage):
         reader_tasks={task for task, role in task_roles.items() if role == "reader"},
         sealed=sealed,
         cache={},
+        patches=[],
+        files={},
+        relied={},
     )
+
+
+def patch_files(root, draft, live, errors):
+    """同 audit_manifest：核對草稿的作者補丁清單，倒退每個補丁檔。不合格時記錯，不承認任何較早版本。"""
+    try:
+        patches = review.author_patches(root, draft, live)
+        return patches, review.file_versions(root, patches)
+    except CAUGHT as error:
+        errors.append("author_patches: " + message(error))
+        return [], {}
+
+
+def patch_pages(root, draft, live, patches, errors):
+    """目前清單裡 source 有補丁的每一頁，從草稿凍結檔的快照倒退得到的較早版本（review.page_versions）。
+
+    給 issue_inventory 核對修正的複查用；某一頁算不出來時記錯，那一頁不承認較早版本。
+    """
+    sources = {patch["path"] for patch in patches}
+    if not sources:
+        return {}
+    try:
+        frozen = {p["page_id"]: p for p in review.document(root, draft["source_freeze"])["pages"]}
+    except CAUGHT as error:
+        errors.append("author_patches: source_freeze: " + message(error))
+        return {}
+    result = {}
+    for pid, page in live.items():
+        if page.get("source") not in sources:
+            continue
+        try:
+            result[pid] = review.page_versions(root, frozen[pid], page, patches)
+        except CAUGHT as error:
+            errors.append(f"author_patches {pid}: {message(error)}")
+    return result
 
 
 def tool(ctx, name, path):
@@ -483,8 +521,11 @@ def intake_reader_closure(root, proof, current, task, pid, sealed, pending):
     review.require(observed == resolved, "original non-pass concept lacks reader final closure")
 
 
-def review_evidence(root, ctx, pid, proof, role, page, frozen_page, result):
-    """搬自 audit_manifest 頁面迴圈的 review 分支，reader 與 technical 的專屬部分照閘門呼叫模組函式。"""
+def review_evidence(root, ctx, pid, proof, role, page, frozen_page, result, versions):
+    """搬自 audit_manifest 頁面迴圈的 review 分支，reader 與 technical 的專屬部分照閘門呼叫模組函式。
+
+    versions 是這一頁倒退作者補丁得到的較早版本（review.page_versions），靠補丁才對上的記進 ctx.relied。
+    """
     review.require(proof.get("mode") == "review", "missing current role evidence: " + pid + "/" + role)
     report = review.document(root, proof["report"])
     phase = review.collection_seal(proof, role, ctx.sealed)
@@ -508,7 +549,9 @@ def review_evidence(root, ctx, pid, proof, role, page, frozen_page, result):
     )
     current = review.node(report, proof.get("json_pointer", ""))
     review.require(current.get("page_id", current.get("lesson_id")) == pid, "report page membership mismatch")
-    review.require(current.get("source_sha256") == page["source_sha256"], "report source is stale: " + pid)
+    used = review.patched_version(current.get("source_sha256"), page["source_sha256"], versions)
+    review.require(used is not None, "report source is stale: " + pid)
+    ctx.relied.setdefault(pid, set()).update(used)
     review.require(current.get("verdict") in {"pass", "已足夠"}, "reviewer requests revision: " + pid)
     figures = current.get("figures_sha256", current.get("figure_sha256"))
     review.require(figures == page["figures_sha256"], "review figure identity incomplete: " + pid)
@@ -531,10 +574,19 @@ def review_evidence(root, ctx, pid, proof, role, page, frozen_page, result):
         body = review.local(root, frozen_page["snapshot"]).read_text()
         validator = tool(ctx, "check_technical_reviews", "scripts/check_technical_reviews.py")
         errors = validator._validate(
-            root, review.local(root, page["source"]), pid, body, report, ctx.technical_owners, ctx.reader_tasks
+            root,
+            review.local(root, page["source"]),
+            pid,
+            body,
+            report,
+            ctx.technical_owners,
+            ctx.reader_tasks,
+            earlier_versions={"source_sha256": versions, "files": ctx.files},
         )
         # 閘門把全部錯誤合成一句；這裡逐條列出。
         result["errors"].extend("_validate: " + error for error in errors)
+        # 閘門在 _validate 通過後才記；這裡有錯也照記，列出這一頁承認了哪些較早版本。
+        ctx.relied[pid].update(review.technical_patches(report, versions, ctx.files))
 
 
 def check_page(root, ctx, pid, row, page, frozen_page):
@@ -554,6 +606,13 @@ def check_page(root, ctx, pid, row, page, frozen_page):
         )
     except CAUGHT as error:
         result["page"]["errors"].append(message(error))
+    # 同閘門：凍結快照核對過才從它倒退作者補丁；頁層級有錯時這一頁不承認較早版本。
+    versions = {}
+    if not result["page"]["errors"]:
+        try:
+            versions = review.page_versions(root, frozen_page, page, ctx.patches)
+        except CAUGHT as error:
+            result["page"]["errors"].append("author_patches: " + message(error))
     for role in ctx.selected:
         found = section()
         proof = row.get(role, {})
@@ -563,7 +622,7 @@ def check_page(root, ctx, pid, row, page, frozen_page):
             elif role == "technical" and proof.get("mode") == "section-composite":
                 section_composite(root, ctx, pid, proof, page, frozen_page, found)
             else:
-                review_evidence(root, ctx, pid, proof, role, page, frozen_page, found)
+                review_evidence(root, ctx, pid, proof, role, page, frozen_page, found, versions)
         except CAUGHT as error:
             found["errors"].append(message(error))
         result[role] = found
@@ -675,6 +734,7 @@ def check_draft(root, draft, live, mode, stage):
     """草稿裡每一頁、每個角色各自收集錯誤；一頁、一個角色的失敗不影響其他頁。"""
     root = Path(root).resolve()
     ctx = setup(root, draft, mode, stage)
+    ctx.patches, ctx.files = patch_files(root, draft, live, ctx.shared["errors"])
     frozen = {}
     try:
         frozen = {p["page_id"]: p for p in review.document(root, draft["source_freeze"])["pages"]}
@@ -703,6 +763,13 @@ def check_draft(root, draft, live, mode, stage):
         "pages": pages,
         "coordinator_checks": coordinator,
     }
+    if "author_patches" in draft:
+        # 同閘門 records 的 author_patches：靠作者補丁才對上的頁，列出靠的補丁 id（照清單順序）。
+        result["author_patches"] = {
+            pid: [patch["id"] for patch in ctx.patches if patch["id"] in used]
+            for pid, used in ctx.relied.items()
+            if used
+        }
     result["failing"] = failing(result)
     return result
 

@@ -6,8 +6,9 @@
 驗證：preflight 在 intake 與 sealed 兩種模式下，對 C 的 basis 指向舊版、L 漏收或收錯概念、L 的 basis_report 連錯、
 seal 漏列原始判斷、inherit 條件不符的反應，以及一頁的錯不影響另一頁；三項協調者核對（basis 那一版沒有讀完的
 session、閱讀計畫不含該頁、technical 的 figure_sha256 多列圖）只記在 coordinator_checks；issue_inventory 對複查者
-不是原提出者、複查版本過期、兩份報告各有同 id 的問題、issue_reports 漏列必要報告的反應；CLI 的說明文字與 exit
-code；搬寫的段落與現行閘門原始碼相同。
+不是原提出者、複查版本過期、兩份報告各有同 id 的問題、issue_reports 漏列必要報告的反應；草稿帶 author_patches 時，
+作者補之前的讀者報告、技術報告與它引用的頁檔、修正的複查照樣通過，靠補丁的頁列在 author_patches，清單倒退不回
+現行檔時記錯、不承認任何較早版本；CLI 的說明文字與 exit code；搬寫的段落與現行閘門原始碼相同。
 不涵蓋：真實 reader.py 的單元切法（以 monkeypatch 的固定切法代替）、section-composite 分支、tool_audit 型的
 複查、多個 wave 之間的先後；這些在這裡沒有測試守著。
 """
@@ -543,3 +544,163 @@ def test_basis_with_only_new_figures_needs_a_session_that_saw_them(tmp_path):
     basis = {"report": save(tmp_path, "reviews/recheck-figure.json", recheck), "json_pointer": "/pages/0"}
     errors = preflight.basis_read(fixture.root, {**proof, "basis": basis})
     assert errors and "reviews/recheck-figure.json#/pages/0" in errors[0]
+
+
+# 以下測作者補丁：R、C、L 與複查都審過 REVISED 之後，作者直接補了半句，目前清單與凍結檔是補過的版本。
+PATCHED = "first unit, revised\n\nsecond unit, revised by the author\n"
+PATCH = {
+    "id": "fixture-1",
+    "path": "course/fixture.md",
+    "old": "second unit, revised",
+    "new": "second unit, revised by the author",
+    "requested_by": "author",
+    "requested_on": "2026-10-20",
+    "reason": "作者直接要求補半句",
+}
+
+
+def patch_list(root, patches):
+    data = {
+        "schema_version": 1,
+        "kind": preflight.review.PATCHES_KIND,
+        "statement": preflight.review.PATCHES_STATEMENT,
+        "patches": patches,
+    }
+    return save(root, "author-patches.json", data)
+
+
+def author_patched(fixture, patches=(PATCH,)):
+    """目前清單與新凍結檔換成補過的版本；patches 不是 None 時兩份草稿都帶作者補丁清單。"""
+    root = fixture.root
+    save(root, "course/fixture.md", PATCHED.encode(), raw=True)
+    snapshot = save(root, "freeze-3/fixture.md", PATCHED.encode(), raw=True)
+    page = {**fixture.live[PID], "source_sha256": snapshot["sha256"]}
+    neighbor = {**fixture.live["neighbor"], "snapshot": "freeze-2/neighbor.md"}
+    freeze = save(root, "freeze-3.json", {"pages": [{**page, "snapshot": snapshot["path"]}, neighbor]})
+    extra = {} if patches is None else {"author_patches": patch_list(root, list(patches))}
+    drafts = {mode: {**draft, "source_freeze": freeze, **extra} for mode, draft in fixture.drafts.items()}
+    return drafts, {**fixture.live, PID: page}
+
+
+@pytest.mark.parametrize("mode", ["intake", "sealed"])
+def test_reader_reports_before_an_author_patch_pass_and_are_listed(tmp_path, mode):
+    fixture = pilot(tmp_path)
+    drafts, live = author_patched(fixture)
+    result = check(fixture, mode, drafts[mode], live)
+    assert result["failing"] == []
+    assert result["author_patches"] == {PID: ["fixture-1"]}
+
+
+@pytest.mark.parametrize("mode", ["intake", "sealed"])
+def test_draft_without_the_patch_list_is_checked_as_before_and_lists_nothing(tmp_path, mode):
+    # 同一頁、同一份草稿不帶清單：和以前一樣是過期，輸出也沒有 author_patches 這個鍵。
+    fixture = pilot(tmp_path)
+    drafts, live = author_patched(fixture, None)
+    result = check(fixture, mode, drafts[mode], live)
+    assert result["pages"][PID]["reader"]["errors"] == ["report source is stale: fixture"]
+    assert "author_patches" not in result
+    assert "author_patches" not in check(fixture, mode)
+
+
+def test_draft_without_patches_lists_nothing_even_when_the_field_is_present(tmp_path):
+    fixture = pilot(tmp_path)
+    draft = {**fixture.drafts["sealed"], "author_patches": patch_list(tmp_path, [])}
+    result = check(fixture, "sealed", draft)
+    assert result["failing"] == [] and result["author_patches"] == {}
+
+
+def test_fix_recheck_before_an_author_patch_is_accepted_by_the_issue_inventory(tmp_path):
+    fixture = pilot(tmp_path)
+    drafts, live = author_patched(fixture)
+    assert issues(fixture, "sealed", drafts["sealed"], live)["failing"] == []
+    drafts, live = author_patched(fixture, None)
+    failing = issues(fixture, "sealed", drafts["sealed"], live)["dispositions"]["failing"]
+    assert "verification reviews/recheck.json: fix recheck is stale" in failing[0]["errors"]
+
+
+def test_patch_list_that_does_not_lead_back_is_an_error_and_accepts_no_older_version(tmp_path):
+    fixture = pilot(tmp_path)
+    drafts, live = author_patched(fixture, [{**PATCH, "new": "second unit, revised by someone else"}])
+    undo = (
+        "作者補丁清單的 patches[0]（id 'fixture-1'）：new 在倒退到這一筆時的 course/fixture.md 出現 0 次，必須恰好一次"
+    )
+    result = check(fixture, "sealed", drafts["sealed"], live)
+    assert result["shared"]["errors"] == ["author_patches: " + undo]
+    assert result["pages"][PID]["reader"]["errors"] == ["report source is stale: fixture"]
+    assert result["author_patches"] == {}
+    listed = issues(fixture, "sealed", drafts["sealed"], live)
+    assert listed["errors"] == ["author_patches: " + undo]
+    assert "verification reviews/recheck.json: fix recheck is stale" in listed["dispositions"]["failing"][0]["errors"]
+
+
+def technical_patched(root, listed):
+    """一頁技術報告與它當 repository_code 引用的頁檔都是作者補之前的版本；listed 時草稿帶作者補丁清單。"""
+    main = save(root, "course/figures/main.svg", b"<svg/>", raw=True)
+    reviewed = b"# Fixture\n\n![diagram](figures/main.svg)\n\nweight grows four times\n"
+    patched = b"# Fixture\n\n![diagram](figures/main.svg)\n\nweight becomes four times as large\n"
+    save(root, "course/fixture.md", patched, raw=True)
+    snapshot = save(root, "freeze/fixture.md", patched, raw=True)
+    figures = {main["path"]: main["sha256"]}
+    page = {"page_id": PID, "source": "course/fixture.md", "selector": "whole-file", "figures_sha256": figures}
+    page["source_sha256"] = snapshot["sha256"]
+    freeze = save(root, "freeze.json", {"pages": [{**page, "snapshot": snapshot["path"]}]})
+    checks = {
+        name: {"status": "pass" if name == "figure_consistency" else "not_applicable", "details": "虛構核對"}
+        for name in validator.CHECKS
+    }
+    cited = {
+        "id": "page",
+        "kind": "repository_code",
+        "title": "本頁原文",
+        "path": "course/fixture.md",
+        "sha256": hashlib.sha256(reviewed).hexdigest(),
+        "version": "審閱時的工作樹",
+        "inspection_note": "虛構讀取紀錄",
+        "verified": True,
+    }
+    report = save(
+        root,
+        "reviews/technical.json",
+        {
+            "schema_version": 1,
+            "review_stage": "technical",
+            "lesson_id": PID,
+            "source": "course/fixture.md",
+            "source_sha256": hashlib.sha256(reviewed).hexdigest(),
+            "verdict": "pass",
+            "reviewer_task": TECHNICAL,
+            "reviewer_context": "fresh",
+            "figure_sha256": figures,
+            "artifacts": [],
+            "sources": [cited],
+            "claims": [],
+            "applicability": {"substantive_claims": False, "reason": "虛構頁沒有實質主張"},
+            "issues": [],
+            "checks": checks,
+        },
+    )
+    assignment = {"task": TECHNICAL, "role": "technical", "wave": WAVE, "context": "fresh", "lesson_id": PID}
+    assignment["dispatch_window"] = {"not_before": at(1), "not_after": at(2)}
+    proof = {"mode": "review", "wave": WAVE, "report": report, "json_pointer": "", "original_report": report}
+    draft = {
+        "source_freeze": freeze,
+        "assignments": save(root, "assignments.json", {"tasks": [assignment]}),
+        "author_tasks": ["/root"],
+        "review_waves": [{"id": WAVE, "seals": {}}],
+        "pages": [
+            {"page_id": PID, "technical": {**proof, "original_json_pointer": "", "collection_role": "technical"}}
+        ],
+    }
+    if listed:
+        patch = {**PATCH, "old": "weight grows four times", "new": "weight becomes four times as large"}
+        draft["author_patches"] = patch_list(root, [patch])
+    return preflight.check_draft(root, draft, {PID: page}, "intake", "technical")
+
+
+def test_technical_report_and_cited_file_before_an_author_patch_pass_and_are_listed(tmp_path):
+    # 這一頁沒有 reader 證據，stage technical 會在 reader 記錯；這裡只看 technical 與作者補丁的列表。
+    result = technical_patched(tmp_path / "listed", True)
+    assert result["pages"][PID]["technical"]["errors"] == []
+    assert result["author_patches"] == {PID: ["fixture-1"]}
+    result = technical_patched(tmp_path / "unlisted", False)
+    assert result["pages"][PID]["technical"]["errors"] == ["report source is stale: fixture"]

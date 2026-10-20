@@ -15,7 +15,8 @@ unmatched_dispositions 是有處置、對不到問題；dispositions.failing 是
 
 驗證：應處置集合與實際處置以「報告 SHA＋pointer」逐筆對照；issue_reports 是否涵蓋必要報告；每筆處置的四個理由欄、
 final_necessity、action、necessary 只能 fixed、fixed 要有 verification，且複查者是原提出者（提出者是作者或沒有
-owner 時例外）、頁面複查是目前版本的 pass、工具複查列了現行 SHA 的檔，並涵蓋 affected_pages／affected_files；
+owner 時例外）、頁面複查是目前版本（或倒退草稿 author_patches 得到的較早版本）的 pass、工具複查列了現行 SHA 的檔，
+並涵蓋 affected_pages／affected_files；
 處置表的 pending_count 與收件時間。intake 模式把收件時間與 seal 的關係列在 pending_seal。
 不涵蓋：處置內容是否合理、修正是否真的做了；草稿沒列的頁與報告；閘門的其他檢查（見 preflight.py）。
 """
@@ -138,8 +139,12 @@ def collection(draft, dispositions, sealed, mode, errors, pending):
         errors.append("dispositions_collection: " + message(error))
 
 
-def check_decision(root, draft, decision, live, tasks):
-    """搬自 check_dispositions 對每一筆處置的條件。閘門遇到第一個錯就停；這裡列出這一筆的全部錯誤。"""
+def check_decision(root, draft, decision, live, tasks, earlier=None):
+    """搬自 check_dispositions 對每一筆處置的條件。閘門遇到第一個錯就停；這裡列出這一筆的全部錯誤。
+
+    earlier 同閘門：各頁倒退作者補丁得到的較早版本（preflight.patch_pages）。
+    """
+    earlier = earlier or {}
     errors = []
 
     def need(condition, text):
@@ -189,7 +194,8 @@ def check_decision(root, draft, decision, live, tasks):
             value = review.node(report, verification["json_pointer"])
             pid = value.get("page_id", value.get("lesson_id"))
             review.require(pid in live and value.get("verdict") == "pass", "fix lacks reviewer pass on affected page")
-            review.require(value.get("source_sha256") == live[pid]["source_sha256"], "fix recheck is stale")
+            used = review.patched_version(value.get("source_sha256"), live[pid]["source_sha256"], earlier.get(pid, {}))
+            review.require(used is not None, "fix recheck is stale")
             review.require(
                 value.get("figures_sha256", value.get("figure_sha256")) == live[pid]["figures_sha256"],
                 "fix figure recheck stale",
@@ -224,6 +230,8 @@ def inventory(root, draft, live, mode, stage):
     task_roles, _ = preflight.assignments(root, draft, errors)
     waves = draft.get("review_waves", [])
     sealed = preflight.seals(root, waves, selected, mode, errors) if waves else {}
+    patches, _ = preflight.patch_files(root, draft, live, errors)
+    earlier = preflight.patch_pages(root, draft, live, patches, errors)
     required, note_reports = required_reports(draft, selected, errors)
     listed = {}
     for ref in draft.get("issue_reports", []):
@@ -265,7 +273,7 @@ def inventory(root, draft, live, mode, stage):
                 actual.add(key)
                 if key not in expected:
                     unmatched.append(describe(decision))
-            problems += check_decision(root, draft, decision, live, task_roles)
+            problems += check_decision(root, draft, decision, live, task_roles, earlier)
             if problems:
                 failing.append({**describe(decision), "errors": problems})
     result = {

@@ -1034,3 +1034,627 @@ def test_tool_audit_has_to_cover_the_current_supplement_list(tmp_path, case):
             review.check_tool_audit(*arguments)
     else:
         review.check_tool_audit(*arguments)
+
+
+# 以下測作者補丁：manifest 的 author_patches 指向作者直接要求、沒有經過 AI 審閱的小補丁清單。閘門把現行檔倒退這些補丁，
+# 得到的較早版本只在報告的 source_sha256、修正的複查與 technical 的 repository_code 來源承認。
+
+PATCH_OLD = "第二項的重要程度增加四倍，其梯度也增加四倍。"
+PATCH_NEW = "第二項的重要程度變成四倍，其梯度也變成四倍。"
+CHAPTER = "course/chapters/99.md"
+INTRO = "# 第九十九章\n\n導言。\n\n"
+REVIEWED = "## 99.1 權重\n\n" + PATCH_OLD + "\n"
+PATCHED = "## 99.1 權重\n\n" + PATCH_NEW + "\n"
+OTHER = "## 99.1 權重\n\n第二項的重要程度增加三倍，其梯度也增加三倍。\n"
+FILE_REVIEWED = INTRO + REVIEWED
+FILE_PATCHED = INTRO + PATCHED
+PLAIN = "# 沒有改過的頁\n"
+PATCH_LIST = "round/author-patches.json"
+ENTRY = "作者補丁清單 " + PATCH_LIST + " 的 patches[{}]（id {!r}）："
+UNDO = "作者補丁清單的 patches[{}]（id {!r}）："
+SOURCES = {"99.1": {"page_id": "99.1", "source": CHAPTER}, "plain": {"page_id": "plain", "source": "course/plain.md"}}
+
+
+def patch_entry(**changes):
+    entry = {
+        "id": "ch99-1",
+        "path": CHAPTER,
+        "old": PATCH_OLD,
+        "new": PATCH_NEW,
+        "requested_by": "author",
+        "requested_on": "2026-10-20",
+        "reason": "作者要求把「增加四倍」改成「變成四倍」",
+    }
+    return {**entry, **changes}
+
+
+def patch_list(patches, **changes):
+    return {
+        "schema_version": 1,
+        "kind": review.PATCHES_KIND,
+        "statement": review.PATCHES_STATEMENT,
+        "patches": patches,
+        **changes,
+    }
+
+
+def listed_patches(root, data, raw=False, reference=lambda listed: listed):
+    listed = reference(save(root, PATCH_LIST, data, raw=raw))
+    return review.author_patches(root, {"author_patches": listed}, SOURCES)
+
+
+def test_author_patch_list_is_optional_and_returned_as_listed(tmp_path):
+    # 欄位缺席時什麼都不讀，連目前清單都不碰。
+    assert review.author_patches(tmp_path, {}, None) == []
+    entries = [patch_entry(), patch_entry(id="ch99-2", old="導言。", new="這一章的導言。", requested_on="2026-10-21")]
+    assert listed_patches(tmp_path, patch_list(entries)) == entries
+
+
+def test_old_and_new_may_be_exactly_eighty_characters(tmp_path):
+    entry = patch_entry(old="增" * 80, new="變" * 80)
+    assert listed_patches(tmp_path, patch_list([entry])) == [entry]
+
+
+FIELDS_RULE = (
+    "作者補丁清單 " + PATCH_LIST + " 的 patches[0] 必須是恰好含 " + "、".join(review.PATCH_FIELDS) + " 七個欄位的物件"
+)
+
+
+@pytest.mark.parametrize(
+    ("patches", "message"),
+    [
+        (
+            [patch_entry(), patch_entry(old="導言。", new="這一章的導言。")],
+            ENTRY.format(1, "ch99-1") + "id 和前面的補丁重複",
+        ),
+        ([patch_entry(id=" ")], ENTRY.format(0, " ") + "id 必須是非空字串"),
+        ([patch_entry(path="scripts/tool.py")], ENTRY.format(0, "ch99-1") + "path 不是 manifest 任何一頁的 source"),
+        ([patch_entry(old="")], ENTRY.format(0, "ch99-1") + "old 必須是非空字串"),
+        ([patch_entry(new=7)], ENTRY.format(0, "ch99-1") + "new 必須是非空字串"),
+        ([patch_entry(new=PATCH_OLD)], ENTRY.format(0, "ch99-1") + "old 與 new 相同"),
+        ([patch_entry(old="增" * 81)], ENTRY.format(0, "ch99-1") + "old 有 81 個字元，超過 80"),
+        ([patch_entry(new="變" * 81)], ENTRY.format(0, "ch99-1") + "new 有 81 個字元，超過 80"),
+        ([patch_entry(requested_by="coordinator")], ENTRY.format(0, "ch99-1") + "requested_by 必須是 'author'"),
+        (
+            [patch_entry(requested_on="2026/10/20")],
+            ENTRY.format(0, "ch99-1") + "requested_on 必須是 YYYY-MM-DD 格式的日期",
+        ),
+        (
+            [patch_entry(requested_on="20261020")],
+            ENTRY.format(0, "ch99-1") + "requested_on 必須是 YYYY-MM-DD 格式的日期",
+        ),
+        (
+            [patch_entry(requested_on="2026-02-30")],
+            ENTRY.format(0, "ch99-1") + "requested_on 必須是 YYYY-MM-DD 格式的日期",
+        ),
+        ([patch_entry(reason=" ")], ENTRY.format(0, "ch99-1") + "reason 必須是非空字串"),
+        ([{**patch_entry(), "reviewed_by": "nobody"}], FIELDS_RULE),
+        ([{key: value for key, value in patch_entry().items() if key != "reason"}], FIELDS_RULE),
+    ],
+    ids=[
+        "duplicate_id",
+        "blank_id",
+        "path_not_page_source",
+        "empty_old",
+        "new_not_string",
+        "same_text",
+        "old_81",
+        "new_81",
+        "requested_by",
+        "date_slashes",
+        "date_compact",
+        "date_impossible",
+        "blank_reason",
+        "extra_field",
+        "missing_field",
+    ],
+)
+def test_each_patch_that_breaks_a_rule_is_named_with_that_rule(tmp_path, patches, message):
+    with pytest.raises(ValueError, match=exactly(message)):
+        listed_patches(tmp_path, patch_list(patches))
+
+
+def test_every_forbidden_mark_in_old_or_new_is_rejected(tmp_path):
+    # 記號取自 PATCH_FORBIDDEN；規約至少要擋換行、程式區塊的圍欄、圖與連結的語法這四種。
+    assert {"\n", "```", "![", "]("} <= set(review.PATCH_FORBIDDEN)
+    for token, label in review.PATCH_FORBIDDEN.items():
+        for field in ("old", "new"):
+            entry = patch_entry(**{field: "權重" + token + "四倍"})
+            with pytest.raises(ValueError, match=exactly(ENTRY.format(0, "ch99-1") + f"{field} 不能含{label}")):
+                listed_patches(tmp_path, patch_list([entry]))
+
+
+@pytest.mark.parametrize(
+    ("data", "reference", "message"),
+    [
+        (patch_list([patch_entry()], schema_version=2), None, "作者補丁清單的 schema_version 不是 1：" + PATCH_LIST),
+        (patch_list([patch_entry()], schema_version=True), None, "作者補丁清單的 schema_version 不是 1：" + PATCH_LIST),
+        (
+            patch_list([patch_entry()], kind="author patches"),
+            None,
+            "作者補丁清單的 kind 不是 'author patches without AI review'：" + PATCH_LIST,
+        ),
+        (
+            patch_list([patch_entry()], statement="作者要求的修改"),
+            None,
+            "作者補丁清單的 statement 不是規定的聲明：" + PATCH_LIST,
+        ),
+        (patch_list({"0": patch_entry()}), None, "作者補丁清單的 patches 不是 list：" + PATCH_LIST),
+        ([patch_entry()], None, "作者補丁清單不是 JSON 物件：" + PATCH_LIST),
+        (b"not json", None, "作者補丁清單不是合法的 JSON：" + PATCH_LIST),
+        (patch_list([]), lambda ref: {**ref, "sha256": "0" * 64}, "artifact changed: " + PATCH_LIST),
+        (
+            patch_list([]),
+            lambda ref: {**ref, "path": "round/absent.json"},
+            "作者補丁清單讀不到（FileNotFoundError）：round/absent.json",
+        ),
+    ],
+    ids=[
+        "schema_version",
+        "schema_version_bool",
+        "kind",
+        "statement",
+        "not_list",
+        "not_object",
+        "not_json",
+        "digest",
+        "missing",
+    ],
+)
+def test_patch_list_itself_is_bound_and_declares_no_ai_review(tmp_path, data, reference, message):
+    options = {"reference": reference} if reference else {}
+    with pytest.raises(ValueError, match=exactly(message)):
+        listed_patches(tmp_path, data, raw=isinstance(data, bytes), **options)
+
+
+def chapter_versions(root, text, patches):
+    save(root, CHAPTER, text.encode(), raw=True)
+    return review.file_versions(root, patches)
+
+
+def test_file_versions_undo_the_list_from_its_last_patch(tmp_path):
+    # 同一處先後補了兩次：先倒退第二筆，第一筆的 new 才會出現。
+    patches = [
+        patch_entry(id="p1", old="權重增加四倍。", new="權重變成四倍。"),
+        patch_entry(id="p2", old="權重變成四倍。", new="權重變成原來的四倍。"),
+    ]
+    once = INTRO + "## 99.1 權重\n\n權重變成四倍。\n"
+    reviewed = INTRO + "## 99.1 權重\n\n權重增加四倍。\n"
+    versions = chapter_versions(tmp_path, INTRO + "## 99.1 權重\n\n權重變成原來的四倍。\n", patches)
+    assert versions == {CHAPTER: {digest(once.encode()): ("p2",), digest(reviewed.encode()): ("p2", "p1")}}
+
+
+@pytest.mark.parametrize(
+    ("text", "count"),
+    [(FILE_PATCHED + "\n" + PATCH_NEW + "\n", 2), (FILE_REVIEWED, 0)],
+    ids=["twice", "absent"],
+)
+def test_new_text_must_occur_exactly_once_when_it_is_undone(tmp_path, text, count):
+    message = UNDO.format(0, "ch99-1") + f"new 在倒退到這一筆時的 {CHAPTER} 出現 {count} 次，必須恰好一次"
+    with pytest.raises(ValueError, match=exactly(message)):
+        chapter_versions(tmp_path, text, [patch_entry()])
+
+
+def test_overlapping_occurrences_of_new_text_are_counted_separately(tmp_path):
+    # 「四四」在「四四四」裡有兩個起點；只數不重疊的出現會數成一次。
+    message = UNDO.format(0, "ch99-1") + f"new 在倒退到這一筆時的 {CHAPTER} 出現 2 次，必須恰好一次"
+    with pytest.raises(ValueError, match=exactly(message)):
+        chapter_versions(tmp_path, INTRO + "## 99.1 權重\n\n四四四\n", [patch_entry(old="三三", new="四四")])
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "```python\nprint('" + PATCH_NEW + "')\n```\n",
+        "```text " + PATCH_NEW + "\nx\n```\n",
+        "   ```\n" + PATCH_NEW + "\n   ```\n",
+        "```\n" + PATCH_NEW + "\n",
+    ],
+    ids=["inside", "fence_line", "indented_fence", "unclosed"],
+)
+def test_new_text_inside_a_fenced_code_block_is_rejected(tmp_path, body):
+    message = UNDO.format(0, "ch99-1") + f"new 在 {CHAPTER} 的那一處落在 ``` 圍起來的程式區塊裡"
+    with pytest.raises(ValueError, match=exactly(message)):
+        chapter_versions(tmp_path, INTRO + "## 99.1 權重\n\n" + body, [patch_entry()])
+
+
+def test_new_text_after_a_closed_fenced_block_is_undone(tmp_path):
+    text = INTRO + "## 99.1 權重\n\n```python\nprint(4)\n```\n\n" + PATCH_NEW + "\n"
+    versions = chapter_versions(tmp_path, text, [patch_entry()])
+    assert versions == {CHAPTER: {digest(text.replace(PATCH_NEW, PATCH_OLD).encode()): ("ch99-1",)}}
+
+
+def test_page_versions_undo_only_the_patches_found_on_that_page(tmp_path):
+    # 同一個章檔：p1 改導言、p2 改 99.1；99.1 這一頁只倒退 p2。
+    patches = [patch_entry(id="p1", old="導言。", new="這一章的導言。"), patch_entry(id="p2")]
+    snapshot = save(tmp_path, "freeze/99.1.md", PATCHED.encode(), raw=True)
+    page = {"page_id": "99.1", "source": CHAPTER, "source_sha256": snapshot["sha256"]}
+    frozen = {"snapshot": snapshot["path"]}
+    assert review.page_versions(tmp_path, frozen, page, patches) == {digest(REVIEWED.encode()): ("p2",)}
+    # source 沒有補丁的頁不讀快照。
+    other = {**page, "source": "course/plain.md"}
+    assert review.page_versions(tmp_path, {"snapshot": "absent.md"}, other, patches) == {}
+
+
+# 迷你一輪給整個 audit_manifest 跑：99.1 審閱後被作者補了一句，plain 沿用舊判斷；重放、目前清單與建置換成替身，
+# check_technical_reviews.py 用現行這一份。
+
+READER_TASK = "/root/fixture_reader"
+TECHNICAL_TASK = "/root/fixture_technical"
+AUDITOR_TASK = "/root/fixture_tool_auditor"
+PATCH_WAVE = "fixture-wave"
+MODEL = "tiny/model.py"
+MODEL_BYTES = b"def model():\n    return 4\n"
+GATE_STUBS = {
+    "docs/review-tools/baseline_replay.py": "def replay(root, supplements=()):\n    return {'failures': []}\n",
+    "docs/review-tools/composite_review.py": (
+        "import json\nfrom pathlib import Path\n\n\ndef current_inventory(root):\n"
+        "    return json.loads((Path(root) / 'inventory.json').read_text(encoding='utf-8'))\n"
+    ),
+    "scripts/build_course.py": "def build(check=False):\n    return None\n",
+    "docs/course-revision-20261016/tools/reader.py": "def units(text):\n    return [text]\n",
+}
+GATE_PLACEHOLDERS = (
+    "docs/review-tools/incremental_revision.py",
+    "docs/review-tools/phase7_review.py",
+    "docs/review-tools/incremental_reader.py",
+    "scripts/reading_time.py",
+    "scripts/export_course.py",
+    "docs/course-revision-20261016/tools/freeze_sources.py",
+    "tests/test_incremental_revision_review.py",
+)
+NOTE_FIELDS = ("understanding", "materials_and_labels", "expected_change", "confusion_and_quote", "missing_visuals")
+CONCEPT_FIELDS = ("concept", "identity", "mechanism", "need", "usage", "example_scope", "source_quote")
+TECHNICAL_CHECKS = (
+    "factual_accuracy",
+    "numeric_verification",
+    "figure_consistency",
+    "source_verification",
+    "limitations",
+)
+
+
+def when(minute):
+    return f"2026-10-16T03:{minute:02d}:00+00:00"
+
+
+def code_source(identifier, path, data):
+    return {
+        "id": identifier,
+        "kind": "repository_code",
+        "title": "虛構來源",
+        "path": path,
+        "sha256": digest(data),
+        "version": "審閱時的工作樹",
+        "inspection_note": "虛構讀取紀錄",
+        "verified": True,
+    }
+
+
+def gate_round(
+    root,
+    listed=True,
+    patches=None,
+    reader_on=REVIEWED,
+    fix_on=None,
+    technical_on=REVIEWED,
+    chapter_cited=FILE_REVIEWED,
+    model_cited=MODEL_BYTES,
+):
+    """寫出迷你一輪，回傳 manifest 路徑。
+
+    reader_on、fix_on、technical_on 是讀者目前判斷、修正的複查（None 時就是目前判斷）與技術報告記的那一版 99.1；
+    chapter_cited、model_cited 是技術報告兩個 repository_code 來源記的那一版檔案。listed 時帶作者補丁清單，
+    patches 指定清單內容（預設是補 99.1 的那一筆）。
+    """
+    for name, text in GATE_STUBS.items():
+        save(root, name, text.encode(), raw=True)
+    for name in GATE_PLACEHOLDERS:
+        save(root, name, ("fictional " + name + "\n").encode(), raw=True)
+    save(
+        root, "scripts/check_technical_reviews.py", (ROOT / "scripts/check_technical_reviews.py").read_bytes(), raw=True
+    )
+    criteria = save(root, ".agents/skills/clear-tutorial/SKILL.md", b"fictional criteria\n", raw=True)
+    save(root, CHAPTER, FILE_PATCHED.encode(), raw=True)
+    save(root, "course/plain.md", PLAIN.encode(), raw=True)
+    save(root, MODEL, MODEL_BYTES, raw=True)
+    lesson = {
+        "page_id": "99.1",
+        "source": CHAPTER,
+        "selector": "section:99.1",
+        "source_sha256": digest(PATCHED.encode()),
+        "figures_sha256": {},
+    }
+    plain = {
+        "page_id": "plain",
+        "source": "course/plain.md",
+        "selector": "whole-file",
+        "source_sha256": digest(PLAIN.encode()),
+        "figures_sha256": {},
+    }
+    save(root, "inventory.json", {"pages": [lesson, plain]})
+    snapshots = {
+        "99.1": save(root, "freeze/99.1.md", PATCHED.encode(), raw=True)["path"],
+        "plain": save(root, "freeze/plain.md", PLAIN.encode(), raw=True)["path"],
+    }
+    pages = [{**page, "snapshot": snapshots[page["page_id"]]} for page in (lesson, plain)]
+    freeze = save(root, "round/freeze.json", {"pages": pages, "figure_snapshots": {}})
+    baseline = save(root, "old/baseline-freeze.json", {"pages": pages[1:], "criteria": ["SKILL.md"]})
+    inputs = save(root, "old/inputs.json", {"files_sha256": {}})
+    save(root, REVIEW_MANIFEST, {"source_freeze": baseline, "current_technical_inputs": inputs})
+
+    seen = save(root, "sessions/s1/source.md", REVIEWED.encode(), raw=True)
+    opening = {
+        "page_id": "99.1",
+        "reviewer_task": READER_TASK,
+        "source_sha256": seen["sha256"],
+        "figures_sha256": {},
+        "started_at": when(5),
+    }
+    note = {
+        "page_id": "99.1",
+        "reviewer_task": READER_TASK,
+        "unit_index": 0,
+        "unit_sha256": seen["sha256"],
+        "saved_at": when(6),
+        **{field: "虛構觀察" for field in NOTE_FIELDS},
+        "concept_checks": [{**{field: "虛構回答" for field in CONCEPT_FIELDS}, "verdict": "已足夠"}],
+    }
+    session = {
+        "opening": save(root, "sessions/s1/opening.json", opening),
+        "source": seen,
+        "notes": [save(root, "sessions/s1/note-0.json", note)],
+        "figures": {},
+    }
+    issue = {"id": "R-1", "problem": "虛構問題"}
+    original_page = {"page_id": "99.1", "source_sha256": seen["sha256"], "figures_sha256": {}, "verdict": "需補說明"}
+    original = save(
+        root,
+        "reviews/reader-original.json",
+        {"reviewer_task": READER_TASK, "created_at": when(7), "pages": [{**original_page, "issues": [issue]}]},
+    )
+    current_page = {
+        "page_id": "99.1",
+        "source_sha256": digest(reader_on.encode()),
+        "figures_sha256": {},
+        "verdict": "pass",
+        "basis_report": "reviews/reader-current.json",
+        "ai_estimate": {"minutes_min": 3, "minutes_max": 5, "reason": "虛構估計"},
+    }
+    current = save(
+        root,
+        "reviews/reader-current.json",
+        {"reviewer_task": READER_TASK, "created_at": when(8), "pages": [current_page]},
+    )
+    recheck = current
+    if fix_on is not None:
+        recheck_page = {
+            "page_id": "99.1",
+            "source_sha256": digest(fix_on.encode()),
+            "figures_sha256": {},
+            "verdict": "pass",
+        }
+        recheck = save(root, "reviews/reader-recheck.json", {"reviewer_task": READER_TASK, "pages": [recheck_page]})
+    reader_proof = {
+        "mode": "review",
+        "wave": PATCH_WAVE,
+        "report": current,
+        "json_pointer": "/pages/0",
+        "original_report": original,
+        "original_json_pointer": "/pages/0",
+        "basis": {"report": current, "json_pointer": "/pages/0"},
+        "sessions": [session],
+    }
+
+    technical_report = {
+        "schema_version": 1,
+        "review_stage": "technical",
+        "lesson_id": "99.1",
+        "source": CHAPTER + "#99.1",
+        "source_sha256": digest(technical_on.encode()),
+        "verdict": "pass",
+        "reviewer_task": TECHNICAL_TASK,
+        "reviewer_context": "fresh",
+        "figure_sha256": {},
+        "artifacts": [],
+        "claims": [],
+        "sources": [code_source("chapter", CHAPTER, chapter_cited.encode()), code_source("model", MODEL, model_cited)],
+        "applicability": {"substantive_claims": False, "reason": "虛構頁沒有實質主張"},
+        "issues": [],
+        "checks": {name: {"status": "not_applicable", "details": "虛構核對"} for name in TECHNICAL_CHECKS},
+    }
+    technical = save(root, "reviews/technical.json", technical_report)
+    technical_proof = {
+        "mode": "review",
+        "wave": PATCH_WAVE,
+        "report": technical,
+        "json_pointer": "",
+        "original_report": technical,
+        "original_json_pointer": "",
+    }
+    tools = [{"path": name, "sha256": digest((root / name).read_bytes())} for name in TOOL_FILES]
+    audit = save(
+        root, "round/tool-audit.json", {"reviewer_task": AUDITOR_TASK, "verdict": "pass", "checked_files": tools}
+    )
+
+    later = {"not_before": when(42), "not_after": when(43)}
+    tasks = [
+        {
+            "task": READER_TASK,
+            "role": "reader",
+            "wave": PATCH_WAVE,
+            "context": "fresh",
+            "pages": ["99.1"],
+            "dispatch_window": {"not_before": when(1), "not_after": when(2)},
+        },
+        {
+            "task": TECHNICAL_TASK,
+            "role": "technical",
+            "wave": PATCH_WAVE,
+            "context": "fresh",
+            "lesson_id": "99.1",
+            "dispatch_window": later,
+        },
+        {"task": AUDITOR_TASK, "role": "technical", "wave": PATCH_WAVE, "context": "fresh", "dispatch_window": later},
+    ]
+    seals = {
+        "reader": save(
+            root,
+            "round/seal-reader.json",
+            {
+                "role": "reader",
+                "status": "completed",
+                "started_at": when(0),
+                "completed_at": when(40),
+                "report_sha256s": [original["sha256"], current["sha256"]],
+            },
+        ),
+        "technical": save(
+            root,
+            "round/seal-technical.json",
+            {
+                "role": "technical",
+                "status": "completed",
+                "started_at": when(41),
+                "completed_at": when(59),
+                "report_sha256s": [technical["sha256"], audit["sha256"]],
+            },
+        ),
+    }
+    decision = {
+        "issue_id": "R-1",
+        "report": original,
+        "json_pointer": "/pages/0/issues/0",
+        "final_necessity": "necessary",
+        "action": "fixed",
+        **{field: "虛構理由" for field in ("source_support", "learning_benefit", "change_burden", "reason")},
+        "affected_pages": ["99.1"],
+        "verification": [{"report": recheck, "json_pointer": "/pages/0"}],
+    }
+    inherited = {"mode": "inherit", "baseline_page_id": "plain", "dependency_note": "這一頁沒有改"}
+    implementation = [*GATE_STUBS, *GATE_PLACEHOLDERS, "scripts/check_technical_reviews.py"]
+    manifest = {
+        "review_policy": review.POLICY,
+        "schema_version": 2,
+        "baseline_freeze": baseline,
+        "source_freeze": freeze,
+        "implementation": {name: digest((root / name).read_bytes()) for name in implementation},
+        "criteria": {criteria["path"]: criteria["sha256"]},
+        "author_tasks": ["/root"],
+        "assignments": save(root, "round/assignments.json", {"tasks": tasks}),
+        "review_waves": [{"id": PATCH_WAVE, "seals": seals}],
+        "pages": [
+            {"page_id": "99.1", "reader": reader_proof, "technical": technical_proof},
+            {"page_id": "plain", **{role: inherited for role in review.ROLES}},
+        ],
+        "issue_reports": [original, current, technical, audit] + ([recheck] if fix_on is not None else []),
+        "dispositions": save(
+            root, "round/dispositions.json", {"at": when(21), "pending_count": 0, "items": [decision]}
+        ),
+        "dispositions_collection": {"received_at": when(22), "wave": PATCH_WAVE, "role": "reader"},
+        "tool_audit": {"wave": PATCH_WAVE, "report": audit},
+    }
+    if listed:
+        manifest["author_patches"] = save(root, PATCH_LIST, patch_list([patch_entry()] if patches is None else patches))
+    return save(root, "round/manifest.json", manifest)["path"]
+
+
+def audit(root, stage="reader", **options):
+    return review.audit_manifest(root, root / gate_round(root, **options), stage)
+
+
+def records(*patched):
+    first = {"page_id": "99.1", "source_sha256": digest(PATCHED.encode())}
+    if patched:
+        first["author_patches"] = list(patched)
+    return [first, {"page_id": "plain", "source_sha256": digest(PLAIN.encode())}]
+
+
+@pytest.mark.parametrize("stage", ["reader", "technical"])
+def test_reviews_of_the_version_before_an_author_patch_still_count_and_are_marked(tmp_path, stage):
+    result = audit(tmp_path, stage)
+    assert result["failures"] == []
+    assert result["records"] == records("ch99-1")
+
+
+@pytest.mark.parametrize("stage", ["reader", "technical"])
+def test_without_the_patch_list_the_same_round_fails_as_it_did_before(tmp_path, stage):
+    assert audit(tmp_path, stage, listed=False)["failures"] == ["report source is stale: 99.1"]
+
+
+@pytest.mark.parametrize("stage", ["reader", "technical"])
+def test_reviews_of_the_current_version_are_not_marked_with_or_without_the_list(tmp_path, stage):
+    current = {"reader_on": PATCHED, "technical_on": PATCHED, "chapter_cited": FILE_PATCHED}
+    for listed in (True, False):
+        result = audit(tmp_path / str(listed), stage, listed=listed, **current)
+        assert result["failures"] == []
+        assert result["records"] == records()
+
+
+def test_fix_recheck_before_the_patch_is_accepted_and_marks_the_page(tmp_path):
+    # 目前判斷已對著現行版本重做，只剩修正的複查停在補之前的版本。
+    result = audit(tmp_path, reader_on=PATCHED, fix_on=REVIEWED)
+    assert result["failures"] == []
+    assert result["records"] == records("ch99-1")
+    unlisted = audit(tmp_path / "unlisted", reader_on=PATCHED, fix_on=REVIEWED, listed=False)
+    assert unlisted["failures"] == ["fix recheck is stale"]
+
+
+def test_technical_report_before_the_patch_is_accepted_and_marks_the_page(tmp_path):
+    result = audit(tmp_path, "technical", reader_on=PATCHED)
+    assert result["failures"] == []
+    assert result["records"] == records("ch99-1")
+
+
+def test_chapter_cited_before_the_patch_alone_is_accepted_and_marks_the_page(tmp_path):
+    # 讀者與技術報告都對著現行版本，只有 repository_code 來源記的章檔還是補之前的版本。
+    options = {"reader_on": PATCHED, "technical_on": PATCHED}
+    result = audit(tmp_path, "technical", **options)
+    assert result["failures"] == []
+    assert result["records"] == records("ch99-1")
+    unlisted = audit(tmp_path / "unlisted", "technical", listed=False, **options)
+    assert unlisted["failures"] == ["99.1: ['source chapter: 證據版本已改變：course/chapters/99.md']"]
+
+
+@pytest.mark.parametrize(
+    "model_cited", [b"def model():\n    return 3\n", FILE_REVIEWED.encode()], ids=["stale", "chapter_digest"]
+)
+def test_older_digest_of_a_file_without_patches_is_still_rejected(tmp_path, model_cited):
+    # 沒有補丁的檔只認現行位元組，借用補丁檔較早版本的 SHA 也一樣。
+    result = audit(tmp_path, "technical", model_cited=model_cited)
+    assert result["failures"] == ["99.1: ['source model: 證據版本已改變：tiny/model.py']"]
+
+
+@pytest.mark.parametrize(
+    ("stage", "options", "failure"),
+    [
+        ("reader", {"reader_on": OTHER}, "report source is stale: 99.1"),
+        ("reader", {"reader_on": PATCHED, "fix_on": OTHER}, "fix recheck is stale"),
+        ("technical", {"technical_on": OTHER}, "report source is stale: 99.1"),
+        (
+            "technical",
+            {"reader_on": PATCHED, "technical_on": PATCHED, "chapter_cited": INTRO + OTHER},
+            "99.1: ['source chapter: 證據版本已改變：course/chapters/99.md']",
+        ),
+    ],
+    ids=["reader_report", "fix_recheck", "technical_report", "cited_chapter"],
+)
+def test_older_version_the_patches_do_not_lead_back_to_is_still_stale(tmp_path, stage, options, failure):
+    assert audit(tmp_path, stage, **options)["failures"] == [failure]
+
+
+@pytest.mark.parametrize(
+    ("patches", "failure"),
+    [
+        (
+            [patch_entry(new="第二項的重要程度變成五倍，其梯度也變成五倍。")],
+            UNDO.format(0, "ch99-1") + f"new 在倒退到這一筆時的 {CHAPTER} 出現 0 次，必須恰好一次",
+        ),
+        ([patch_entry(new="變" * 81)], ENTRY.format(0, "ch99-1") + "new 有 81 個字元，超過 80"),
+    ],
+    ids=["not_in_current_file", "too_long"],
+)
+def test_patch_list_that_breaks_a_rule_fails_the_whole_gate(tmp_path, patches, failure):
+    result = audit(tmp_path, patches=patches)
+    assert result["failures"] == [failure]
+    assert result["records"] == []

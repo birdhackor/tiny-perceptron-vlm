@@ -352,3 +352,63 @@ def test_malformed_report_fails_cleanly(reviewed_course):
     reports["14.1"]["artifacts"][0]["kind"] = {}
     write_report(root, reports["14.1"])
     assert technical.check(root)["failures"]
+
+
+def code_source(identifier, path, sha256):
+    return {
+        "id": identifier,
+        "kind": "repository_code",
+        "title": "測試程式來源",
+        "path": path,
+        "sha256": sha256,
+        "version": "審閱時的工作樹",
+        "inspection_note": "測試讀取紀錄",
+        "verified": True,
+    }
+
+
+def patched_course(root, reports):
+    """14.1 審閱後作者補了一個字：正文與整個章檔都換了位元組，報告與它引用章檔的 repository_code 來源還是補之前的版本。"""
+    source = root / "course/chapters/14.md"
+    reviewed = source.read_bytes()
+    report = copy.deepcopy(reports["14.1"])
+    report["sources"].append(code_source("s4", "course/chapters/14.md", digest(reviewed)))
+    source.write_text(reviewed.decode().replace("共同旋轉保留點積", "共同旋轉會保留點積"), encoding="utf-8")
+    return source, dict(technical.sections(source))["14.1"], report, digest(reviewed)
+
+
+def validate(root, source, body, report, *earlier):
+    owners = {report["reviewer_task"]: ["14.1"]}
+    options = {"earlier_versions": earlier[0]} if earlier else {}
+    return technical._validate(root, source, "14.1", body, report, owners, set(), **options)
+
+
+def test_earlier_versions_accept_the_body_and_the_cited_file_before_a_patch(reviewed_course):
+    root, reports = reviewed_course
+    source, body, report, chapter = patched_course(root, reports)
+    stale = ["事實審閱不是目前小節原文", "source s4: 證據版本已改變：course/chapters/14.md"]
+    assert validate(root, source, body, report) == stale
+    earlier = {"source_sha256": {report["source_sha256"]}, "files": {"course/chapters/14.md": {chapter}}}
+    assert validate(root, source, body, report, earlier) == []
+    # 只承認列出的那幾個 SHA。
+    other = {"source_sha256": {"0" * 64}, "files": {"course/chapters/14.md": {"0" * 64}}}
+    assert validate(root, source, body, report, other) == stale
+
+
+@pytest.mark.parametrize("cited", ["stale", "borrowed"])
+def test_earlier_file_versions_only_cover_their_own_path(reviewed_course, cited):
+    # 圖檔沒有較早版本：記舊的 SHA，或借用章檔較早版本的 SHA，都還是過期。
+    root, reports = reviewed_course
+    source, body, report, chapter = patched_course(root, reports)
+    figure = "course/figures/sample.svg"
+    report["sources"].append(code_source("s5", figure, digest(b"<svg/>") if cited == "stale" else chapter))
+    earlier = {"source_sha256": {report["source_sha256"]}, "files": {"course/chapters/14.md": {chapter}}}
+    assert validate(root, source, body, report, earlier) == [f"source s5: 證據版本已改變：{figure}"]
+
+
+def test_absent_or_empty_earlier_versions_change_nothing(reviewed_course):
+    root, reports = reviewed_course
+    source, body, report, _ = patched_course(root, reports)
+    expected = validate(root, source, body, report)
+    for earlier in (None, {}, {"source_sha256": {}, "files": {}}, {"files": {"course/other.md": {"0" * 64}}}):
+        assert validate(root, source, body, report, earlier) == expected

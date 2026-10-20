@@ -6,7 +6,8 @@
 import hashlib
 import importlib.util
 import json
-from datetime import UTC, datetime
+import re
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -17,6 +18,12 @@ SCOPE = (
     "Not a new full-course blind review, human test, proof of comprehension, scientific truth, physical isolation, "
     "image viewing, kernel execution, training success or deployment."
 )
+PATCHES_KIND = "author patches without AI review"
+PATCHES_STATEMENT = "每一筆都是作者直接要求的小修改，沒有經過 AI 審閱；閘門只核對改動確實就是這裡寫的那一筆。"
+PATCH_FIELDS = ("id", "path", "old", "new", "requested_by", "requested_on", "reason")
+PATCH_LIMIT = 80
+# old／new 不能出現的記號：換行會跨行，``` 是程式區塊的圍欄，![ 與 ]( 是圖與連結的語法。
+PATCH_FORBIDDEN = {"\n": "換行", "\r": "換行", "```": "「```」", "![": "「![」", "](": "「](」"}
 
 
 def require(condition, message):
@@ -297,7 +304,10 @@ def reported_issues(value, pointer=""):
     return result
 
 
-def check_dispositions(root, manifest, selected, live, tasks, sealed):
+def check_dispositions(root, manifest, selected, live, tasks, sealed, earlier=None):
+    """核對每個問題的處置；earlier 是各頁倒退作者補丁得到的較早版本（page_versions），回傳修正的複查靠了哪些補丁。"""
+    earlier = earlier or {}
+    relied = {}
     dispositions = document(root, manifest["dispositions"])
     require(dispositions.get("pending_count") == 0, "unresolved author dispositions")
     collected = manifest.get("dispositions_collection", {})
@@ -381,7 +391,9 @@ def check_dispositions(root, manifest, selected, live, tasks, sealed):
             value = node(report, verification["json_pointer"])
             pid = value.get("page_id", value.get("lesson_id"))
             require(pid in live and value.get("verdict") == "pass", "fix lacks reviewer pass on affected page")
-            require(value.get("source_sha256") == live[pid]["source_sha256"], "fix recheck is stale")
+            used = patched_version(value.get("source_sha256"), live[pid]["source_sha256"], earlier.get(pid, {}))
+            require(used is not None, "fix recheck is stale")
+            relied.setdefault(pid, set()).update(used)
             require(
                 value.get("figures_sha256", value.get("figure_sha256")) == live[pid]["figures_sha256"],
                 "fix figure recheck stale",
@@ -395,6 +407,7 @@ def check_dispositions(root, manifest, selected, live, tasks, sealed):
                 "fix does not cover affected pages/files",
             )
     require(actual == expected, "reported issues and dispositions differ")
+    return relied
 
 
 def baseline_supplements(root, manifest):
@@ -426,6 +439,170 @@ def baseline_supplements(root, manifest):
             f"補充還原清單 {name} 的 files[{i}] 必須是只含 live_path、path、sha256 三個字串欄位的物件",
         )
     return files
+
+
+def is_calendar_day(value):
+    """value 是不是 YYYY-MM-DD 寫法、而且真的存在的日期。"""
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value):
+        return False
+    try:
+        date.fromisoformat(value)
+    except ValueError:
+        return False
+    return True
+
+
+def author_patches(root, manifest, live):
+    """讀 manifest 的 author_patches 指向的作者補丁清單，逐筆核對格式；欄位缺席時回傳空清單。
+
+    live 是目前清單的各頁（page_id 對 page）；manifest 涵蓋的頁和它相同，每筆的 path 必須是其中一頁的 source。
+    """
+    # 驗證：清單的位元組等於 manifest 記的 SHA，是 JSON 物件，schema_version 為 1，kind 與 statement 是規定的文字；
+    # 每筆恰好 PATCH_FIELDS 七個欄位，id 不重複，path 是某一頁的 source，old 與 new 是彼此不同、各不超過 80 字、
+    # 不含 PATCH_FORBIDDEN 記號的非空字串，requested_by 是 author，requested_on 是 YYYY-MM-DD，reason 非空。
+    # 不涵蓋：補丁的語意，由作者負責；new 落在連結網址或行內程式碼裡時，只靠上面的字面限制擋不住。
+    # 現行檔是否正好是審閱過的版本加上這些補丁，由 file_versions 與 page_versions 倒退核對。
+    if "author_patches" not in manifest:
+        return []
+    sources = {page.get("source") for page in live.values()}
+    reference = manifest["author_patches"]
+    try:
+        raw = artifact(root, reference)
+    except OSError as error:
+        raise ValueError(f"作者補丁清單讀不到（{type(error).__name__}）：{reference['path']}") from None
+    name = reference["path"]
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        raise ValueError("作者補丁清單不是合法的 JSON：" + name) from None
+    require(isinstance(data, dict), "作者補丁清單不是 JSON 物件：" + name)
+    version = data.get("schema_version")
+    require(type(version) is int and version == 1, "作者補丁清單的 schema_version 不是 1：" + name)
+    require(data.get("kind") == PATCHES_KIND, f"作者補丁清單的 kind 不是 {PATCHES_KIND!r}：" + name)
+    require(data.get("statement") == PATCHES_STATEMENT, "作者補丁清單的 statement 不是規定的聲明：" + name)
+    patches = data.get("patches")
+    require(isinstance(patches, list), "作者補丁清單的 patches 不是 list：" + name)
+    seen = set()
+    for i, patch in enumerate(patches):
+        where = f"作者補丁清單 {name} 的 patches[{i}]"
+        require(
+            isinstance(patch, dict) and set(patch) == set(PATCH_FIELDS),
+            where + " 必須是恰好含 " + "、".join(PATCH_FIELDS) + " 七個欄位的物件",
+        )
+        where += f"（id {patch['id']!r}）"
+        require(isinstance(patch["id"], str) and patch["id"].strip(), where + "：id 必須是非空字串")
+        require(patch["id"] not in seen, where + "：id 和前面的補丁重複")
+        seen.add(patch["id"])
+        require(
+            isinstance(patch["path"], str) and patch["path"] in sources,
+            where + "：path 不是 manifest 任何一頁的 source",
+        )
+        for field in ("old", "new"):
+            text = patch[field]
+            require(isinstance(text, str) and text, where + f"：{field} 必須是非空字串")
+            require(len(text) <= PATCH_LIMIT, where + f"：{field} 有 {len(text)} 個字元，超過 {PATCH_LIMIT}")
+            for token, label in PATCH_FORBIDDEN.items():
+                require(token not in text, where + f"：{field} 不能含{label}")
+        require(patch["old"] != patch["new"], where + "：old 與 new 相同")
+        require(patch["requested_by"] == "author", where + "：requested_by 必須是 'author'")
+        require(is_calendar_day(patch["requested_on"]), where + "：requested_on 必須是 YYYY-MM-DD 格式的日期")
+        require(isinstance(patch["reason"], str) and patch["reason"].strip(), where + "：reason 必須是非空字串")
+    return patches
+
+
+def positions(text, needle):
+    """needle 在 text 裡每一處的起點，彼此重疊的也算。"""
+    found, start = [], text.find(needle)
+    while start != -1:
+        found.append(start)
+        start = text.find(needle, start + 1)
+    return found
+
+
+def fenced(text, position):
+    """position 是否落在 ``` 圍起來的區塊裡：圍欄那兩行也算，沒有收尾的圍欄一路算到文字結尾。"""
+    # 圍欄的認法同 incremental_reader.blocks：去掉行首空白後以 ``` 開頭的行。
+    inside, start = False, 0
+    for line in text.split("\n"):
+        fence = line.lstrip().startswith("```")
+        if position <= start + len(line):
+            return inside or fence
+        inside ^= fence
+        start += len(line) + 1
+    return inside
+
+
+def undo_patches(text, patches, where, absent_ok=False):
+    """從 text 依清單倒序逐筆倒退補丁，回傳每倒退一筆得到的（較早版本的文字，到這一版為止倒退的補丁 id）。
+
+    patches 是同一個檔的（清單位置，補丁），照清單順序。每一筆的 new 在當下的文字裡要恰好出現一次、不在 ``` 圍起來的
+    區塊裡，才換回 old。absent_ok 時 new 沒出現的那一筆略過：那一筆改的是同一個檔的別頁。
+    """
+    versions, undone = [], ()
+    for i, patch in reversed(patches):
+        label = f"作者補丁清單的 patches[{i}]（id {patch['id']!r}）"
+        hits = positions(text, patch["new"])
+        if absent_ok and not hits:
+            continue
+        require(len(hits) == 1, f"{label}：new 在倒退到這一筆時的 {where} 出現 {len(hits)} 次，必須恰好一次")
+        require(not fenced(text, hits[0]), f"{label}：new 在 {where} 的那一處落在 ``` 圍起來的程式區塊裡")
+        text = text[: hits[0]] + patch["old"] + text[hits[0] + len(patch["new"]) :]
+        undone += (patch["id"],)
+        versions.append((text, undone))
+    return versions
+
+
+def earlier_digests(versions, current):
+    """倒退得到的版本換成 UTF-8 位元組的 SHA-256；等於 current 的不算較早版本，同一個 SHA 記第一次得到時倒退的補丁。"""
+    result = {}
+    for text, undone in versions:
+        digest = sha(text.encode("utf-8"))
+        if digest != current:
+            result.setdefault(digest, undone)
+    return result
+
+
+def file_versions(root, patches):
+    """有補丁的每個檔，從現行位元組倒退它的全部補丁：{path: {較早版本的 SHA-256: 倒退的補丁 id}}。"""
+    result = {}
+    for path in dict.fromkeys(patch["path"] for patch in patches):
+        raw = local(root, path).read_bytes()
+        own = [(i, patch) for i, patch in enumerate(patches) if patch["path"] == path]
+        result[path] = earlier_digests(undo_patches(raw.decode("utf-8"), own, path), sha(raw))
+    return result
+
+
+def page_versions(root, frozen_page, page, patches):
+    """這一頁凍結快照的現行文字，倒退 new 出現在這一頁的補丁：{較早版本的 SHA-256: 倒退的補丁 id}。"""
+    own = [(i, patch) for i, patch in enumerate(patches) if patch["path"] == page["source"]]
+    if not own:
+        return {}
+    raw = artifact(root, {"path": frozen_page["snapshot"], "sha256": page["source_sha256"]})
+    where = "頁 " + page["page_id"] + " 的凍結快照"
+    return earlier_digests(undo_patches(raw.decode("utf-8"), own, where, absent_ok=True), page["source_sha256"])
+
+
+def patched_version(recorded, current, versions):
+    """recorded 是現行版本時回傳 ()；是倒退作者補丁得到的較早版本時回傳倒退的補丁 id；都不是時回傳 None。"""
+    if recorded == current:
+        return ()
+    if isinstance(recorded, str) and recorded in versions:
+        return versions[recorded]
+    return None
+
+
+def technical_patches(report, versions, files):
+    """技術報告靠作者補丁才對上的補丁 id：報告的 source_sha256，以及 repository_code 來源記的檔案 SHA-256。"""
+    used = []
+    if isinstance(report.get("source_sha256"), str):
+        used += versions.get(report["source_sha256"], ())
+    sources = report.get("sources")
+    for source in sources if isinstance(sources, list) else []:
+        if isinstance(source, dict) and source.get("kind") == "repository_code":
+            path, digest = source.get("path"), source.get("sha256")
+            if isinstance(path, str) and isinstance(digest, str):
+                used += files.get(path, {}).get(digest, ())
+    return used
 
 
 def check_tool_audit(root, manifest, task_roles, sealed):
@@ -461,6 +638,7 @@ def check_tool_audit(root, manifest, task_roles, sealed):
 def audit_manifest(root, path, stage="all"):
     root = Path(root).resolve()
     failures, records = [], []
+    patches, relied = [], {}
     try:
         require(stage in {"reader", "technical", "all"}, "unknown review stage")
         manifest = json.loads(Path(path).read_bytes())
@@ -495,6 +673,10 @@ def audit_manifest(root, path, stage="all"):
             set(live) == set(frozen) == set(catalog) and set(old) <= set(live),
             "canonical scope lost or added without evidence",
         )
+        # 作者補丁：核對清單、倒退每個補丁檔；各頁的較早版本在頁面迴圈裡由 page_versions 算，存進 earlier。
+        patches = author_patches(root, manifest, live)
+        files = file_versions(root, patches)
+        earlier = {}
         original_inputs = document(root, original_policy["current_technical_inputs"])["files_sha256"]
         required_implementation = set(original_inputs) | {
             "docs/review-tools/incremental_revision.py",
@@ -572,6 +754,7 @@ def audit_manifest(root, path, stage="all"):
                 == page["source_sha256"],
                 "missing source snapshot",
             )
+            versions = earlier[pid] = page_versions(root, frozen[pid], page, patches)
             inherited_identity = pid in old and all(
                 page.get(f) == old[pid].get(f) for f in ("source", "selector", "source_sha256", "figures_sha256")
             )
@@ -648,7 +831,12 @@ def audit_manifest(root, path, stage="all"):
                 )
                 current = node(report, proof.get("json_pointer", ""))
                 require(current.get("page_id", current.get("lesson_id")) == pid, "report page membership mismatch")
-                require(current.get("source_sha256") == page["source_sha256"], "report source is stale: " + pid)
+                # 報告記的可以是凍結快照倒退作者補丁得到的較早版本；靠了哪些補丁記進 relied，最後標在 records。
+                # 不涵蓋：inherit 頁、section-composite 的整份檔頁、圖與 Notebook 輸出都只認現行版本，不走這條路；
+                # 補丁的語意由作者負責，閘門只核對字面。
+                used = patched_version(current.get("source_sha256"), page["source_sha256"], versions)
+                require(used is not None, "report source is stale: " + pid)
+                relied.setdefault(pid, set()).update(used)
                 require(current.get("verdict") in {"pass", "已足夠"}, "reviewer requests revision: " + pid)
                 figures = current.get("figures_sha256", current.get("figure_sha256"))
                 require(figures == page["figures_sha256"], "review figure identity incomplete: " + pid)
@@ -667,13 +855,22 @@ def audit_manifest(root, path, stage="all"):
                 if role == "technical":
                     body = local(root, frozen[pid]["snapshot"]).read_text()
                     errors = technical._validate(
-                        root, local(root, page["source"]), pid, body, report, technical_owners, reader_tasks
+                        root,
+                        local(root, page["source"]),
+                        pid,
+                        body,
+                        report,
+                        technical_owners,
+                        reader_tasks,
+                        earlier_versions={"source_sha256": versions, "files": files},
                     )
                     require(not errors, pid + ": " + repr(errors))
+                    relied[pid].update(technical_patches(report, versions, files))
             records.append({"page_id": pid, "source_sha256": page["source_sha256"]})
         if stage in {"technical", "all"}:
             check_tool_audit(root, manifest, task_roles, sealed)
-        check_dispositions(root, manifest, selected, live, task_roles, sealed)
+        for pid, used in check_dispositions(root, manifest, selected, live, task_roles, sealed, earlier).items():
+            relied.setdefault(pid, set()).update(used)
         if stage == "all":
             dependency = document(root, manifest["dependency_audit"])
             require(
@@ -683,6 +880,11 @@ def audit_manifest(root, path, stage="all"):
             require(set(dependency.get("inventory_page_ids", [])) == set(live), "dependency audit inventory incomplete")
     except (ValueError, KeyError, TypeError, OSError, StopIteration, RuntimeError, IndexError) as error:
         failures.append(str(error))
+    # 靠作者補丁才對上的頁，列出靠的補丁 id（照清單順序）。
+    for record in records:
+        used = relied.get(record["page_id"])
+        if used:
+            record["author_patches"] = [patch["id"] for patch in patches if patch["id"] in used]
     return {
         "schema_version": 2,
         "review_policy": POLICY,
