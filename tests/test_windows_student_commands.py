@@ -21,13 +21,19 @@ LONG_PATHS，以及 Windows PowerShell 5.1 與 PowerShell 7 都跑。kernel 核�
 KERNEL_CHECKS 執行的 Notebook 程式格，以及 python_run_by_workflow 列的檔裡；on: 區塊本身寫著排除樣式，不掃。workflow 檔
 本身、四頁、KERNEL_CHECKS 執行的 Notebook 與 python_run_by_workflow 列的檔，repo 內的 POSIX 路徑都不以任何排除的樹加 /
 開頭。workflow 每一處 `# 頁面說：` 的引文，以及下面〈不涵蓋〉裡 not_covered_page_items 收的各項中的「」引文，都要在頁面上找得到，
-比對方式見 test_page_quotes_appear_on_the_pages。
-這些比對裡，引文往頁面查的函式（test_page_quotes_appear_on_the_pages 直接或間接呼叫的，read 除外）與 KERNEL_CHECKS 裡
-main、run 以外的函式是單向比對：抽少了或挑錯了，比對仍會通過。所以它們的 docstring 與錯誤訊息宣稱的每個結果，都要有
-一例餵假資料的案例，放在以該函式命名的參數化測試裡。推出頁面命令與取出 workflow 副本的函式不逐個結果補這種案例：compare 對
-頁面推出的命令與 workflow 的副本做序列比對，一邊漏抽或多抽，另一邊多出或缺少的那條就會報出；兩邊同時看不到的寫法比對
-不出來，〈不涵蓋〉列了其中一些。下面講觸發條件讀檔集合的兩道測試，用到的函式也是單向，同樣不逐個結果補這種案例，理由見
-〈不涵蓋〉裡講排除安不安全的那句。
+比對方式見 page_quote_problems。
+這些比對裡，結果錯了、所有比對仍會通過的出口是單向出口，例如引文往頁面查的函式、compare 本身、今天沒有頁面用到的命令
+辨識規則，以及 compare 看不到的出口（純文字區塊、沒分類的語言、HTML 的 code 元素這類）。這類出口宣稱的每個結果，都要有
+一例餵假資料的案例，放在以該函式命名的參數化測試裡。
+測試本體只呼叫一個 helper、斷言它回報的問題為空時，這個 assert 不另補案例。本體把被呼叫端的失敗訊號（回報的問題，或表示
+找不到、寫法不符的 None、False、空結果）轉成失敗，那個訊號已有別的測試以假資料釘住，而拿掉這一步整檔仍會通過時，就越過
+這條底線；這種決定要放在 helper 裡，helper 宣稱的每個結果都要有一例。被呼叫端的一般輸出被假資料釘住，不讓用到它的
+本體越過底線。
+下面這些不逐個結果補案例。今天頁面上已有的命令怎麼抽：compare 對兩邊做序列比對，一邊漏抽，另一邊多出的那條就報出（兩邊
+都看不到的寫法比對不出來，〈不涵蓋〉列了其中一些）。workflow 的 PowerShell 核對與 KERNEL_CHECKS 的 main、run：每次 Windows
+實跑都以真資料執行，核得對不對由重掃引文判斷；main 在 helper 之外只挑 lines[-1] 或 lines[0]、用 != 比，比哪一行由它的訊息
+與取期望值的樣式旁的 `# 頁面說：` 指名。讀檔集合那兩道測試用到的函式：理由見〈不涵蓋〉裡講排除安不安全的那句；excluded_trees
+遇到寫法不符的條目時的出口除外，它有案例。沒有上面那種轉換的測試本體也不補。
 
 觸發條件的讀檔集合：排除的樹裡不能有頁面命令或 workflow 會讀的檔。這份集合由三種來源合起來推出。(a) 在本機用
 sys.addaudithook 收 open 事件，執行 workflow 會跑、又能在本機安全執行的 Python 頁面命令（check_env.py、
@@ -68,9 +74,9 @@ Windows CI 只核 workflow 裡旁邊以 `# 頁面說：` 引了頁面原話的�
 時，要用收窄句說出核了哪一半，不能只靠略去把它藏起來。前提子句也算子句；workflow 照頁面做了的事（命令由命令的釘選核對）
 算核到。只說同一則引文裡某個結果的意思、理由或用途，沒有引入新的可核對事實的子句，跟著那個結果算，寫在它前面或後面都
 一樣；引入新事實（另一個輸出、另一個裝置、另一個檔）就是另一個子句，照同樣的規則核對或收窄。「緊接」指收窄句與引文在同一段
-註解裡、中間沒有程式行，前後都可以。引文從哪裡開始、到哪裡結束見 workflow_quotes；頁面句子的句尾「。」在「」裡時，整句
-引文讀不到句尾，引文以「……」收尾。含「。」的 inline code，引文要嘛把那段寫成 `…`，要嘛留著反引號，後者只限用一個反引號
-包住的 code，原因見 cut_at_full_stop。引文和〈不涵蓋〉裡 not_covered_page_items 收的各項中的「」引文，由
+註解裡、中間沒有程式行，前後都可以。引文從哪裡開始、到哪裡結束見 workflow_quotes；頁面句子的句尾「。」在「」裡，或在
+inline code 裡時，整句引文讀不到句尾，引文都以「……」收尾。含「。」的 inline code，引文要嘛把那段寫成 `…`，要嘛留著反引號，
+後者只限用一個反引號包住的 code，原因見 cut_at_full_stop。引文和〈不涵蓋〉裡 not_covered_page_items 收的各項中的「」引文，由
 test_page_quotes_appear_on_the_pages 核對還在頁面上。練習的改法或期望值只寫在句子裡時，要核對就得把句意寫死成 workflow
 裡的程式，頁面改了練習，那份副本也不會跟著變，所以不核：
 - course/first-steps.md W.2「核對時應看到 `鳥 3` 和三行「看到」」：要換掉清單與最後檢查的哪兩行、要數的「三行」只寫在句子裡。
@@ -155,7 +161,7 @@ COMMAND_START = re.compile(
     r"^(?:(?:git|uv|uvx|cd|python3?|py|pip|jupyter|pytest|ruff|source|mkdir|powershell|pwsh|winget|choco|scoop)(?=\s|$)"
     r"|\.venv[/\\]|\.\.?[/\\]|\$env:|[A-Z][a-z]+-[A-Z][A-Za-z]+(?=\s|$))"
 )
-POWERSHELL_ONLY = re.compile(r"\\|\$|\.(?:exe|ps1)\b|^[A-Z][a-z]+-[A-Z][A-Za-z]+(?=\s|$)")
+POWERSHELL_ONLY = re.compile(r"\\|\$|\.(?:exe|ps1)\b")
 
 # 頁面句子裡給 Windows 的寫法，取代 bash 區塊裡的一行：(bash 行, 錨點)。取代的寫法是錨點之後、同一句裡的 inline code。
 REPLACEMENTS = {
@@ -271,10 +277,15 @@ def load_workflow():
 
 
 def excluded_trees():
-    """觸發條件排除的樹：push 的 paths 在第一條之後、寫成 '!<樹>/**' 的每一條。寫法不符的條目不在這裡，
-    由 test_workflow_triggers_and_shells 報錯。"""
+    """觸發條件排除的樹：push 的 paths 在第一條之後每一條的 <樹>，依序列出。第一條之後有一條寫法不符 TREE_EXCLUSION
+    （'!<樹>/**'）時，在這裡失敗，用到它的測試都跟著失敗。"""
     paths = load_workflow()["on"]["push"]["paths"]
-    return [match["tree"] for match in map(TREE_EXCLUSION.fullmatch, paths[1:]) if match]
+    malformed = [path for path in paths[1:] if not TREE_EXCLUSION.fullmatch(path)]
+    assert not malformed, (
+        f"'**' 之後每一條都要寫成 '!<樹>/**'，一次排除一整棵樹；<樹> 以 / 分段，每一段都不能是空的、. 或 ..，"
+        f"也不能含 * ? + [ ] !：{malformed}"
+    )
+    return [TREE_EXCLUSION.fullmatch(path)["tree"] for path in paths[1:]]
 
 
 def kernel_checks_source():
@@ -600,6 +611,8 @@ def workflow_copies():
                 copies.extend(
                     Copy(step.get("name", ""), match["verb"], pages, line.strip()) for line in body if line.strip()
                 )
+    if not copies:
+        problems.append(f"{WORKFLOW}：沒有讀到任何 Invoke-Page／Skip-Page 列出的命令")
     return copies, problems
 
 
@@ -624,20 +637,30 @@ def compare(page, expected, actual):
                     f"{page}:{command.line}：頁面的 Windows 命令 `{command.text}` 在 workflow 沒有對應的 Invoke-Page 或 Skip-Page"
                 )
         last = i1 + paired - 1
-        near = expected[last].line if last >= 0 else (expected[0].line if expected else 1)
+        if last >= 0:
+            near, where = expected[last].line, f"它在頁面上應接在第 {expected[last].line} 行的命令之後"
+        elif expected:
+            near, where = expected[0].line, f"它在頁面上應在第 {expected[0].line} 行的命令之前"
+        else:
+            near, where = 1, "這頁沒有推出任何 Windows 命令"
         for copy in actual[j1 + paired : j2]:
             problems.append(
-                f"{page}:{near}：workflow 步驟「{copy.step}」的 {copy.verb} 列了 `{copy.text}`，頁面上找不到；"
-                f"它在頁面上應接在第 {near} 行的命令之後"
+                f"{page}:{near}：workflow 步驟「{copy.step}」的 {copy.verb} 列了 `{copy.text}`，頁面上找不到；{where}"
             )
     return problems
 
 
-@pytest.mark.parametrize("page", PAGES)
-def test_page_windows_commands_match_workflow(page):
+def page_command_problems(page):
+    """一頁的命令問題：windows_commands 對這頁回報的問題，以及 compare 比對這頁推出的命令與 workflow 標了這頁的副本的
+    結果；標了別頁的副本不比。workflow_copies 回報的問題不在這裡，由 test_workflow_page_calls_are_recognized 報錯。"""
     commands, problems = windows_commands(page)
     copies, _ = workflow_copies()
-    problems += compare(page, commands, [copy for copy in copies if page in copy.pages])
+    return problems + compare(page, commands, [copy for copy in copies if page in copy.pages])
+
+
+@pytest.mark.parametrize("page", PAGES)
+def test_page_windows_commands_match_workflow(page):
+    problems = page_command_problems(page)
     assert not problems, (
         "頁面與 workflow 的 Windows 命令要一起改；不跑的命令寫進 Skip-Page，-Reason 寫印進記錄的簡短理由，"
         "註解寫完整理由。\n" + "\n".join(problems)
@@ -702,12 +725,14 @@ def test_windows_clone_comes_after_global_long_paths():
         ),
         pytest.param("<pre>\ngit lfs install --local\n</pre>\n", "x.md:1：fence 外有 HTML", id="跨行的 pre 元素"),
         pytest.param("說明 <CODE>uv sync</CODE> 的用途。\n", "x.md:1：fence 外有 HTML", id="大寫的 CODE 元素"),
+        pytest.param("```\ngit lfs install --local\n```\n", "x.md:1：程式區塊的語言「」沒有分類", id="沒標語言的區塊"),
         pytest.param("```text\ncourse/chapters/     教材正文與短程式\n```\n", None, id="專案結構不是命令"),
         pytest.param("HTML 的 `<code>` 標籤只是舉例。\n", None, id="反引號裡的 code 字樣"),
     ],
 )
-def test_commands_in_plain_blocks_or_html_code_are_reported(monkeypatch, text, expected):
-    """寫在純文字區塊或 HTML code 元素裡的命令，比對時看不到，所以要報錯並指出行號；不是命令的內容不報。"""
+def test_windows_commands_report_what_the_comparison_cannot_see(monkeypatch, text, expected):
+    """比對看不到的寫法，windows_commands 要報錯並指出行號：純文字區塊裡看起來是命令的行、fence 外 HTML 的 code 或 pre
+    元素，以及語言沒有分類的程式區塊（不論裡面寫什麼）。純文字區塊裡不是命令的內容、反引號裡的 code 字樣不報。"""
     monkeypatch.setitem(globals(), "read", lambda relative: text)
     _, problems = windows_commands("x.md")
     if expected is None:
@@ -716,10 +741,318 @@ def test_commands_in_plain_blocks_or_html_code_are_reported(monkeypatch, text, e
         assert any(problem.startswith(expected) for problem in problems), problems
 
 
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        pytest.param("安裝後執行 `git lfs install --local`。\n", ["git lfs install --local"], id="命令字 git"),
+        pytest.param("先執行 `uv sync --frozen --extra cpu`。\n", ["uv sync --frozen --extra cpu"], id="命令字 uv"),
+        pytest.param("不安裝也能跑：`uvx ruff check .`。\n", ["uvx ruff check ."], id="命令字 uvx"),
+        pytest.param("回到上一層：`cd ..`。\n", ["cd .."], id="命令字 cd"),
+        pytest.param("先看版本：`python3 --version`。\n", ["python3 --version"], id="命令字 python3?"),
+        pytest.param("用 `py -3.12 --version` 確認版本。\n", ["py -3.12 --version"], id="命令字 py"),
+        pytest.param("更新 pip：`pip install --upgrade pip`。\n", ["pip install --upgrade pip"], id="命令字 pip"),
+        pytest.param("再執行 `jupyter lab notebooks`。\n", ["jupyter lab notebooks"], id="命令字 jupyter"),
+        pytest.param("跑測試：`pytest -q tests`。\n", ["pytest -q tests"], id="命令字 pytest"),
+        pytest.param("排版：`ruff format .`。\n", ["ruff format ."], id="命令字 ruff"),
+        pytest.param("啟用：`source .venv/bin/activate`。\n", ["source .venv/bin/activate"], id="命令字 source"),
+        pytest.param("先建資料夾：`mkdir outputs`。\n", ["mkdir outputs"], id="命令字 mkdir"),
+        pytest.param(
+            "也可以用 `powershell -NoProfile` 開新的視窗。\n", ["powershell -NoProfile"], id="命令字 powershell"
+        ),
+        pytest.param("或用 `pwsh -NoProfile` 開新的視窗。\n", ["pwsh -NoProfile"], id="命令字 pwsh"),
+        pytest.param(
+            "用 `winget install --id GitHub.GitLFS -e` 安裝。\n",
+            ["winget install --id GitHub.GitLFS -e"],
+            id="命令字 winget",
+        ),
+        pytest.param("或用 `choco install git-lfs` 安裝。\n", ["choco install git-lfs"], id="命令字 choco"),
+        pytest.param("或用 `scoop install git-lfs` 安裝。\n", ["scoop install git-lfs"], id="命令字 scoop"),
+        pytest.param(
+            "核對環境：`.venv/bin/python scripts/check_env.py`。\n",
+            [".venv/bin/python scripts/check_env.py"],
+            id="開頭是 .venv/",
+        ),
+        pytest.param("在 notebooks 裡改用 `../.venv/bin/python`。\n", ["../.venv/bin/python"], id="開頭是 ./ 或 ../"),
+        pytest.param('先設定 `$env:GIT_LFS_SKIP_SMUDGE="1"`。\n', ['$env:GIT_LFS_SKIP_SMUDGE="1"'], id="開頭是 $env:"),
+        pytest.param(
+            "清掉工具箱：`Remove-Item -Recurse -Force .venv`。\n",
+            ["Remove-Item -Recurse -Force .venv"],
+            id="開頭是 cmdlet",
+        ),
+        pytest.param(
+            "Windows PowerShell 用 `explorer .\\outputs` 打開輸出資料夾。\n",
+            ["explorer .\\outputs"],
+            id="Windows 句子裡帶反斜線",
+        ),
+        pytest.param(
+            "Windows PowerShell 用 `echo $LASTEXITCODE` 查看結束碼。\n", ["echo $LASTEXITCODE"], id="Windows 句子裡帶 $"
+        ),
+        pytest.param(
+            "Windows PowerShell 也可以執行 `python.exe -m pip --version`。\n",
+            ["python.exe -m pip --version"],
+            id="Windows 句子裡帶 .exe",
+        ),
+        pytest.param(
+            "Windows PowerShell 用 `notepad profile.ps1` 打開設定檔。\n",
+            ["notepad profile.ps1"],
+            id="Windows 句子裡帶 .ps1",
+        ),
+        pytest.param(
+            "```powershell\nRemove-Item -Recurse -Force .venv\n```\n",
+            ["Remove-Item -Recurse -Force .venv"],
+            id="``` 區塊",
+        ),
+        pytest.param("~~~powershell\ngit lfs install --local\n~~~\n", ["git lfs install --local"], id="~~~ 區塊"),
+        pytest.param("```python\nimport torch\n```\n", [], id="其他語言的區塊略過"),
+        pytest.param(
+            "```bash\nuv sync --frozen --extra cpu\n```\n", ["uv sync --frozen --extra cpu"], id="shell 區塊的每一行"
+        ),
+    ],
+)
+def test_windows_commands_recognize_each_rule_branch(monkeypatch, text, expected):
+    """正例表：COMMAND_START、POWERSHELL_ONLY 與 FENCE 的每個分支，以及語言分類的其他語言略過、shell 區塊抽出兩個出口，
+    各一列。語言分類另外兩個出口（純文字區塊報錯、沒分類報錯）的列在
+    test_windows_commands_report_what_the_comparison_cannot_see。"""
+    monkeypatch.setitem(globals(), "read", lambda relative: text)
+    commands, problems = windows_commands("x.md")
+    assert ([command.text for command in commands], problems) == (expected, [])
+
+
+# test_windows_commands_drop_a_not_windows_snippet_found_once_or_report_it 的 NOT_WINDOWS 片段。
+UV_SYNC_SNIPPET = "`uv sync` 根據專案的套件清單建立"
+
+
+@pytest.mark.parametrize(
+    ("text", "snippet", "found"),
+    [
+        pytest.param(
+            "`uv sync` 根據專案的套件清單建立工具箱。\n", UV_SYNC_SNIPPET, None, id="剛好一處，蓋住的命令不列出"
+        ),
+        pytest.param("`uv sync --frozen` 根據專案的套件清單建立工具箱。\n", UV_SYNC_SNIPPET, 0, id="找不到"),
+        pytest.param(
+            "`uv sync` 根據專案的套件清單建立工具箱。\n\n再說一次：`uv sync` 根據專案的套件清單建立工具箱。\n",
+            UV_SYNC_SNIPPET,
+            2,
+            id="兩處",
+        ),
+        pytest.param("`uv.lock` 記下套件的版本。\n", "`uv.lock` 記下套件的版本", 1, id="剛好一處，卻沒有蓋住命令"),
+    ],
+)
+def test_windows_commands_drop_a_not_windows_snippet_found_once_or_report_it(monkeypatch, text, snippet, found):
+    """NOT_WINDOWS 的片段在 fence 外剛好出現一處、蓋住看起來像命令的 inline code 時，那段 inline code 不列為命令；找不到、
+    不只一處，或剛好一處卻沒有蓋住命令時，windows_commands 報錯，訊息寫出找到幾處。"""
+    monkeypatch.setitem(globals(), "read", lambda relative: text)
+    monkeypatch.setitem(NOT_WINDOWS, "x.md", [(snippet, "說明命令做什麼")])
+    commands, problems = windows_commands("x.md")
+    if found is None:
+        assert (commands, problems) == ([], [])
+    else:
+        assert problems == [f"x.md：NOT_WINDOWS 的「{snippet}」對不到頁面上的命令（找到 {found} 處）；請更新清單"]
+
+
+@pytest.mark.parametrize(
+    ("line", "expected"),
+    [
+        pytest.param("在 Windows 用 `echo $LASTEXITCODE` 查看結束碼。", [True], id="句子提到 Windows"),
+        pytest.param("在 PowerShell 用 `echo $LASTEXITCODE` 查看結束碼。", [True], id="句子提到 PowerShell"),
+        pytest.param("用 `echo $LASTEXITCODE` 查看結束碼。", [False], id="句子沒有提到"),
+        pytest.param("下面給 Windows 讀者。用 `echo $LASTEXITCODE` 查看結束碼。", [False], id="提到的是前一句"),
+        pytest.param(
+            "在 Windows 先執行 `cd ..; dir`，再用 `echo $LASTEXITCODE` 查看。",
+            [True, True],
+            id="inline code 裡的「; 」不讓句子結束",
+        ),
+    ],
+)
+def test_spans_in_marks_whether_the_sentence_mentions_windows_or_powershell(line, expected):
+    """逐一核對 spans_in 記下的「那句有沒有提到 Windows 或 PowerShell」：句子提到 Windows、提到 PowerShell 時為真，沒有提到、
+    提到的是前一句時為假；inline code 裡的標點不讓句子結束，同一句後面的 inline code 仍為真。"""
+    assert [span.windows for span in spans_in(1, line)] == expected
+
+
+@pytest.mark.parametrize(
+    ("page", "workflow", "expected"),
+    [
+        pytest.param(
+            ["git lfs install --local", "uv sync --frozen"],
+            ["git lfs install --local", "uv sync --frozen"],
+            [],
+            id="兩邊相同",
+        ),
+        pytest.param(
+            ["git lfs install --local", "uv sync --frozen"],
+            ["git lfs install --local", "uv sync"],
+            [
+                "x.md:5：頁面的 Windows 命令是 `uv sync --frozen`，workflow 的對應位置（步驟「步驟」的 Invoke-Page）是 `uv sync`"
+            ],
+            id="同一個位置寫法不同",
+        ),
+        pytest.param(
+            ["git lfs install --local", "uv sync --frozen"],
+            ["git lfs install --local"],
+            ["x.md:5：頁面的 Windows 命令 `uv sync --frozen` 在 workflow 沒有對應的 Invoke-Page 或 Skip-Page"],
+            id="頁面多一條",
+        ),
+        pytest.param(
+            ["git lfs install --local", "uv sync --frozen"],
+            ["git lfs install --local", "git lfs pull", "uv sync --frozen"],
+            [
+                "x.md:3：workflow 步驟「步驟」的 Invoke-Page 列了 `git lfs pull`，頁面上找不到；"
+                "它在頁面上應接在第 3 行的命令之後"
+            ],
+            id="workflow 多一條",
+        ),
+        pytest.param(
+            ["git lfs install --local", "uv sync --frozen"],
+            ["git lfs pull", "git lfs install --local", "uv sync --frozen"],
+            [
+                "x.md:3：workflow 步驟「步驟」的 Invoke-Page 列了 `git lfs pull`，頁面上找不到；"
+                "它在頁面上應在第 3 行的命令之前"
+            ],
+            id="workflow 多一條，排在頁面第一條命令之前",
+        ),
+        pytest.param(
+            [],
+            ["git lfs pull"],
+            [
+                "x.md:1：workflow 步驟「步驟」的 Invoke-Page 列了 `git lfs pull`，頁面上找不到；這頁沒有推出任何 Windows 命令"
+            ],
+            id="頁面沒有命令，workflow 有一條",
+        ),
+    ],
+)
+def test_compare_reports_each_command_that_differs_with_its_page_line(page, workflow, expected):
+    """拿頁面第 3、5 行的命令（至多兩條）與 workflow 一個步驟的副本，逐一核對 compare：兩邊相同時沒有問題；同一個位置寫法
+    不同時，寫出頁面的命令與 workflow 那個位置的命令；頁面多一條時，寫出頁面那一條；workflow 多一條時，寫出那一條，以及它在
+    頁面上應接在哪一行的命令之後，排在頁面第一條命令之前時寫應在那一行的命令之前；頁面沒有推出任何命令時，寫出這一點。每個
+    問題以頁面行號開頭，頁面沒有命令時是第 1 行。"""
+    commands = [Command(line, text) for line, text in zip((3, 5), page)]
+    copies = [Copy("步驟", "Invoke-Page", ("x.md",), text) for text in workflow]
+    assert compare("x.md", commands, copies) == expected
+
+
+def fake_workflow(run):
+    """只有一個 job、一個名為「步驟」的 run 步驟的假 workflow；run 是那一步的 PowerShell。"""
+    return "jobs:\n  student-commands:\n    steps:\n      - name: 步驟\n        run: |\n" + "".join(
+        f"          {line}\n" for line in run.split("\n")
+    )
+
+
+@pytest.mark.parametrize(
+    ("page", "run", "expected"),
+    [
+        pytest.param(
+            "```bash\ngit lfs install --local\n```\n",
+            "Invoke-Page -Pages x.md -Commands 'git lfs install --local'\n"
+            "Invoke-Page -Pages README.md -Commands 'uv sync --frozen'",
+            [],
+            id="這頁的命令都在標了這頁的副本裡，標了別頁的副本不比",
+        ),
+        pytest.param(
+            "```bash\ngit lfs install --local\n```\n\n```text\nuv sync --frozen\n```\n",
+            "Invoke-Page -Pages x.md -Commands 'git lfs install --local'",
+            [
+                "x.md:6：標成「text」的區塊裡，「uv sync --frozen」看起來是命令；"
+                "shell 命令請標 bash 或 powershell，這個測試才會比對它"
+            ],
+            id="windows_commands 回報的問題",
+        ),
+        pytest.param(
+            "```bash\ngit lfs install --local\n```\n",
+            "Invoke-Page -Pages README.md -Commands 'git lfs install --local'",
+            ["x.md:2：頁面的 Windows 命令 `git lfs install --local` 在 workflow 沒有對應的 Invoke-Page 或 Skip-Page"],
+            id="compare 回報的問題",
+        ),
+    ],
+)
+def test_page_command_problems_join_what_windows_commands_and_compare_report(monkeypatch, page, run, expected):
+    """餵假的頁面 x.md 與假的 workflow，逐一核對 page_command_problems：這頁的命令都在標了這頁的副本裡、標了別頁的副本
+    不比時沒有問題；windows_commands 回報的問題與 compare 回報的問題都列出來。"""
+    files = {WORKFLOW: fake_workflow(run), "x.md": page}
+    monkeypatch.setitem(globals(), "read", lambda relative: files[relative])
+    assert page_command_problems("x.md") == expected
+
+
 def test_workflow_page_calls_are_recognized():
-    copies, problems = workflow_copies()
-    assert copies, f"{WORKFLOW} 沒有任何 Invoke-Page／Skip-Page"
+    _, problems = workflow_copies()
     assert not problems, "\n".join(problems)
+
+
+@pytest.mark.parametrize(
+    ("run", "expected"),
+    [
+        pytest.param(
+            "Invoke-Page -Pages README.md,README_en.md -Commands 'python -c ''print(1)'''\n"
+            "$shown = Skip-Page -Pages course/training.md -Reason 'downloads a model' -Commands @'\n"
+            "python scripts/fetch_course_models.py --list\n"
+            "\n"
+            "python scripts/check_course_models.py --model text_foundation\n"
+            "'@",
+            (
+                [
+                    Copy("步驟", "Invoke-Page", ("README.md", "README_en.md"), "python -c 'print(1)'"),
+                    Copy("步驟", "Skip-Page", ("course/training.md",), "python scripts/fetch_course_models.py --list"),
+                    Copy(
+                        "步驟",
+                        "Skip-Page",
+                        ("course/training.md",),
+                        "python scripts/check_course_models.py --model text_foundation",
+                    ),
+                ],
+                [],
+            ),
+            id="依序列出每個呼叫的每一行命令",
+        ),
+        pytest.param(
+            "Invoke-Page -Pages README.md -Commands 'git lfs version'\n"
+            'Invoke-Page -Pages README.md -Commands "git --version"',
+            (
+                [Copy("步驟", "Invoke-Page", ("README.md",), "git lfs version")],
+                [f"{WORKFLOW}：步驟「步驟」有 Invoke-Page／Skip-Page 的寫法認不出來"],
+            ),
+            id="寫法認不出來",
+        ),
+        pytest.param(
+            "Invoke-Page -Pages README.md,READMe_en.md -Commands 'git --version'",
+            (
+                [Copy("步驟", "Invoke-Page", ("README.md", "READMe_en.md"), "git --version")],
+                [f"{WORKFLOW}：步驟「步驟」的 -Pages 有不認得的頁面 ['READMe_en.md']"],
+            ),
+            id="不認得的頁面",
+        ),
+        pytest.param(
+            "Skip-Page -Pages README.md -Commands 'git --version'",
+            (
+                [Copy("步驟", "Skip-Page", ("README.md",), "git --version")],
+                [
+                    f"{WORKFLOW}：步驟「步驟」的 Skip-Page 沒有 -Reason；"
+                    "記錄裡要印出不跑的理由，讀記錄的人才分得出「這裡沒跑」與「前面已經跑過」"
+                ],
+            ),
+            id="Skip-Page 沒有 -Reason",
+        ),
+        pytest.param(
+            "Invoke-Page -Pages README.md -Reason 'checks the version' -Commands 'git --version'",
+            (
+                [Copy("步驟", "Invoke-Page", ("README.md",), "git --version")],
+                [f"{WORKFLOW}：步驟「步驟」的 Invoke-Page 不收 -Reason"],
+            ),
+            id="Invoke-Page 帶 -Reason",
+        ),
+        pytest.param(
+            "Write-Host 'runner setup only'",
+            ([], [f"{WORKFLOW}：沒有讀到任何 Invoke-Page／Skip-Page 列出的命令"]),
+            id="沒有任何 Invoke-Page／Skip-Page",
+        ),
+    ],
+)
+def test_workflow_copies_list_the_commands_of_each_call_or_report_the_call(monkeypatch, run, expected):
+    """餵只有一個步驟的假 workflow，逐一核對 workflow_copies：依序列出每個 Invoke-Page／Skip-Page 的每一行命令（含指派給
+    變數的呼叫；單行命令裡的 '' 換回 '，here-string 裡的空行略過），以及步驟名、動詞與 -Pages；寫法認不出來、-Pages 有
+    不認得的頁面、Skip-Page 沒有 -Reason、Invoke-Page 帶 -Reason，或整份 workflow 沒有讀到任何 Invoke-Page／Skip-Page
+    列出的命令時回報問題。"""
+    monkeypatch.setitem(globals(), "read", lambda relative: fake_workflow(run))
+    assert workflow_copies() == expected
 
 
 def test_page_code_anchors_point_at_python_blocks():
@@ -933,7 +1266,8 @@ def test_printed_lines_join_stdout_before_splitting_or_fail_on_other_outputs(out
 # workflow 引頁面原話的註解記號；引文從記號之後開始，範圍見 workflow_quotes。
 PAGE_QUOTE = "# 頁面說："
 # 同一行裡的 Markdown 行內連結 `[文字](網址)`（含圖片）：比對引文與頁面之前，只留方括號裡的文字。參考式連結
-# `[文字][標籤]` 與自動連結 `<網址>` 原樣留著。
+# `[文字][標籤]` 與自動連結 `<網址>` 原樣留著。兩個限制：網址裡有 `)` 時，連結只換到第一個 `)`，留下多出的 `)`；
+# 連結文字裡有 `]` 時，整段不換。
 LINK = re.compile(r"!?\[([^\]\n]*)\]\([^)\n]*\)")
 
 
@@ -985,7 +1319,8 @@ def workflow_quotes():
 
 
 def flatten(text):
-    """比對用的寫法：同一行裡的 Markdown 行內連結（寫法見 LINK）只留方括號裡的文字，再去掉 `**`、反引號與所有空白。"""
+    """比對用的寫法：同一行裡的 Markdown 行內連結（寫法見 LINK）只留方括號裡的文字，再去掉 `**`、反引號與所有空白。
+    網址裡有 `)` 時，連結只換到第一個 `)`，留下多出的 `)`；連結文字裡有 `]` 時，整段不換。"""
     return re.sub(r"\s+", "", LINK.sub(r"\1", text).replace("**", "").replace("`", ""))
 
 
@@ -1031,22 +1366,33 @@ def not_covered_page_items():
     return [(words[1], item) for item in items if len(words := item.split()) > 1 and words[1] in PAGES]
 
 
-def test_page_quotes_appear_on_the_pages():
-    """workflow 每一處 `# 頁面說：` 的引文（範圍見 workflow_quotes）要在四頁之一找得到；not_covered_page_items 從檔頭
-    〈不涵蓋〉收的每一項，其中最外層「」裡的每段引文要在那一項的頁面找得到。比對前，引文與頁面都經 flatten，引文再以「…」切段，
-    各段要在同一頁依序找得到。引文沒有照 workflow_quotes 的規則結束、某一項的「」不成對、workflow 沒有任何 `# 頁面說：`，
-    或 not_covered_page_items 一項都沒收到時，也會失敗。這裡只核引文還在頁面上：引文旁的核對是否仍和頁面句子一樣強、
-    〈不涵蓋〉那一項的理由是否仍成立，都不在這裡核；頁面留著同樣的字而意思改變時，這裡不會失敗。"""
+# page_quote_problems 兩段訊息開頭給讀者的指引：寫法不合規則的引文，與頁面上找不到的引文。
+MALFORMED_QUOTES = "這些引文的寫法不合規則，還沒有和頁面比對；照每一行寫的問題改寫法："
+MISSING_QUOTES = (
+    "頁面上找不到這些引文。頁面沒改時，先看 workflow 的引文是不是照檔頭的引文規則結束。頁面改了句子時，workflow 的引文要先"
+    "重新判斷旁邊的核對是否仍和頁面的新句子一樣強，再照檔頭的引文規則改引文，而不是直接把新句子整句抄回來；〈不涵蓋〉的項目"
+    "要先重新判斷它寫的理由是否仍成立，再改「」裡的引文。"
+)
+
+
+def page_quote_problems():
+    """引文核對的問題，分段寫成給讀者的訊息；沒有問題時是空的清單。workflow 每一處 `# 頁面說：` 的引文（範圍見
+    workflow_quotes）要在四頁之一找得到；not_covered_page_items 從檔頭〈不涵蓋〉收的每一項，其中最外層「」裡的每段引文要在
+    那一項的頁面找得到。比對前，引文與頁面都經 flatten，引文再以「…」切段，各段要在同一頁依序找得到（見 in_order）。引文沒有
+    照 workflow_quotes 的規則結束、某一項的「」不成對時，那一則不和頁面比對，寫進以 MALFORMED_QUOTES 開頭的一段；找不到的
+    寫進以 MISSING_QUOTES 開頭的一段。workflow 沒有任何 `# 頁面說：`，或 not_covered_page_items 一項都沒收到時，各自另成
+    一段。"""
     pages = {page: flatten(read(page)) for page in PAGES}
-    quotes, malformed, missing = workflow_quotes(), [], []
-    assert quotes, f"{WORKFLOW} 沒有任何 `# 頁面說：`"
+    quotes, items, malformed, missing, sections = workflow_quotes(), not_covered_page_items(), [], [], []
+    if not quotes:
+        sections.append(f"{WORKFLOW} 沒有任何 `# 頁面說：`")
+    if not items:
+        sections.append("檔頭找不到「不涵蓋：」那一行，或它底下沒有 not_covered_page_items 收得到的項目")
     for number, quote, problem in quotes:
         if problem:
             malformed.append(f"{WORKFLOW}:{number}：{problem}：{quote}")
         elif not any(in_order(quote, text) for text in pages.values()):
             missing.append(f"{WORKFLOW}:{number}：「{quote}」不在四頁的任何一頁上")
-    items = not_covered_page_items()
-    assert items, "檔頭找不到「不涵蓋：」那一行，或它底下沒有 not_covered_page_items 收得到的項目"
     for page, item in items:
         found = bracketed(item)
         if found is None:
@@ -1054,15 +1400,17 @@ def test_page_quotes_appear_on_the_pages():
         missing += [
             f"檔頭〈不涵蓋〉：「{quote}」不在 {page} 上" for quote in found or [] if not in_order(quote, pages[page])
         ]
-    sections = []
     if malformed:
-        sections.append("這些引文的寫法不合規則，還沒有和頁面比對；照每一行寫的問題改寫法：\n" + "\n".join(malformed))
+        sections.append(MALFORMED_QUOTES + "\n" + "\n".join(malformed))
     if missing:
-        sections.append(
-            "頁面上找不到這些引文。頁面改了句子時，workflow 的引文要先重新判斷旁邊的核對是否仍和頁面的新句子一樣強，"
-            "再照檔頭的引文規則改引文，而不是直接把新句子整句抄回來；〈不涵蓋〉的項目要先重新判斷它寫的理由是否仍成立，"
-            "再改「」裡的引文。\n" + "\n".join(missing)
-        )
+        sections.append(MISSING_QUOTES + "\n" + "\n".join(missing))
+    return sections
+
+
+def test_page_quotes_appear_on_the_pages():
+    """page_quote_problems 回報的問題要是空的。這裡只核引文還在頁面上：引文旁的核對是否仍和頁面句子一樣強、〈不涵蓋〉
+    那一項的理由是否仍成立，都不在這裡核；頁面留著同樣的字而意思改變時，這裡不會失敗。"""
+    sections = page_quote_problems()
     assert not sections, "\n\n".join(sections)
 
 
@@ -1255,11 +1603,20 @@ def test_workflow_quotes_report_a_quote_that_does_not_end(monkeypatch, text, exp
         pytest.param("a b\n\tc　d", "abcd", id="去掉所有空白：空格、換行、tab 與全形空白"),
         pytest.param("見[入口頁][readme]的說明", "見[入口頁][readme]的說明", id="參考式連結不換"),
         pytest.param("見 <https://example.com> 的說明", "見<https://example.com>的說明", id="自動連結不換"),
+        pytest.param(
+            "見[位元](https://zh.wikipedia.org/wiki/Bit_(unit))的說明",
+            "見位元)的說明",
+            id="限制：網址裡有 `)` 時只換到第一個 `)`，留下多出的 `)`",
+        ),
+        pytest.param(
+            "見[第[1]章](ch01.md)的說明", "見[第[1]章](ch01.md)的說明", id="限制：連結文字裡有 `]` 時整段不換"
+        ),
     ],
 )
 def test_flatten_keeps_link_text_and_drops_bold_marks_backticks_and_whitespace(text, expected):
     """逐一核對 flatten：同一行裡的行內連結（含圖片）只留方括號裡的文字，跨行的連結、參考式連結與自動連結不換；去掉
-    `**`（單一個 `*` 留著）、反引號與所有空白。"""
+    `**`（單一個 `*` 留著）、反引號與所有空白；以及它 docstring 寫的兩個限制：網址裡有 `)` 時留下多出的 `)`，連結文字裡
+    有 `]` 時整段不換。"""
     assert flatten(text) == expected
 
 
@@ -1356,6 +1713,61 @@ def test_not_covered_page_items_list_the_page_lines_after_the_heading(monkeypatc
     assert not_covered_page_items() == expected
 
 
+# test_page_quote_problems_report_each_malformed_or_missing_quote 的假頁面 README.md、找得到的引文與〈不涵蓋〉。
+QUOTED_PAGE = "先用 `--list` 查看名稱，再用 `--asset NAME` 下載。\n"
+FOUND_QUOTE = "# 頁面說：先用 --list 查看名稱，再用 --asset NAME 下載。\n"
+FOUND_ITEM = "不涵蓋：\n- README.md 甲「再用 `--asset NAME` 下載」：理由。\n"
+
+
+@pytest.mark.parametrize(
+    ("workflow", "doc", "expected"),
+    [
+        pytest.param(FOUND_QUOTE, FOUND_ITEM, [], id="引文都在頁面上"),
+        pytest.param(
+            "# 頁面說：先用 --list 查看名稱\nInvoke-Page -Pages README.md -Commands 'x'\n",
+            FOUND_ITEM,
+            [MALFORMED_QUOTES + f"\n{WORKFLOW}:1：{QUOTE_WITHOUT_END}：先用 --list 查看名稱"],
+            id="沒有結束的引文寫進寫法不合規則那段，不和頁面比對",
+        ),
+        pytest.param(
+            FOUND_QUOTE,
+            "不涵蓋：\n- README.md 甲「再用 `--asset NAME` 下載：理由。\n",
+            [MALFORMED_QUOTES + "\n檔頭〈不涵蓋〉這一項的「」不成對：- README.md 甲「再用 `--asset NAME` 下載：理由。"],
+            id="「」不成對的項目寫進寫法不合規則那段",
+        ),
+        pytest.param(
+            "# 頁面說：先用 --list 查看全部名稱。\n",
+            FOUND_ITEM,
+            [MISSING_QUOTES + f"\n{WORKFLOW}:1：「先用 --list 查看全部名稱。」不在四頁的任何一頁上"],
+            id="四頁都找不到的引文寫進找不到那段",
+        ),
+        pytest.param(
+            FOUND_QUOTE,
+            "不涵蓋：\n- README_en.md 甲「再用 `--asset NAME` 下載」：理由。\n",
+            [MISSING_QUOTES + "\n檔頭〈不涵蓋〉：「再用 `--asset NAME` 下載」不在 README_en.md 上"],
+            id="〈不涵蓋〉的引文只在那一項的頁面找，在別頁找得到也寫進找不到那段",
+        ),
+        pytest.param(
+            "# 頁面以外：這一步不引頁面。\n", FOUND_ITEM, [f"{WORKFLOW} 沒有任何 `# 頁面說：`"], id="沒有 `# 頁面說：`"
+        ),
+        pytest.param(
+            FOUND_QUOTE,
+            "說明。\n",
+            ["檔頭找不到「不涵蓋：」那一行，或它底下沒有 not_covered_page_items 收得到的項目"],
+            id="〈不涵蓋〉一項都沒收到",
+        ),
+    ],
+)
+def test_page_quote_problems_report_each_malformed_or_missing_quote(monkeypatch, workflow, doc, expected):
+    """餵假的 workflow、檔頭與頁面（只有 README.md 有字），逐一核對 page_quote_problems：引文都找得到時沒有問題；沒有結束的
+    引文與「」不成對的項目寫進以 MALFORMED_QUOTES 開頭的一段，不和頁面比對；四頁都找不到的引文，以及〈不涵蓋〉的引文不在
+    那一項的頁面時，寫進以 MISSING_QUOTES 開頭的一段；沒有 `# 頁面說：`、〈不涵蓋〉一項都沒收到時各成一段。"""
+    files = {WORKFLOW: workflow, "README.md": QUOTED_PAGE}
+    monkeypatch.setitem(globals(), "read", lambda relative: files.get(relative, ""))
+    monkeypatch.setitem(globals(), "__doc__", doc)
+    assert page_quote_problems() == expected
+
+
 def test_workflow_triggers_and_shells():
     document = load_workflow()
     triggers = document["on"]
@@ -1365,11 +1777,6 @@ def test_workflow_triggers_and_shells():
     push, pull = triggers["push"]["paths"], triggers["pull_request"]["paths"]
     assert push == pull, f"push 與 pull_request 的 paths 要完全相同：\npush：{push}\npull_request：{pull}"
     assert push[:1] == ["**"], f"paths 第一條要是 '**'，改到任何檔都跑，之後只用 '!' 排除不讀的樹；現在是 {push[:1]}"
-    malformed = [path for path in push[1:] if not TREE_EXCLUSION.fullmatch(path)]
-    assert not malformed, (
-        f"'**' 之後每一條都要寫成 '!<樹>/**'，一次排除一整棵樹；<樹> 以 / 分段，每一段都不能是空的、. 或 ..，"
-        f"也不能含 * ? + [ ] !：{malformed}"
-    )
     missing = [tree for tree in excluded_trees() if not (ROOT / tree).is_dir()]
     assert not missing, f"這些排除的樹在 repo 裡不存在，排除與旁邊的理由都已經沒有對象：{missing}"
     for name, job in document["jobs"].items():
@@ -1412,6 +1819,31 @@ def test_tree_exclusion_verdicts(pattern, accepted):
     assert bool(TREE_EXCLUSION.fullmatch(pattern)) is accepted, f"TREE_EXCLUSION 應該{verdict} {pattern}"
 
 
+@pytest.mark.parametrize(
+    ("paths", "expected"),
+    [
+        pytest.param(
+            ["**", "!docs/technical-reviews/**", "!docs/reader-reviews/**"],
+            ["docs/technical-reviews", "docs/reader-reviews"],
+            id="第一條之後每一條的樹，依序列出",
+        ),
+        pytest.param(
+            ["**", "!docs/technical-reviews/**", "!./notebooks/**"], None, id="第一條之後有一條寫法不符就失敗"
+        ),
+    ],
+)
+def test_excluded_trees_list_each_tree_after_the_first_path_or_fail_on_a_malformed_one(monkeypatch, paths, expected):
+    """餵 push 的 paths 是 paths 的假 workflow，逐一核對 excluded_trees：第一條之後每一條的 <樹> 依序列出；有一條寫法不符
+    TREE_EXCLUSION 時以 AssertionError 失敗，訊息列出那幾條。"""
+    workflow = "on:\n  push:\n    paths:\n" + "".join(f"      - '{path}'\n" for path in paths)
+    monkeypatch.setitem(globals(), "read", lambda relative: workflow)
+    if expected is None:
+        with pytest.raises(AssertionError, match=re.escape("['!./notebooks/**']")):
+            excluded_trees()
+    else:
+        assert excluded_trees() == expected
+
+
 def test_excluded_trees_are_not_named_where_the_workflow_reads():
     """排除的樹的名字以一整串出現（各段在檔案文字裡以單一個 / 或反斜線相連，前後不接路徑字元）時報錯。掃的是四頁的程式
     區塊、workflow 的 env 與每一步的 run:、env、KERNEL_CHECKS 執行的 Notebook 程式格，以及 python_run_by_workflow 列的檔；
@@ -1449,8 +1881,7 @@ def test_excluded_trees_are_not_named_where_the_workflow_reads():
 def test_workflow_file_pages_notebook_and_python_run_by_workflow_are_outside_excluded_trees():
     """workflow 檔本身、四頁、KERNEL_CHECKS 執行的 Notebook，以及 python_run_by_workflow 列的檔，這些已知會讀的檔不在
     排除的樹底下。比對的是 repo 內的 POSIX 路徑是否以「<樹>/」開頭；這依賴 TREE_EXCLUSION 把每條排除限定成 '!<樹>/**'，
-    寫法不符的排除不在 excluded_trees() 裡，由 test_workflow_triggers_and_shells 報錯。排除的樹裡另有哪些檔被讀，這裡看
-    不到。"""
+    有一條寫法不符時，excluded_trees() 直接失敗，這個測試跟著失敗。排除的樹裡另有哪些檔被讀，這裡看不到。"""
     known = [WORKFLOW, *PAGES, kernel_checks()["NOTEBOOK"]]
     # 用 as_posix()，不用 str()：ci.yml 在 windows-latest 也跑這個測試，str() 在 Windows 用反斜線，比對永遠不會命中。
     known += [path.relative_to(ROOT).as_posix() for path in python_run_by_workflow()]
