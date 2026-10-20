@@ -106,7 +106,7 @@ test_page_quotes_appear_on_the_pages 核對還在頁面上。練習的改法或�
 - course/training.md T.6「依序確認三件事」的「留出了什麼」：pretrain_encoders.py 印出的 JSON 只有留出題數，沒有記下留出哪幾題。
 - course/training.md T.6「效果仍以驗證題核對」：沒有期望值。
 - course/training.md T.6「希望答案依序為 `circle`、`high`、`square,low`」與「再看結束是否完整」：頁面寫「希望」，沒說模型一定答對；結束是否完整沒有期望值。
-- course/training.md T.6「檢查文字能力時，要用其中的文字核心評估同一份文字驗證題」：頁面沒給命令，也沒有期望值。
+- course/training.md T.6「這要在圖文訓練前後，用同一批文字測試題各核對一次」：本節的命令不做這個對照；做這個對照的 `vqa` 固定配方用 `--device cuda`，這裡不跑。
 - course/training.md T.6 補充區「要另外核對生成是否符合換入圖」：頁面沒給這條的命令。
 - course/training.md T.7「先看 `chosen`、`rejected` 是否符合自己的判準」：判準由讀者自訂。
 - course/training.md T.7「再對其餘驗證題做相同檢查」與「確認新階段沒有破壞它們」：沒有期望值。

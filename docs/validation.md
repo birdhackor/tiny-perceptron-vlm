@@ -77,6 +77,6 @@ pytest -ra
 
 前四行核對教材與審閱資料；接著註冊kernel，讓每份Notebook由獨立執行環境開始；最後的單元測試檢查程式機制。Notebook執行副本與當次核對寫入`outputs/notebooks/`，它們是工作產物，不是模型能力分數。
 
-每一行結束時的exit code都是0才算通過。`check_notebooks.py`最後印出一段JSON：`failed`是0表示每份Notebook都從頭跑完；有失敗時`failures`列出哪一份、錯在哪裡，同一份結果也寫進`outputs/notebooks/validation-kernel.json`。`pytest -ra`的最後一行列出通過、失敗與跳過的數目，`-ra`會把失敗與跳過的原因列在摘要裡。
+每一行結束時的exit code都是0才算通過。exit code（結束碼）是每條命令結束時交回終端機的數字：0表示成功，不是0就是沒有通過。要看剛結束那一條的值，在輸入下一條命令之前執行：macOS或Linux用`echo $?`，Windows PowerShell用`$LASTEXITCODE`。`check_notebooks.py`最後印出一段JSON：`failed`是0表示每份Notebook都從頭跑完；有失敗時`failures`列出哪一份、錯在哪裡，同一份結果也寫進`outputs/notebooks/validation-kernel.json`。`pytest -ra`的最後一行列出通過、失敗與跳過的數目，`-ra`會把失敗與跳過的原因列在摘要裡。
 
-如果改了教材，舊報告或舊輸出可能被拒絕；應重讀、重查受影響內容，再重新執行改過的Notebook。若另做模型訓練，則按對應訓練指引保存配置與留出題結果。網站建置與連結核對接著見[教材發布](publishing.md)。本機CPU執行也不等於Colab雲端或所有學生設備已經驗證。
+如果改了教材，舊報告或舊輸出可能被拒絕；應重讀、重查受影響內容，再重新執行改過的Notebook。若另做模型訓練，則按對應訓練指引保存配置與留出題結果。網站建置與連結核對接著見[教材發布](publishing.md)。發布前要先把這次的修改存成Git提交：`git status`列出改過的檔，`git add <檔案>`選定要提交的檔，`git commit -m "<這次改了什麼>"`建立提交。若Git回報`Author identity unknown`，先用`git config --global user.name "<名字>"`與`git config --global user.email "<信箱>"`設定作者資料，再執行一次`git commit`。本機CPU執行也不等於Colab雲端或所有學生設備已經驗證。
