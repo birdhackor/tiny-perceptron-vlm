@@ -1,0 +1,249 @@
+實驗紀錄所綁定的程式摘錄
+Git blob: 99393a5d6ab342099e6d9cc267895acb25256ef6
+完整檔 SHA-256: 8fbb7e1c1a5ee33c50884a3cb6658352aacd80d2131ac6561c272e8c75b2ade0
+
+def _sample(model, messages, ctx, count=1, tokens=32, temperature=0.0):
+    """實際 batch 抽樣，保留 EOS、非法特殊 token 與測得的生成成本。"""
+    tokenizer = ByteTokenizer()
+    prompt = _prompt_ids(messages, tokenizer)
+    if len(prompt) + tokens > model.config.max_length:
+        raise ValueError(f"輸入 {len(prompt)} + 答案預留 {tokens} > {model.config.max_length}")
+    was_training = model.training
+    model.eval()
+    current = torch.tensor([prompt] * count, device=ctx.device)
+    active = torch.ones(count, dtype=torch.bool, device=ctx.device)
+    outputs = [[] for _ in range(count)]
+    state = None
+    forward_tokens = 0
+    _sync(ctx)
+    started = time.perf_counter()
+    try:
+        for _ in range(tokens):
+            result = model(current, cache=state)
+            forward_tokens += current.numel()
+            scores = result["logits"][:, -1]
+            chosen = (
+                scores.argmax(-1)
+                if temperature <= 0
+                else torch.multinomial((scores / temperature).softmax(-1), 1).squeeze(-1)
+            )
+            was_active = active.tolist()
+            for row, (keep, token) in enumerate(zip(was_active, chosen.tolist(), strict=True)):
+                if keep:
+                    outputs[row].append(token)
+            active = active & (chosen != tokenizer.eos_id)
+            if not active.any():
+                break
+            current = chosen.masked_fill(~active, tokenizer.pad_id).unsqueeze(1)
+            state = result["cache"]
+    finally:
+        model.train(was_training)
+    _sync(ctx)
+    seconds = time.perf_counter() - started
+    samples = []
+    for output in outputs:
+        raw = output[:-1] if output and output[-1] == tokenizer.eos_id else output
+        samples.append(
+            {
+                "generated": tokenizer.decode(raw),
+                "generated_ids": output,
+                "eos": bool(output and output[-1] == tokenizer.eos_id),
+                "invalid_special_tokens": [token for token in raw if token < 8],
+                "generated_tokens": len(output),
+            }
+        )
+    return {
+        "messages": messages,
+        "input_ids": prompt,
+        "input_tokens": len(prompt),
+        "samples": samples,
+        "candidate_count": count,
+        "temperature": temperature,
+        "max_new_tokens": tokens,
+        "generated_tokens": sum(len(output) for output in outputs),
+        "forward_input_tokens": forward_tokens,
+        "seconds": seconds,
+    }
+
+def _tool_records():
+    records = []
+    for a in range(10):
+        for b in range(10):
+            for operation in ("add", "multiply"):
+                family = f"pair:{min(a, b)}:{max(a, b)}"
+                request = {"name": operation, "arguments": {"a": a, "b": b}}
+                answer = call_tool(request)
+                messages = [
+                    {"role": "system", "content": _TOOLS_SYSTEM},
+                    {"role": "user", "content": f"CALC:{operation}({a},{b})"},
+                    {"role": "assistant", "content": _json(request)},
+                    {"role": "user", "content": f"TOOL_RESULT:{answer}"},
+                    {"role": "assistant", "content": _json({"done": True, "answer": answer})},
+                ]
+                records.append(
+                    {"family": family, "operation": operation, "a": a, "b": b, "answer": answer, "messages": messages}
+                )
+    for value in range(10):
+        records.append(
+            {
+                "family": f"copy:{value}",
+                "operation": "copy",
+                "answer": value,
+                "messages": [
+                    {"role": "system", "content": _TOOLS_SYSTEM},
+                    {"role": "user", "content": f"COPY:{value}"},
+                    {"role": "assistant", "content": _json({"done": True, "answer": value})},
+                ],
+            }
+        )
+    return records
+
+def _tool_episode(model, record, ctx, max_steps=3):
+    messages = copy.deepcopy(record["messages"][:2])
+    trace = []
+    answer = None
+    status = "step_limit"
+    started = time.perf_counter()
+    for step in range(max_steps):
+        try:
+            generation = _sample(model, messages, ctx, tokens=64)
+        except ValueError as error:
+            status = "context_limit"
+            trace.append({"step": step + 1, "error": str(error), "messages": copy.deepcopy(messages)})
+            break
+        raw = generation["samples"][0]
+        event = {"step": step + 1, "generation": generation, "executed": False}
+        trace.append(event)
+        try:
+            if raw["invalid_special_tokens"]:
+                raise ValueError("模型產生未允許的特殊 token")
+            action = _parse_json_action(raw["generated"])
+            event["parsed"] = action
+            if "done" in action:
+                status, answer = "done", action["answer"]
+                event["done"] = True
+                break
+            # 唯一真正執行工具的位置；參數不從標準答案替換或修正。
+            result = call_tool(action)
+            finite_result = type(result) is not float or math.isfinite(result)
+            event.update(
+                {
+                    "executed": True,
+                    "finite_result": finite_result,
+                    "tool_result": result if finite_result else repr(result),
+                }
+            )
+            event["request_matches_question"] = record["operation"] != "copy" and action == {
+                "name": record["operation"],
+                "arguments": {"a": record["a"], "b": record["b"]},
+            }
+            if not finite_result:
+                event["error"] = "工具確實已執行，但運算 overflow 產生非有限結果；保留文字證據並停止。"
+                status = "invalid_tool_result"
+                break
+            messages += [
+                {"role": "assistant", "content": raw["generated"]},
+                {"role": "user", "content": f"TOOL_RESULT:{result}"},
+            ]
+        except (ValueError, TypeError, KeyError, OverflowError) as error:
+            event["error"] = str(error)
+            status = "invalid_request"
+            break
+    completed_answer_correct = status == "done" and type(answer) in (int, float) and answer == record["answer"]
+    executions = [event for event in trace if event.get("executed")]
+    required_call_satisfied = (
+        not executions
+        if record["operation"] == "copy"
+        else bool(
+            executions
+            and executions[-1]["finite_result"]
+            and any(event["request_matches_question"] for event in executions)
+            and answer == executions[-1]["tool_result"]
+        )
+    )
+    return {
+        "family": record["family"],
+        "operation": record["operation"],
+        "question": record["messages"][1]["content"],
+        "expected": record["answer"],
+        "status": status,
+        "answer": answer,
+        "answer_correct": completed_answer_correct,
+        "required_tool_behavior": required_call_satisfied,
+        "correct": completed_answer_correct and required_call_satisfied,
+        "trace": trace,
+        "max_steps": max_steps,
+        "actual_tool_calls": sum(event["executed"] for event in trace if "executed" in event),
+        "generated_tokens": sum(event["generation"]["generated_tokens"] for event in trace if "generation" in event),
+        "seconds": time.perf_counter() - started,
+    }
+
+def run_tools(ctx):
+    """模型每步真實產生 JSON，validate→執行→回填→真實 final。"""
+    started = time.perf_counter()
+    seed(ctx.seed)
+    ctx.output.mkdir(parents=True, exist_ok=True)
+    splits = split_records(_tool_records(), ctx.seed)
+    write_json(ctx.output / "dataset.json", splits)
+    model = new_lm(ctx, width=64, layers=2, max_length=384, heads=2, backend="sdpa")
+    training = _fit_lm(model, splits["train"], ctx, mode="sft", steps=1200, batch_size=16)
+    episodes = [_tool_episode(model, row, ctx) for row in splits["test"]]
+    capped = [_tool_episode(model, row, ctx, max_steps=1) for row in splits["test"] if row["operation"] != "copy"]
+    # 這組是外層協議的故障注入；和上方模型成績分開保存。
+    injected = []
+    for raw in (
+        "{",
+        "[]",
+        '{"name":"delete_all","arguments":{"a":2,"b":3}}',
+        '{"name":"add","arguments":{"a":true,"b":3}}',
+        '{"name":"add","arguments":{"a":NaN,"b":3}}',
+        '{"name":"add","arguments":{"a":1e999,"b":3}}',
+        '{"name":"add","name":"multiply","arguments":{"a":2,"b":3}}',
+    ):
+        try:
+            action = _parse_json_action(raw)
+            value = call_tool(action)
+            injected.append({"input": raw, "rejected": False, "result": value})
+        except (ValueError, TypeError, KeyError) as error:
+            injected.append({"input": raw, "rejected": True, "error": str(error)})
+    actual_calls = [event for episode in episodes for event in episode["trace"] if event.get("executed")]
+    result = {
+        "task": "B: generated JSON calculator requests and completions",
+        "seed": ctx.seed,
+        "training": training,
+        "split": _split_summary(splits),
+        "model": model.description(),
+        "validation": _sft_nll(model, splits["validation"], ctx),
+        "test": _sft_nll(model, splits["test"], ctx),
+        "protocol": {
+            "roles": ["system", "user", "assistant"],
+            "external_result_serialization": "user content TOOL_RESULT:<number>",
+            "reason": "render_chat supports no tool role; the system and training data declare this explicit protocol.",
+            "allowlist": ["add", "multiply"],
+            "final": {"done": True, "answer": "number"},
+            "max_steps_including_done": 3,
+        },
+        "accuracy": _rate(sum(episode["correct"] for episode in episodes), len(episodes)),
+        "answer_accuracy": _rate(sum(episode["answer_correct"] for episode in episodes), len(episodes)),
+        "completion_rate": _rate(sum(episode["status"] == "done" for episode in episodes), len(episodes)),
+        "first_action_json_rate": _rate(
+            sum(bool(episode["trace"] and "parsed" in episode["trace"][0]) for episode in episodes), len(episodes)
+        ),
+        "correct_parameters_given_executed_call": _rate(
+            sum(event["request_matches_question"] for event in actual_calls), len(actual_calls)
+        ),
+        "status_counts": dict(Counter(episode["status"] for episode in episodes)),
+        "actual_tool_calls": sum(episode["actual_tool_calls"] for episode in episodes),
+        "generated_tokens": sum(episode["generated_tokens"] for episode in episodes + capped),
+        "samples": episodes,
+        "one_step_cap_samples": capped,
+        "injected_protocol_checks_not_model_scores": injected,
+        "seconds": time.perf_counter() - started,
+        "limits": [
+            "Arithmetic operand-pair families, including reversed operands and both operations, remain in one split.",
+            "done is a protocol signal; correctness is independently compared against the original question.",
+            "The finite local allowlist does not establish general agent or arbitrary-code execution ability.",
+        ],
+    }
+    write_json(ctx.output / "generations.json", {"episodes": episodes, "one_step_cap": capped, "injected": injected})
+    return result
