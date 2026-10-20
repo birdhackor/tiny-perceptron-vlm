@@ -22,8 +22,10 @@ PATCHES_KIND = "author patches without AI review"
 PATCHES_STATEMENT = "每一筆都是作者直接要求的小修改，沒有經過 AI 審閱；閘門只核對改動確實就是這裡寫的那一筆。"
 PATCH_FIELDS = ("id", "path", "old", "new", "requested_by", "requested_on", "reason")
 PATCH_LIMIT = 80
-# old／new 不能出現的記號：換行會跨行，``` 是程式區塊的圍欄，![ 與 ]( 是圖與連結的語法。
-PATCH_FORBIDDEN = {"\n": "換行", "\r": "換行", "```": "「```」", "![": "「![」", "](": "「](」"}
+# old／new 不能出現的記號：換行會跨行，``` 與 ~~~ 是程式區塊的圍欄，![ 與 ]( 是圖與連結的語法。
+PATCH_FORBIDDEN = {"\n": "換行", "\r": "換行", "```": "「```」", "~~~": "「~~~」", "![": "「![」", "](": "「](」"}
+# 程式圍欄所在的行：行首的空白與引用記號 > 之後，接三個以上的反引號或波浪號。
+FENCE = re.compile(r"[> \t]*(`{3,}|~{3,})")
 
 
 def require(condition, message):
@@ -455,10 +457,11 @@ def is_calendar_day(value):
 def author_patches(root, manifest, live):
     """讀 manifest 的 author_patches 指向的作者補丁清單，逐筆核對格式；欄位缺席時回傳空清單。
 
-    live 是目前清單的各頁（page_id 對 page）；manifest 涵蓋的頁和它相同，每筆的 path 必須是其中一頁的 source。
+    live 是目前清單的各頁（page_id 對 page）；manifest 涵蓋的頁和它相同，每筆的 path 必須是其中一頁的 Markdown source。
     """
     # 驗證：清單的位元組等於 manifest 記的 SHA，是 JSON 物件，schema_version 為 1，kind 與 statement 是規定的文字；
-    # 每筆恰好 PATCH_FIELDS 七個欄位，id 不重複，path 是某一頁的 source，old 與 new 是彼此不同、各不超過 80 字、
+    # 每筆恰好 PATCH_FIELDS 七個欄位，id 不重複，path 是某一頁以 .md 結尾的 source（首頁的 source 是產生它的
+    # Python 程式，整份都是程式碼），old 與 new 是彼此不同、各不超過 80 字、
     # 不含 PATCH_FORBIDDEN 記號的非空字串，requested_by 是 author，requested_on 是 YYYY-MM-DD，reason 非空。
     # 不涵蓋：補丁的語意，由作者負責；new 落在連結網址或行內程式碼裡時，只靠上面的字面限制擋不住。
     # 現行檔是否正好是審閱過的版本加上這些補丁，由 file_versions 與 page_versions 倒退核對。
@@ -497,6 +500,10 @@ def author_patches(root, manifest, live):
             isinstance(patch["path"], str) and patch["path"] in sources,
             where + "：path 不是 manifest 任何一頁的 source",
         )
+        require(
+            patch["path"].endswith(".md"),
+            where + "：path 不是 Markdown（.md）原文；程式檔整份是程式碼，不能用作者補丁改",
+        )
         for field in ("old", "new"):
             text = patch[field]
             require(isinstance(text, str) and text, where + f"：{field} 必須是非空字串")
@@ -520,23 +527,29 @@ def positions(text, needle):
 
 
 def fenced(text, position):
-    """position 是否落在 ``` 圍起來的區塊裡：圍欄那兩行也算，沒有收尾的圍欄一路算到文字結尾。"""
-    # 圍欄的認法同 incremental_reader.blocks：去掉行首空白後以 ``` 開頭的行。
-    inside, start = False, 0
+    """position 是否落在程式圍欄圍起來的區塊裡：圍欄那兩行也算，沒有收尾的圍欄一路算到文字結尾。"""
+    # 驗證：圍欄的認法照網站用的 pymdownx.superfences。符合 FENCE 的行開一個區塊；區塊裡只有同一串記號
+    # （同一種字元、同樣長度，後面只接空白）的行收尾，其他符合 FENCE 的行是區塊內容。
+    # 不涵蓋：縮排四格的程式區塊與 HTML 的 <pre>；superfences 因選項寫錯而不當成圍欄的行，這裡仍當成開頭；
+    # Notebook 的 Markdown 讓更長的同種記號也能收尾，與網站不同時這裡照網站。
+    fence, start = None, 0
     for line in text.split("\n"):
-        fence = line.lstrip().startswith("```")
+        match = FENCE.match(line)
         if position <= start + len(line):
-            return inside or fence
-        inside ^= fence
+            return fence is not None or match is not None
+        if fence is None and match:
+            fence = match[1]
+        elif match and match[1] == fence and not line[match.end() :].strip():
+            fence = None
         start += len(line) + 1
-    return inside
+    return fence is not None
 
 
 def undo_patches(text, patches, where, absent_ok=False):
     """從 text 依清單倒序逐筆倒退補丁，回傳每倒退一筆得到的（較早版本的文字，到這一版為止倒退的補丁 id）。
 
-    patches 是同一個檔的（清單位置，補丁），照清單順序。每一筆的 new 在當下的文字裡要恰好出現一次、不在 ``` 圍起來的
-    區塊裡，才換回 old。absent_ok 時 new 沒出現的那一筆略過：那一筆改的是同一個檔的別頁。
+    patches 是同一個檔的（清單位置，補丁），照清單順序。每一筆的 new 在當下的文字裡要恰好出現一次、不在程式圍欄
+    圍起來的區塊裡，才換回 old。absent_ok 時 new 沒出現的那一筆略過：那一筆改的是同一個檔的別頁。
     """
     versions, undone = [], ()
     for i, patch in reversed(patches):
@@ -545,7 +558,7 @@ def undo_patches(text, patches, where, absent_ok=False):
         if absent_ok and not hits:
             continue
         require(len(hits) == 1, f"{label}：new 在倒退到這一筆時的 {where} 出現 {len(hits)} 次，必須恰好一次")
-        require(not fenced(text, hits[0]), f"{label}：new 在 {where} 的那一處落在 ``` 圍起來的程式區塊裡")
+        require(not fenced(text, hits[0]), f"{label}：new 在 {where} 的那一處落在程式圍欄圍起來的區塊裡")
         text = text[: hits[0]] + patch["old"] + text[hits[0] + len(patch["new"]) :]
         undone += (patch["id"],)
         versions.append((text, undone))

@@ -1052,7 +1052,12 @@ PLAIN = "# 沒有改過的頁\n"
 PATCH_LIST = "round/author-patches.json"
 ENTRY = "作者補丁清單 " + PATCH_LIST + " 的 patches[{}]（id {!r}）："
 UNDO = "作者補丁清單的 patches[{}]（id {!r}）："
-SOURCES = {"99.1": {"page_id": "99.1", "source": CHAPTER}, "plain": {"page_id": "plain", "source": "course/plain.md"}}
+SOURCES = {
+    "99.1": {"page_id": "99.1", "source": CHAPTER},
+    "plain": {"page_id": "plain", "source": "course/plain.md"},
+    # 首頁的 source 是產生它的 Python 程式。
+    "index": {"page_id": "index", "source": "scripts/export_course.py"},
+}
 
 
 def patch_entry(**changes):
@@ -1109,6 +1114,10 @@ FIELDS_RULE = (
         ),
         ([patch_entry(id=" ")], ENTRY.format(0, " ") + "id 必須是非空字串"),
         ([patch_entry(path="scripts/tool.py")], ENTRY.format(0, "ch99-1") + "path 不是 manifest 任何一頁的 source"),
+        (
+            [patch_entry(path="scripts/export_course.py", old='return ""', new='return "\\t"')],
+            ENTRY.format(0, "ch99-1") + "path 不是 Markdown（.md）原文；程式檔整份是程式碼，不能用作者補丁改",
+        ),
         ([patch_entry(old="")], ENTRY.format(0, "ch99-1") + "old 必須是非空字串"),
         ([patch_entry(new=7)], ENTRY.format(0, "ch99-1") + "new 必須是非空字串"),
         ([patch_entry(new=PATCH_OLD)], ENTRY.format(0, "ch99-1") + "old 與 new 相同"),
@@ -1135,6 +1144,7 @@ FIELDS_RULE = (
         "duplicate_id",
         "blank_id",
         "path_not_page_source",
+        "path_is_python_page_source",
         "empty_old",
         "new_not_string",
         "same_text",
@@ -1155,8 +1165,8 @@ def test_each_patch_that_breaks_a_rule_is_named_with_that_rule(tmp_path, patches
 
 
 def test_every_forbidden_mark_in_old_or_new_is_rejected(tmp_path):
-    # 記號取自 PATCH_FORBIDDEN；規約至少要擋換行、程式區塊的圍欄、圖與連結的語法這四種。
-    assert {"\n", "```", "![", "]("} <= set(review.PATCH_FORBIDDEN)
+    # 記號取自 PATCH_FORBIDDEN；規約至少要擋換行、兩種程式區塊的圍欄、圖與連結的語法。
+    assert {"\n", "```", "~~~", "![", "]("} <= set(review.PATCH_FORBIDDEN)
     for token, label in review.PATCH_FORBIDDEN.items():
         for field in ("old", "new"):
             entry = patch_entry(**{field: "權重" + token + "四倍"})
@@ -1249,17 +1259,40 @@ def test_overlapping_occurrences_of_new_text_are_counted_separately(tmp_path):
         "```text " + PATCH_NEW + "\nx\n```\n",
         "   ```\n" + PATCH_NEW + "\n   ```\n",
         "```\n" + PATCH_NEW + "\n",
+        "~~~python\nprint('" + PATCH_NEW + "')\n~~~\n",
+        "> ```\n> " + PATCH_NEW + "\n> ```\n",
+        # 收尾要是同一串記號、後面只接空白：較短、較長、另一種字元或帶語言名的那一行都還在區塊裡。
+        "````markdown\n```\n" + PATCH_NEW + "\n````\n",
+        "```\n````\n" + PATCH_NEW + "\n```\n",
+        "~~~\n```\n" + PATCH_NEW + "\n~~~\n",
+        "```\n```python\n" + PATCH_NEW + "\n```\n",
     ],
-    ids=["inside", "fence_line", "indented_fence", "unclosed"],
+    ids=[
+        "inside",
+        "fence_line",
+        "indented_fence",
+        "unclosed",
+        "tilde",
+        "blockquote",
+        "shorter",
+        "longer",
+        "other_char",
+        "info",
+    ],
 )
 def test_new_text_inside_a_fenced_code_block_is_rejected(tmp_path, body):
-    message = UNDO.format(0, "ch99-1") + f"new 在 {CHAPTER} 的那一處落在 ``` 圍起來的程式區塊裡"
+    message = UNDO.format(0, "ch99-1") + f"new 在 {CHAPTER} 的那一處落在程式圍欄圍起來的區塊裡"
     with pytest.raises(ValueError, match=exactly(message)):
         chapter_versions(tmp_path, INTRO + "## 99.1 權重\n\n" + body, [patch_entry()])
 
 
-def test_new_text_after_a_closed_fenced_block_is_undone(tmp_path):
-    text = INTRO + "## 99.1 權重\n\n```python\nprint(4)\n```\n\n" + PATCH_NEW + "\n"
+@pytest.mark.parametrize(
+    "block",
+    ["```python\nprint(4)\n```\n", "~~~\nprint(4)\n~~~\n", "````\n```\nprint(4)\n````\n", "```\nprint(4)\n```  \n"],
+    ids=["backticks", "tildes", "longer_fence", "trailing_space"],
+)
+def test_new_text_after_a_closed_fenced_block_is_undone(tmp_path, block):
+    text = INTRO + "## 99.1 權重\n\n" + block + "\n" + PATCH_NEW + "\n"
     versions = chapter_versions(tmp_path, text, [patch_entry()])
     assert versions == {CHAPTER: {digest(text.replace(PATCH_NEW, PATCH_OLD).encode()): ("ch99-1",)}}
 
