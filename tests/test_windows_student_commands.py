@@ -31,9 +31,10 @@ KERNEL_CHECKS 執行的 Notebook 程式格，以及 python_run_by_workflow 列�
 本體越過底線。
 下面這些不逐個結果補案例。今天頁面上已有的命令怎麼抽：compare 對兩邊做序列比對，一邊漏抽，另一邊多出的那條就報出（兩邊
 都看不到的寫法比對不出來，〈不涵蓋〉列了其中一些）。workflow 的 PowerShell 核對與 KERNEL_CHECKS 的 main、run：每次 Windows
-實跑都以真資料執行，核得對不對由重掃引文判斷；main 在 helper 之外只挑 lines[-1] 或 lines[0]、用 != 比，比哪一行由它的訊息
-與取期望值的樣式旁的 `# 頁面說：` 指名。讀檔集合那兩道測試用到的函式：理由見〈不涵蓋〉裡講排除安不安全的那句；excluded_trees
-遇到寫法不符的條目時的出口除外，它有案例。沒有上面那種轉換的測試本體也不補。
+實跑都以真資料執行，核得對不對由重掃引文判斷；main 在 helper 之外的比對只有三件事：挑程式格與輸出行、組出 W.6 要執行的
+Notebook、用 != 比；挑哪一格、哪一行、怎麼組，由 main 裡的註解、它的訊息與取期望值的樣式旁的 `# 頁面說：` 指名。讀檔集合
+那兩道測試用到的函式：理由見〈不涵蓋〉裡講排除安不安全的那句；excluded_trees 遇到寫法不符的條目時的出口除外，它有案例。
+沒有上面那種轉換的測試本體也不補。
 
 觸發條件的讀檔集合：排除的樹裡不能有頁面命令或 workflow 會讀的檔。這份集合由三種來源合起來推出。(a) 在本機用
 sys.addaudithook 收 open 事件，執行 workflow 會跑、又能在本機安全執行的 Python 頁面命令（check_env.py、
@@ -726,13 +727,24 @@ def test_windows_clone_comes_after_global_long_paths():
         pytest.param("<pre>\ngit lfs install --local\n</pre>\n", "x.md:1：fence 外有 HTML", id="跨行的 pre 元素"),
         pytest.param("說明 <CODE>uv sync</CODE> 的用途。\n", "x.md:1：fence 外有 HTML", id="大寫的 CODE 元素"),
         pytest.param("```\ngit lfs install --local\n```\n", "x.md:1：程式區塊的語言「」沒有分類", id="沒標語言的區塊"),
+        pytest.param(
+            "```\nexplorer .\\outputs\n```\n",
+            "x.md:1：程式區塊的語言「」沒有分類",
+            id="沒標語言的區塊，內容不是 COMMAND_START 認得的命令",
+        ),
+        pytest.param(
+            "```posh\ngit lfs install --local\n```\n",
+            "x.md:1：程式區塊的語言「posh」沒有分類",
+            id="標了沒分類的語言的區塊",
+        ),
         pytest.param("```text\ncourse/chapters/     教材正文與短程式\n```\n", None, id="專案結構不是命令"),
         pytest.param("HTML 的 `<code>` 標籤只是舉例。\n", None, id="反引號裡的 code 字樣"),
     ],
 )
 def test_windows_commands_report_what_the_comparison_cannot_see(monkeypatch, text, expected):
     """比對看不到的寫法，windows_commands 要報錯並指出行號：純文字區塊裡看起來是命令的行、fence 外 HTML 的 code 或 pre
-    元素，以及語言沒有分類的程式區塊（不論裡面寫什麼）。純文字區塊裡不是命令的內容、反引號裡的 code 字樣不報。"""
+    元素，以及語言沒有分類的程式區塊。沒分類的語言，沒標語言與標了沒分類的名字（例如 posh）都報，不論裡面是不是
+    COMMAND_START 認得的命令。純文字區塊裡不是命令的內容、反引號裡的 code 字樣不報。"""
     monkeypatch.setitem(globals(), "read", lambda relative: text)
     _, problems = windows_commands("x.md")
     if expected is None:
@@ -772,6 +784,11 @@ def test_windows_commands_report_what_the_comparison_cannot_see(monkeypatch, tex
             [".venv/bin/python scripts/check_env.py"],
             id="開頭是 .venv/",
         ),
+        pytest.param(
+            "核對環境：`.venv\\Scripts\\python.exe scripts/check_env.py`。\n",
+            [".venv\\Scripts\\python.exe scripts/check_env.py"],
+            id="開頭是 .venv 加反斜線，句子沒提到 Windows",
+        ),
         pytest.param("在 notebooks 裡改用 `../.venv/bin/python`。\n", ["../.venv/bin/python"], id="開頭是 ./ 或 ../"),
         pytest.param('先設定 `$env:GIT_LFS_SKIP_SMUDGE="1"`。\n', ['$env:GIT_LFS_SKIP_SMUDGE="1"'], id="開頭是 $env:"),
         pytest.param(
@@ -779,6 +796,7 @@ def test_windows_commands_report_what_the_comparison_cannot_see(monkeypatch, tex
             ["Remove-Item -Recurse -Force .venv"],
             id="開頭是 cmdlet",
         ),
+        pytest.param("查看目前的資料夾：`Get-Location`。\n", ["Get-Location"], id="開頭是 cmdlet，後面沒有參數"),
         pytest.param(
             "Windows PowerShell 用 `explorer .\\outputs` 打開輸出資料夾。\n",
             ["explorer .\\outputs"],
@@ -811,8 +829,9 @@ def test_windows_commands_report_what_the_comparison_cannot_see(monkeypatch, tex
 )
 def test_windows_commands_recognize_each_rule_branch(monkeypatch, text, expected):
     """正例表：COMMAND_START、POWERSHELL_ONLY 與 FENCE 的每個分支，以及語言分類的其他語言略過、shell 區塊抽出兩個出口，
-    各一列。語言分類另外兩個出口（純文字區塊報錯、沒分類報錯）的列在
-    test_windows_commands_report_what_the_comparison_cannot_see。"""
+    各一列。COMMAND_START 的 .venv 開頭有 / 與反斜線兩種寫法，cmdlet 後面有參數與沒有參數（名稱後面就是字串結尾）兩種，
+    也各一列；.venv 反斜線那一列的句子不提 Windows，抽出它的只能是 COMMAND_START，不是 POWERSHELL_ONLY。語言分類另外兩個
+    出口（純文字區塊報錯、沒分類報錯）的列在 test_windows_commands_report_what_the_comparison_cannot_see。"""
     monkeypatch.setitem(globals(), "read", lambda relative: text)
     commands, problems = windows_commands("x.md")
     assert ([command.text for command in commands], problems) == (expected, [])
@@ -1266,8 +1285,9 @@ def test_printed_lines_join_stdout_before_splitting_or_fail_on_other_outputs(out
 # workflow 引頁面原話的註解記號；引文從記號之後開始，範圍見 workflow_quotes。
 PAGE_QUOTE = "# 頁面說："
 # 同一行裡的 Markdown 行內連結 `[文字](網址)`（含圖片）：比對引文與頁面之前，只留方括號裡的文字。參考式連結
-# `[文字][標籤]` 與自動連結 `<網址>` 原樣留著。兩個限制：網址裡有 `)` 時，連結只換到第一個 `)`，留下多出的 `)`；
-# 連結文字裡有 `]` 時，整段不換。
+# `[文字][標籤]` 與自動連結 `<網址>` 原樣留著。連結文字只認到第一個 `]`，網址只認到第一個 `)`，不處理巢狀：網址裡有 `)`
+# 時，第一個 `)` 之後的網址連同結尾的 `)` 都留在文字裡；連結文字裡有 `]` 時，連結文字本身又含完整的連結或圖片就只換掉一
+# 部分，否則整段不換。
 LINK = re.compile(r"!?\[([^\]\n]*)\]\([^)\n]*\)")
 
 
@@ -1320,7 +1340,8 @@ def workflow_quotes():
 
 def flatten(text):
     """比對用的寫法：同一行裡的 Markdown 行內連結（寫法見 LINK）只留方括號裡的文字，再去掉 `**`、反引號與所有空白。
-    網址裡有 `)` 時，連結只換到第一個 `)`，留下多出的 `)`；連結文字裡有 `]` 時，整段不換。"""
+    連結文字只認到第一個 `]`，網址只認到第一個 `)`：網址裡有 `)` 時，第一個 `)` 之後的網址連同結尾的 `)` 都留下；連結文
+    字裡有 `]` 時，連結文字本身又含完整的連結或圖片就只換掉一部分，否則整段不換。"""
     return re.sub(r"\s+", "", LINK.sub(r"\1", text).replace("**", "").replace("`", ""))
 
 
@@ -1369,9 +1390,10 @@ def not_covered_page_items():
 # page_quote_problems 兩段訊息開頭給讀者的指引：寫法不合規則的引文，與頁面上找不到的引文。
 MALFORMED_QUOTES = "這些引文的寫法不合規則，還沒有和頁面比對；照每一行寫的問題改寫法："
 MISSING_QUOTES = (
-    "頁面上找不到這些引文。頁面沒改時，先看 workflow 的引文是不是照檔頭的引文規則結束。頁面改了句子時，workflow 的引文要先"
-    "重新判斷旁邊的核對是否仍和頁面的新句子一樣強，再照檔頭的引文規則改引文，而不是直接把新句子整句抄回來；〈不涵蓋〉的項目"
-    "要先重新判斷它寫的理由是否仍成立，再改「」裡的引文。"
+    "頁面上找不到這些引文。頁面沒改時，先看 workflow 的引文是不是照檔頭的引文規則結束；〈不涵蓋〉的項目先看頁名，引文在"
+    "別頁上時，把那一項的頁名改成那一頁。頁面改了句子時，workflow 的引文要先重新判斷旁邊的核對是否仍和頁面的新句子一樣"
+    "強，再照檔頭的引文規則改引文，而不是直接把新句子整句抄回來；〈不涵蓋〉的項目要先重新判斷它寫的理由是否仍成立，再改"
+    "「」裡的引文。"
 )
 
 
@@ -1606,17 +1628,29 @@ def test_workflow_quotes_report_a_quote_that_does_not_end(monkeypatch, text, exp
         pytest.param(
             "見[位元](https://zh.wikipedia.org/wiki/Bit_(unit))的說明",
             "見位元)的說明",
-            id="限制：網址裡有 `)` 時只換到第一個 `)`，留下多出的 `)`",
+            id="限制：網址的最後有 `)` 時，結尾的 `)` 留下",
         ),
         pytest.param(
-            "見[第[1]章](ch01.md)的說明", "見[第[1]章](ch01.md)的說明", id="限制：連結文字裡有 `]` 時整段不換"
+            "見[文字](https://example.com/a_(b)c)的說明",
+            "見文字c)的說明",
+            id="限制：網址中間有 `)` 時，第一個 `)` 之後的網址連同結尾的 `)` 都留下",
+        ),
+        pytest.param(
+            "見[第[1]章](ch01.md)的說明",
+            "見[第[1]章](ch01.md)的說明",
+            id="限制：連結文字裡有 `]`、沒有完整的連結或圖片時整段不換",
+        ),
+        pytest.param(
+            "見[![流程圖](a.svg)](b.md)的說明",
+            "見![流程圖](b.md)的說明",
+            id="限制：連結文字本身又含完整的圖片時只換掉一部分，外層的 `](網址)` 留下",
         ),
     ],
 )
 def test_flatten_keeps_link_text_and_drops_bold_marks_backticks_and_whitespace(text, expected):
     """逐一核對 flatten：同一行裡的行內連結（含圖片）只留方括號裡的文字，跨行的連結、參考式連結與自動連結不換；去掉
-    `**`（單一個 `*` 留著）、反引號與所有空白；以及它 docstring 寫的兩個限制：網址裡有 `)` 時留下多出的 `)`，連結文字裡
-    有 `]` 時整段不換。"""
+    `**`（單一個 `*` 留著）、反引號與所有空白；以及它 docstring 寫的限制：網址裡有 `)` 時，第一個 `)` 之後的網址連同結尾
+    的 `)` 都留下；連結文字裡有 `]` 時，連結文字本身又含完整的連結或圖片就只換掉一部分，否則整段不換。"""
     assert flatten(text) == expected
 
 
@@ -1713,8 +1747,10 @@ def test_not_covered_page_items_list_the_page_lines_after_the_heading(monkeypatc
     assert not_covered_page_items() == expected
 
 
-# test_page_quote_problems_report_each_malformed_or_missing_quote 的假頁面 README.md、找得到的引文與〈不涵蓋〉。
+# test_page_quote_problems_report_each_malformed_or_missing_quote 的假頁面 README.md 與 README_en.md，
+# 以及找得到的引文與〈不涵蓋〉。
 QUOTED_PAGE = "先用 `--list` 查看名稱，再用 `--asset NAME` 下載。\n"
+OTHER_PAGE = "將 NAME 換成清單中的名稱。\n"
 FOUND_QUOTE = "# 頁面說：先用 --list 查看名稱，再用 --asset NAME 下載。\n"
 FOUND_ITEM = "不涵蓋：\n- README.md 甲「再用 `--asset NAME` 下載」：理由。\n"
 
@@ -1724,9 +1760,9 @@ FOUND_ITEM = "不涵蓋：\n- README.md 甲「再用 `--asset NAME` 下載」：
     [
         pytest.param(FOUND_QUOTE, FOUND_ITEM, [], id="引文都在頁面上"),
         pytest.param(
-            "# 頁面說：先用 --list 查看名稱\nInvoke-Page -Pages README.md -Commands 'x'\n",
+            "# 頁面說：先用 --list 查看全部名稱\nInvoke-Page -Pages README.md -Commands 'x'\n",
             FOUND_ITEM,
-            [MALFORMED_QUOTES + f"\n{WORKFLOW}:1：{QUOTE_WITHOUT_END}：先用 --list 查看名稱"],
+            [MALFORMED_QUOTES + f"\n{WORKFLOW}:1：{QUOTE_WITHOUT_END}：先用 --list 查看全部名稱"],
             id="沒有結束的引文寫進寫法不合規則那段，不和頁面比對",
         ),
         pytest.param(
@@ -1742,10 +1778,36 @@ FOUND_ITEM = "不涵蓋：\n- README.md 甲「再用 `--asset NAME` 下載」：
             id="四頁都找不到的引文寫進找不到那段",
         ),
         pytest.param(
+            "# 頁面說：將 NAME 換成清單中的名稱。\n",
+            FOUND_ITEM,
+            [],
+            id="workflow 的引文在四頁之一找得到就好，不必在 README.md",
+        ),
+        pytest.param(
+            "# 頁面說：先用 --list 查看名稱……將 NAME 換成清單中的名稱。\n",
+            FOUND_ITEM,
+            [
+                MISSING_QUOTES
+                + f"\n{WORKFLOW}:1：「先用 --list 查看名稱……將 NAME 換成清單中的名稱。」不在四頁的任何一頁上"
+            ],
+            id="引文以「……」切出的各段分在不同頁時，沒有一頁找得齊就是找不到",
+        ),
+        pytest.param(
             FOUND_QUOTE,
             "不涵蓋：\n- README_en.md 甲「再用 `--asset NAME` 下載」：理由。\n",
             [MISSING_QUOTES + "\n檔頭〈不涵蓋〉：「再用 `--asset NAME` 下載」不在 README_en.md 上"],
             id="〈不涵蓋〉的引文只在那一項的頁面找，在別頁找得到也寫進找不到那段",
+        ),
+        pytest.param(
+            FOUND_QUOTE,
+            "不涵蓋：\n- README.md 甲「先用 `--list` 查看全部名稱」與「再用 `--asset NAME` 下載」"
+            "與「核對並解包所選包」：理由。\n",
+            [
+                MISSING_QUOTES
+                + "\n檔頭〈不涵蓋〉：「先用 `--list` 查看全部名稱」不在 README.md 上"
+                + "\n檔頭〈不涵蓋〉：「核對並解包所選包」不在 README.md 上"
+            ],
+            id="〈不涵蓋〉一項有幾段引文時，每段都和那一項的頁面比對，找不到的各寫一行",
         ),
         pytest.param(
             "# 頁面以外：這一步不引頁面。\n", FOUND_ITEM, [f"{WORKFLOW} 沒有任何 `# 頁面說：`"], id="沒有 `# 頁面說：`"
@@ -1759,10 +1821,13 @@ FOUND_ITEM = "不涵蓋：\n- README.md 甲「再用 `--asset NAME` 下載」：
     ],
 )
 def test_page_quote_problems_report_each_malformed_or_missing_quote(monkeypatch, workflow, doc, expected):
-    """餵假的 workflow、檔頭與頁面（只有 README.md 有字），逐一核對 page_quote_problems：引文都找得到時沒有問題；沒有結束的
-    引文與「」不成對的項目寫進以 MALFORMED_QUOTES 開頭的一段，不和頁面比對；四頁都找不到的引文，以及〈不涵蓋〉的引文不在
-    那一項的頁面時，寫進以 MISSING_QUOTES 開頭的一段；沒有 `# 頁面說：`、〈不涵蓋〉一項都沒收到時各成一段。"""
-    files = {WORKFLOW: workflow, "README.md": QUOTED_PAGE}
+    """餵假的 workflow、檔頭與頁面（README.md 與 README_en.md 各有一句，其餘為空），逐一核對 page_quote_problems：引文都
+    找得到時沒有問題，workflow 的引文只在 README.md 以外的一頁找得到也一樣；沒有結束的引文與「」不成對的項目寫進以
+    MALFORMED_QUOTES 開頭的一段，不和頁面比對（沒有結束的引文，其字在四頁都沒有：若它也被拿去比對，會多報一則找不到）；
+    四頁都找不到的引文（含以「……」切出的各段分在不同頁、沒有一頁找得齊的），以及〈不涵蓋〉的引文不在那一項的頁面時，寫進
+    以 MISSING_QUOTES 開頭的一段，〈不涵蓋〉一項有幾段引文時每段都比對，找不到的各寫一行；沒有 `# 頁面說：`、〈不涵蓋〉
+    一項都沒收到時各成一段。"""
+    files = {WORKFLOW: workflow, "README.md": QUOTED_PAGE, "README_en.md": OTHER_PAGE}
     monkeypatch.setitem(globals(), "read", lambda relative: files.get(relative, ""))
     monkeypatch.setitem(globals(), "__doc__", doc)
     assert page_quote_problems() == expected
