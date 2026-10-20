@@ -6,7 +6,7 @@
 
 - **在哪裡執行。** 這頁的命令都在本機的終端機執行，起點是有 `pyproject.toml` 的專案根目錄；它們不是 Notebook 的程式格，這頁也沒有對應的 Notebook。本課沒有在 Colab 實測過這些命令，請在自己的電腦上跑。第一次安裝請看 [W.1](first-steps.md#W.1)，檔案位置請看 [W.7](first-steps.md#W.7)。
 - **需要什麼。** 照 W.1 裝好 `.venv` 就能跑本機練習。用 `fetch_training_assets.py --asset` 下載資料包時需要 Git LFS，安裝與確認方式也在 W.1。命令寫 `--device cuda` 的固定配方需要 NVIDIA GPU，以及 CUDA 版的安裝（選擇見[環境說明](../docs/environment.md)）；沒有 NVIDIA GPU 時能否改用 CPU 跑完，各配方都未量測。下載公開模型需要連上 Hugging Face。
-- **Python 怎麼寫。** 命令一律寫成 `.venv/bin/python …`，直接使用專案工具箱裡的 Python，不必先啟用 `.venv`。Windows PowerShell 把這段路徑換成 `.\.venv\Scripts\python.exe`，其餘參數不變。沒寫 `--device` 的命令由工具自動選裝置：有 NVIDIA GPU 時用 CUDA，Apple Silicon 可能用 MPS，否則用 CPU；本課沒有在 MPS 上驗證整套訓練，想固定用 CPU 就加 `--device cpu`。
+- **Python 怎麼寫。** 命令一律寫成 `.venv/bin/python …`，直接使用專案工具箱裡的 Python，不必先啟用 `.venv`。Windows PowerShell 把這段路徑換成 `.\.venv\Scripts\python.exe`，其餘參數不變。`scripts/train.py`、`evaluate.py`、`infer.py` 這類訓練、評估與推論的工具，沒寫 `--device` 時會自動選裝置：有 NVIDIA GPU 時用 CUDA，Apple Silicon 可能用 MPS，否則用 CPU；本課沒有在 MPS 上驗證整套訓練，想固定用 CPU 就加 `--device cpu`。`scripts.course_experiments.run` 沒指定時用 CPU。`quantize.py` 固定用 CPU；`prepare_data.py`、`fetch_training_assets.py` 這類準備資料與下載的工具不處理裝置；這三個工具都沒有 `--device` 參數。
 - **要花多久。** 有作者實驗紀錄（JSON，這是機器可讀的完整結果）的命令會寫出時間與硬體，數字取自紀錄裡的 `elapsed_seconds`，只算實驗本身，不含安裝、啟動與下載。沒有寫出時間的命令都沒有量測紀錄，各節的本機訓練會再註明「未量測」。`train.py` 的報告有 `seconds` 欄，可以記下你自己這次訓練迴圈花的秒數。
 
 自己的報告和模型放在 `outputs/` 與 `checkpoints/`，不要用課程的歷史數字代替自己的結果。

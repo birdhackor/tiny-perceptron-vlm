@@ -31,7 +31,7 @@ B五輪兩盒追蹤2928/2956通過核心門檻，三數加法2/42未過次要門
 
 資料按原始情境家族切分，同一情境衍生題都放同一組；但不同情境刪掉申請編號後，仍可能都變成「卡片進度;申請編號=?」。C有5,453種相同文字／問題／候選意義組合出現在多組，合計影響215,427筆資料列。因此家族留出不能代替完全未見文字的證明。
 
-本版把驗證題分兩部分：calibration用來選C各問題類型的溫度調整係數，policy用來選模型存檔及Auto給B幾輪的規則；Auto是依題目自動分配計算預算的入口。[設定凍結檔](lesson-products/results/settings-freeze-v1.json)已在第一次最後測試前提交。評分後沒有重訓或調參。兩位獨立審核者從保存的逐題原始分數重算B／機制／Auto及C成績，沒有把重新整理統計當成新一輪模型測試。固定下載與CPU操作見[產品指引](lesson-products/README.md)；最後考卷與有限語法都不代表開放式中文服務能力。
+本版把驗證題分兩部分：calibration用來選C各問題類型的溫度調整係數，policy用來選模型存檔及Auto給B幾輪的規則；Auto是依題目自動分配計算預算的入口。[設定凍結檔](lesson-products/results/settings-freeze-v1.json)已在第一次最後測試前提交。[最後評分紀錄](lesson-products/results/final-report-v1.json)記下這份凍結檔的SHA-256；[公開套件](lesson-products/results/publication-package-v1.json)裡權重與設定檔的SHA-256也和凍結檔所記相同，所以評分與公開的都是凍結時那一份。兩位獨立審核者從保存的逐題原始分數重算B／機制／Auto及C成績（紀錄見[B／機制／Auto](lesson-products/reviews/engineering-final-b-mechanisms-original.json)與[C](lesson-products/reviews/engineering-final-c-original.json)），沒有把重新整理統計當成新一輪模型測試。固定下載與CPU操作見[產品指引](lesson-products/README.md)；最後考卷與有限語法都不代表開放式中文服務能力。
 
 已發布的[舊合成示範](course-experiments/README.md)只涵蓋簡單圖形、純音、固定句型與受限工具，其歷史成績不能代替v2驗收。[第20章](../course/chapters/20.md)是成熟模型的延伸路線，使用已有的圖文底座與語音辨識器，分別檢查自然照片、中文讀字、文字聊天及語音聊天。兩條路的題目、權重來源與規模不同，分數不能直接當成同一場比賽。
 
