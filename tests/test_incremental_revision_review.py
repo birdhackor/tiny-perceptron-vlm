@@ -1252,63 +1252,81 @@ def test_overlapping_occurrences_of_new_text_are_counted_separately(tmp_path):
         chapter_versions(tmp_path, INTRO + "## 99.1 權重\n\n四四四\n", [patch_entry(old="三三", new="四四")])
 
 
+# 補丁所在的檔：導言四行、小節標題一行、空行一行，所以 body 從第 7 行開始。
+BODY_LINE = 7
+
+
 @pytest.mark.parametrize(
     "body",
     [
         "```python\nprint('" + PATCH_NEW + "')\n```\n",
-        "```text " + PATCH_NEW + "\nx\n```\n",
-        "   ```\n" + PATCH_NEW + "\n   ```\n",
-        "```\n" + PATCH_NEW + "\n",
-        "~~~python\nprint('" + PATCH_NEW + "')\n~~~\n",
-        "> ```\n> " + PATCH_NEW + "\n> ```\n",
-        # 收尾要是同一串記號、後面只接空白：較短、較長、另一種字元或帶語言名的那一行都還在區塊裡。
-        "````markdown\n```\n" + PATCH_NEW + "\n````\n",
-        "```\n````\n" + PATCH_NEW + "\n```\n",
-        "~~~\n```\n" + PATCH_NEW + "\n~~~\n",
-        "```\n```python\n" + PATCH_NEW + "\n```\n",
-        # 行首和開頭那行不同的同一串記號，網站（superfences）不當成收尾。
-        "```python\n  ```\n" + PATCH_NEW + "\n```\n",
-        "```python\n    ```\n" + PATCH_NEW + "\n```\n",
-        "```python\n> ```\n" + PATCH_NEW + "\n```\n",
-        # 網站到第二個 ``` 才收尾；Notebook 的 CommonMark 在 ```` 就收尾，第二個 ``` 又開了一個程式區塊。
-        "```\na\n````\nb\n```\n" + PATCH_NEW + "\n```\n",
+        "```\n" + PATCH_NEW + "\n```\n",
+        "```python\nx = 1\n```\n\n```bash\n" + PATCH_NEW + "\n```\n",
     ],
-    ids=[
-        "inside",
-        "fence_line",
-        "indented_fence",
-        "unclosed",
-        "tilde",
-        "blockquote",
-        "shorter",
-        "longer",
-        "other_char",
-        "info",
-        "two_space_close",
-        "four_space_close",
-        "quoted_close",
-        "notebook_reopens",
-    ],
+    ids=["inside", "bare_block", "second_block"],
 )
-def test_new_text_inside_a_fenced_code_block_is_rejected(tmp_path, body):
+def test_new_text_inside_a_plain_fenced_block_is_rejected(tmp_path, body):
     message = UNDO.format(0, "ch99-1") + f"new 在 {CHAPTER} 的那一處落在程式圍欄圍起來的區塊裡"
     with pytest.raises(ValueError, match=exactly(message)):
         chapter_versions(tmp_path, INTRO + "## 99.1 權重\n\n" + body, [patch_entry()])
 
 
+# 圍欄寫法不單純的檔：（body，從 body 第一行算起第幾行出問題）。這些寫法，網站、Notebook 與建置程式可能認出
+# 不同的程式區塊，閘門一律不承認補丁。
+NOT_PLAIN = {
+    "info_with_text": ("```text " + PATCH_NEW + "\nx\n```\n", 0),
+    "indented": ("   ```\n" + PATCH_NEW + "\n   ```\n", 0),
+    "tilde": ("~~~python\nprint(4)\n~~~\n\n" + PATCH_NEW + "\n", 0),
+    "blockquote": ("> ```\n> print(4)\n> ```\n\n" + PATCH_NEW + "\n", 0),
+    "four_backticks": ("````markdown\n```\nprint(4)\n````\n\n" + PATCH_NEW + "\n", 0),
+    "longer_close": ("```\na\n````\nb\n```\n" + PATCH_NEW + "\n```\n", 2),
+    "closer_with_language": ("```\n```python\n" + PATCH_NEW + "\n```\n", 1),
+    "indented_close": ("```python\n  ```\n" + PATCH_NEW + "\n```\n", 1),
+    "quoted_close": ("```python\n> ```\n" + PATCH_NEW + "\n```\n", 1),
+    "trailing_space": ("```\nprint(4)\n```  \n\n" + PATCH_NEW + "\n", 2),
+    "nbsp_close": ("```python\n```\xa0\n" + PATCH_NEW + "\n```\n", 1),
+    "ideographic_space_close": ("```python\n```\u3000\n" + PATCH_NEW + "\n```\n", 1),
+    "vertical_tab_close": ("```python\n```\x0b\n" + PATCH_NEW + "\n```\n", 1),
+    "backtick_info": ("```bad`info\n```\n" + PATCH_NEW + "\n```\n", 0),
+    "unknown_option": ("```python invalid\n```\n" + PATCH_NEW + "\n```\n", 0),
+    "inline_triple_backticks": ("程式圍欄用 ``` 開頭。\n\n" + PATCH_NEW + "\n", 0),
+}
+
+
+@pytest.mark.parametrize(("body", "offset"), list(NOT_PLAIN.values()), ids=list(NOT_PLAIN))
+def test_files_whose_fences_are_not_plain_take_no_author_patch(tmp_path, body, offset):
+    line = body.split("\n")[offset]
+    message = (
+        UNDO.format(0, "ch99-1")
+        + f"{CHAPTER} 第 {BODY_LINE + offset} 行的程式圍欄寫法不單純，閘門認不出程式區塊的範圍，作者補丁不適用：{line[:40]!r}"
+    )
+    with pytest.raises(ValueError, match=exactly(message)):
+        chapter_versions(tmp_path, INTRO + "## 99.1 權重\n\n" + body, [patch_entry()])
+
+
+def test_a_file_ending_inside_a_fence_takes_no_author_patch(tmp_path):
+    message = UNDO.format(0, "ch99-1") + f"{CHAPTER} 最後一個程式圍欄沒有收尾，閘門認不出程式區塊的範圍，作者補丁不適用"
+    with pytest.raises(ValueError, match=exactly(message)):
+        chapter_versions(tmp_path, INTRO + "## 99.1 權重\n\n" + PATCH_NEW + "\n\n```\nprint(4)\n", [patch_entry()])
+
+
+def test_the_reviewed_version_must_have_plain_fences_too(tmp_path):
+    # 現行版本那一行只有兩個反引號；倒退補丁後成了三個，審閱過的版本寫法不單純。
+    message = (
+        UNDO.format(0, "ch99-1")
+        + f"倒退這一筆之後的 {CHAPTER} 第 {BODY_LINE} 行的程式圍欄寫法不單純，閘門認不出程式區塊的範圍，作者補丁不適用："
+        + repr("用``` 開頭")
+    )
+    with pytest.raises(ValueError, match=exactly(message)):
+        chapter_versions(tmp_path, INTRO + "## 99.1 權重\n\n用``X 開頭\n", [patch_entry(old="` 開頭", new="X 開頭")])
+
+
 @pytest.mark.parametrize(
     "block",
-    [
-        "```python\nprint(4)\n```\n",
-        "~~~\nprint(4)\n~~~\n",
-        "````\n```\nprint(4)\n````\n",
-        "```\nprint(4)\n```  \n",
-        "> ```\n> print(4)\n> ```\n",
-        "  ```\n  print(4)\n  ```\n",
-    ],
-    ids=["backticks", "tildes", "longer_fence", "trailing_space", "quoted", "indented"],
+    ["```python\nprint(4)\n```\n", "```\nprint(4)\n```\n", "```python\r\nprint(4)\r\n```\r\n"],
+    ids=["language", "bare", "crlf"],
 )
-def test_new_text_after_a_closed_fenced_block_is_undone(tmp_path, block):
+def test_new_text_after_a_closed_plain_block_is_undone(tmp_path, block):
     text = INTRO + "## 99.1 權重\n\n" + block + "\n" + PATCH_NEW + "\n"
     versions = chapter_versions(tmp_path, text, [patch_entry()])
     assert versions == {CHAPTER: {digest(text.replace(PATCH_NEW, PATCH_OLD).encode()): ("ch99-1",)}}

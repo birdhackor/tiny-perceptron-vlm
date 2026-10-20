@@ -527,62 +527,50 @@ def positions(text, needle):
     return found
 
 
-def closes_superfences(opener, line):
-    """網站用的 pymdownx.superfences：行首與開頭那行完全相同，同一串記號，後面只接空白。"""
-    return line[1] == opener[1] and line[2] == opener[2] and not line[3].strip()
+# 作者補丁只用在圍欄寫法單純的檔：程式圍欄都是行首的三個反引號，開頭那行最多接一個由英數字與 _ + - 組成的語言名，
+# 收尾那行什麼都不接。
+PLAIN_FENCE = re.compile(r"```([A-Za-z0-9_+-]*)")
 
 
-def quote_and_indent(prefix):
-    """行首的引用層數，以及最後一個 > 之後的縮排格數（> 後面那一格空白屬於引用記號）。"""
-    depth = prefix.count(">")
-    rest = prefix.rsplit(">", 1)[-1]
-    if depth and rest.startswith(" "):
-        rest = rest[1:]
-    return depth, len(rest.expandtabs(4))
+def fence_blocks(text, where):
+    """text 的程式圍欄寫法單純時，回傳每個區塊的（起點, 終點）位置，圍欄那兩行也算在內；不單純就停下。"""
+    # 驗證：以 \n 分行，行尾的 \r 不算進那一行。符合 FENCE 或含 ``` 的每一行都要整行符合 PLAIN_FENCE；區塊外的這種行
+    # 開區塊，區塊裡的只能是光的 ```，用來收尾；檔尾不能停在區塊裡。這樣的檔裡，scripts/build_course.py 切出的每個
+    # 程式格（從 ```python 那行切到下一個 ```）都落在這裡認出的區塊裡。
+    # 不涵蓋：網站與 Notebook 顯示的其餘程式框。它們配對圍欄前，原文已經被改過，例如 scripts/build_course.py 在
+    # `## 1.2` 這種節標題處切開、把跨行的圖片語法整段取出，scripts/export_course.py 與 Markdown 套件在 \n 以外的
+    # 換行字元處斷行；Notebook 還可能把 HTML 區塊或數學式裡的圍欄行當成一般文字。這些情況下，這裡當成正文的字
+    # 可能顯示在程式框裡。縮排四格的程式區塊與 HTML 的 <pre> 也不認。規約把這些位置交給要求補丁的作者負責。
+    blocks, opened, start = [], None, 0
+    for number, raw in enumerate(text.split("\n"), 1):
+        line = raw.removesuffix("\r")
+        if FENCE.match(line) or "```" in line:
+            plain = PLAIN_FENCE.fullmatch(line)
+            require(
+                plain is not None and not (opened is not None and plain[1]),
+                f"{where} 第 {number} 行的程式圍欄寫法不單純，閘門認不出程式區塊的範圍，作者補丁不適用：{line[:40]!r}",
+            )
+            if opened is None:
+                opened = start
+            else:
+                blocks.append((opened, start + len(raw)))
+                opened = None
+        start += len(raw) + 1
+    require(opened is None, f"{where} 最後一個程式圍欄沒有收尾，閘門認不出程式區塊的範圍，作者補丁不適用")
+    return blocks
 
 
-def closes_commonmark(opener, line):
-    """Notebook 顯示 Markdown 用的 CommonMark：引用層數相同、縮排不超過三格，同種記號、不短於開頭，後面只接空白。"""
-    depth, indent = quote_and_indent(line[1])
-    return (
-        depth == quote_and_indent(opener[1])[0]
-        and indent <= 3
-        and line[2][0] == opener[2][0]
-        and len(line[2]) >= len(opener[2])
-        and not line[3].strip()
-    )
-
-
-def inside_fence(text, position, closes):
-    """照 closes 這條收尾規則，position 是否在圍欄區塊裡；圍欄那兩行也算，沒有收尾的一路算到文字結尾。"""
-    opener, start = None, 0
-    for line in text.split("\n"):
-        match = FENCE.match(line)
-        if position <= start + len(line):
-            return opener is not None or match is not None
-        if opener is None:
-            opener = match
-        elif match and closes(opener, match):
-            opener = None
-        start += len(line) + 1
-    return opener is not None
-
-
-def fenced(text, position):
-    """position 是否落在程式圍欄圍起來的區塊裡：網站與 Notebook 的認法任一個認為在區塊裡就算。"""
-    # 驗證：區塊外符合 FENCE 的行開一個區塊；區塊裡照 closes_superfences（網站）或 closes_commonmark（Notebook）
-    # 收尾，其他符合 FENCE 的行是區塊內容。兩種認法各跑一次，任一個在區塊裡就算。superfences 因選項寫錯或縮排
-    # 不夠而放棄的圍欄，這裡仍當成程式區塊。
-    # 不涵蓋：縮排四格的程式區塊與 HTML 的 <pre>；行中間出現 ```python 再換行時，scripts/build_course.py 會從
-    # 那裡切出 Notebook 的程式格，這裡只認行首的圍欄。
-    return any(inside_fence(text, position, closes) for closes in (closes_superfences, closes_commonmark))
+def fenced(text, position, where):
+    """position 是否落在程式圍欄圍起來的區塊裡（圍欄那兩行也算）；圍欄寫法不單純時停下，見 fence_blocks。"""
+    return any(first <= position <= last for first, last in fence_blocks(text, where))
 
 
 def undo_patches(text, patches, where, absent_ok=False):
     """從 text 依清單倒序逐筆倒退補丁，回傳每倒退一筆得到的（較早版本的文字，到這一版為止倒退的補丁 id）。
 
     patches 是同一個檔的（清單位置，補丁），照清單順序。每一筆的 new 在當下的文字裡要恰好出現一次、不在程式圍欄
-    圍起來的區塊裡，才換回 old。absent_ok 時 new 沒出現的那一筆略過：那一筆改的是同一個檔的別頁。
+    圍起來的區塊裡，才換回 old；換回前後兩個版本的圍欄寫法都要單純（fence_blocks）。
+    absent_ok 時 new 沒出現的那一筆略過：那一筆改的是同一個檔的別頁。
     """
     versions, undone = [], ()
     for i, patch in reversed(patches):
@@ -591,8 +579,12 @@ def undo_patches(text, patches, where, absent_ok=False):
         if absent_ok and not hits:
             continue
         require(len(hits) == 1, f"{label}：new 在倒退到這一筆時的 {where} 出現 {len(hits)} 次，必須恰好一次")
-        require(not fenced(text, hits[0]), f"{label}：new 在 {where} 的那一處落在程式圍欄圍起來的區塊裡")
+        require(
+            not fenced(text, hits[0], f"{label}：{where}"),
+            f"{label}：new 在 {where} 的那一處落在程式圍欄圍起來的區塊裡",
+        )
         text = text[: hits[0]] + patch["old"] + text[hits[0] + len(patch["new"]) :]
+        fence_blocks(text, f"{label}：倒退這一筆之後的 {where}")
         undone += (patch["id"],)
         versions.append((text, undone))
     return versions
