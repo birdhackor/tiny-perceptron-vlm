@@ -1,0 +1,153 @@
+diff --git a/docs/review-tools/incremental_revision.py b/docs/review-tools/incremental_revision.py
+index 268a491f..87a013b3 100644
+--- a/docs/review-tools/incremental_revision.py
++++ b/docs/review-tools/incremental_revision.py
+@@ -24,8 +24,8 @@ PATCH_FIELDS = ("id", "path", "old", "new", "requested_by", "requested_on", "rea
+ PATCH_LIMIT = 80
+ # old／new 不能出現的記號：換行會跨行，``` 與 ~~~ 是程式區塊的圍欄，![ 與 ]( 是圖與連結的語法。
+ PATCH_FORBIDDEN = {"\n": "換行", "\r": "換行", "```": "「```」", "~~~": "「~~~」", "![": "「![」", "](": "「](」"}
+-# 程式圍欄所在的行：行首的空白與引用記號 > 之後，接三個以上的反引號或波浪號。
+-FENCE = re.compile(r"[> \t]*(`{3,}|~{3,})")
++# 程式圍欄所在的行：行首（空白與引用記號 >）、三個以上的反引號或波浪號、同一行其餘的字。
++FENCE = re.compile(r"([> \t]*)(`{3,}|~{3,})(.*)")
+ 
+ 
+ def require(condition, message):
+@@ -463,7 +463,8 @@ def author_patches(root, manifest, live):
+     # 每筆恰好 PATCH_FIELDS 七個欄位，id 不重複，path 是某一頁以 .md 結尾的 source（首頁的 source 是產生它的
+     # Python 程式，整份都是程式碼），old 與 new 是彼此不同、各不超過 80 字、
+     # 不含 PATCH_FORBIDDEN 記號的非空字串，requested_by 是 author，requested_on 是 YYYY-MM-DD，reason 非空。
+-    # 不涵蓋：補丁的語意，由作者負責；new 落在連結網址或行內程式碼裡時，只靠上面的字面限制擋不住。
++    # 不涵蓋：補丁的語意；new 或 old 落在行內程式碼、數學式、連結的網址或文字、沒有圍欄的程式區塊或 HTML 裡時，
++    # 上面的字面限制與 fenced 都擋不住。規約把這些交給要求補丁的作者負責。
+     # 現行檔是否正好是審閱過的版本加上這些補丁，由 file_versions 與 page_versions 倒退核對。
+     if "author_patches" not in manifest:
+         return []
+@@ -526,23 +527,55 @@ def positions(text, needle):
+     return found
+ 
+ 
+-def fenced(text, position):
+-    """position 是否落在程式圍欄圍起來的區塊裡：圍欄那兩行也算，沒有收尾的圍欄一路算到文字結尾。"""
+-    # 驗證：圍欄的認法照網站用的 pymdownx.superfences。符合 FENCE 的行開一個區塊；區塊裡只有同一串記號
+-    # （同一種字元、同樣長度，後面只接空白）的行收尾，其他符合 FENCE 的行是區塊內容。
+-    # 不涵蓋：縮排四格的程式區塊與 HTML 的 <pre>；superfences 因選項寫錯而不當成圍欄的行，這裡仍當成開頭；
+-    # Notebook 的 Markdown 讓更長的同種記號也能收尾，與網站不同時這裡照網站。
+-    fence, start = None, 0
++def closes_superfences(opener, line):
++    """網站用的 pymdownx.superfences：行首與開頭那行完全相同，同一串記號，後面只接空白。"""
++    return line[1] == opener[1] and line[2] == opener[2] and not line[3].strip()
++
++
++def quote_and_indent(prefix):
++    """行首的引用層數，以及最後一個 > 之後的縮排格數（> 後面那一格空白屬於引用記號）。"""
++    depth = prefix.count(">")
++    rest = prefix.rsplit(">", 1)[-1]
++    if depth and rest.startswith(" "):
++        rest = rest[1:]
++    return depth, len(rest.expandtabs(4))
++
++
++def closes_commonmark(opener, line):
++    """Notebook 顯示 Markdown 用的 CommonMark：引用層數相同、縮排不超過三格，同種記號、不短於開頭，後面只接空白。"""
++    depth, indent = quote_and_indent(line[1])
++    return (
++        depth == quote_and_indent(opener[1])[0]
++        and indent <= 3
++        and line[2][0] == opener[2][0]
++        and len(line[2]) >= len(opener[2])
++        and not line[3].strip()
++    )
++
++
++def inside_fence(text, position, closes):
++    """照 closes 這條收尾規則，position 是否在圍欄區塊裡；圍欄那兩行也算，沒有收尾的一路算到文字結尾。"""
++    opener, start = None, 0
+     for line in text.split("\n"):
+         match = FENCE.match(line)
+         if position <= start + len(line):
+-            return fence is not None or match is not None
+-        if fence is None and match:
+-            fence = match[1]
+-        elif match and match[1] == fence and not line[match.end() :].strip():
+-            fence = None
++            return opener is not None or match is not None
++        if opener is None:
++            opener = match
++        elif match and closes(opener, match):
++            opener = None
+         start += len(line) + 1
+-    return fence is not None
++    return opener is not None
++
++
++def fenced(text, position):
++    """position 是否落在程式圍欄圍起來的區塊裡：網站與 Notebook 的認法任一個認為在區塊裡就算。"""
++    # 驗證：區塊外符合 FENCE 的行開一個區塊；區塊裡照 closes_superfences（網站）或 closes_commonmark（Notebook）
++    # 收尾，其他符合 FENCE 的行是區塊內容。兩種認法各跑一次，任一個在區塊裡就算。superfences 因選項寫錯或縮排
++    # 不夠而放棄的圍欄，這裡仍當成程式區塊。
++    # 不涵蓋：縮排四格的程式區塊與 HTML 的 <pre>；行中間出現 ```python 再換行時，scripts/build_course.py 會從
++    # 那裡切出 Notebook 的程式格，這裡只認行首的圍欄。
++    return any(inside_fence(text, position, closes) for closes in (closes_superfences, closes_commonmark))
+ 
+ 
+ def undo_patches(text, patches, where, absent_ok=False):
+diff --git a/docs/technical-review-guide.md b/docs/technical-review-guide.md
+index 2b16c5b8..f971c64a 100644
+--- a/docs/technical-review-guide.md
++++ b/docs/technical-review-guide.md
+@@ -12,7 +12,7 @@
+ 
+ 審閱者不必知道歷史作者task，不能為了填欄位猜一個。若協調者有可靠的作者task紀錄，可以提供 `author_tasks`；checker會拒絕作者task與reviewer相同。這個欄位是可選的，作者獨立性仍由實際派工紀錄負責。`reviewer_task`必須是審閱者自己的完整task名稱，`reviewer_context`填 `fresh`。checker能核對報告中的身分與唯一性，不能證明某個task真的執行過、真的讀過來源，或作者沒有偽造署名。
+ 
+-報告由該審閱者寫到 `docs/technical-reviews/<節號>.json`。作者修訂教材後，讓同一位審閱者重新核對；原task已無法呼叫時，再派一位新審閱者完整重審。作者與協調者不能只更新舊報告的hash或自行改成pass。例外是作者直接要求的小補丁：每筆只改一小段文字（新舊各不超過80字，不跨行，不碰程式區塊、圖與連結），記在該輪的作者補丁清單（manifest 的 `author_patches`），寫明是作者要求、沒有經過 AI 審閱；閘門核對現行版本倒退這些補丁後正好是審閱過的版本，才承認原審閱。舊版本可從Git歷史追查。
++報告由該審閱者寫到 `docs/technical-reviews/<節號>.json`。作者修訂教材後，讓同一位審閱者重新核對；原task已無法呼叫時，再派一位新審閱者完整重審。作者與協調者不能只更新舊報告的hash或自行改成pass。例外是作者直接要求的小補丁：每筆只改 Markdown 原文裡的一小段文字，條件以 `docs/review-tools/incremental_revision.py` 的 `author_patches` 與 `undo_patches` 為準（例如新舊各不超過80字、不跨行、不落在程式圍欄裡），記在該輪的作者補丁清單（manifest 的 `author_patches`），寫明是作者要求、沒有經過 AI 審閱；閘門核對現行版本倒退這些補丁後正好是審閱過的版本，才承認原審閱。補丁內容的對錯由要求的作者負責，改到行內程式碼、數學式、連結或沒有圍欄的程式區塊裡的字時也一樣。舊版本可從Git歷史追查。
+ 
+ ## 每節實際要做的核對
+ 
+diff --git a/tests/test_incremental_revision_review.py b/tests/test_incremental_revision_review.py
+index 0e9ea8fe..18a877dc 100644
+--- a/tests/test_incremental_revision_review.py
++++ b/tests/test_incremental_revision_review.py
+@@ -1266,6 +1266,12 @@ def test_overlapping_occurrences_of_new_text_are_counted_separately(tmp_path):
+         "```\n````\n" + PATCH_NEW + "\n```\n",
+         "~~~\n```\n" + PATCH_NEW + "\n~~~\n",
+         "```\n```python\n" + PATCH_NEW + "\n```\n",
++        # 行首和開頭那行不同的同一串記號，網站（superfences）不當成收尾。
++        "```python\n  ```\n" + PATCH_NEW + "\n```\n",
++        "```python\n    ```\n" + PATCH_NEW + "\n```\n",
++        "```python\n> ```\n" + PATCH_NEW + "\n```\n",
++        # 網站到第二個 ``` 才收尾；Notebook 的 CommonMark 在 ```` 就收尾，第二個 ``` 又開了一個程式區塊。
++        "```\na\n````\nb\n```\n" + PATCH_NEW + "\n```\n",
+     ],
+     ids=[
+         "inside",
+@@ -1278,6 +1284,10 @@ def test_overlapping_occurrences_of_new_text_are_counted_separately(tmp_path):
+         "longer",
+         "other_char",
+         "info",
++        "two_space_close",
++        "four_space_close",
++        "quoted_close",
++        "notebook_reopens",
+     ],
+ )
+ def test_new_text_inside_a_fenced_code_block_is_rejected(tmp_path, body):
+@@ -1288,8 +1298,15 @@ def test_new_text_inside_a_fenced_code_block_is_rejected(tmp_path, body):
+ 
+ @pytest.mark.parametrize(
+     "block",
+-    ["```python\nprint(4)\n```\n", "~~~\nprint(4)\n~~~\n", "````\n```\nprint(4)\n````\n", "```\nprint(4)\n```  \n"],
+-    ids=["backticks", "tildes", "longer_fence", "trailing_space"],
++    [
++        "```python\nprint(4)\n```\n",
++        "~~~\nprint(4)\n~~~\n",
++        "````\n```\nprint(4)\n````\n",
++        "```\nprint(4)\n```  \n",
++        "> ```\n> print(4)\n> ```\n",
++        "  ```\n  print(4)\n  ```\n",
++    ],
++    ids=["backticks", "tildes", "longer_fence", "trailing_space", "quoted", "indented"],
+ )
+ def test_new_text_after_a_closed_fenced_block_is_undone(tmp_path, block):
+     text = INTRO + "## 99.1 權重\n\n" + block + "\n" + PATCH_NEW + "\n"
