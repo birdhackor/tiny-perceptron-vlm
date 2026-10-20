@@ -25,11 +25,13 @@
 
 ## 獨立性
 
-完成並存下自己的原始判斷以前，**不看**：
+完成並存下自己的原始判斷以前，**不看**下面這些位置。提示詞明確指出路徑的凍結原文、凍結圖與工具，照路徑直接讀，不在此限：
 
-- 其他角色的報告：`docs/course-review-20261019/reviews/` 底下除了你自己目錄以外的檔；
-- 這一節以前的審閱紀錄與問題：`docs/technical-reviews/*.json`、`docs/course-repair-20261017/`、`docs/course-revision-20261016/`、`docs/course-publish-20261008/` 底下的審閱報告；
+- 這一輪其他審閱者的紀錄：`docs/course-review-20261019/` 底下除了你自己報告目錄以外的審閱報告、處置、seal、閱讀計畫與提示詞（例如 `reviews/` 裡別人的目錄、`dispositions-*.json`、`seal-*.json`、`reader-plan-*.json`、`prompts/`），以及 `docs/technical-reviews/artifacts/` 裡別人的目錄；
+- 以前各輪的審閱紀錄、問題與處置：`docs/technical-reviews/*.json`、`docs/reader-reviews/`、`docs/course-repair-20261008/`、`docs/course-repair-20261017/`、`docs/course-revision-20261005/`、`docs/course-revision-20261007-phase7/`、`docs/course-revision-20261016/`、`docs/course-publish-20261008/`、`docs/course-inline-code-20261017/`；
 - `outputs/`（除了上面的 PNG）。
+
+在 repo 裡做大範圍搜尋時，先排除上面這些位置再搜，例如 `rg` 加上 `--glob '!docs/course-review-20261019/**' --glob '!docs/technical-reviews/**' --glob '!docs/reader-reviews/**' --glob '!docs/course-repair-*/**' --glob '!docs/course-revision-*/**' --glob '!docs/course-publish-20261008/**' --glob '!docs/course-inline-code-20261017/**' --glob '!outputs/**'`。自己的報告與 artifact 目錄直接照路徑列出。若仍意外看到這些位置的內容，照實寫進報告與回覆的訊號C。
 
 `docs/technical-sources/` 是找證據的候選庫，可以用來找線索，但它的摘要不能當證據；原文要自己讀。
 
