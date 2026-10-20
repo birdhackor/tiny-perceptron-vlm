@@ -318,7 +318,7 @@ PKU-SafeRLHF 起步包標示 CC-BY-NC-4.0；它與本課原創盒子題的授權
 .venv/bin/python scripts/infer_modal.py checkpoints/joint.pt --color red --shape square --frequency 220 --prompt "joint?" --tokens 16
 ```
 
-希望答案依序為 `circle`、`high`、`square,low`。開啟 JSON 的 `answer` 和它們比較，再看結束是否完整。兩個入口的驗證題全對，也沒有保證接上文字核心後每題都對。
+希望答案依序為 `circle`、`high`、`square,low`。開啟 JSON 的 `answer` 和它們比較，再看結束是否完整。兩個入口的驗證題全對，也沒有保證接上文字核心後每題都對。模型小、訓練短，同一個固定配方在不同電腦上也可能訓練出不同結果，所以你看到的答案可能和希望的不同；不同時先確認命令照抄、檢查點存在，再拿整份驗證題的成績判斷，不要只憑這三題。
 
 `vision.pt`、`audio.pt`、`joint.pt` 是多模態檢查點：裡面同時有文字核心（`model.language`）與圖片、聲音的入口和接頭。檢查文字能力時，要用其中的文字核心評估同一份文字驗證題；`evaluate.py` 只接受純文字的檢查點，直接把多模態檢查點交給它會報錯。[11.7](chapters/11.md#11.7)解釋這個對照。
 
@@ -493,7 +493,7 @@ FlashAttention是分塊安排注意力計算、減少中間表儲存與搬移的
 .venv/bin/python scripts/infer.py checkpoints/attributes-int4.pt --chat --prompt "color=blue;shape=circle;pitch=low;color?" --tokens 24 --device cpu --json
 ```
 
-希望答案是`blue`。這一題先讓你查看前後有沒有改變；完整能力檢查仍用同一份驗證題。原訓練檔可能含最佳化器狀態與隨機狀態，不能把訓練狀態的差異也算作量化收益。
+希望答案是`blue`。這一題先讓你查看前後有沒有改變；完整能力檢查仍用同一份驗證題。原模型若本來就沒答 `blue`，量化後也不必是 `blue`：這一題比的是前後兩次的答案是否一致。原訓練檔可能含最佳化器狀態與隨機狀態，不能把訓練狀態的差異也算作量化收益。
 
 本機練習先比較純模型張量 bytes，不要求另做原版部署匯出。用任何純文字編輯器把下段存成 `outputs/size_check.py`，再用 `.venv/bin/python outputs/size_check.py` 執行，應印出三行，每個檔案一行。它只讀剛才的三個檔案：`model` 保存模型數字，最佳化器與其他訓練狀態在它之外。每份模型張量的格數乘每格 bytes，再加總；量化版的低位元碼、刻度與保留的浮點張量都計入。
 
