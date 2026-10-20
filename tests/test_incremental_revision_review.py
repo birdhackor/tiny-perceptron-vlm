@@ -1266,6 +1266,12 @@ def test_overlapping_occurrences_of_new_text_are_counted_separately(tmp_path):
         "```\n````\n" + PATCH_NEW + "\n```\n",
         "~~~\n```\n" + PATCH_NEW + "\n~~~\n",
         "```\n```python\n" + PATCH_NEW + "\n```\n",
+        # 行首和開頭那行不同的同一串記號，網站（superfences）不當成收尾。
+        "```python\n  ```\n" + PATCH_NEW + "\n```\n",
+        "```python\n    ```\n" + PATCH_NEW + "\n```\n",
+        "```python\n> ```\n" + PATCH_NEW + "\n```\n",
+        # 網站到第二個 ``` 才收尾；Notebook 的 CommonMark 在 ```` 就收尾，第二個 ``` 又開了一個程式區塊。
+        "```\na\n````\nb\n```\n" + PATCH_NEW + "\n```\n",
     ],
     ids=[
         "inside",
@@ -1278,6 +1284,10 @@ def test_overlapping_occurrences_of_new_text_are_counted_separately(tmp_path):
         "longer",
         "other_char",
         "info",
+        "two_space_close",
+        "four_space_close",
+        "quoted_close",
+        "notebook_reopens",
     ],
 )
 def test_new_text_inside_a_fenced_code_block_is_rejected(tmp_path, body):
@@ -1288,8 +1298,15 @@ def test_new_text_inside_a_fenced_code_block_is_rejected(tmp_path, body):
 
 @pytest.mark.parametrize(
     "block",
-    ["```python\nprint(4)\n```\n", "~~~\nprint(4)\n~~~\n", "````\n```\nprint(4)\n````\n", "```\nprint(4)\n```  \n"],
-    ids=["backticks", "tildes", "longer_fence", "trailing_space"],
+    [
+        "```python\nprint(4)\n```\n",
+        "~~~\nprint(4)\n~~~\n",
+        "````\n```\nprint(4)\n````\n",
+        "```\nprint(4)\n```  \n",
+        "> ```\n> print(4)\n> ```\n",
+        "  ```\n  print(4)\n  ```\n",
+    ],
+    ids=["backticks", "tildes", "longer_fence", "trailing_space", "quoted", "indented"],
 )
 def test_new_text_after_a_closed_fenced_block_is_undone(tmp_path, block):
     text = INTRO + "## 99.1 權重\n\n" + block + "\n" + PATCH_NEW + "\n"
