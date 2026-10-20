@@ -10,7 +10,7 @@ v2的MoE pretrain、MoE SFT、MoE joint與Dense joint四組推論輸出已公開
 
 第20章另有[固定公開清單](natural-assistant/v4/public-release.json)，本版指定Qwen3-VL-2B-Instruct底座與Whisper-large-v3-turbo，不加LoRA修正。先依[20.2](../course/chapters/20.md#20.2)試用，操作與資源見[學生指引](natural-assistant/v4/STUDENT.md)，能力與限制見[20.13](../course/chapters/20.md#20.13)。它延伸已有上游能力，與自行訓練主線各自驗收。
 
-共同基礎：**猜下一個字 → 理解上下文 → Attention → 可訓練、可驗證的 Dense Transformer → 文字對話**。先用字元 tokenizer，BPE 可回讀；之後按問題進入行為、多模態、架構、效率與壓縮單元。
+共同基礎：**猜下一個字 → 理解上下文 → Attention → 可訓練、可驗證的 Dense Transformer → 文字對話**。先用字元 tokenizer，BPE（位元組對編碼，[6.2](../course/chapters/06.md#6.2)）可回讀；之後按問題進入行為、多模態、架構、效率與壓縮單元。
 
 **容易理解是最高優先度。** 每個小節只處理一個主要概念，改動一小段程式，並留下一個能觀察或驗證的結果。先建立直覺和簡單基準，再因具體問題引入後續設計；歷史背景放在對應概念旁。可以回到小模型、切換 checkpoint 或使用獨立實驗；章節排序依概念依賴與理解難度安排。
 
