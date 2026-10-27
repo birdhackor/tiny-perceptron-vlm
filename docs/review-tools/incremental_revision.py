@@ -24,6 +24,12 @@ PATCH_FIELDS = ("id", "path", "old", "new", "requested_by", "requested_on", "rea
 PATCH_LIMIT = 80
 # old／new 不能出現的記號：換行會跨行，``` 與 ~~~ 是程式區塊的圍欄，![ 與 ]( 是圖與連結的語法。
 PATCH_FORBIDDEN = {"\n": "換行", "\r": "換行", "```": "「```」", "~~~": "「~~~」", "![": "「![」", "](": "「](」"}
+HISTORICAL_INPUTS = {
+    "docs/review-tools/historical_fix_rechecks.py",
+    "docs/course-review-20261019/tools/preflight.py",
+    "docs/course-review-20261019/tools/issue_inventory.py",
+    "tests/test_historical_rechecks.py",
+}
 # 程式圍欄所在的行：行首（空白與引用記號 >）、三個以上的反引號或波浪號、同一行其餘的字。
 FENCE = re.compile(r"([> \t]*)(`{3,}|~{3,})(.*)")
 
@@ -306,6 +312,31 @@ def reported_issues(value, pointer=""):
     return result
 
 
+def historical_rechecks(root, manifest, live, tasks, sealed):
+    """沒有明示 sidecar 就維持原規則；gate 與局部問題清單共用同一驗證器。"""
+    if "historical_fix_rechecks" not in manifest:
+        return None
+    from types import SimpleNamespace
+
+    helper = module("revision_historical_rechecks", Path(__file__).with_name("historical_fix_rechecks.py"))
+    names = (
+        "require",
+        "document",
+        "artifact",
+        "node",
+        "owner",
+        "at",
+        "local",
+        "sha",
+        "module",
+        "check_tool_audit",
+        "POLICY",
+    )
+    return helper.Rechecks(
+        root, manifest, live, tasks, sealed, SimpleNamespace(**{name: globals()[name] for name in names})
+    )
+
+
 def check_dispositions(root, manifest, selected, live, tasks, sealed, earlier=None):
     """核對每個問題的處置；earlier 是各頁倒退作者補丁得到的較早版本（page_versions），回傳修正的複查靠了哪些補丁。"""
     earlier = earlier or {}
@@ -318,7 +349,10 @@ def check_dispositions(root, manifest, selected, live, tasks, sealed, earlier=No
     phase = sealed[collected["wave"]].get(collected["role"])
     if phase:
         require(at(phase["started_at"]) <= received <= at(phase["completed_at"]), "dispositions outside closure phase")
+    historical = historical_rechecks(root, manifest, live, tasks, sealed)
     required = {}
+    if historical:
+        required.update({ref["sha256"]: ref for ref in historical.reports})
     note_reports = {}
     for page in manifest["pages"]:
         for role in selected:
@@ -389,11 +423,21 @@ def check_dispositions(root, manifest, selected, live, tasks, sealed, earlier=No
                 for checked in report.get("checked_files", []):
                     if checked.get("sha256") == sha(local(root, checked["path"]).read_bytes()):
                         checked_files.add(checked["path"])
+                if historical and set(decision.get("affected_files", [])) - checked_files:
+                    checked_files.update(historical.files(decision, verification))
                 continue
             value = node(report, verification["json_pointer"])
             pid = value.get("page_id", value.get("lesson_id"))
             require(pid in live and value.get("verdict") == "pass", "fix lacks reviewer pass on affected page")
             used = patched_version(value.get("source_sha256"), live[pid]["source_sha256"], earlier.get(pid, {}))
+            figures = value.get("figures_sha256", value.get("figure_sha256"))
+            if (
+                historical
+                and (used is None or figures != live[pid]["figures_sha256"])
+                and historical.page(decision, verification, pid)
+            ):
+                checked_pages.add(pid)
+                continue
             require(used is not None, "fix recheck is stale")
             relied.setdefault(pid, set()).update(used)
             require(
@@ -408,6 +452,8 @@ def check_dispositions(root, manifest, selected, live, tasks, sealed, earlier=No
                 (affected or files) and affected <= checked_pages and files <= checked_files,
                 "fix does not cover affected pages/files",
             )
+    if historical:
+        historical.finish()
     require(actual == expected, "reported issues and dispositions differ")
     return relied
 
@@ -661,6 +707,11 @@ def check_tool_audit(root, manifest, task_roles, sealed):
         "tests/test_incremental_revision_review.py",
     ):
         require(checked.get(name) == sha(local(root, name).read_bytes()), "tool audit version stale: " + name)
+    if "historical_fix_rechecks" in manifest:
+        for name in HISTORICAL_INPUTS:
+            require(
+                checked.get(name) == sha(local(root, name).read_bytes()), "historical tool audit version stale: " + name
+            )
     if "baseline_supplements" in manifest:
         # 驗證：checked_files列了候選manifest指定的補充還原清單，SHA等於它現在的位元組；清單一改，舊報告就過期。
         # 不涵蓋：清單指到的舊副本；它們由清單裡的sha256與重放時的舊身分核對綁住。
@@ -730,6 +781,8 @@ def audit_manifest(root, path, stage="all"):
             "docs/course-revision-20261016/tools/freeze_sources.py",
             "tests/test_incremental_revision_review.py",
         }
+        if "historical_fix_rechecks" in manifest:
+            required_implementation |= HISTORICAL_INPUTS
         require(
             required_implementation <= set(manifest.get("implementation", {})), "implementation inventory incomplete"
         )

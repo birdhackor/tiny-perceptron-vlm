@@ -54,7 +54,7 @@ FIELDS = ("source", "selector", "source_sha256", "figures_sha256", "notebook", "
 TRANSCRIBED = {
     "audit_manifest": "d018868b8d6f9029540288d0265c13913b8f21f32080ee55b1725f121ef1e121",
     "reader_closure": "3107611701489ad4dfe4a6d415c968499a44770633e4d43897dbb90d8dc514ed",
-    "check_dispositions": "2b2fc1079b9dfe08f0bcdcb5e291ef9ee63c833d112a6188e04b7dbc6dc6db23",
+    "check_dispositions": "6bc96e7877b7ed86e76471f1c2c8b913d9b84f614063e18d3cc3c5060549569a",
 }
 
 

@@ -65,6 +65,7 @@
 | 6.7 一個 token 一定是一個完整字嗎？ | [閱讀](../course/chapters/06.md#6.7) | [開啟](../notebooks/06/6.7.ipynb) |
 | 6.8 訓練視窗是在切詞嗎？ | [閱讀](../course/chapters/06.md#6.8) | [開啟](../notebooks/06/6.8.ipynb) |
 | 6.9 讀檔分段會改變切詞嗎？ | [閱讀](../course/chapters/06.md#6.9) | [開啟](../notebooks/06/6.9.ipynb) |
+| 6.10 分塊邊界可以跟語言模型一起學嗎？ | [閱讀](../course/chapters/06.md#6.10) | [開啟](../notebooks/06/6.10.ipynb) |
 | 7.1 對話怎麼表示？ | [閱讀](../course/chapters/07.md#7.1) | [開啟](../notebooks/07/7.1.ipynb) |
 | 7.2 模型怎麼知道輪到誰？ | [閱讀](../course/chapters/07.md#7.2) | [開啟](../notebooks/07/7.2.ipynb) |
 | 7.3 哪些位置應該學？ | [閱讀](../course/chapters/07.md#7.3) | [開啟](../notebooks/07/7.3.ipynb) |

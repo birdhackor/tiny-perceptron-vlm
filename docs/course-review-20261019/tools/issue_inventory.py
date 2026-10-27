@@ -139,7 +139,7 @@ def collection(draft, dispositions, sealed, mode, errors, pending):
         errors.append("dispositions_collection: " + message(error))
 
 
-def check_decision(root, draft, decision, live, tasks, earlier=None):
+def check_decision(root, draft, decision, live, tasks, earlier=None, historical=None):
     """搬自 check_dispositions 對每一筆處置的條件。閘門遇到第一個錯就停；這裡列出這一筆的全部錯誤。
 
     earlier 同閘門：各頁倒退作者補丁得到的較早版本（preflight.patch_pages）。
@@ -190,11 +190,21 @@ def check_decision(root, draft, decision, live, tasks, earlier=None):
                 for checked in report.get("checked_files", []):
                     if checked.get("sha256") == review.sha(review.local(root, checked["path"]).read_bytes()):
                         checked_files.add(checked["path"])
+                if historical and set(decision.get("affected_files", [])) - checked_files:
+                    checked_files.update(historical.files(decision, verification))
                 continue
             value = review.node(report, verification["json_pointer"])
             pid = value.get("page_id", value.get("lesson_id"))
             review.require(pid in live and value.get("verdict") == "pass", "fix lacks reviewer pass on affected page")
             used = review.patched_version(value.get("source_sha256"), live[pid]["source_sha256"], earlier.get(pid, {}))
+            figures = value.get("figures_sha256", value.get("figure_sha256"))
+            if (
+                historical
+                and (used is None or figures != live[pid]["figures_sha256"])
+                and historical.page(decision, verification, pid)
+            ):
+                checked_pages.add(pid)
+                continue
             review.require(used is not None, "fix recheck is stale")
             review.require(
                 value.get("figures_sha256", value.get("figure_sha256")) == live[pid]["figures_sha256"],
@@ -233,6 +243,13 @@ def inventory(root, draft, live, mode, stage):
     patches, _ = preflight.patch_files(root, draft, live, errors)
     earlier = preflight.patch_pages(root, draft, live, patches, errors)
     required, note_reports = required_reports(draft, selected, errors)
+    historical = None
+    try:
+        historical = review.historical_rechecks(root, draft, live, task_roles, sealed)
+        if historical:
+            required.update({ref["sha256"]: ref for ref in historical.reports})
+    except CAUGHT as error:
+        errors.append("historical_fix_rechecks: " + message(error))
     listed = {}
     for ref in draft.get("issue_reports", []):
         try:
@@ -273,9 +290,14 @@ def inventory(root, draft, live, mode, stage):
                 actual.add(key)
                 if key not in expected:
                     unmatched.append(describe(decision))
-            problems += check_decision(root, draft, decision, live, task_roles, earlier)
+            problems += check_decision(root, draft, decision, live, task_roles, earlier, historical)
             if problems:
                 failing.append({**describe(decision), "errors": problems})
+    if historical:
+        try:
+            historical.finish()
+        except CAUGHT as error:
+            errors.append("historical_fix_rechecks: " + message(error))
     result = {
         "tool": "issue_inventory",
         "note": NOTE,
