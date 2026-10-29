@@ -13,7 +13,7 @@ from pathlib import Path
 from scripts.omni_revision.finance import POLICY
 
 ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_CANDIDATES = "docs/course-revision-20261029-omni/infrastructure/image-candidates-v1.json"
+DEFAULT_CANDIDATES = "docs/course-revision-20261029-omni/infrastructure/image-candidates-v2.json"
 PACKAGES = (
     "torch",
     "transformers",
@@ -40,13 +40,35 @@ def candidates(path):
         raise ValueError("App ID重複或格式不符")
     if any(not row.get("primary_log_sha256") or not row.get("primary_job_url") for row in values):
         raise ValueError("每個既有App需有原始課程job來源")
+    direct = document.get("images", [])
+    if not isinstance(direct, list) or len(direct) > 24:
+        raise ValueError("明示既有Image清單最多24筆")
+    identifiers = [row["image_id"] for row in direct]
+    if len(set(identifiers)) != len(identifiers) or any(
+        not re.fullmatch(r"im-[A-Za-z0-9]{10,}", x) for x in identifiers
+    ):
+        raise ValueError("Image ID重複或格式不符")
+    for row in direct:
+        source = (ROOT / row["primary_source_path"]).resolve()
+        if not source.is_relative_to(ROOT.resolve()) or not source.is_file():
+            raise ValueError("Image來源必須是repo內既有檔案")
+        raw = source.read_bytes()
+        line = row["primary_line"]
+        if hashlib.sha256(raw).hexdigest() != row["primary_source_sha256"]:
+            raise ValueError("Image原始來源bytes不符")
+        lines = raw.decode().splitlines()
+        if type(line) is not int or not 1 <= line <= len(lines):
+            raise ValueError("Image來源行號不符")
+        if lines[line - 1] != row["exact_source_excerpt"] or row["image_id"] not in lines[line - 1]:
+            raise ValueError("Image來源原句或ID不符")
     return document
 
 
 async def inspect_existing(document, api, client):
     """只用唯讀RPC；缺失物件照實記錄，沒有建置或建立物件的fallback。"""
     results = []
-    image_origins = {}
+    image_origins = {row["image_id"]: [] for row in document.get("images", [])}
+    direct_origins = {row["image_id"]: row for row in document.get("images", [])}
     for row in document["apps"]:
         app_id = row["app_id"]
         try:
@@ -65,7 +87,7 @@ async def inspect_existing(document, api, client):
                     "grpc_status": getattr(getattr(error, "status", None), "name", None),
                 }
             )
-    registry = {"status": "not_queried_app_images_available"}
+    registry = {"status": "not_queried_explicit_or_app_images_available"}
     named_origins = {}
     if not image_origins:
         try:
@@ -100,6 +122,7 @@ async def inspect_existing(document, api, client):
                     "image_id": image_id,
                     "status": "existing_image_resolved",
                     "source_app_ids": image_origins[image_id],
+                    "source_direct_receipt": direct_origins.get(image_id),
                     "source_image_tags": named_origins.get(image_id, []),
                     "python_version_info": metadata.python_version_info,
                     "image_builder_version": metadata.image_builder_version,
@@ -135,6 +158,7 @@ def main():
         args.candidates,
         ROOT / ".github/workflows/omni-revision.yml",
         ROOT / "scripts/omni_revision/finance.py",
+        *sorted({ROOT / row["primary_source_path"] for row in document.get("images", [])}),
     ]:
         name = path.relative_to(ROOT).as_posix()
         raw = path.read_bytes()
@@ -179,6 +203,7 @@ def main():
         "image_created_or_built": False,
         "limitations": [
             "Image存在與packages metadata不是GPU可用、CUDA初始化、模型載入或訓練成功。",
+            "舊日誌的Building image只是候選來源，不是該層建置成功證據；本次只查ImageFromId。",
             "不存在的舊App/Image照實記unavailable，沒有建置或執行fallback。",
             "後續任何付費邊界仍須新鮮官方billing/inventory、完整硬上界及durable CAS reserve。",
         ],
