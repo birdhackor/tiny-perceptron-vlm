@@ -120,30 +120,34 @@ def main():
             raise ValueError("唯讀清冊工具／來源必須與實際commit一致")
         sources[name] = hashlib.sha256(raw).hexdigest()
     import modal
+    from google.protobuf.empty_pb2 import Empty
     from modal.client import _Client
     from modal_proto import api_pb2
 
     if modal.__version__ != "1.6.0":
         raise ValueError("唯讀RPC介面核對版本必須modal==1.6.0")
-    workspace = modal.Workspace.from_context()
-    if workspace.name != POLICY["workspace"]:
-        raise ValueError("認證workspace不是既有birdhackor")
 
     async def run():
         client = await _Client.from_env()
-        return await inspect_existing(document, api_pb2, client)
+        try:
+            workspace = await asyncio.wait_for(client._stub.WorkspaceNameLookup(Empty()), 8)
+            if workspace.username != POLICY["workspace"]:
+                raise ValueError("認證workspace不是既有birdhackor")
+            return await inspect_existing(document, api_pb2, client)
+        finally:
+            await client._close()
 
     apps, images, total = asyncio.run(run())
     receipt = {
         "schema_version": 1,
         "kind": "actual_client_only_existing_image_inventory",
         "observed_at": datetime.now(UTC).isoformat(),
-        "workspace": workspace.name,
+        "workspace": POLICY["workspace"],
         "environment": POLICY["environment"],
         "source_revision": revision,
         "modal_sdk_version": modal.__version__,
         "source_files": sources,
-        "rpc_allowlist": ["AppGetObjects", "ImageFromId"],
+        "rpc_allowlist": ["WorkspaceNameLookup", "AppGetObjects", "ImageFromId"],
         "apps": apps,
         "images": images,
         "image_dependencies_found": total,
