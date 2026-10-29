@@ -50,10 +50,8 @@ async def inspect_existing(document, api, client):
     for row in document["apps"]:
         app_id = row["app_id"]
         try:
-            response = await asyncio.wait_for(
-                client._stub.AppGetObjects(api.AppGetObjectsRequest(app_id=app_id, include_unindexed=True)), 8
-            )
-            objects = sorted({item.object.object_id for item in response.items})
+            response = await asyncio.wait_for(client._stub.AppGetLayout(api.AppGetLayoutRequest(app_id=app_id)), 8)
+            objects = sorted({item.object_id for item in response.app_layout.objects})
             image_ids = [identifier for identifier in objects if re.fullmatch(r"im-[A-Za-z0-9]{10,}", identifier)]
             for image_id in image_ids:
                 image_origins.setdefault(image_id, []).append(app_id)
@@ -147,7 +145,7 @@ def main():
         "source_revision": revision,
         "modal_sdk_version": modal.__version__,
         "source_files": sources,
-        "rpc_allowlist": ["WorkspaceNameLookup", "AppGetObjects", "ImageFromId"],
+        "rpc_allowlist": ["WorkspaceNameLookup", "AppGetLayout", "ImageFromId"],
         "apps": apps,
         "images": images,
         "image_dependencies_found": total,
