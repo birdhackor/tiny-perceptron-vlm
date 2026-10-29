@@ -1,0 +1,72 @@
+name: Client-only Omni curriculum infrastructure
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        type: choice
+        options: [inventory, initialize, transport-probe]
+        default: inventory
+        description: Read Modal metadata, initialize reconciled GitHub budget, or test GitHub transport without Modal
+      reconciliation_path:
+        type: string
+        default: docs/course-revision-20261029-omni/legacy-reconciliation.json
+        description: Exact committed independent legacy reconciliation; initialize only
+
+permissions:
+  contents: write
+
+# Only adopted same-repo workflows share this mutex; it is not a workspace lock.
+concurrency:
+  group: tiny-perceptron-course-gpu
+  cancel-in-progress: false
+
+jobs:
+  client:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      MODAL_ENVIRONMENT: ${{ vars.MODAL_ENVIRONMENT || 'main' }}
+      GH_TOKEN: ${{ github.token }}
+      OMNI_OPERATION: ${{ inputs.operation }}
+      OMNI_RECONCILIATION: ${{ inputs.reconciliation_path }}
+      OMNI_OUTPUT: outputs/omni-infrastructure-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          lfs: false
+          fetch-depth: 1
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - name: Install only the client SDK for metadata operations
+        if: env.OMNI_OPERATION != 'transport-probe'
+        env:
+          MODAL_TOKEN_ID: ${{ vars.MODAL_TOKEN_ID || secrets.MODAL_TOKEN_ID }}
+          MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+        run: |
+          set -euo pipefail
+          test -n "$MODAL_TOKEN_ID"
+          test -n "$MODAL_TOKEN_SECRET"
+          python -m pip install modal==1.6.0
+      - name: Read metadata or initialize the independently reconciled round
+        if: env.OMNI_OPERATION != 'transport-probe'
+        env:
+          MODAL_TOKEN_ID: ${{ vars.MODAL_TOKEN_ID || secrets.MODAL_TOKEN_ID }}
+          MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+        run: |
+          args=("$OMNI_OPERATION" --output "$OMNI_OUTPUT")
+          if [[ "$OMNI_OPERATION" == "initialize" ]]; then
+            args+=(--reconciliation "$OMNI_RECONCILIATION")
+          fi
+          python -m scripts.omni_revision.preflight "${args[@]}"
+      - name: Test GitHub weights and continuation transport without Modal
+        if: env.OMNI_OPERATION == 'transport-probe'
+        run: python -m scripts.omni_revision.github_transport_probe --output "$OMNI_OUTPUT"
+      - name: Preserve raw inventory, exact budget CAS commits and transport evidence
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: omni-infrastructure-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.OMNI_OUTPUT }}
+          if-no-files-found: error
