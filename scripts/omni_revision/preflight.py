@@ -41,7 +41,7 @@ def app_rows():
 
 
 def stopped_app(row):
-    return str(row.get("State", "")).lower() == "stopped" and str(row.get("Tasks", "")) == "0"
+    return str(row.get("state", "")).lower() == "stopped" and str(row.get("tasks", "")) == "0"
 
 
 def read_bounded(volume, name):

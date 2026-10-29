@@ -22,7 +22,7 @@ from scripts.omni_revision.finance import POLICY, GitHubLedger, digest, finish, 
 
 ROOT = Path(__file__).resolve().parents[2]
 IMAGE_ID = "im-1b8GW96gjEVRiK1vg5Jqa0"
-AUDIT_PATH = "docs/course-revision-20261029-omni/infrastructure/execution-probe-audit-v1.json"
+AUDIT_PATH = "docs/course-revision-20261029-omni/infrastructure/execution-probe-audit-v2.json"
 SOURCE_FILES = (
     ".github/workflows/omni-execution.yml",
     "scripts/omni_revision/execution.py",
@@ -33,6 +33,10 @@ SOURCE_FILES = (
     "scripts/selftrained/finance.py",
     "docs/selftrained/v2-gross-quota-20261006.json",
     "tests/test_omni_execution.py",
+    "scripts/omni_revision/attempt_inspection.py",
+    "scripts/omni_revision/reconcile_failed_probe.py",
+    "tests/test_omni_probe_reconciliation.py",
+    "docs/course-revision-20261029-omni/infrastructure/failed-probe-attempt-v1.json",
 )
 RATE_CEILINGS = {
     "gpu_hour_cost_l4": "0.8",
@@ -108,7 +112,6 @@ def identifiers(attempt_id):
         raise ValueError("探測 ID 必須使用唯一 GitHub run／attempt；禁止重用")
     return {
         "app_name": f"omni-{attempt_id}",
-        "sandbox_name": f"omni-{attempt_id}",
         "tags": {"omni-round": POLICY["round_id"], "omni-attempt": attempt_id},
     }
 
@@ -168,6 +171,19 @@ async def hard_wait(coroutine, seconds):
     return task.result()
 
 
+def redacted_create_error(error):
+    detail = str(getattr(error, "_grpc_message", ""))
+    values = [os.environ[key] for key in ("MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET", "GH_TOKEN") if os.environ.get(key)]
+    # 先遮完整值，再裁切；較長值優先，避免其較短前綴先被改寫。
+    for secret in sorted(values, key=len, reverse=True):
+        detail = detail.replace(secret, "[redacted]")
+    return {
+        "type": type(error).__name__,
+        "grpc_status": getattr(getattr(error, "_grpc_status", None), "name", None),
+        "redacted_server_detail": detail[:4000],
+    }
+
+
 async def run_owned_probe(client, api, app_type, sandbox_type, names, output, freshness, resources, network_access):
     """只有一個明示 SandboxCreate RPC；不使用 loader 的自動重試／取消 shield。"""
     receipt = {"started_at": now(), "success": False, "paid_call_started": False, "cleanup_checks": {}}
@@ -209,9 +225,7 @@ async def run_owned_probe(client, api, app_type, sandbox_type, names, output, fr
             entrypoint_args=["python", "-u", "-c", (ROOT / "scripts/omni_revision/probe_worker.py").read_text()],
             image_id=IMAGE_ID,
             timeout_secs=LIFETIME_SECONDS,
-            name=names["sandbox_name"],
             resources=resources,
-            runtime="runc",
             network_access=network_access,
             enable_snapshot=False,
             include_oidc_identity_token=False,
@@ -221,9 +235,13 @@ async def run_owned_probe(client, api, app_type, sandbox_type, names, output, fr
         preflight.write_json(output / "runtime-progress.json", receipt)
         creation_deadline = time.monotonic() + CREATE_SECONDS
         # retry=None 同時關掉 transport retry 與 server-driven throttle retry。
-        response = await hard_wait(
-            client._stub.SandboxCreate(request, retry=None, timeout=CREATE_SECONDS), CREATE_SECONDS
-        )
+        try:
+            response = await hard_wait(
+                client._stub.SandboxCreate(request, retry=None, timeout=CREATE_SECONDS), CREATE_SECONDS
+            )
+        except Exception as error:
+            receipt["create_error"] = redacted_create_error(error)
+            raise
         known_ids.add(response.sandbox_id)
         receipt["sandbox_id"] = response.sandbox_id
         preflight.write_json(
@@ -337,8 +355,8 @@ async def execute_async(names, output, freshness):
 
 def reconcile_stop(receipt, rows, names):
     """缺 App ID 的已派工、模糊／仍執行的回應均保留 unresolved。"""
-    own = [row for row in rows if row.get("App ID") == receipt.get("app_id")]
-    same_name = [row for row in rows if row.get("Description") == names["app_name"]]
+    own = [row for row in rows if row.get("app_id") == receipt.get("app_id")]
+    same_name = [row for row in rows if row.get("description") == names["app_name"]]
     if not receipt["paid_call_started"]:
         stopped = not own or all(preflight.stopped_app(row) for row in own)
     else:
@@ -369,7 +387,7 @@ def read_stopped_apps(receipt):
         rows = json.loads(completed.stdout)
         if not isinstance(rows, list):
             raise ValueError("官方 App inventory 非 list")
-        own = [row for row in rows if row.get("App ID") == receipt.get("app_id")]
+        own = [row for row in rows if row.get("app_id") == receipt.get("app_id")]
         if not receipt["paid_call_started"] or len(own) == 1 and preflight.stopped_app(own[0]):
             receipt["cleanup_checks"]["cleanup_completed_within_deadline"] = datetime.now(UTC) <= deadline
             return rows

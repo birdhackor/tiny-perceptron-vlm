@@ -116,6 +116,8 @@ def run_case(tmp_path, mode):
         assert request.definition.image_id == runner.IMAGE_ID
         assert request.definition.timeout_secs == 600
         assert not hasattr(request.definition, "env")
+        assert not hasattr(request.definition, "name")
+        assert not hasattr(request.definition, "runtime")
         if mode in {"ambiguous_create", "ambiguous_empty"}:
             raise TimeoutError("response lost after container create")
         return SimpleNamespace(sandbox_id=sandbox.object_id, metadata=None)
@@ -199,7 +201,7 @@ def test_single_create_exports_before_stop_and_ambiguity_never_replays(tmp_path,
     assert lookups and sandbox.terminate_count == (0 if mode == "ambiguous_empty" else 1)
     assert receipt["success"] is (mode == "normal")
     assert sandbox.stopped is (mode not in {"cleanup_failure", "ambiguous_empty"})
-    rows = [{"App ID": "ap-owned", "Description": "omni-probe-123-1", "State": "stopped", "Tasks": "0"}]
+    rows = [{"app_id": "ap-owned", "description": "omni-probe-123-1", "state": "stopped", "tasks": "0"}]
     final = runner.reconcile_stop(receipt, rows, runner.identifiers("probe-123-1"))
     assert final["resources_verified"] is (mode not in {"cleanup_failure", "ambiguous_empty"})
     if mode == "cleanup_failure":
@@ -208,7 +210,7 @@ def test_single_create_exports_before_stop_and_ambiguity_never_replays(tmp_path,
         assert runner.check_probe((tmp_path / "probe-result.json").read_bytes())["finite_identity_matmul"]
 
 
-@pytest.mark.parametrize("rows", [[], [{"App ID": "ap-owned", "State": "running", "Tasks": "1"}]])
+@pytest.mark.parametrize("rows", [[], [{"app_id": "ap-owned", "state": "running", "tasks": "1"}]])
 def test_missing_or_running_app_is_not_verified_cleanup(tmp_path, rows):
     receipt, *_ = run_case(tmp_path, "normal")
     final = runner.reconcile_stop(receipt, rows, runner.identifiers("probe-123-1"))
@@ -262,3 +264,13 @@ def test_hard_wait_does_not_wait_for_a_cancellation_shield(late_cleanup):
         assert time.monotonic() - started < 0.1
 
     asyncio.run(main())
+
+
+def test_error_redaction_precedes_truncation_and_longer_overlapping_values(monkeypatch):
+    monkeypatch.setenv("MODAL_TOKEN_ID", "test-prefix")
+    monkeypatch.setenv("MODAL_TOKEN_SECRET", "test-prefix-long-secret")
+    monkeypatch.setenv("GH_TOKEN", "test-cross-boundary-token")
+    error = SimpleNamespace(_grpc_message="test-prefix-long-secret " + "x" * 3960 + "test-cross-boundary-token")
+    detail = runner.redacted_create_error(error)["redacted_server_detail"]
+    assert "long-secret" not in detail and "test-cross" not in detail and "test-prefix" not in detail
+    assert len(detail) <= 4000
