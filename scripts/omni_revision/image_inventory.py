@@ -44,7 +44,7 @@ def candidates(path):
 
 
 async def inspect_existing(document, api, client):
-    """兩個固定唯讀RPC；缺失物件照實記錄，沒有建置或建立物件的fallback。"""
+    """只用唯讀RPC；缺失物件照實記錄，沒有建置或建立物件的fallback。"""
     results = []
     image_origins = {}
     for row in document["apps"]:
@@ -65,6 +65,29 @@ async def inspect_existing(document, api, client):
                     "grpc_status": getattr(getattr(error, "status", None), "name", None),
                 }
             )
+    registry = {"status": "not_queried_app_images_available"}
+    named_origins = {}
+    if not image_origins:
+        try:
+            response = await asyncio.wait_for(
+                client._stub.ImageListTags(
+                    api.ImageListTagsRequest(environment_name=POLICY["environment"], max_objects=24)
+                ),
+                8,
+            )
+            tags = []
+            for item in response.items:
+                if re.fullmatch(r"im-[A-Za-z0-9]{10,}", item.image_id):
+                    image_origins.setdefault(item.image_id, [])
+                    named_origins.setdefault(item.image_id, []).append(item.tag)
+                    tags.append({"tag": item.tag, "image_id": item.image_id})
+            registry = {"status": "read", "tags": tags, "more_pages_uninspected": bool(response.next_page_token)}
+        except Exception as error:
+            registry = {
+                "status": "unavailable",
+                "error_type": type(error).__name__,
+                "grpc_status": getattr(getattr(error, "status", None), "name", None),
+            }
     images = []
     for image_id in sorted(image_origins)[:24]:
         try:
@@ -77,6 +100,7 @@ async def inspect_existing(document, api, client):
                     "image_id": image_id,
                     "status": "existing_image_resolved",
                     "source_app_ids": image_origins[image_id],
+                    "source_image_tags": named_origins.get(image_id, []),
                     "python_version_info": metadata.python_version_info,
                     "image_builder_version": metadata.image_builder_version,
                     "selected_python_packages": {
@@ -93,7 +117,7 @@ async def inspect_existing(document, api, client):
                     "grpc_status": getattr(getattr(error, "status", None), "name", None),
                 }
             )
-    return results, images, len(image_origins)
+    return results, images, len(image_origins), registry
 
 
 def main():
@@ -135,7 +159,7 @@ def main():
         finally:
             await client._close()
 
-    apps, images, total = asyncio.run(run())
+    apps, images, total, registry = asyncio.run(run())
     receipt = {
         "schema_version": 1,
         "kind": "actual_client_only_existing_image_inventory",
@@ -145,9 +169,10 @@ def main():
         "source_revision": revision,
         "modal_sdk_version": modal.__version__,
         "source_files": sources,
-        "rpc_allowlist": ["WorkspaceNameLookup", "AppGetLayout", "ImageFromId"],
+        "rpc_allowlist": ["WorkspaceNameLookup", "AppGetLayout", "ImageListTags", "ImageFromId"],
         "apps": apps,
         "images": images,
+        "named_image_registry": registry,
         "image_dependencies_found": total,
         "image_dependency_limit": 24,
         "remote_compute_started": False,
