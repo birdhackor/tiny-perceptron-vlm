@@ -120,7 +120,7 @@ def main():
             raise ValueError("唯讀清冊工具／來源必須與實際commit一致")
         sources[name] = hashlib.sha256(raw).hexdigest()
     import modal
-    from modal._client import _Client
+    from modal.client import _Client
     from modal_proto import api_pb2
 
     if modal.__version__ != "1.6.0":
