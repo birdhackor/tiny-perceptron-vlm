@@ -24,16 +24,16 @@ from scripts.omni_revision.finance import POLICY, GitHubLedger, digest, finish, 
 
 ROOT = Path(__file__).resolve().parents[2]
 IMAGE_ID = execution.IMAGE_ID
-CREATE_SECONDS, CLEANUP_SECONDS = 180, 120
+CREATE_SECONDS, CLEANUP_SECONDS = 480, 120
 MAX_RESULT_BYTES = 128 * 1024**2
 MAX_CONTROL_BYTES = 16 * 1024**2
 MAX_ARTIFACT_BYTES = 256 * 1024**2
 ARTIFACT_RETENTION_DAYS = 7
-STORAGE_DAILY_CEILING = Decimal("0.10")
+STORAGE_DAILY_CEILING = Decimal("0.02")
 STORAGE_URL = "https://docs.github.com/en/billing/concepts/product-billing/github-actions"
-COMPONENTS = {"compute": "0.32", "startup_idle": "0.11", "build": "0", "egress": "0.01", "storage_cleanup": "0.21"}
+COMPONENTS = {"compute": "0.32", "startup_idle": "0.22", "build": "0", "egress": "0.01", "storage_cleanup": "0.10"}
 JOBS = ("dev-av", "dev-choice", "dev-sound")
-AUDIT = "docs/course-revision-20261029-omni/infrastructure/experiment-execution-audit-v1.json"
+AUDIT = "docs/course-revision-20261029-omni/infrastructure/experiment-execution-audit-v2.json"
 MODEL_FILES = tuple(
     f"tiny_perceptron/omni_products/{name}.py"
     for name in (
@@ -218,7 +218,7 @@ def cost_proof(rates, job, storage=None):
     storage_bound = (Decimal(MAX_ARTIFACT_BYTES) / 1024**3 * ARTIFACT_RETENTION_DAYS * STORAGE_DAILY_CEILING).quantize(
         Decimal("0.01"), rounding=ROUND_CEILING
     )
-    if storage_bound + Decimal("0.03") > usd(COMPONENTS["storage_cleanup"]):
+    if storage_bound + Decimal("0.06") > usd(COMPONENTS["storage_cleanup"]):
         raise ValueError("artifact 保存與其他收尾未完整保留")
     return {
         "observed_at": now(),
@@ -237,7 +237,7 @@ def cost_proof(rates, job, storage=None):
             "result_max_bytes": MAX_RESULT_BYTES,
             "artifact_retention_days": ARTIFACT_RETENTION_DAYS,
             "artifact_storage_bound_usd": str(storage_bound),
-            "other_cleanup_bound_usd": "0.03",
+            "other_cleanup_bound_usd": "0.06",
             "modal_persistent_bytes": 0,
             "modal_ephemeral_fs_retention": "Only this Sandbox lifetime; destroyed when exact owned Sandbox stops. No new Volume/image/Secret or persistent cache.",
             "accounting": "Actions artifact storage is external to Modal gross; this retained component also covers it assuming no free storage quota. No refund or free-tier assumption.",
@@ -273,6 +273,7 @@ async def read_ready(stream):
         text += part
         if len(text.encode()) > 4 * 1024**2:
             raise ValueError("worker stdout 超限")
+        print(part, end="", flush=True)  # worker沒有憑證；讓實際訓練進度同步留在Actions。
         if "OMNI_JOB_READY\n" in text:
             return text
     raise RuntimeError("worker 未匯出結果即結束")
@@ -327,7 +328,7 @@ async def run_owned_job(
             include_oidc_identity_token=False,
         )
         request = api.SandboxCreateRequest(app_id=app_id, definition=definition, tags=tags)
-        receipt.update(paid_call_started=True, paid_call_at=now())
+        receipt.update(paid_call_started=True, paid_call_at=now(), phase="SandboxCreate")
         preflight.write_json(output / "runtime-progress.json", receipt)
         creation_deadline = time.monotonic() + CREATE_SECONDS
         # retry=None 同時關掉 transport retry 與 server-driven throttle retry。
@@ -344,6 +345,8 @@ async def run_owned_job(
             output / "owned-resource.json", {"app_id": app_id, "sandbox_id": response.sandbox_id, **names}
         )
         sandbox = sandbox_type._new_hydrated(response.sandbox_id, client, response.metadata)
+        receipt["phase"] = "waiting_for_task_id"
+        preflight.write_json(output / "runtime-progress.json", receipt)
         await hard_wait(
             sandbox._get_task_id(
                 raise_if_task_complete=True,
@@ -352,8 +355,11 @@ async def run_owned_job(
             ),
             creation_deadline - time.monotonic(),
         )
+        receipt["phase"] = "worker_stdout_until_export_ready"
+        preflight.write_json(output / "runtime-progress.json", receipt)
         (output / "stdout.txt").write_text(await hard_wait(read_ready(sandbox.stdout), job["sandbox_seconds"] - 60))
         raw = await hard_wait(sandbox.filesystem.read_bytes("/tmp/omni-result.json"), 30)
+        receipt["phase"] = "exporting_result"
         result = json.loads(raw)
         if (
             len(raw) > 64 * 1024

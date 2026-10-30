@@ -28,7 +28,7 @@ def test_development_bundle_pins_exact_worker_configuration_and_local_sources():
     for name in runner.WORKER_FILES:
         assert archive.read(name) == (runner.ROOT / name).read_bytes()
     proof = runner.cost_proof(execution.RATE_CEILINGS, config, storage_fixture())
-    assert proof["reserved_usd"] == "0.65" and proof["resource_wall_bound_seconds"] == 1200
+    assert proof["reserved_usd"] == "0.65" and proof["resource_wall_bound_seconds"] == 1500
     with pytest.raises(ValueError):
         runner.job_config("formal-final-without-freeze")
 
@@ -106,7 +106,7 @@ def test_owned_runtime_exports_before_termination_and_never_replays_create(tmp_p
 
     async def create(request, **kwargs):
         calls.append(("create", request))
-        assert kwargs == {"retry": None, "timeout": 180}
+        assert kwargs == {"retry": None, "timeout": 480}
         assert request.definition.timeout_secs == 900
         assert not hasattr(request.definition, "name") and not hasattr(request.definition, "runtime")
         if mode.startswith("lost_"):
@@ -181,7 +181,7 @@ def test_owned_runtime_exports_before_termination_and_never_replays_create(tmp_p
 def test_storage_bound_checks_price_retention_and_aggregate_before_upload(tmp_path):
     proof = runner.cost_proof(execution.RATE_CEILINGS, runner.job_config("dev-av"), storage_fixture())
     assert proof["storage"]["artifact_retention_days"] == 7
-    assert proof["storage"]["artifact_storage_bound_usd"] == "0.18"
+    assert proof["storage"]["artifact_storage_bound_usd"] == "0.04"
     with pytest.raises(ValueError):
         runner.storage_quote(b"Price per GB/month Shared storage (artifacts and GitHub Packages) $100 USD")
     with pytest.raises(ValueError):
