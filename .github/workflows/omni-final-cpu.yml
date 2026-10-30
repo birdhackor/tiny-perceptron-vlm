@@ -1,0 +1,67 @@
+name: Fixed core final measurements and durable raw evidence
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: tiny-perceptron-course-gpu
+  cancel-in-progress: false
+
+jobs:
+  fixed-final:
+    if: github.repository == 'birdhackor/tiny-perceptron-vlm' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      PYTHONUTF8: '1'
+      OMNI_ATTEMPT: cpu-final-${{ github.run_id }}-${{ github.run_attempt }}
+      OMNI_OUTPUT: outputs/omni-final-${{ github.run_id }}-${{ github.run_attempt }}
+      MODAL_ENVIRONMENT: main
+      MODAL_SANDBOX_V2: '0'
+      HF_HUB_DISABLE_IMPLICIT_TOKEN: '1'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          lfs: false
+          fetch-depth: 1
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13.5'
+      - uses: astral-sh/setup-uv@v10.2.0
+      - name: Install fixed CPU dependencies
+        run: uv sync --extra cpu --locked
+      - name: Verify all real fixed inputs and reserve bounded storage once
+        id: reserve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MODAL_TOKEN_ID: ${{ vars.MODAL_TOKEN_ID || secrets.MODAL_TOKEN_ID }}
+          MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+        run: uv run --extra cpu --with modal==1.6.0 python -m scripts.omni_revision.cpu_final_execution reserve --attempt-id "$OMNI_ATTEMPT" --output "$OMNI_OUTPUT"
+      - name: Measure all four parts once and export complete or partial original evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: uv run --extra cpu python -m scripts.omni_revision.cpu_final_execution run --attempt-id "$OMNI_ATTEMPT" --output "$OMNI_OUTPUT"
+      - name: Check every evidence bound
+        if: always() && steps.reserve.outputs.reserved == 'true'
+        id: bound
+        run: uv run --extra cpu python -m scripts.omni_revision.cpu_final_execution bound --output "$OMNI_OUTPUT"
+      - name: Preserve original evidence for seven days
+        if: always() && steps.bound.outcome == 'success'
+        id: evidence
+        uses: actions/upload-artifact@v6
+        with:
+          name: omni-final-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.OMNI_OUTPUT }}
+          retention-days: 7
+          if-no-files-found: error
+      - name: Verify owned Release and actual provider limits, then finish without refund
+        if: always() && steps.reserve.outputs.reserved == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OMNI_ARTIFACT_OUTCOME: ${{ steps.evidence.outcome }}
+        run: uv run --extra cpu python -m scripts.omni_revision.cpu_final_execution finish --attempt-id "$OMNI_ATTEMPT" --output "$OMNI_OUTPUT"
