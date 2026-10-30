@@ -43,6 +43,29 @@ jobs:
       - uses: astral-sh/setup-uv@v10.2.0
       - name: Install fixed controller dependencies
         run: uv sync --extra cpu --locked
+      - name: Install and verify Qwen input speech preparation before reservation
+        if: inputs.job == 'qwen25'
+        timeout-minutes: 10
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends ffmpeg
+          python - <<'PY'
+          import io
+          import subprocess
+          import wave
+
+          audio = subprocess.run(
+              ["ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+               "flite=text=ready:voice=slt", "-t", "0.25", "-ac", "1", "-ar", "16000",
+               "-acodec", "pcm_s16le", "-f", "wav", "pipe:1"],
+              check=True, capture_output=True, timeout=30,
+          ).stdout
+          with wave.open(io.BytesIO(audio), "rb") as source:
+              assert (source.getnchannels(), source.getsampwidth(), source.getframerate()) == (1, 2, 16000)
+              samples = source.readframes(16000)
+              assert 1600 <= len(samples) <= 32000 and any(samples)
+          print("FFmpeg flite/slt produced nonempty mono PCM16 speech at 16 kHz before reservation")
+          PY
       - name: Verify the real Modal filesystem contract offline before reservation
         run: uv run --extra cpu --with modal==1.6.0 python -m pytest tests/test_omni_mature_modal_sdk.py -q
       - name: Prepare and reserve once, infer, export and stop the exact owned resources
