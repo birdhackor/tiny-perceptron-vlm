@@ -1,0 +1,218 @@
+"""Independent explicit fixtures only. Never run NN frozen final/Auto/retention."""
+from pathlib import Path
+import collections
+import copy
+import datetime
+import hashlib
+import json
+import re
+import sys
+from types import SimpleNamespace
+from unittest.mock import patch
+import torch
+
+ROOT=Path('/workspace/work/omni-models-v1')
+E=Path('/workspace/work/omni-final-evaluation-review-original-v1')
+sys.path.insert(0,str(ROOT))
+from scripts.omni_revision import core_final as final, core_evaluation as measured, core_report as report
+from tiny_perceptron.omni_products.data import Event, av_pair, split_a, sound_wave
+from tiny_perceptron.omni_products.inference import SOUND_MAP, OmniAssistant
+from tiny_perceptron.omni_products.reliability import select_policy
+
+def sha(p):return hashlib.sha256(Path(p).read_bytes()).hexdigest()
+def write(p,value):
+    p.parent.mkdir(parents=True,exist_ok=True)
+    p.write_text(json.dumps(value,ensure_ascii=False,indent=2)+'\n')
+
+data=json.loads((ROOT/'docs/omni-products/v1/data-definition.json').read_bytes())
+metrics=json.loads((ROOT/'docs/omni-products/v1/metrics.json').read_bytes())
+findings={};positive={}
+
+# Isolate opening prerequisites. Audit/commit guard is explicitly stubbed only in
+# this private fixture; no production final-opening path is ever touched.
+frozen=E/'fixtures/opening/frozen';core=E/'fixtures/opening/core';frozen.mkdir(parents=True,exist_ok=True);core.mkdir(parents=True,exist_ok=True)
+for name in ('formal-recipes.json','data-definition.json','metrics.json'):
+    (frozen/name).write_bytes((ROOT/'docs/omni-products/v1'/name).read_bytes())
+write(frozen/'codec-selection.json',{'explicit_fixture':True})
+selection={'final_opened':False,'implementation_sha256':final.source_binding(),'all_formal_jobs':{},'model_files':{},'formal_recipe_sha256':sha(frozen/'formal-recipes.json'),'data_definition_sha256':sha(frozen/'data-definition.json'),'metrics_sha256':sha(frozen/'metrics.json'),'codec_selection_sha256':sha(frozen/'codec-selection.json')}
+write(frozen/'model-selection.json',selection);write(frozen/'audit.json',{'explicit_fixture':True})
+formal_calls=[]
+def formal_must_not_be_needed(*args):formal_calls.append(args);raise AssertionError('unexpected fixture formal_result call')
+with patch.object(final,'FROZEN',frozen),patch.object(final,'AUDIT',frozen/'audit.json'),patch.object(final,'checked_audit',lambda:{'explicit_fixture_only':'sha'}),patch.object(final,'formal_result',formal_must_not_be_needed):
+    final.opening(core,sha(frozen/'model-selection.json'),create=True)
+    opened=json.loads((frozen/'final-opening.json').read_bytes())
+    assert opened['final_opened'] is True and not formal_calls
+    try:final.opening(core,sha(frozen/'model-selection.json'),create=True)
+    except FileExistsError:positive['opening_immutable_second_create_rejected']=True
+    else:raise AssertionError('opening overwritten')
+findings['incomplete_selection_opens']={'opening_fixture_path':str(frozen/'final-opening.json'),'opened':True,'formal_result_calls':len(formal_calls),'missing_fields':['selected','temperature','threshold','policy_feasible','sound_map'],'all_formal_jobs':{},'model_files':{},'note':'Other independent audit/HEAD gates stubbed to isolate unchecked selection schema; no production opening or model predictions.'}
+
+# Check source closure and audit/commit failure paths without claiming HEAD pass.
+sources=final.evaluation_sources()
+expected_paths={str(p.relative_to(ROOT)) for directory in ('tiny_perceptron/omni_products','tiny_perceptron/selftrained','tiny_perceptron/lesson_products') for p in (ROOT/directory).glob('*.py')}
+expected_paths|={f'scripts/omni_revision/{name}.py' for name in ('core_final','core_evaluation','core_selection','core_report')}
+assert set(sources)==expected_paths and all(sha(ROOT/name)==digest for name,digest in sources.items())
+audit_fixture=E/'fixtures/audit.json';audit={'status':'pass_for_reviewed_scope','reviewer_task':'explicit-fixture-reviewer','reviewed_files_sha256':sources}
+write(audit_fixture,audit)
+def matching_git(args,**kwargs):return (ROOT/args[2].split(':',1)[1]).read_bytes()
+with patch.object(final,'AUDIT',audit_fixture),patch.object(final.subprocess,'check_output',matching_git):assert final.checked_audit()==sources
+for label,mutate in [('root_reviewer',lambda v:v.update(reviewer_task='/root')),('pending',lambda v:v.update(status='pending')),('missing_source',lambda v:v['reviewed_files_sha256'].pop(next(iter(sources))))]:
+    value=copy.deepcopy(audit);mutate(value);write(audit_fixture,value)
+    with patch.object(final,'AUDIT',audit_fixture),patch.object(final.subprocess,'check_output',matching_git):
+        try:final.checked_audit()
+        except ValueError:pass
+        else:raise AssertionError(label)
+write(audit_fixture,audit)
+with patch.object(final,'AUDIT',audit_fixture),patch.object(final.subprocess,'check_output',lambda *a,**k:b'wrong git bytes'):
+    try:final.checked_audit()
+    except ValueError:positive['uncommitted_source_fixture_rejected']=True
+    else:raise AssertionError('wrong git bytes accepted')
+positive['evaluation_sources_exact_count']=len(sources)
+
+# AV generation is a toy development pair; predictions are explicit labels, not NN.
+toy=av_pair(split_a()['dev'][0])
+defs=[{'family':i,'variant':0,'panel':i//50,'labels':[0,1],'predeclared_chain_pair_index':i%2} for i in range(200)]
+av_calls=[]
+def label_predictions(model,examples,batch_size=64):
+    av_calls.append(len(examples));answers=[label for _,label in examples]
+    if len(av_calls)==1:answers[3]=2
+    if len(av_calls)==2:answers[0]=0
+    return answers
+with patch.object(measured,'av_pair',lambda *args:toy),patch.object(measured,'av_waveform_swap_control',lambda *args:toy),patch.object(measured,'av_predictions',label_predictions):
+    av=measured.evaluate_av(None,defs)
+assert av_calls==[400,200,200,400]
+assert av['primary']['families']==200 and av['primary']['correct']==199
+assert av['remove_image']['families']==av['remove_audio']['families']==200
+assert all(v['families']==50 for v in av['panels'].values())
+assert av['same_metadata_waveform_swap']['paired']['families']==200 and av['same_metadata_waveform_swap']['observations']==400
+positive['AV_full_denominators']={'prediction_batch_sizes':av_calls,'primary':av['primary'],'panel_n':[v['families'] for v in av['panels'].values()],'swap_paired_n':200,'swap_observations':400}
+
+class CodecFixture:
+    config=SimpleNamespace(codes=8,hop=80)
+    def encode_wave(self,wave):return torch.tensor([0,1,2,3]),len(wave)
+    def decode_codes(self,codes):return torch.repeat_interleave(codes.float(),80)
+    def chunks(self,codes):
+        for c in codes:yield c.float().repeat(80)
+codec=CodecFixture();snr_calls=[];generation_calls=[]
+def snr_fixture(*args):
+    i=len(snr_calls);snr_calls.append(i);return None if i==17 else 12.
+def generation_fixture(*args):
+    i=len(generation_calls);generation_calls.append(i);return {'program_success':i not in (11,93),'legal':True}
+programs=[[{'frequency':220,'duration_ms':100,'rest_ms':0}] for _ in range(200)]
+with patch.object(measured,'sound_wave',lambda program:torch.ones(320)),patch.object(measured,'active_reference_snr',snr_fixture),patch.object(measured,'generated_sound',generation_fixture):
+    sound=measured.evaluate_sound(codec,None,programs,E/'fixtures/sound')
+assert sound['families']==200 and sound['mean_active_reference_snr_db'] is None and sound['invalid_snr_families']==1
+assert sound['gold_program']['families']==200 and sound['gold_program']['correct']==198 and len(sound['chunk_controls'])==10
+positive['SNR_invalid_family_not_dropped']={'n':200,'invalid':1,'mean':None,'gold_program_correct':198,'gold_program_n':200}
+talker_calls=[]
+talker=SimpleNamespace(generate=lambda *args,**kw:talker_calls.append((args,kw)) or {'codes':torch.tensor([0,1]),'eos':True,'capped':False})
+decoder=SimpleNamespace(decode_codes=lambda codes:torch.zeros(37))
+generated=measured.generated_sound(decoder,talker,(Event(220,100),))
+assert talker_calls==[(((Event(220,100),),),{})] and generated['waveform']['samples']==37
+positive['Talker_generation_call_no_reference_or_forced_length']={'generate_args':'program only','decoded_samples':37,'reference_requested_samples':800,'not_cropped_or_extended_to_gold':True}
+
+# A wrong answer with a faithful actual semantic map isolates the mapping metric.
+class WrongSemanticFixture:
+    def video(self,item,with_sound):
+        program=SOUND_MAP['square']
+        return {'answer':'square','sound':{'program':program,'waveform':sound_wave(program),'eos':True,'capped':False}}
+with patch.object(measured,'av_pair',lambda *args:toy):
+    mapped=measured.evaluate_chain(WrongSemanticFixture(),[defs[0]],E/'fixtures/chain-one')
+assert mapped['mapping']['correct']==0
+findings['mapping_metric_conflates_A_error']={'fixture_A_answer':'square','gold_semantic':'circle','emitted_program_matches_actual_semantic_map':True,'reported_mapping_correct':mapped['mapping']['correct'],'only_analysis':'analysis_against_gold_program','actual_condition_program_success_not_reported':True}
+class FailedAVFixture:
+    def video(self,item,with_sound):raise RuntimeError('explicit fixture failure')
+with patch.object(measured,'av_pair',lambda *args:toy):
+    chain=measured.evaluate_chain(FailedAVFixture(),defs,E/'fixtures/chain-failed')
+assert chain['primary']['families']==200 and chain['primary']['correct']==0 and len(chain['rows'])==200
+positive['A_chain_all_failure_n']=200
+
+def c_families():
+    families=[]
+    for i in range(60):
+        def pred(ids,gold):return {'ids':ids,'gold':gold,'answer':gold,'logits':[10. if v==gold else 0. for v in ids]}
+        families.append({'family':str(i),'source':'explicit fixture','panel':'complete' if i<48 else 'removed' if i<54 else 'missing','tasks':{'choice':pred(['act','none'],'act'),'info':pred(['yes','no'],'yes'),'rubric':pred(['0','1','2'],'2')},'choice_info':{'ids':['yes','no'],'answer':'yes','logits':[10.,0.]},'world_supported':True,'choice_information_sufficient':i!=0})
+    return families
+families=c_families();c=measured.evaluate_c(families,1.,.9);handoff=measured.evaluate_c(families,1.,None)
+assert c['policy']['accepted']==60 and c['policy']['errors']==1
+assert handoff['policy']['families']==60 and len(handoff['policy']['rows'])==60 and handoff['policy']['empirical_risk'] is None
+assert handoff['types_correlated_not_independent180'] is True
+unusable=copy.deepcopy(families)
+for row in unusable:row['tasks']['choice']['logits']=[0.,10.];row['tasks']['choice']['answer']='none'
+assert select_policy(unusable,1.)['feasible'] is False
+positive['C_policy']={'n':60,'insufficient_even_if_choice_correct_errors':1,'no_feasible_tau_all_handoff_rows':60,'risk':handoff['policy']['empirical_risk'],'correlated_types':True}
+class JudgeFixture:
+    def predict(self,q):
+        assert q.gold is None
+        ids=[x.id for x in q.candidates]+['none'];return {'ids':ids,'logits':[0.]*len(ids),'answer':min(ids),'probabilities':[1/len(ids)]*len(ids),'p_max':1/len(ids)}
+secondary=measured.choice_candidate_diagnostics(JudgeFixture(),data['C']['panels']['dev'][:2],data['C']['diagnostic_candidate_pool'])
+assert secondary['parent_families']==2 and secondary['secondary_observations']==14 and secondary['independent_n_increase'] is False
+positive['candidate_diagnostics_dev_fixture']={'parent_n':2,'observations':14,'sizes':sorted({r['total_choices_including_none'] for r in secondary['rows']})}
+
+# Actual auto method, stub router always chooses none, and stub product execution.
+auto_calls=[]
+def dispatch(route,payload):auto_calls.append((route,id(payload)));return {'status':'unsupported' if route=='none' else 'explicit fixture'}
+route={'answer':'none','ids':['A','B','C','none'],'logits':[0.,0.,0.,1.],'probabilities':[.1,.1,.1,.7],'p_max':.7}
+assistant=OmniAssistant.__new__(OmniAssistant);assistant.c=SimpleNamespace(route=lambda request:copy.deepcopy(route));assistant.dispatch=dispatch
+with patch.object(measured,'score_auto_result',lambda record,result:{'correct':True}):auto=measured.evaluate_auto(assistant,data['Auto']['families'])
+assert auto['families']==100 and auto['route_accuracy']['correct']==auto['real_route_end_to_end']['correct']==20
+assert auto['gold_route_end_to_end']['correct']==100 and len(auto_calls)==200
+assert all(auto_calls[2*i][1]==auto_calls[2*i+1][1] for i in range(100))
+positive['Auto_public_payload_and_wrong_routes']={'n':100,'same_payload_identity_pairs':100,'gold_route_stub_score':100,'actual_always_none_route_correct':20,'wrong_routes_not_rescored_or_fallback':80}
+calc=next(r for r in data['Auto']['families'] if r['family'].startswith('auto-A-calculator'))
+_,op,x,y=calc['parent'];trace={'executed':True,'tool_call':{'tool':'calculator','operation':op,'a':x,'b':y}}
+canonical=measured.score_auto_result(calc,{'answer':f"答案是{calc['gold']}。",'tool_trace':trace})
+equivalent=measured.score_auto_result(calc,{'answer':f"結果是{calc['gold']}。",'tool_trace':trace})
+assert canonical['correct'] and not equivalent['correct']
+findings['Auto_calculator_unfrozen_exact_wording']={'request':calc['request']['text'],'public_messages':calc['payload']['old_A_input']['messages'],'numeric_gold':calc['gold'],'both_calls_executed_and_parameters_correct':True,'canonical_answer_accepted':canonical['correct'],'equally_correct_result_wording_accepted':equivalent['correct']}
+
+old_a=SimpleNamespace(reply=lambda *args,**kwargs:(_ for _ in ()).throw(RuntimeError('explicit failure fixture')))
+old_assistant=SimpleNamespace(old_a=old_a,old_reply=lambda public:old_a.reply(public))
+with patch.object(measured,'controlled_tool_reply',lambda *args:(_ for _ in ()).throw(RuntimeError('controlled fixture failure'))):
+    retention=measured.evaluate_old_a(old_assistant,data['old_A_retention'],data['counterfactual_tool_diagnostics'])
+assert retention['observations']==258 and retention['parent_families']==180 and retention['counterfactual_diagnostics']['observations']==24
+positive['old_A_all_failures_retained']={'observations':258,'parents':180,'tasks':{k:r['families'] for k,r in retention['tasks'].items()},'separate_CF':24}
+depths=[]
+def solve(state,loops):
+    depths.append(loops);numbers=[int(v) for v in re.findall(r'=[0-6]',state)[0:3] for v in [v[1:]]]
+    if numbers==[0,0,0]:raise RuntimeError('one failing family fixture')
+    return {'answer':sum(numbers)}
+b=SimpleNamespace(auto_policy={'version':1,'sum_depth':1},solve=solve)
+product=SimpleNamespace(old_b=b,dispatch=lambda route,payload:solve('三數加法;x=%d;y=%d;z=%d'%tuple(payload['numbers']),1))
+br=measured.evaluate_b(product,data['B_retention']['values'])
+assert br['population_families']==84 and br['old_correct']==83 and br['wrapper_correct']==83 and br['ordered_diagnostic']['observations']==343 and br['ordered_diagnostic']['correct']==342 and set(depths)=={1}
+positive['B_finite_population_and_ordered_n']={'primary_families':84,'ordered_observations':343,'one_family_error_kept':True,'depths':[1]}
+
+chunk_assistant=OmniAssistant.__new__(OmniAssistant)
+chunk_assistant.talker=SimpleNamespace(generate=lambda program:{'codes':torch.tensor([0,1]),'eos':True,'capped':False})
+chunk_assistant.codec=SimpleNamespace(chunks=lambda codes:iter([torch.zeros(80),torch.zeros(80)]))
+timing=measured.measure_playable_chunks(chunk_assistant,(Event(220,100),))
+assert timing['chunks']==2 and timing['samples']==160 and timing['first_playable_seconds']>=timing['whole_code_generation_seconds']
+positive['actual_chunk_interface_stub_codes']=timing
+
+# An intentionally partial aggregate is accepted as complete by the report.
+av_names=[f'av-explicit-fixture-{i}' for i in range(6)]
+perfect_av={'primary':{'families':200,'correct':200,'accuracy':1.},'panels':{str(i):{'families':50,'correct':50,'accuracy':1.} for i in range(4)},'remove_image':{'families':200,'accuracy':1.},'remove_audio':{'families':200,'accuracy':1.}}
+perfect_c={'types':{kind:{'primary':{'families':60,'correct':60,'accuracy':1.}} for kind in ('choice','info','rubric')},'policy':{'families':60,'accepted':60,'errors':0,'empirical_risk':0.}}
+partial={'av':{name:copy.deepcopy(perfect_av) for name in av_names},'sound':{'codec_and_gold_program':{'families':200,'mean_active_reference_snr_db':12.,'gold_program':{'families':200,'accuracy':1.},'legal_output':{'families':200,'accuracy':1.},'chunk_controls':[{'chunks_bit_exact':True,'future_code_prefix_bit_exact':True} for _ in range(10)]},'actual_A_chain':{'primary':{'families':200,'accuracy':1.},'legal':{'families':200,'accuracy':1.}}},'choice':{'primary':perfect_c,'data_control_raw_only':{'types':{'choice':{'primary':{'families':60}}}},'development_invariants':{'all_passed':True}},'integration':{'auto':{'families':100},'old_A_retention':{'observations':258,'parent_families':180,'tasks':{},'counterfactual_diagnostics':{'observations':24}},'B_retention':{'population_families':84,'ordered_diagnostic':{'observations':343},'difference_percentage_points':0.}}}
+selected={'selected':{'av':av_names[0]}}
+gates=report.verdict(partial,selected,metrics)
+assert gates['research_measurements_complete'] and gates['global_targets_all_met'] and gates['promote_C_service'] and gates['promote_A_AV_sound_extension']
+findings['partial_aggregate_reported_complete']={'missing':['all old_A task counts/correct/old-wrapper deltas','C raw/calibrated metrics','candidate-count secondary observations','playable timing','AV same-metadata swap diagnostics','AV paired family bootstrap/seed summaries','Auto route and end-to-end metrics'],'returned':gates}
+
+# Report accepts explicit conflicting part/selection/final_opened origin fields.
+rf=E/'fixtures/report/frozen';rr=E/'fixtures/report/results';rf.mkdir(parents=True,exist_ok=True)
+write(rf/'model-selection.json',selected);write(rf/'metrics.json',metrics)
+write(rf/'final-opening.json',{'final_opened':True,'model_selection_sha256':sha(rf/'model-selection.json'),'metrics_sha256':sha(rf/'metrics.json'),'evaluation_sources_sha256':{'scripts/omni_revision/core_report.py':sha(ROOT/'scripts/omni_revision/core_report.py')}})
+for part,value in partial.items():
+    write(rr/part/'results.json',value)
+    write(rr/part/'part-origin.json',{'part':'different-part','final_opened':False,'model_selection_sha256':'conflicting-selection','final_opening_sha256':sha(rf/'final-opening.json')})
+    write(rr/part/'part-completion.json',{'part':'different-part','measurement_completed':True,'results_sha256':sha(rr/part/'results.json')})
+with patch.object(report,'FROZEN',rf),patch.object(sys,'argv',['core_report','--results',str(rr),'--output',str(rf/'gates.json')]):report.main()
+assert json.loads((rf/'gates.json').read_bytes())['research_measurements_complete'] is True
+findings['conflicting_part_origins_accepted']={'conflicting_fields':['origin.part','origin.final_opened','origin.model_selection_sha256','completion.part'],'report_created':str(rf/'gates.json'),'research_measurements_complete':True,'notes':'All fixture file SHA receipts were consistent; fields still contradict the declared opening.'}
+
+result={'reviewer_task':'/root/omni_final_definition_review','completed_at_utc':datetime.datetime.now(datetime.UTC).isoformat(),'method':'Explicit fixture tensors/labels, arithmetic oracle, stub routers/generators and isolated temporary opening/report paths; no true neural predictions on frozen final/Auto/retention','positive_controls':positive,'necessary_candidates_reproduced':findings,'frozen_AV_comparison_not_implemented':'metrics declares paired family bootstrap1000 seed20261029 plus each seed and seed mean; none of four evaluation helpers implements/exports it','evaluation_sources':sources}
+path=E/'probe-evidence-original-v1.json'
+with path.open('x') as f:f.write(json.dumps(result,ensure_ascii=False,indent=2)+'\n')
+print(json.dumps({'path':str(path),'sha256':sha(path),'finding_keys':list(findings),'positive_control_keys':list(positive),'evaluation_source_count':len(sources),'no_NN_predictions':True},ensure_ascii=False,indent=2))
