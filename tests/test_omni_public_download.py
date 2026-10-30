@@ -93,9 +93,11 @@ def test_existing_user_weights_are_preserved(tmp_path):
     ["C:/escaped.txt", "C:escaped.txt", "name:stream", "CON", "NUL.txt", "../x", "x/./y", "x//y", "tail.", "folder\\x"],
 )
 def test_cross_platform_unsafe_members_rejected_before_install(tmp_path, member):
+    assert not loader.portable_member("core/codec/" + member)
     path, asset, files = package(tmp_path, {"core/codec/" + member: b"outside or ambiguous"})
     target = tmp_path / "rejected"
-    with pytest.raises(ValueError, match="路徑"):
+    # Windows zipfile會把fixture的反斜線換成/；此時內層清單不符也必須拒絕。
+    with pytest.raises(ValueError, match="路徑|manifest"):
         loader.install(path, asset, target, expected_files=selected_files(files))
     assert not target.exists()
 
