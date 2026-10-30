@@ -1,0 +1,71 @@
+name: Bounded limited mature-model research
+
+on:
+  workflow_dispatch:
+    inputs:
+      job:
+        description: Fixed mature-model research job
+        required: true
+        type: choice
+        options:
+          - kev
+          - qwen25
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: tiny-perceptron-course-gpu
+  cancel-in-progress: false
+
+jobs:
+  limited-research:
+    if: github.repository == 'birdhackor/tiny-perceptron-vlm' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    env:
+      PYTHONUTF8: '1'
+      OMNI_JOB: ${{ inputs.job }}
+      OMNI_ATTEMPT: mature-${{ inputs.job }}-${{ github.run_id }}-${{ github.run_attempt }}
+      OMNI_OUTPUT: outputs/omni-mature-${{ inputs.job }}-${{ github.run_id }}-${{ github.run_attempt }}
+      MODAL_ENVIRONMENT: main
+      MODAL_SANDBOX_V2: '0'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          lfs: false
+          fetch-depth: 1
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - uses: astral-sh/setup-uv@v10.2.0
+      - name: Install fixed controller dependencies
+        run: uv sync --extra cpu --locked
+      - name: Prepare and reserve once, infer, export and stop the exact owned resources
+        id: research
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MODAL_TOKEN_ID: ${{ vars.MODAL_TOKEN_ID || secrets.MODAL_TOKEN_ID }}
+          MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+        run: uv run --extra cpu --with modal==1.6.0 python -m scripts.omni_revision.research_execution run --job "$OMNI_JOB" --attempt-id "$OMNI_ATTEMPT" --output "$OMNI_OUTPUT"
+      - name: Check all evidence size before artifact upload
+        if: always() && steps.research.outputs.reserved == 'true'
+        id: bound
+        run: uv run --extra cpu python -m scripts.omni_revision.research_execution bound --job "$OMNI_JOB" --attempt-id "$OMNI_ATTEMPT" --output "$OMNI_OUTPUT"
+      - name: Retain complete or partial original evidence for seven days
+        if: always() && steps.bound.outcome == 'success'
+        id: evidence
+        uses: actions/upload-artifact@v6
+        with:
+          name: omni-mature-${{ inputs.job }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.OMNI_OUTPUT }}
+          retention-days: 7
+          if-no-files-found: error
+      - name: Verify provider artifact limits and finish the exact reservation without refund
+        if: always() && steps.research.outputs.reserved == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OMNI_ARTIFACT_OUTCOME: ${{ steps.evidence.outcome }}
+        run: uv run --extra cpu python -m scripts.omni_revision.research_execution finish --job "$OMNI_JOB" --attempt-id "$OMNI_ATTEMPT" --output "$OMNI_OUTPUT"
