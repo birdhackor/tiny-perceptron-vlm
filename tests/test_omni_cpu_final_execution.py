@@ -2,6 +2,9 @@
 
 import hashlib
 import json
+import os
+import subprocess
+import sys
 import zipfile
 from pathlib import Path
 
@@ -334,3 +337,75 @@ def test_missing_owned_release_marks_export_failed_immediately(tmp_path, monkeyp
     receipt = json.loads((output / "cpu-final-receipt.json").read_bytes())
     assert receipt["success"] is False
     assert receipt["export_error_type"] == "ValueError"
+
+
+@pytest.mark.parametrize("initial", [None, "0", "1"])
+def test_cold_download_process_configures_real_hub_before_import(tmp_path, initial):
+    environment = dict(os.environ)
+    if initial is None:
+        environment.pop("HF_HUB_OFFLINE", None)
+    else:
+        environment["HF_HUB_OFFLINE"] = initial
+    environment.update(HF_HOME=str(tmp_path / "empty-hub"), TRANSFORMERS_OFFLINE="1", PYTHONUTF8="1")
+    result = subprocess.run(
+        [sys.executable, "-m", "scripts.omni_revision.legacy_download", "--check-network-only"],
+        cwd=Path(__file__).resolve().parents[1],
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {"HF_HUB_OFFLINE": "0", "hub_client_offline": False}
+
+
+def test_cached_offline_client_cannot_be_relabelled_online(tmp_path):
+    code = (
+        "import os; os.environ['HF_HUB_OFFLINE']='1'; "
+        "from huggingface_hub import constants; assert constants.HF_HUB_OFFLINE; "
+        "from scripts.omni_revision.legacy_download import configure_download_network; configure_download_network()"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=Path(__file__).resolve().parents[1],
+        env={**os.environ, "HF_HOME": str(tmp_path / "empty-hub"), "PYTHONUTF8": "1"},
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode != 0
+    assert "Hub已先快取離線設定" in result.stderr
+
+
+def test_downloader_does_not_change_an_existing_final_process(monkeypatch):
+    from scripts.omni_revision.legacy_download import configure_download_network
+
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    with pytest.raises(ValueError, match="獨立新程序"):
+        configure_download_network()
+    assert os.environ["HF_HUB_OFFLINE"] == "1"
+
+
+def test_legacy_download_and_offline_validation_have_separate_bounded_processes(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(runner, "ROOT", tmp_path)
+    monkeypatch.setattr(
+        runner.transport, "bounded_child", lambda arguments, log, seconds, state: calls.append((arguments, seconds))
+    )
+    runner.legacy_inputs(tmp_path / "controls")
+    assert [row[0][1] for row in calls] == ["scripts.omni_revision.legacy_download", "scripts.omni_revision.core_final"]
+    assert calls[1][0][2] == "legacy-preflight"
+    assert [row[1] for row in calls] == [900, 180]
+
+
+def test_failed_download_never_starts_local_loader_validation(tmp_path, monkeypatch):
+    calls = []
+
+    def fail(arguments, log, seconds, state):
+        calls.append(arguments[1])
+        raise RuntimeError("explicit download failure")
+
+    monkeypatch.setattr(runner.transport, "bounded_child", fail)
+    with pytest.raises(RuntimeError):
+        runner.legacy_inputs(tmp_path / "controls")
+    assert calls == ["scripts.omni_revision.legacy_download"]
