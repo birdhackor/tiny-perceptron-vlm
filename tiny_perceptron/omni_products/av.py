@@ -181,7 +181,9 @@ class AVModel(nn.Module):
         times = F.pad(batch["time_s"], (1, 0))
         valid = F.pad(batch["mask"], (1, 0), value=True)
         if self.config.representation == "additive":
-            frequencies = 2 ** torch.linspace(-1, 6, self.config.width // 2, device=tokens.device)
+            # 兩種表示使用同一個 per-head 頻率集合；加法版只跨 heads 重複，
+            # 不額外給它 width/2 個獨特頻率當作另一個變因。
+            frequencies = self.blocks[0][1].frequencies.repeat(self.config.heads)
             angle = times[..., None] * frequencies
             tokens = tokens + torch.stack((angle.sin(), angle.cos()), dim=-1).flatten(-2)
         for norm1, attention, norm2, ffn in self.blocks:
