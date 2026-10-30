@@ -35,7 +35,7 @@ from scripts.omni_revision.github_transport_probe import REPOSITORY, api, find_d
 from scripts.omni_revision.staged_execution import MAX_INPUT_BYTES, run_staged_job
 from tiny_perceptron.omni_products.training_runtime import file_sha, json_file
 
-AUDIT = ROOT / "docs/course-revision-20261029-omni/infrastructure/mature-research-audit-v3.json"
+AUDIT = ROOT / "docs/course-revision-20261029-omni/infrastructure/mature-research-audit-v4.json"
 JOBS = {
     "kev": {
         "gpu": "L40S",
