@@ -18,7 +18,7 @@ from tiny_perceptron.omni_products.media_bindings import OLD_A, OLD_B
 from tiny_perceptron.omni_products.reliability import TEMPERATURES, THRESHOLDS
 from tiny_perceptron.omni_products.training_runtime import file_sha, json_file, source_binding
 
-AUDIT = ROOT / "docs/course-revision-20261029-omni/infrastructure/final-evaluation-audit-v1.json"
+AUDIT = ROOT / "docs/course-revision-20261029-omni/infrastructure/final-evaluation-audit-v2.json"
 
 
 def evaluation_sources():
@@ -43,7 +43,7 @@ def evaluation_sources():
             "scripts/omni_revision/__init__.py",
         )
     )
-    return {str(path.relative_to(ROOT)): file_sha(path) for path in sorted(files)}
+    return {path.relative_to(ROOT).as_posix(): file_sha(path) for path in sorted(files)}
 
 
 def legacy_preflight(data_root, a_root, b_root):

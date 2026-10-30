@@ -3,7 +3,7 @@
 import copy
 import json
 from collections import Counter
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from types import SimpleNamespace
 
 import pytest
@@ -27,6 +27,22 @@ def test_final_source_watchlist_includes_real_old_A_transitive_modules():
         assert name in sources
     assert len(sources) == 57
     assert all(file_sha(ROOT / name) == digest for name, digest in sources.items())
+
+
+def test_final_source_watchlist_uses_same_POSIX_keys_on_Windows(monkeypatch):
+    expected = final.evaluation_sources()
+
+    class WindowsRoot(PureWindowsPath):
+        def glob(self, pattern):
+            assert pattern == "*.py"
+            folder = self.relative_to("C:/fixture").as_posix()
+            return [self / PurePosixPath(name).name for name in expected if str(PurePosixPath(name).parent) == folder]
+
+    root = WindowsRoot("C:/fixture")
+    assert "\\" in str(root / "tiny_perceptron/model.py")
+    monkeypatch.setattr(final, "ROOT", root)
+    monkeypatch.setattr(final, "file_sha", lambda path: expected[path.relative_to(root).as_posix()])
+    assert final.evaluation_sources() == expected
 
 
 def prediction(question):

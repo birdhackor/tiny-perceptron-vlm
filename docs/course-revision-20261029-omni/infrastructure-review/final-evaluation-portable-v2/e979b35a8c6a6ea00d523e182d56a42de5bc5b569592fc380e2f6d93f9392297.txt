@@ -1,0 +1,91 @@
+"""FE07 current rejection controls: private mirror, no real edits or NN calls."""
+from pathlib import Path
+import ast
+import datetime
+import hashlib
+import json
+import sys
+from unittest.mock import patch
+ROOT=Path('/workspace/work/omni-models-v1')
+E=Path('/workspace/work/omni-final-evaluation-review-current-v3')
+sys.path.insert(0,str(ROOT))
+from scripts.omni_revision import core_final as final
+def sha(p):return hashlib.sha256(Path(p).read_bytes()).hexdigest()
+def write(p,value):
+    p.parent.mkdir(parents=True,exist_ok=True);p.write_text(json.dumps(value,ensure_ascii=False,indent=2)+'\n')
+def rejects(fn):
+    try:fn()
+    except ValueError:return True
+    raise AssertionError('source drift accepted')
+
+watched=final.evaluation_sources()
+expected=set()
+for directory in ('tiny_perceptron','tiny_perceptron/omni_products','tiny_perceptron/selftrained','tiny_perceptron/lesson_products'):
+    expected.update(str(p.relative_to(ROOT)) for p in (ROOT/directory).glob('*.py'))
+expected.update(f'scripts/omni_revision/{name}.py' for name in ('core_final','core_evaluation','core_selection','core_report','formal_local','__init__'))
+assert set(watched)==expected and len(watched)==57
+assert all(sha(ROOT/name)==digest for name,digest in watched.items())
+
+# Independently walk absolute/relative/inside-function local imports, including
+# package initializers and from-package import aliases where a module exists.
+edges=[];missing=set()
+def resolve(module):
+    p=ROOT.joinpath(*module.split('.'))
+    for target in (p.with_suffix('.py'),p/'__init__.py'):
+        if target.is_file():return target
+    return None
+for filename in watched:
+    path=ROOT/filename;parts=list(path.relative_to(ROOT).with_suffix('').parts)
+    package=parts[:-1] if parts[-1]!='__init__' else parts[:-1]
+    for node in ast.walk(ast.parse(path.read_text())):
+        modules=[]
+        if isinstance(node,ast.Import):modules=[(a.name,[]) for a in node.names]
+        elif isinstance(node,ast.ImportFrom):
+            name=node.module or ''
+            if node.level:name='.'.join(package[:len(package)-node.level+1]+([name] if name else []))
+            modules=[(name,[a.name for a in node.names if a.name!='*'])]
+        for module,aliases in modules:
+            if not module.startswith(('tiny_perceptron','scripts.omni_revision')):continue
+            candidates=[module]+[module+'.'+name for name in aliases]
+            for candidate in candidates:
+                target=resolve(candidate)
+                if target is None:continue
+                relative=str(target.relative_to(ROOT));edges.append({'importer':filename,'target':relative})
+                if relative not in watched:missing.add(relative)
+                for n in range(1,len(candidate.split('.'))):
+                    init=ROOT.joinpath(*candidate.split('.')[:n])/'__init__.py'
+                    if init.exists() and str(init.relative_to(ROOT)) not in watched:missing.add(str(init.relative_to(ROOT)))
+assert not missing
+
+mirror=E/'fixtures/source-closure-mirror'
+for name in watched:
+    dest=mirror/name;dest.parent.mkdir(parents=True,exist_ok=True);dest.write_bytes((ROOT/name).read_bytes())
+frozen=mirror/'docs/omni-products/v1'
+for name in ('data-definition.json','metrics.json','formal-recipes.json'):
+    dest=frozen/name;dest.parent.mkdir(parents=True,exist_ok=True);dest.write_bytes((ROOT/'docs/omni-products/v1'/name).read_bytes())
+for name in ('codec-selection.json','model-selection.json'):write(frozen/name,{'explicit_fixture':True})
+audit_path=mirror/'docs/course-revision-20261029-omni/infrastructure/final-evaluation-audit-v2.json'
+audit={'status':'pass_for_reviewed_scope','reviewer_task':'explicit-private-fixture-reviewer','reviewed_files_sha256':watched}
+write(audit_path,audit)
+def matching_git(args,**kwargs):return (mirror/args[2].split(':',1)[1]).read_bytes()
+drifts=[]
+with patch.object(final,'ROOT',mirror),patch.object(final,'FROZEN',frozen),patch.object(final,'AUDIT',audit_path),patch.object(final.subprocess,'check_output',matching_git):
+    assert final.checked_audit()==watched
+    for name in watched:
+        path=mirror/name;old=path.read_bytes();path.write_bytes(old+b'\n# explicit private mirror byte drift\n')
+        rejects(final.checked_audit);drifts.append(name);path.write_bytes(old)
+    assert final.checked_audit()==watched
+    missing_audit={**audit,'reviewed_files_sha256':{k:v for k,v in watched.items() if k!='tiny_perceptron/model.py'}}
+    write(audit_path,missing_audit);rejects(final.checked_audit);write(audit_path,audit)
+    extra=mirror/'tiny_perceptron/explicit_new_dependency_fixture.py';extra.write_text('# private fixture only\n')
+    rejects(final.checked_audit);extra.unlink()
+    assert final.checked_audit()==watched
+def mismatched_root_git(args,**kwargs):
+    name=args[2].split(':',1)[1]
+    return b'wrong committed dependency bytes' if name=='tiny_perceptron/model.py' else (mirror/name).read_bytes()
+with patch.object(final,'ROOT',mirror),patch.object(final,'FROZEN',frozen),patch.object(final,'AUDIT',audit_path),patch.object(final.subprocess,'check_output',mismatched_root_git):rejects(final.checked_audit)
+
+result={'reviewer_task':'/root/omni_final_definition_review','completed_at_utc':datetime.datetime.now(datetime.UTC).isoformat(),'source_count':57,'root_py':23,'three_packages_py':28,'scripts':6,'independent_AST_local_import_edges':len(edges),'missing_local_import_targets':sorted(missing),'all57_source_mutations_rejected':drifts,'old_unwatched_root_model_drift_now_rejected':True,'missing_root_audit_entry_rejected':True,'new_unreviewed_local_module_rejected':True,'uncommitted_root_dependency_bytes_rejected':True,'matching_unchanged_fixture_passed':True,'method':'Actual checked_audit/evaluation_sources in private mirror with explicitly mocked Git byte responses; no real source edits, trained weights or NN predictions','watched_source_sha256':watched}
+p=E/'source-closure-evidence-current-v3.json'
+with p.open('x') as stream:stream.write(json.dumps(result,ensure_ascii=False,indent=2)+'\n')
+print(json.dumps({'path':str(p),'sha256':sha(p),'FE07':'resolved','sources':57,'mutation_rejections':len(drifts),'AST_missing':len(missing)},ensure_ascii=False))
