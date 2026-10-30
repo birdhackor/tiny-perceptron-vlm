@@ -136,9 +136,12 @@ async def run_staged_job(
         )
         receipt["phase"] = "uploading_fixed_input_payload"
         preflight.write_json(output / "runtime-progress.json", receipt)
-        await hard_wait(sandbox.filesystem.write_bytes("/tmp/omni-input.zip", payload), 90)
+        await hard_wait(sandbox.filesystem.write_bytes(data=payload, remote_path="/tmp/omni-input.zip"), 90)
         await hard_wait(
-            sandbox.filesystem.write_bytes("/tmp/omni-input.sha256", hashlib.sha256(payload).hexdigest().encode()), 15
+            sandbox.filesystem.write_bytes(
+                data=hashlib.sha256(payload).hexdigest().encode(), remote_path="/tmp/omni-input.sha256"
+            ),
+            15,
         )
         receipt["input_payload_uploaded"] = True
         receipt["input_payload_bytes"] = len(payload)

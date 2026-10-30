@@ -15,7 +15,7 @@ from datetime import datetime
 from decimal import ROUND_CEILING, Decimal
 from pathlib import Path, PurePosixPath
 
-from scripts.omni_revision import execution, preflight
+from scripts.omni_revision import execution, preflight, research_recovery
 from scripts.omni_revision.core_final import evaluation_sources
 from scripts.omni_revision.cpu_execution import upload_owned
 from scripts.omni_revision.experiment_execution import (
@@ -35,7 +35,7 @@ from scripts.omni_revision.github_transport_probe import REPOSITORY, api, find_d
 from scripts.omni_revision.staged_execution import MAX_INPUT_BYTES, run_staged_job
 from tiny_perceptron.omni_products.training_runtime import file_sha, json_file
 
-AUDIT = ROOT / "docs/course-revision-20261029-omni/infrastructure/mature-research-audit-v1.json"
+AUDIT = ROOT / "docs/course-revision-20261029-omni/infrastructure/mature-research-audit-v2.json"
 JOBS = {
     "kev": {
         "gpu": "L40S",
@@ -63,6 +63,7 @@ RESEARCH_FILES = (
         f"scripts/omni_revision/{name}.py"
         for name in (
             "research_execution",
+            "research_recovery",
             "research_core_inputs",
             "research_measurements",
             "research_model_files",
@@ -79,8 +80,11 @@ RESEARCH_FILES = (
     "scripts/omni_revision/research_requirements/kev.txt",
     "scripts/omni_revision/research_requirements/qwen25.txt",
     "tests/test_omni_mature_research.py",
+    "tests/test_omni_mature_modal_sdk.py",
     ".github/workflows/omni-mature-research.yml",
     "docs/omni-products/v1/mature-research-protocol.md",
+    research_recovery.PERMIT_NAME,
+    research_recovery.ORIGINAL_NAME,
 )
 
 
@@ -107,6 +111,57 @@ def identity(job, attempt):
         or os.environ.get("MODAL_ENVIRONMENT") != "main"
     ):
         raise ValueError("成熟研究只限授權repo/main手動單次工作及原main環境")
+
+
+def release_identity(attempt, revision):
+    return (
+        "omni-mature-candidate-" + attempt,
+        "Owned unpublished limited mature-model research; " + attempt + "; source " + revision,
+    )
+
+
+def check_receipt_identity(job, attempt, sources, reserved, receipt):
+    """先綁本次預約與收據，再讀provider；真foreign draft也不能代本次執行。"""
+    purpose = research_recovery.purpose(reserved)
+    if (
+        reserved.get("attempt_id") != attempt
+        or reserved.get("revision") != sources["revision"]
+        or reserved.get("status") != "reserved"
+        or purpose.get("job") != "mature-" + job
+        or purpose.get("sources_sha256") != digest(sources)
+        or purpose.get("controller_audit_sha256") != sources["audit_sha256"]
+        or purpose.get("ownership")
+        != {
+            "app_name": "omni-" + attempt,
+            "tags": {"omni-round": POLICY["round_id"], "omni-attempt": attempt},
+        }
+    ):
+        raise ValueError("成熟研究預約不是本次已審來源／工作")
+    present = set(purpose) & set(research_recovery.LINEAGE_KEYS)
+    if present and present != set(research_recovery.LINEAGE_KEYS):
+        raise ValueError("準備修復lineage不能缺欄位")
+    expected_lineage = None
+    if present:
+        expected_lineage = research_recovery.lineage(file_sha(ROOT / research_recovery.PERMIT_NAME))
+        if job != "kev" or any(purpose[key] != value for key, value in expected_lineage.items()):
+            raise ValueError("準備修復的預約／permit身分不同")
+    tag, body = release_identity(attempt, sources["revision"])
+    expected = {
+        "schema": "omni-mature-controller-receipt-v2",
+        "attempt": attempt,
+        "job": job,
+        "source_revision": sources["revision"],
+        "controller_audit_sha256": sources["audit_sha256"],
+        "release_tag": tag,
+        "release_body": body,
+        "input_payload_sha256": purpose["input_sha256"],
+        "config_sha256": purpose["job_config_sha256"],
+        "core_selection_sha256": purpose["core_selection_sha256"],
+        "core_final_opening_sha256": purpose["core_final_opening_sha256"],
+        "preparation_recovery": expected_lineage,
+    }
+    if any(receipt.get(key) != value for key, value in expected.items()):
+        raise ValueError("成熟研究收據來自另一attempt／來源／輸入／草稿")
 
 
 def committed(path, revision):
@@ -179,6 +234,7 @@ def worker_files():
         and not name.endswith(
             (
                 "research_execution.py",
+                "research_recovery.py",
                 "research_core_inputs.py",
                 "research_measurements.py",
                 "staged_execution.py",
@@ -475,13 +531,12 @@ def run(job_name, attempt, output):
     state, blob = store.read()
     if state is None:
         raise ValueError("沿用既有round，不可重設預算")
-    if any(
-        row["purpose"].startswith("{") and json.loads(row["purpose"]).get("job") == "mature-" + job_name
-        for row in state["attempts"]
-    ):
-        raise ValueError("同一成熟研究曾嘗試，不能盲目重跑")
+    lineage = research_recovery.eligibility(state, job_name)
     core = checked_core(sources["revision"], state)
-    job, payload = prepare(job_config(job_name, core), output)
+    if lineage is None:
+        job, payload = prepare(job_config(job_name, core), output)
+    else:
+        job, payload = research_recovery.reuse_input(job_config(job_name, core), output, worker_files(), lineage)
     workspace = modal.Workspace.from_context()
     inventory = preflight.inventory(modal, output, preflight.load_reconciliation(preflight.DEFAULT_RECONCILIATION))
     first = state["origin"]["baseline"]["summaries"][0]["cycle"] + "-01T00:00:00+00:00"
@@ -494,10 +549,12 @@ def run(job_name, attempt, output):
             "job": "mature-" + job_name,
             "ownership": names,
             "sources_sha256": digest(sources),
+            "controller_audit_sha256": sources["audit_sha256"],
             "input_sha256": hashlib.sha256(payload).hexdigest(),
             "job_config_sha256": job["config_sha256"],
             "cost_proof_sha256": digest(proof),
             **core,
+            **(lineage or {}),
         },
         sort_keys=True,
     )
@@ -511,9 +568,17 @@ def run(job_name, attempt, output):
     json_file(output / "reservation.json", {"transaction": transaction, "attempt": reserved})
     with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as stream:
         stream.write("reserved=true\n")
-    tag = "omni-mature-candidate-" + attempt
-    body = "Owned unpublished limited mature-model research; " + attempt + "; source " + sources["revision"]
+    tag, body = release_identity(attempt, sources["revision"])
     receipt = {
+        "schema": "omni-mature-controller-receipt-v2",
+        "job": job_name,
+        "source_revision": sources["revision"],
+        "controller_audit_sha256": sources["audit_sha256"],
+        "input_payload_sha256": hashlib.sha256(payload).hexdigest(),
+        "config_sha256": job["config_sha256"],
+        "core_selection_sha256": core["core_selection_sha256"],
+        "core_final_opening_sha256": core["core_final_opening_sha256"],
+        "preparation_recovery": lineage,
         "success": False,
         "paid_call_started": False,
         "cleanup_checks": {"no_modal_executor_entered": True},
@@ -573,8 +638,10 @@ def run(job_name, attempt, output):
 
 def finish_run(job, attempt, output):
     identity(job, attempt)
+    sources = checked_sources()
     reserved = json.loads((output / "reservation.json").read_bytes())["attempt"]
     receipt = json.loads((output / "research-receipt.json").read_bytes())
+    check_receipt_identity(job, attempt, sources, reserved, receipt)
     bounds = bound(output)
     record = api(f"actions/runs/{os.environ['GITHUB_RUN_ID']}/artifacts?per_page=100")
     items = record["artifacts"]
@@ -604,9 +671,19 @@ def finish_run(job, attempt, output):
         and owned.get("draft") is True
         and owned.get("tag_name") == receipt["release_tag"]
         and owned.get("body") == receipt["release_body"]
+        and owned.get("target_commitish") == sources["revision"]
         and {(asset["id"], asset["name"], asset["size"]) for asset in owned["assets"]}
         == {(asset["id"], asset["name"], asset["bytes"]) for asset in receipt["assets"]}
         and all(asset.get("roundtrip_verified") is True for asset in receipt["assets"])
+        and {asset["name"] for asset in receipt["assets"]} <= {"input.zip", "result.zip"}
+        and (
+            receipt.get("success") is not True
+            or (
+                {asset["name"] for asset in receipt["assets"]} == {"input.zip", "result.zip"}
+                and receipt.get("result_exported_before_stop") is True
+                and receipt.get("research_final_opened") is True
+            )
+        )
     )
     receipt["cleanup_checks"].update(
         artifact_retention_and_size_bounded=artifact_ok,

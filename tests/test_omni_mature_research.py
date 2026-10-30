@@ -18,9 +18,11 @@ from scripts.omni_revision import research_core_inputs as core_inputs
 from scripts.omni_revision import research_execution as runner
 from scripts.omni_revision import research_measurements as checks
 from scripts.omni_revision import research_model_files as model_files
+from scripts.omni_revision import research_recovery as recovery
 from scripts.omni_revision import research_worker as worker
 from scripts.omni_revision import staged_execution as staged
 from scripts.omni_revision.experiment_execution import storage_quote
+from scripts.omni_revision.finance import digest
 from scripts.omni_revision.kev_research import public_record, state_view
 from scripts.omni_revision.qwen_inputs import make_inputs
 
@@ -180,8 +182,9 @@ def test_single_create_staged_transfer_and_exact_stop(tmp_path, mode):
         async def _get_task_id(self, **kwargs):
             return "ta-owned"
 
-        async def write_bytes(self, path, payload):
-            calls.append(("write", path))
+        async def write_bytes(self, data, remote_path):
+            assert isinstance(data, bytes) and isinstance(remote_path, str)
+            calls.append(("write", remote_path))
             if mode == "input_failure":
                 raise ConnectionError("fixture")
 
@@ -752,3 +755,443 @@ def test_precision_records_each_component_and_official_float_decoder():
     result["parameter_numel_by_dtype_after_speech"] = before
     with pytest.raises(ValueError, match="FP32"):
         checks.parameter_precision(result)
+
+
+@pytest.fixture
+def preparation_recovery_fixture(tmp_path, monkeypatch):
+    """只用自製狀態測守門；真舊ZIP／ledger由獨立runtime review另核。"""
+    identity = copy.deepcopy(recovery.IDENTITY)
+    receipt = {
+        "phase": "uploading_fixed_input_payload",
+        "error_type": "TypeError",
+        "app_id": identity["app_id"],
+        "sandbox_id": identity["sandbox_id"],
+        "observed_owned_sandbox_ids": [identity["sandbox_id"]],
+        "stopped_sandboxes": {identity["sandbox_id"]: 3},
+        "remaining_owned_sandboxes": [],
+        "stop_errors": {},
+        "compute_stopped": True,
+        "resources_verified": True,
+        "cleanup_checks": {"official_app_stopped": True, "owned_sandboxes_stopped": True},
+    }
+    row = {
+        "attempt_id": identity["attempt"],
+        "status": "failed-stopped",
+        "revision": identity["source_revision"],
+        "reserved_usd": "4.30",
+        "purpose": json.dumps({"job": "mature-kev"}),
+        "receipt": receipt,
+    }
+    identity.update(row_sha256=digest(row), receipt_sha256=digest(receipt))
+    monkeypatch.setattr(recovery, "IDENTITY", identity)
+    monkeypatch.setattr(recovery, "ROOT", tmp_path)
+    original = {"created_at": "2026-10-30T04:59:00+00:00", "reviewer_task": "/root/independent_fixture"}
+    path = tmp_path / recovery.ORIGINAL_NAME
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(original))
+    original_sha = hashlib.sha256(path.read_bytes()).hexdigest()
+    monkeypatch.setattr(recovery, "ORIGINAL_SHA", original_sha)
+    permit = {
+        "schema": "omni-mature-preparation-recovery-permit-v1",
+        "status": "pass_for_exact_preparation_recovery",
+        "reviewer_task": original["reviewer_task"],
+        "created_at": "2026-10-30T04:59:01+00:00",
+        "identity": identity,
+        "original_runtime_review": {"path": recovery.ORIGINAL_NAME, "sha256": original_sha},
+        "maximum_new_attempts": 1,
+        "new_bound_usd": "4.30",
+        "source_path_proof": {
+            "sdk_version": "1.6.0",
+            "first_write_failed_before_any_fs_rpc": True,
+            "sha_marker_not_sent_by_failed_path": True,
+            "provider_historical_NN_telemetry_directly_observed": False,
+        },
+    }
+    permit_path = tmp_path / recovery.PERMIT_NAME
+    permit_path.write_text(json.dumps(permit))
+    body = (
+        "Owned unpublished limited mature-model research; "
+        + identity["attempt"]
+        + "; source "
+        + identity["source_revision"]
+    )
+    release = {
+        "id": identity["release_id"],
+        "draft": True,
+        "tag_name": identity["release_tag"],
+        "body": body,
+        "target_commitish": identity["source_revision"],
+        "assets": [
+            {
+                "id": identity["asset_id"],
+                "name": identity["asset_name"],
+                "size": identity["asset_bytes"],
+                "digest": "sha256:" + identity["asset_sha256"],
+            }
+        ],
+    }
+    gets = []
+
+    def get(endpoint):
+        assert endpoint == f"releases/{identity['release_id']}"
+        gets.append(endpoint)
+        return copy.deepcopy(release)
+
+    monkeypatch.setattr(recovery, "api", get)
+    return SimpleNamespace(
+        state={"attempts": [row]}, row=row, permit=permit, permit_path=permit_path, release=release, gets=gets
+    )
+
+
+def test_general_once_guard_and_exact_preparation_permit(preparation_recovery_fixture):
+    f = preparation_recovery_fixture
+    assert recovery.eligibility({"attempts": []}, "kev") is None
+    assert recovery.eligibility(f.state, "qwen25") is None
+    lineage = recovery.eligibility(f.state, "kev")
+    assert lineage == recovery.lineage(hashlib.sha256(f.permit_path.read_bytes()).hexdigest())
+    assert len(f.gets) == 1 and f.row["reserved_usd"] == "4.30"
+    f.state["attempts"].append({"purpose": json.dumps({"job": "mature-kev", **lineage})})
+    with pytest.raises(ValueError):
+        recovery.eligibility(f.state, "kev")
+    assert len(f.gets) == 1
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("status", "completed"),
+        ("revision", "foreign"),
+        ("reserved_usd", "0"),
+        ("attempt_id", "foreign"),
+    ],
+)
+def test_recovery_does_not_rewrite_original_attempt(preparation_recovery_fixture, field, value):
+    f = preparation_recovery_fixture
+    f.row[field] = value
+    with pytest.raises(ValueError):
+        recovery.eligibility(f.state, "kev")
+    assert f.gets == []
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("phase", "worker_stdout_until_export_ready"),
+        ("error_type", "TimeoutError"),
+        ("input_payload_uploaded", True),
+        ("compute_stopped", False),
+        ("resources_verified", False),
+        ("remaining_owned_sandboxes", ["sb-unknown"]),
+        ("stop_errors", {"sb-owned": "unknown"}),
+    ],
+)
+def test_recovery_rejects_changed_or_ambiguous_predecessor(preparation_recovery_fixture, field, value):
+    f = preparation_recovery_fixture
+    f.row["receipt"][field] = value
+    with pytest.raises(ValueError):
+        recovery.eligibility(f.state, "kev")
+    assert f.gets == []
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("status", "author_proposal_not_authorized"),
+        ("reviewer_task", "/root"),
+        ("maximum_new_attempts", True),
+        ("maximum_new_attempts", 2),
+        ("new_bound_usd", "0"),
+        ("created_at", "2026-10-30T04:58:59+00:00"),
+    ],
+)
+def test_recovery_requires_independent_specific_once_permit(preparation_recovery_fixture, field, value):
+    f = preparation_recovery_fixture
+    f.permit[field] = value
+    f.permit_path.write_text(json.dumps(f.permit))
+    with pytest.raises(ValueError):
+        recovery.eligibility(f.state, "kev")
+    assert f.gets == []
+
+
+@pytest.mark.parametrize("mutation", ["draft", "target", "extra_asset", "digest"])
+def test_recovery_rechecks_original_owned_provider_asset(preparation_recovery_fixture, mutation):
+    f = preparation_recovery_fixture
+    if mutation == "draft":
+        f.release["draft"] = False
+    elif mutation == "target":
+        f.release["target_commitish"] = "foreign"
+    elif mutation == "extra_asset":
+        f.release["assets"].append({"name": "result.zip"})
+    else:
+        f.release["assets"][0]["digest"] = "sha256:" + "0" * 64
+    with pytest.raises(ValueError):
+        recovery.eligibility(f.state, "kev")
+
+
+def test_permit_cannot_be_consumed_under_another_job(preparation_recovery_fixture):
+    f = preparation_recovery_fixture
+    proof = recovery.eligibility(f.state, "kev")
+    f.state["attempts"].append({"purpose": json.dumps({"job": "mature-qwen25", **proof})})
+    with pytest.raises(ValueError, match="已使用"):
+        recovery.eligibility(f.state, "kev")
+
+
+@pytest.fixture
+def original_input_fixture(tmp_path, monkeypatch):
+    monkeypatch.setattr(recovery, "ROOT", tmp_path)
+    frozen = tmp_path / "frozen"
+    frozen.mkdir()
+    monkeypatch.setattr(recovery, "FROZEN", frozen)
+    worker_name = "scripts/omni_revision/research_worker.py"
+    files = {worker_name: b"# first-party offline fixture\n"}
+    for name in ("data-definition.json", "model-selection.json", "final-opening.json"):
+        files[name] = b"{}\n"
+        (frozen / name).write_bytes(files[name])
+    worker = tmp_path / worker_name
+    worker.parent.mkdir(parents=True)
+    worker.write_bytes(files[worker_name])
+    expected = {"job": "kev", "core_selection_sha256": "fixture-selected"}
+    job = {
+        **expected,
+        "input_files": {
+            name: {"bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest()} for name, raw in files.items()
+        },
+    }
+    raw_job = (json.dumps(job, indent=2) + "\n").encode()
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        for name, raw in files.items():
+            archive.writestr(name, raw)
+        archive.writestr("job.json", raw_job)
+    payload = buffer.getvalue()
+    identity = {
+        **recovery.IDENTITY,
+        "asset_bytes": len(payload),
+        "asset_sha256": hashlib.sha256(payload).hexdigest(),
+        "job_config_sha256": hashlib.sha256(raw_job).hexdigest(),
+    }
+    monkeypatch.setattr(recovery, "IDENTITY", identity)
+
+    def download(arguments):
+        assert arguments[:3] == ["gh", "release", "download"]
+        (Path(arguments[-1]) / identity["asset_name"]).write_bytes(payload)
+
+    monkeypatch.setattr(recovery, "command", download)
+    output = tmp_path / "new-output"
+    output.mkdir()
+    return SimpleNamespace(
+        output=output,
+        payload=payload,
+        raw_job=raw_job,
+        expected=expected,
+        worker_name=worker_name,
+        worker=worker,
+        frozen=frozen,
+    )
+
+
+def test_recovery_reuses_exact_input_job_and_worker_bytes(original_input_fixture):
+    f = original_input_fixture
+    job, payload = recovery.reuse_input(f.expected, f.output, [f.worker_name], recovery.lineage("fixture-permit"))
+    assert payload == f.payload == (f.output / "input.zip").read_bytes()
+    assert (f.output / "job.json").read_bytes() == f.raw_job
+    assert job["config_sha256"] == hashlib.sha256(f.raw_job).hexdigest()
+    assert json.loads((f.output / "input-preparation.json").read_bytes())["reused_original_owned_input_asset"]
+    with pytest.raises(FileExistsError):
+        recovery.reuse_input(f.expected, f.output, [f.worker_name], recovery.lineage("fixture-permit"))
+
+
+@pytest.mark.parametrize("mutation", ["worker", "frozen", "science", "worker_set"])
+def test_preparation_recovery_cannot_change_scientific_inputs(original_input_fixture, mutation):
+    f = original_input_fixture
+    workers = [f.worker_name]
+    if mutation == "worker":
+        f.worker.write_bytes(b"changed")
+    elif mutation == "frozen":
+        (f.frozen / "data-definition.json").write_bytes(b"changed")
+    elif mutation == "science":
+        f.expected["core_selection_sha256"] = "changed"
+    else:
+        workers = []
+    with pytest.raises(ValueError):
+        recovery.reuse_input(f.expected, f.output, workers, recovery.lineage("fixture-permit"))
+    assert not (f.output / "input.zip").exists()
+
+
+def receipt_binding_fixture():
+    attempt = "mature-kev-123-1"
+    sources = {"revision": "a" * 40, "files": {"first-party.py": "b" * 64}, "audit_sha256": "c" * 64}
+    purpose = {
+        "job": "mature-kev",
+        "sources_sha256": digest(sources),
+        "controller_audit_sha256": sources["audit_sha256"],
+        "ownership": {
+            "app_name": "omni-" + attempt,
+            "tags": {"omni-round": runner.POLICY["round_id"], "omni-attempt": attempt},
+        },
+        "input_sha256": "d" * 64,
+        "job_config_sha256": "e" * 64,
+        "core_selection_sha256": "f" * 64,
+        "core_final_opening_sha256": "0" * 64,
+    }
+    reserved = {
+        "attempt_id": attempt,
+        "revision": sources["revision"],
+        "status": "reserved",
+        "purpose": json.dumps(purpose),
+    }
+    tag, body = runner.release_identity(attempt, sources["revision"])
+    receipt = {
+        "schema": "omni-mature-controller-receipt-v2",
+        "attempt": attempt,
+        "job": "kev",
+        "source_revision": sources["revision"],
+        "controller_audit_sha256": sources["audit_sha256"],
+        "release_tag": tag,
+        "release_body": body,
+        "input_payload_sha256": purpose["input_sha256"],
+        "config_sha256": purpose["job_config_sha256"],
+        "core_selection_sha256": purpose["core_selection_sha256"],
+        "core_final_opening_sha256": purpose["core_final_opening_sha256"],
+        "preparation_recovery": None,
+    }
+    return attempt, sources, reserved, receipt
+
+
+def test_mature_receipt_is_bound_to_this_attempt_and_sources():
+    attempt, sources, reserved, receipt = receipt_binding_fixture()
+    runner.check_receipt_identity("kev", attempt, sources, reserved, receipt)
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "schema",
+        "attempt",
+        "job",
+        "source_revision",
+        "controller_audit_sha256",
+        "release_tag",
+        "release_body",
+        "input_payload_sha256",
+        "config_sha256",
+        "core_selection_sha256",
+        "core_final_opening_sha256",
+        "preparation_recovery",
+    ],
+)
+def test_foreign_mature_receipt_identity_rejected(field):
+    attempt, sources, reserved, receipt = receipt_binding_fixture()
+    receipt[field] = "foreign"
+    with pytest.raises(ValueError):
+        runner.check_receipt_identity("kev", attempt, sources, reserved, receipt)
+
+
+def test_foreign_success_cannot_reach_provider_or_ledger_writer(tmp_path, monkeypatch):
+    attempt, sources, reserved, _ = receipt_binding_fixture()
+    (tmp_path / "reservation.json").write_text(json.dumps({"attempt": reserved}))
+    (tmp_path / "research-receipt.json").write_text(
+        json.dumps(
+            {
+                "schema": "omni-cpu-core-execution-v1",
+                "attempt": "cpu-core-foreign",
+                "success": True,
+                "compute_stopped": True,
+                "resources_verified": True,
+            }
+        )
+    )
+    monkeypatch.setattr(runner, "identity", lambda *args: None)
+    monkeypatch.setattr(runner, "checked_sources", lambda: sources)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("foreign receipt必須先拒絕，不可進provider／writer")
+
+    monkeypatch.setattr(runner, "api", forbidden)
+    monkeypatch.setattr(runner, "GitHubLedger", forbidden)
+    monkeypatch.setattr(runner, "bound", forbidden)
+    with pytest.raises(ValueError):
+        runner.finish_run("kev", attempt, tmp_path)
+
+
+def test_repair_receipt_requires_complete_original_lineage(preparation_recovery_fixture, monkeypatch):
+    f = preparation_recovery_fixture
+    monkeypatch.setattr(runner, "ROOT", recovery.ROOT)
+    proof = recovery.eligibility(f.state, "kev")
+    attempt, sources, reserved, receipt = receipt_binding_fixture()
+    original = json.loads(reserved["purpose"])
+    reserved["purpose"] = json.dumps({**original, **proof})
+    receipt["preparation_recovery"] = copy.deepcopy(proof)
+    runner.check_receipt_identity("kev", attempt, sources, reserved, receipt)
+    receipt["preparation_recovery"]["original_input_payload_sha256"] = "changed"
+    with pytest.raises(ValueError):
+        runner.check_receipt_identity("kev", attempt, sources, reserved, receipt)
+    del proof["original_row_sha256"]
+    reserved["purpose"] = json.dumps({**original, **proof})
+    with pytest.raises(ValueError):
+        runner.check_receipt_identity("kev", attempt, sources, reserved, receipt)
+
+
+@pytest.mark.parametrize("right_target,expected", [(True, "completed"), (False, "unresolved")])
+def test_finish_requires_the_current_owned_provider_target(tmp_path, monkeypatch, right_target, expected):
+    attempt, sources, reserved, receipt = receipt_binding_fixture()
+    assets = [
+        {"id": index, "name": name, "bytes": 1, "sha256": str(index) * 64, "roundtrip_verified": True}
+        for index, name in enumerate(["input.zip", "result.zip"], 1)
+    ]
+    receipt.update(
+        success=True,
+        compute_stopped=True,
+        resources_verified=True,
+        cleanup_checks={"fixture_stop": True},
+        release_id=1,
+        assets=assets,
+        result_exported_before_stop=True,
+        research_final_opened=True,
+    )
+    (tmp_path / "reservation.json").write_text(json.dumps({"attempt": reserved}))
+    (tmp_path / "research-receipt.json").write_text(json.dumps(receipt))
+    monkeypatch.setattr(runner, "identity", lambda *args: None)
+    monkeypatch.setattr(runner, "checked_sources", lambda: sources)
+    monkeypatch.setattr(runner, "bound", lambda *args: {"total_bytes": 1, "control_bytes": 1, "retention_days": 7})
+    monkeypatch.setenv("GITHUB_RUN_ID", "123")
+    monkeypatch.setenv("OMNI_ARTIFACT_OUTCOME", "success")
+
+    def get(endpoint):
+        if endpoint.startswith("actions/"):
+            return {
+                "total_count": 1,
+                "artifacts": [
+                    {
+                        "id": 1,
+                        "name": "omni-" + attempt,
+                        "size_in_bytes": 1,
+                        "created_at": "2000-01-01T00:00:00Z",
+                        "expires_at": "2000-01-08T00:00:00Z",
+                    }
+                ],
+            }
+        assert endpoint == "releases/1"
+        return {
+            "draft": True,
+            "tag_name": receipt["release_tag"],
+            "body": receipt["release_body"],
+            "target_commitish": sources["revision"] if right_target else "foreign",
+            "assets": [{"id": x["id"], "name": x["name"], "size": x["bytes"]} for x in assets],
+        }
+
+    writes = []
+
+    class Store:
+        def read(self):
+            return {"attempts": [copy.deepcopy(reserved)]}, "fixture-blob"
+
+        def write(self, state, blob):
+            assert blob == "fixture-blob"
+            writes.append(state)
+            return {"fixture": "no real ledger write"}
+
+    monkeypatch.setattr(runner, "api", get)
+    monkeypatch.setattr(runner, "GitHubLedger", Store)
+    runner.finish_run("kev", attempt, tmp_path)
+    assert len(writes) == 1 and writes[0]["attempts"][0]["status"] == expected
