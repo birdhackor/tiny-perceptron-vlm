@@ -1,6 +1,7 @@
 """真Modal1.6.0 internal filesystem契約；只替換exec與RPC界線，不連服務。"""
 
 import asyncio
+import gc
 import hashlib
 import importlib.metadata
 import json
@@ -74,8 +75,13 @@ def test_real_sdk_rejects_original_inverse_arguments_before_exec(real_sdk):
     memory, events, make = real_sdk
 
     async def probe():
+        sandbox = make()
+        fs = sandbox.filesystem
+        # 真filesystem只弱參照sandbox；測試與production一樣保留擁有者跨越await。
+        gc.collect()
         with pytest.raises(TypeError):
-            await hard_wait(make().filesystem.write_bytes("/tmp/input.zip", b"fixture"), 1)
+            await hard_wait(fs.write_bytes("/tmp/input.zip", b"fixture"), 1)
+        assert sandbox.object_id == "sb-fixture"
 
     synchronizer.create_blocking(probe)()
     assert events == [] and memory == {}
@@ -182,7 +188,9 @@ def test_real_sdk_filesystem_timeout_cancels_before_fake_exec_completes(monkeypa
     monkeypatch.setattr(_Sandbox, "exec", blocked_exec)
 
     async def probe():
-        fs = make().filesystem
+        sandbox = make()
+        fs = sandbox.filesystem
+        gc.collect()
         pending = (
             fs.write_bytes(data=b"fixture", remote_path="/tmp/input")
             if operation == "write"
@@ -190,6 +198,7 @@ def test_real_sdk_filesystem_timeout_cancels_before_fake_exec_completes(monkeypa
         )
         with pytest.raises(TimeoutError):
             await hard_wait(pending, 0.01)
+        assert sandbox.object_id == "sb-fixture"
 
     synchronizer.create_blocking(probe)()
     assert cancelled == [True]
