@@ -1530,11 +1530,14 @@ def library_files():
 @pytest.mark.parametrize("path", library_files(), ids=lambda path: path.relative_to(ROOT).as_posix())
 def test_extracted_source_is_what_inspect_getsource_returns(path):
     relative = path.relative_to(ROOT).as_posix()
+    sources = top_level_sources(path.read_text(encoding="utf-8"))
+    if not sources:
+        return
     try:
         module = importlib.import_module(module_name(relative))
     except ImportError as error:
         pytest.skip(f"{relative} 需要的套件沒有安裝：{error}")
-    for name, source in top_level_sources(path.read_text(encoding="utf-8")).items():
+    for name, source in sources.items():
         assert source == inspect.getsource(getattr(module, name)), f"{relative}：{name}"
 
 
