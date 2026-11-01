@@ -53,6 +53,37 @@ def test_local_process_cannot_publish(monkeypatch):
         release.publish()
 
 
+def test_each_draft_update_preserves_fixed_tag_and_checks_response(monkeypatch):
+    revision = "a" * 40
+    calls = []
+
+    def server(suffix, payload):
+        calls.append((suffix, payload))
+        return {
+            "id": release.RELEASE_ID,
+            "tag_name": payload.get("tag_name", "untagged-server-default"),
+            "target_commitish": payload["target_commitish"],
+            "draft": payload["draft"],
+            "assets": [],
+        }
+
+    monkeypatch.setattr(release, "api", server)
+    for draft in (True, False):
+        result = release.update_release(revision, draft)
+        assert result["tag_name"] == release.TAG and result["draft"] is draft
+        assert calls[-1] == (
+            f"releases/{release.RELEASE_ID}",
+            {"tag_name": release.TAG, "target_commitish": revision, "draft": draft},
+        )
+    monkeypatch.setattr(
+        release,
+        "api",
+        lambda *args: {"id": release.RELEASE_ID, "tag_name": "untagged-wrong", "draft": True, "assets": []},
+    )
+    with pytest.raises(ValueError, match="指定"):
+        release.update_release(revision, True)
+
+
 def test_tag_checks_accept_only_known_missing_draft_or_matching_commit():
     revision = "a" * 40
     good = {"ref": f"refs/tags/{release.TAG}", "object": {"type": "commit", "sha": revision}}

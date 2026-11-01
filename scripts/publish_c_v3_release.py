@@ -63,6 +63,19 @@ def checked_release(release, revision):
     return matches[0] if matches else None
 
 
+def update_release(revision, draft):
+    # GitHub編輯尚無實體tag的draft時，省略tag_name可能重設為untagged-*。
+    # 每次都完整給出固定tag及真commit，並先驗回傳值才繼續上傳。
+    updated = api(
+        f"releases/{RELEASE_ID}",
+        {"tag_name": TAG, "target_commitish": revision, "draft": draft},
+    )
+    checked_release(updated, revision)
+    if updated["draft"] is not draft:
+        raise ValueError("Release狀態未依要求更新；停止發布")
+    return updated
+
+
 def verify_implementation(root, descriptor_path):
     # 固定完整描述檔的原始 bytes，不能藉刪除項目跳過某個已驗收實作。
     raw = descriptor_path.read_bytes()
@@ -156,7 +169,7 @@ def publish():
         if release["draft"]:
             # 先綁定真實成品提交，再上傳；草稿尚未建立公開 tag。
             result["stage"] = "bind_actual_product_commit"
-            release = api(f"releases/{RELEASE_ID}", {"target_commitish": revision})
+            release = update_release(revision, True)
         if asset is None:
             result["stage"] = "upload_fixed_package"
             gh(["release", "upload", TAG, str(PACKAGE), "--repo", REPOSITORY])
@@ -182,7 +195,7 @@ def publish():
                 result["stage"] = "recheck_actual_tag_before_publication"
                 tag_preflight(revision, True)
                 result["stage"] = "publish_verified_release"
-                api(f"releases/{RELEASE_ID}", {"draft": False, "target_commitish": revision})
+                update_release(revision, False)
             result["stage"] = "verify_anonymous_download"
             # urllib 不會讀取 GH_TOKEN；此請求沒有 Authorization header。
             request = urllib.request.Request(URL, headers={"User-Agent": "tiny-perceptron-c-v3-publication"})
