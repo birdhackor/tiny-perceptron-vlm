@@ -670,6 +670,6 @@ uv run --extra cpu python -m scripts.course_product judge
 
 完整歷史結果在[實驗紀錄](../docs/course-experiments/README.md)。RAG、工具與推理的實驗紀錄（JSON）保存各自的原始輸入、輸出及分母。工具要留實際執行結果，以及把結果放回對話後模型生成的回答；只生成請求文字，還沒有完成操作。
 
-[工具實驗紀錄（JSON）](../docs/course-experiments/results/tools.json)的每一步，`generation.input_ids` 才是模型當時真正收到的輸入；同一步的 `generation.messages` 有些混入了後來才產生的訊息，不能當成當時的輸入。逐步核對時請對照[工具紀錄勘誤](../docs/course-repair-20261008/tool-trace-errata.md)，它附有重建後的當時文字。
+[工具實驗紀錄（JSON）](../docs/course-experiments/results/tools.json)的每一步，`generation.input_ids` 才是模型當時真正收到的輸入；同一步的 `generation.messages` 有些混入了後來才產生的訊息，不能當成當時的輸入。逐步核對時請對照[工具紀錄勘誤](https://github.com/birdhackor/tiny-perceptron-vlm/blob/83630ea1cea23d47c4b77162a31cbb7566686d11/docs/course-repair-20261008/tool-trace-errata.md)，它附有重建後的當時文字。
 
 </details>

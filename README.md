@@ -67,7 +67,7 @@ Windows PowerShell 啟用指令是 `.venv\Scripts\Activate.ps1`；不啟用的�
 | NVIDIA CUDA 13.0 相容硬體／驅動 | `uv sync --frozen --extra cu130 --group notebook` |
 | NVIDIA CUDA 12.6 相容硬體／驅動 | `uv sync --frozen --extra cu126 --group notebook` |
 
-各版本的顯卡、驅動與套件配套選擇見[環境說明](docs/environment.md)。Colab操作另見[W.1](course/first-steps.md#W.1)。使用 extra 後，啟用 `.venv` 直接用 `python`，或每次 `uv run` 都帶相同 extra，避免更換 PyTorch。本機小節核驗使用CPU；前19章既有固定配方的GPU訓練曾在Modal的NVIDIA L4、PyTorch 2.14.1+cu126上實測，版本與結果保存於[實驗紀錄](docs/course-experiments/README.md)。第20章既有Qwen／Whisper路線另用Python 3.12與PyTorch 2.8.0的獨立環境；GPU訓練用CUDA 12.8配套，安裝步驟見[學生操作指引](docs/natural-assistant/v4/STUDENT.md)。Apple MPS已在macOS CI通過基本矩陣前向／反向與CPU比對；整套教材與正式模型訓練尚未在MPS驗證，範圍見[CI紀錄](docs/validation-artifacts/release-compatibility-ci.json)。
+各版本的顯卡、驅動與套件配套選擇見[環境說明](docs/environment.md)。Colab操作另見[W.1](course/first-steps.md#W.1)。使用 extra 後，啟用 `.venv` 直接用 `python`，或每次 `uv run` 都帶相同 extra，避免更換 PyTorch。本機小節核驗使用CPU；前19章既有固定配方的GPU訓練曾在Modal的NVIDIA L4、PyTorch 2.14.1+cu126上實測，版本與結果保存於[實驗紀錄](docs/course-experiments/README.md)。第20章既有Qwen／Whisper路線另用Python 3.12與PyTorch 2.8.0的獨立環境；GPU訓練用CUDA 12.8配套，安裝步驟見[學生操作指引](docs/natural-assistant/v4/STUDENT.md)。Apple MPS已在macOS CI通過基本矩陣前向／反向與CPU比對；整套教材與正式模型訓練尚未在MPS驗證，範圍見[CI紀錄](https://github.com/birdhackor/tiny-perceptron-vlm/blob/83630ea1cea23d47c4b77162a31cbb7566686d11/docs/validation-artifacts/release-compatibility-ci.json)。
 
 只想閱讀，可直接開啟線上教材。全站使用 [Zensical](https://zensical.org/) 建置，提供全文搜尋、章節目錄、頁內目錄、深淺色模式與程式碼複製；每節頁尾可下載 Notebook，或在 Colab 開啟同一份內容。SVG 可放大並保留靜態標註，支援系統減少動態效果。網站建置另需 `--group site`；本機閱讀與 GitHub Pages 操作見[教材發布](docs/publishing.md)。公式由網站隨附的 MathJax 在瀏覽器排版。
 
@@ -140,9 +140,6 @@ python scripts/build_visuals.py
 python scripts/format_course_code.py course/chapters/01.md
 python scripts/build_course.py
 python scripts/build_course.py --check
-python scripts/check_course_reviews.py
-python scripts/check_technical_reviews.py
-python docs/review-tools/check_review_round.py
 python scripts/check_notebooks.py --mode python
 python scripts/check_notebooks.py --mode kernel --lesson 3.6
 pytest -ra
@@ -152,7 +149,7 @@ ruff format --check .
 
 `pytest`執行測試；`ruff check`檢查程式碼規則，`ruff format --check`確認排版。
 
-修改教材請改 `course/chapters/`，先格式化該檔的 Python 範例再產生 Notebook。每節依序由獨立讀者核對易讀易理解程度、另一位審閱者查核正確性與證據，再由銜接審閱者檢查前後連貫性，分別見[編輯說明](docs/editorial-guide.md)與[正確性審閱](docs/technical-review-guide.md)；版本不符會阻止發布。執行輸出與網頁放在 `outputs/`。`--mode python`模式替每節使用新的Python命名空間，適合快速檢查；完整Notebook檢查用`--mode kernel`，每節另外啟動獨立Jupyter核心並保存執行結果。GitHub Actions 保留 Linux、macOS、Windows 的核心測試；Notebook整套驗證另行執行。
+修改教材請改 `course/chapters/`，先格式化該檔的 Python 範例再產生 Notebook。每節依序由獨立讀者核對易讀易理解程度、另一位審閱者查核正確性與證據，再由銜接審閱者檢查前後連貫性，分別見[編輯說明](docs/editorial-guide.md)與[正確性審閱](docs/technical-review-guide.md)；審閱範圍與發現記在 PR，不再重驗全部歷史審閱證據。執行輸出與網頁放在 `outputs/`。`--mode python`模式替每節使用新的Python命名空間，適合快速檢查；完整Notebook檢查用`--mode kernel`，每節另外啟動獨立Jupyter核心並保存執行結果。GitHub Actions 保留 Linux、macOS、Windows 的核心測試；Notebook整套驗證另行執行。
 
 ## 參考與授權
 

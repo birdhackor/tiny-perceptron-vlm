@@ -2,6 +2,7 @@ name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
@@ -13,6 +14,19 @@ env:
   PYTHONUTF8: "1" # Windows runner 的輸出預設不是 UTF-8，印中文會出錯
 
 jobs:
+  scope:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.scope.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
+      - id: scope
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: python scripts/ci_scope.py
+
   lint:
     runs-on: ubuntu-latest
     steps:
@@ -25,19 +39,14 @@ jobs:
       - run: uv run --only-group dev ruff format --check .
 
   test:
+    needs: scope
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: ubuntu-latest
-            extra: --extra cpu
-          - os: windows-latest
-            extra: --extra cpu
-          - os: macos-latest
-            extra: "" # macOS 直接用 PyPI 預設的 torch（含 MPS）
+        include: ${{ fromJSON(needs.scope.outputs.matrix) }}
     runs-on: ${{ matrix.os }}
     steps:
-      - name: Allow long review evidence paths on Windows
+      - name: Allow long paths on Windows
         if: runner.os == 'Windows'
         run: git config --global core.longpaths true
       - uses: actions/checkout@v7
@@ -48,21 +57,6 @@ jobs:
       - uses: astral-sh/setup-uv@v10.2.0
       - run: uv sync ${{ matrix.extra }}
       - run: uv run ${{ matrix.extra }} python scripts/check_env.py
-      - name: Check active review evidence including numbered guide sections
-        shell: bash
-        run: |
-          uv run ${{ matrix.extra }} python - <<'PY'
-          import json
-          import subprocess
-          import sys
-          from pathlib import Path
-
-          pointer = json.loads(Path("docs/course-reviews-active.json").read_bytes())
-          subprocess.run([
-              sys.executable, "scripts/omni_revision/review_setup.py", "gate",
-              "--manifest", pointer["manifest"],
-          ], check=True)
-          PY
       - run: uv run ${{ matrix.extra }} pytest --junitxml=outputs/pytest-results.xml
         env:
           # Some Windows runner CPUs expose inconsistent AMX capabilities

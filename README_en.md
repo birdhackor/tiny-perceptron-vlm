@@ -52,7 +52,7 @@ This confirms basic matrix computation on CPU in that run; it does not validate 
 
 On Windows PowerShell, activate with `.venv\Scripts\Activate.ps1`; the commands without activation are in [W.1](course/first-steps.md#W.1). JupyterLab lists files starting from the `notebooks` folder; select **Tiny Perceptron** and open `01/1.1.ipynb` there. The commands above install the CPU build of PyTorch, which also works on Apple Silicon Macs. For another option, replace the `uv sync` line: use `uv sync --frozen --group notebook` on Apple Silicon, or the matching `cu126`/`cu130` extra on compatible NVIDIA hardware. Driver requirements are in [environment notes](docs/environment.md). Reading the course and running lesson code do not need Git LFS; it is needed only to download the training data archives. Installation and the `git lfs version` check are in [W.1](course/first-steps.md#W.1).
 
-Activate `.venv` and use `python` directly, or pass the same extra to each `uv run` so uv keeps selecting the same PyTorch package build. Local lesson checks use CPU; the existing fixed training recipes for chapters 1–19 were tested on NVIDIA L4 on Modal with PyTorch 2.14.1+cu126. Versions and results are recorded in the [experiment records](docs/course-experiments/README.md). Chapter 20 uses a separate Python 3.12 and PyTorch 2.8.0 environment, with CUDA 12.8 packages for GPU training; see the [student instructions](docs/natural-assistant/v4/STUDENT.md). The macOS CI verified basic matrix forward/backward operations on Apple MPS and a CPU comparison. The full course and formal model training have not been validated on MPS; see the [CI evidence](docs/validation-artifacts/release-compatibility-ci.json).
+Activate `.venv` and use `python` directly, or pass the same extra to each `uv run` so uv keeps selecting the same PyTorch package build. Local lesson checks use CPU; the existing fixed training recipes for chapters 1–19 were tested on NVIDIA L4 on Modal with PyTorch 2.14.1+cu126. Versions and results are recorded in the [experiment records](docs/course-experiments/README.md). Chapter 20 uses a separate Python 3.12 and PyTorch 2.8.0 environment, with CUDA 12.8 packages for GPU training; see the [student instructions](docs/natural-assistant/v4/STUDENT.md). The macOS CI verified basic matrix forward/backward operations on Apple MPS and a CPU comparison. The full course and formal model training have not been validated on MPS; see the [CI evidence](https://github.com/birdhackor/tiny-perceptron-vlm/blob/83630ea1cea23d47c4b77162a31cbb7566686d11/docs/validation-artifacts/release-compatibility-ci.json).
 
 Read the online course built with [Zensical](https://zensical.org/): full-text search, chapter navigation, page contents, light/dark modes and code copying. Each lesson footer offers a notebook download and an Open in Colab button. SVGs can be enlarged, retain static labels and respect reduced-motion preferences. Website builds require the separate `--group site`. See [publishing instructions](docs/publishing.md) for local reading, verified outputs and GitHub Pages deployment. Formulas are typeset in the browser by the MathJax copy shipped with the site.
 
@@ -114,16 +114,13 @@ The terminal's last line includes the following fields; the omitted `evidence` p
 
 `pytest` runs tests; `ruff check` checks code rules, and `ruff format --check` checks formatting.
 
-Edit `course/chapters/`, format that file’s Python examples, then regenerate notebooks. Each changed section receives three independent stages in order: readability and understanding, correctness and evidence, then continuity with the surrounding lessons. See the [editorial protocol](docs/editorial-guide.md) and [technical review protocol](docs/technical-review-guide.md). Publication rejects outdated reviews. Components live in `tiny_perceptron/`; SVGs live in `course/figures/`, with generated examples in `scripts/build_visuals.py`.
+Edit `course/chapters/`, format that file’s Python examples, then regenerate notebooks. Each changed section receives three independent stages in order: readability and understanding, correctness and evidence, then continuity with the surrounding lessons. See the [editorial protocol](docs/editorial-guide.md) and [technical review protocol](docs/technical-review-guide.md). Each PR records concise conclusions for the affected material; deployment does not load historical review records. Components live in `tiny_perceptron/`; SVGs live in `course/figures/`, with generated examples in `scripts/build_visuals.py`.
 
 ```bash
 python scripts/build_visuals.py
 python scripts/format_course_code.py course/chapters/01.md
 python scripts/build_course.py
 python scripts/build_course.py --check
-python scripts/check_course_reviews.py
-python scripts/check_technical_reviews.py
-python docs/review-tools/check_review_round.py
 python scripts/check_notebooks.py --mode python
 python scripts/check_notebooks.py --mode kernel --lesson 3.6
 pytest -ra

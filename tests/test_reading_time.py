@@ -134,7 +134,12 @@ def test_changed_source_or_figure_invalidates_estimate(source_tree, changed):
     if changed == "lesson":
         assert before_pages["chapter-01"] == after_pages["chapter-01"]
     with pytest.raises(ValueError, match="目前正文|圖檔 SHA"):
-        load_estimates(path, after)
+        load_estimates(path, after, require_complete=True)
+
+    with pytest.warns(UserWarning):
+        current = load_estimates(path, after)
+    assert "1.2" in current
+    assert ("chapter-01" if changed == "introduction" else "1.1") not in current
 
 
 def test_missing_metadata_and_partial_metadata_need_explicit_completion(source_tree):
@@ -174,7 +179,7 @@ def test_invalid_estimate_is_rejected(source_tree, field, value):
     payload["pages"][0][field] = value
     path.write_text(json.dumps(payload))
     with pytest.raises(ValueError):
-        load_estimates(path, inventory)
+        load_estimates(path, inventory, require_complete=True)
 
 
 def test_duplicate_page_and_missing_figures_are_rejected(source_tree):
@@ -242,7 +247,7 @@ def test_hour_ranges_are_rounded_outward():
     assert format_range((61, 120), total=True) == "1.0–2.0 小時"
 
 
-def test_export_uses_estimates_for_each_page_and_stops_before_writing_stale_data(source_tree, monkeypatch):
+def test_export_omits_stale_estimates_and_strict_mode_still_rejects_them(source_tree, monkeypatch):
     root, index, documents = source_tree
     monkeypatch.setattr(export_course, "ROOT", root)
     monkeypatch.setattr(export_course, "DOCUMENTS", documents)
@@ -286,7 +291,7 @@ def test_export_uses_estimates_for_each_page_and_stops_before_writing_stale_data
         if command[0] == "git":
             return actual_run(command, *args, **kwargs)
         assert "zensical" in command
-        destination.mkdir(parents=True)
+        destination.mkdir(parents=True, exist_ok=True)
 
     monkeypatch.setattr(export_course.subprocess, "run", build_site)
     export_course.build(
@@ -304,5 +309,18 @@ def test_export_uses_estimates_for_each_page_and_stops_before_writing_stale_data
     previous = (root / "outputs/docs/1.1.md").read_text()
     (root / "course/chapters/01.md").write_text((root / "course/chapters/01.md").read_text().replace("逐行", "仔細"))
     with pytest.raises(ValueError, match="目前正文"):
-        export_course.build(destination, reading_times=path, reading_routes=root / "absent-routes.json")
+        export_course.build(
+            destination, reading_times=path, reading_routes=root / "absent-routes.json", require_reading_times=True
+        )
     assert (root / "outputs/docs/1.1.md").read_text() == previous
+
+    # 與真實 build_course 一樣，先讓 Notebook 的說明對應修改後正文。
+    notebook_path = root / index[0]["notebook"]
+    notebook = json.loads(notebook_path.read_bytes())
+    notebook["cells"][0]["source"] = ["# 第一個問題\n\n仔細看這段程式。"]
+    notebook_path.write_text(json.dumps(notebook))
+    with pytest.warns(UserWarning):
+        export_course.build(destination, reading_times=path, reading_routes=root / "absent-routes.json")
+    current = (root / "outputs/docs/1.1.md").read_text()
+    assert "仔細" in current and "閱讀約" not in current
+    assert json.loads((destination / "build-info.json").read_text())["reading_time_complete"] is False

@@ -6,8 +6,6 @@ import re
 from decimal import Decimal
 from pathlib import Path
 
-from check_course_reviews import sections
-
 ROOT = Path(__file__).resolve().parents[1]
 PUBLIC_MODEL_REPOSITORY = "birdhackor/tiny-perceptron-course-models"
 ATTEMPT_FIELDS = ("run_id", "batch_id", "experiment_id", "mode", "reserved_usd", "status")
@@ -17,17 +15,13 @@ def read_json(path, default=None):
     return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else default
 
 
-def review_state(directory, lesson_id, body):
-    report = read_json(ROOT / directory / f"{lesson_id}.json")
-    if report is None:
-        return "pending"
-    if report.get("source_sha256") != hashlib.sha256(body.encode()).hexdigest():
-        return "outdated"
-    for path, digest in (report.get("figure_sha256") or {}).items():
-        file = ROOT / path
-        if not file.is_file() or hashlib.sha256(file.read_bytes()).hexdigest() != digest:
-            return "outdated"
-    return report.get("verdict", "pending")
+def sections(source):
+    """課程進度只需要編號與正文，不依賴審閱引擎。"""
+    raw = source.read_text(encoding="utf-8")
+    headings = list(re.finditer(r"^## ([A-Z\d]+\.\d+) .+$", raw, re.M))
+    for i, heading in enumerate(headings):
+        end = headings[i + 1].start() if i + 1 < len(headings) else len(raw)
+        yield heading[1], raw[heading.start() : end]
 
 
 def _usd(value, field):
@@ -229,8 +223,6 @@ def main():
                     "source_sha256": hashlib.sha256(body.encode()).hexdigest(),
                     "experiments": [e["id"] for e in experiments if lesson_id in e["lessons"]],
                     "supporting_experiments": [e["id"] for e in supporting if lesson_id in e["lessons"]],
-                    "reader_review": review_state("docs/reader-reviews", lesson_id, body),
-                    "technical_review": review_state("docs/technical-reviews", lesson_id, body),
                 }
             )
     receipt_paths = sorted(
@@ -254,7 +246,7 @@ def main():
             "supporting_experiments": len(supporting),
             "complete_supporting_runs": sum(e["status"] == "complete_run" for e in supporting),
         },
-        "note": "Review status reflects existing reports and hashes only and may include legacy readers; it does not count completion of the current fresh review round. Actual current dispatches are recorded in review-dispatch/, and check_review_round.py enforces new identities and reviewed introductions alongside the reader/technical content gates. Experiments without a section mapping do not imply the section was omitted: offline notebooks verify mechanisms separately.",
+        "note": "Experiment progress records reproducibility and published-model evidence. Editorial review conclusions live in PRs; this report does not certify readability or learning outcomes. Offline notebooks verify mechanisms separately.",
         "experiments": experiments,
         "supporting_evidence": supporting,
         "sections": lessons,

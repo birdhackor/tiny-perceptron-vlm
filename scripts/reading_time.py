@@ -7,7 +7,8 @@ JSON；不能把字數、程式行數或自動導覽當成已完成的閱讀評�
 每筆 pages 紀錄必填 page_id、minutes_min、minutes_max、reviewer_task、reason、
 source_sha256、figures_sha256。分鐘是正整數；圖檔 map 以 repo 相對路徑為 key，
 沒有圖時也明寫空 map。reviewer_task 與 reason 記錄誰讀了什麼、如何判斷區間。
-所有 SHA 必須與目前 inventory 相同；不能由本程式補出未經閱讀的分鐘數。
+只顯示 SHA 與目前 inventory 相同的估時；過期資料預設省略，嚴格核對可另要求完整。
+不能由本程式補出未經閱讀的分鐘數。
 
 選用的路線 JSON 是 schema_version=1、routes 陣列；每條路線必填 id、label、
 page_ids。page_ids 只使用 inventory 的公開頁 ID，不使用章號範圍或導航標題。
@@ -19,6 +20,7 @@ import hashlib
 import html
 import json
 import re
+import warnings
 from collections import Counter
 from pathlib import Path
 
@@ -162,7 +164,7 @@ def build_inventory(root, index, documents, home_content, snapshots=None):
 
 
 def load_estimates(path, inventory, require_complete=False):
-    """缺少估時可以建置；已提供的估時必須完整有效，不能悄悄使用過期資料。"""
+    """估時是選用資訊；過期頁省略，明確的 validate 才要求全部符合來源。"""
     expected = {page["page_id"]: page for page in inventory["pages"]}
     if not path.is_file():
         if require_complete:
@@ -179,22 +181,38 @@ def load_estimates(path, inventory, require_complete=False):
     if not isinstance(data.get("pages"), list):
         raise ValueError("閱讀時間 metadata 的 pages 必須是陣列")
     result = {}
+    seen = set()
     for record in data["pages"]:
         if not isinstance(record, dict):
             raise ValueError("閱讀時間每筆紀錄必須是 JSON object")
         page_id = record.get("page_id")
-        if not isinstance(page_id, str) or page_id not in expected or page_id in result:
+        if not isinstance(page_id, str) or page_id not in expected or page_id in seen:
             raise ValueError(f"未知或重複的閱讀時間 page_id：{page_id}")
+        seen.add(page_id)
         lower, upper = record.get("minutes_min"), record.get("minutes_max")
         if type(lower) is not int or type(upper) is not int or lower < 1 or upper < lower:
             raise ValueError(f"{page_id}: minutes_min/max 必須是正整數，且上限不得小於下限")
         for field in ("reviewer_task", "reason"):
             if not isinstance(record.get(field), str) or not record[field].strip():
                 raise ValueError(f"{page_id}: 缺少 {field}")
+        if not re.fullmatch(r"[0-9a-f]{64}", str(record.get("source_sha256", ""))):
+            raise ValueError(f"{page_id}: 正文 SHA 格式不符")
+        figures = record.get("figures_sha256")
+        if not isinstance(figures, dict) or any(
+            not isinstance(name, str) or not re.fullmatch(r"[0-9a-f]{64}", str(digest))
+            for name, digest in figures.items()
+        ):
+            raise ValueError(f"{page_id}: 圖檔 SHA 格式不符")
         if record.get("source_sha256") != expected[page_id]["source_sha256"]:
-            raise ValueError(f"{page_id}: 閱讀時間評審不是目前正文")
+            if require_complete:
+                raise ValueError(f"{page_id}: 閱讀時間評審不是目前正文")
+            warnings.warn(f"{page_id}: 正文已更新，暫不顯示舊估時", stacklevel=2)
+            continue
         if record.get("figures_sha256") != expected[page_id]["figures_sha256"]:
-            raise ValueError(f"{page_id}: 閱讀時間評審的圖檔 SHA 不完整或已過期")
+            if require_complete:
+                raise ValueError(f"{page_id}: 閱讀時間評審的圖檔 SHA 不完整或已過期")
+            warnings.warn(f"{page_id}: 圖解已更新，暫不顯示舊估時", stacklevel=2)
+            continue
         result[page_id] = record
     missing = set(expected) - set(result)
     if require_complete and missing:

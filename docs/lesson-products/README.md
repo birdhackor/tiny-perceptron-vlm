@@ -48,7 +48,7 @@ uv run --frozen --extra cpu python -m scripts.lesson_products.train_local --job 
 
 ## 資料、凍結與結果
 
-[共同契約](../course-revision-20261016/PRODUCT-SPEC.md)、[資料manifest](data-v2-manifest.json)及[實際token稽核](data-v2-token-audit.json)保留切分與指紋。B/C從同一世界衍生的題目繼承家族split；C仍有跨家族相同的通用觀測，相關數量公開，因此不能把其分數稱為對完全未見文字的泛化。
+[共同契約](https://github.com/birdhackor/tiny-perceptron-vlm/blob/83630ea1cea23d47c4b77162a31cbb7566686d11/docs/course-revision-20261016/PRODUCT-SPEC.md)、[資料manifest](data-v2-manifest.json)及[實際token稽核](data-v2-token-audit.json)保留切分與指紋。B/C從同一世界衍生的題目繼承家族split；C仍有跨家族相同的通用觀測，相關數量公開，因此不能把其分數稱為對完全未見文字的泛化。
 
 溫度只看calibration；Auto規則與權重選擇只看policy；最後test在設定SHA凍結後首次啟動。最後報告、逐題原始分數與凍結檔隨固定HF產品公開，可從原始分數重算成績。完整成績與限制回到[19.20](../../course/chapters/19.md#19.20)閱讀；不能把開發集或單一成功例當作最後驗收。
 

@@ -23,7 +23,7 @@
 
 [第19章v2](../course/chapters/19.md#19.12)已完成從隨機初始化的MoE與Dense訓練、公開推論輸出和各3,734題的固定最後測試。文字核心、視覺／語音入口與接頭都自行訓練；三類服飾與兩格位置、12字的指定連續1–4字區域、三種銀行客服語音主題及有限文字／工具任務各有分母。兩版都未通過全部原定能力判準。[完整結果](selftrained/results/v2-final-public-results.json)保留原判準及逐項成績：MoE完整工具往返0/276、語音回答42/90、語音後續對話26/60；圖片服飾辨識357/360與中文字辨讀（OCR）252/324也不能代替這三項能力。
 
-[公開CPU示範](selftrained/v2-public-cpu-commands.md)使用挑選的validation成功題，完成8次對話呼叫（chat）與1次追加對話歷史（history append），支持匿名下載、載入及介面運作。它不改最後測試分數。[本機訓練入口檢查](selftrained/infrastructure/v2-local-stage/independent-review/review-final.md)用自己生成的CPU小資料與存檔，測試能否開始新的訓練段、從自己的最新存檔接續，以及資料或配套紀錄不符時是否拒絕。它沒有重新完成正式全量訓練。
+[公開CPU示範](selftrained/v2-public-cpu-commands.md)使用挑選的validation成功題，完成8次對話呼叫（chat）與1次追加對話歷史（history append），支持匿名下載、載入及介面運作。它不改最後測試分數。[本機訓練入口檢查](https://github.com/birdhackor/tiny-perceptron-vlm/blob/83630ea1cea23d47c4b77162a31cbb7566686d11/docs/selftrained/infrastructure/v2-local-stage/independent-review/review-final.md)用自己生成的CPU小資料與存檔，測試能否開始新的訓練段、從自己的最新存檔接續，以及資料或配套紀錄不符時是否拒絕。它沒有重新完成正式全量訓練。
 
 第19章既有第一版B Looped解題器與C機率判斷服務另有[固定最後報告](lesson-products/results/final-report-v1.json)。B以170,003參數完成1,000次更新，C以84,545參數完成800次更新，均實際使用NVIDIA L4；兩個共享初始化的輪數對照各完成1,500次更新。B讀起始盒值與交換／設定事件，預測最後查詢的盒值；C讀狀態、問題與有限候選，輸出候選間的機率。這些是實際訓練，不是短程式前向或梯度示範。完整訓練checkpoint的下一步恢復檢查另核對權重、最佳化器與隨機狀態。
 
@@ -73,7 +73,7 @@ v2以28,876題訓練，2,435題validation選定候選與生成設定，再凍結
 
 教材依序做三輪獨立審閱：先檢查易讀易理解程度，包括背景、術語、例子、程式解釋與練習；再由不同審閱者核對正確性、原始文件、實際數值與程式；最後檢查連貫性，確認前後節接得上。理解必要的程式碼與關鍵輸出直接內建正文，不能以打開Colab或外部helper補缺。修改正文、圖解或回填結果後，完整受影響閱讀單位需要複查，不能只替換報告指紋。
 
-這些是AI審閱，不是實測真人學生的學習成效。檢查器能核對版本、證據與報告完整性，不能自動證明審閱者已理解內容。
+這些是AI審閱，不是實測真人學生的學習成效。三項審閱按改動範圍留在 PR，網站不載入整套歷史審閱證據；自動檢查不能證明讀者已理解內容。
 
 每頁的閱讀時間也是AI估計，對象是數學基礎良好的高中生，或有基本數學能力但不夠熟的大學生。它包含正文、圖解、範例程式、已展示輸出與短暫思考；不含安裝、下載、親手操作、等待訓練或額外補讀前置。章導讀只計自己的前言，同一頁不重複加到總量。程式執行耗時與閱讀時間，是兩種不同的量。
 
@@ -89,16 +89,13 @@ v2以28,876題訓練，2,435題validation選定候選與生成設定，再凍結
 
 ```bash
 python scripts/build_course.py --check
-python scripts/check_course_reviews.py
-python scripts/check_technical_reviews.py
-python docs/review-tools/check_review_round.py
 python -m ipykernel install --sys-prefix --name tiny-perceptron --display-name "Tiny Perceptron"
 python scripts/check_notebooks.py --mode kernel --workers 1
 pytest -ra
 ```
 
-前四行核對教材與審閱資料；接著註冊kernel，讓每份Notebook由獨立執行環境開始；最後的單元測試檢查程式機制。Notebook執行副本與當次核對寫入`outputs/notebooks/`，它們是工作產物，不是模型能力分數。
+第一行核對教材來源與 Notebook 同步；接著註冊kernel，讓每份Notebook由獨立執行環境開始；最後的單元測試檢查程式機制。Notebook執行副本與當次核對寫入`outputs/notebooks/`，它們是工作產物，不是模型能力分數。
 
 每一行結束時的exit code都是0才算通過。exit code（結束碼）是每條命令結束時交回終端機的數字：0表示成功，不是0就是沒有通過。要看剛結束那一條的值，在輸入下一條命令之前執行：macOS或Linux用`echo $?`，Windows PowerShell用`$LASTEXITCODE`。`check_notebooks.py`最後印出一段JSON：`failed`是0表示每份Notebook都從頭跑完；有失敗時`failures`列出哪一份、錯在哪裡，同一份結果也寫進`outputs/notebooks/validation-kernel.json`。`pytest -ra`的最後一行列出通過、失敗與跳過的數目，`-ra`會把失敗與跳過的原因列在摘要裡。
 
-如果改了教材，舊報告或舊輸出可能被拒絕；應重讀、重查受影響內容，再重新執行改過的Notebook。若另做模型訓練，則按對應訓練指引保存配置與留出題結果。網站建置與連結核對接著見[教材發布](publishing.md)。發布前要先把這次的修改存成Git提交：`git status`列出改過的檔，`git add <檔案>`選定要提交的檔，`git commit -m "<這次改了什麼>"`建立提交。若Git回報`Author identity unknown`，先用`git config --global user.name "<名字>"`與`git config --global user.email "<信箱>"`設定作者資料，再執行一次`git commit`。本機CPU執行也不等於Colab雲端或所有學生設備已經驗證。
+如果改了教材，應重讀、重查受影響內容；程式或執行輸入變更時重新執行Notebook，只有文字改動時可重用相同程式的成功輸出。過期閱讀估時省略顯示，不阻擋發布。若另做模型訓練，則按對應訓練指引保存配置與留出題結果。網站建置與連結核對接著見[教材發布](publishing.md)。發布前要先把這次的修改存成Git提交：`git status`列出改過的檔，`git add <檔案>`選定要提交的檔，`git commit -m "<這次改了什麼>"`建立提交。若Git回報`Author identity unknown`，先用`git config --global user.name "<名字>"`與`git config --global user.email "<信箱>"`設定作者資料，再執行一次`git commit`。本機CPU執行也不等於Colab雲端或所有學生設備已經驗證。
