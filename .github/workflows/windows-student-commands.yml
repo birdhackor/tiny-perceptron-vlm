@@ -592,7 +592,7 @@ jobs:
           .venv\Scripts\Activate.ps1
           Invoke-Page -Pages README.md,README_en.md -Commands 'python scripts/prepare_data.py --kind toy-text'
           Invoke-Page -Pages README.md,README_en.md -Commands 'python scripts/train.py --task text --data data/generated/toy-text/train.jsonl' | Tee-Object -Variable shown
-          # 頁面說：報告的 mode 應為 dry-run-no-weight-update；逐步紀錄 history 第一筆的 loss 是有限數字、grad_norm 也有限且大於 0……
+          # 頁面說：確認 mode 為 dry-run-no-weight-update；逐步紀錄 history 第一筆的 loss 與 grad_norm 都是有限數字……
           Assert-TrainReport $shown -Mode dry-run-no-weight-update -Task text | Out-Null
           Invoke-Page -Pages README.md,README_en.md -Commands 'python scripts/fetch_training_assets.py --list' | Tee-Object -Variable shown
           # 頁面說：先用 …--list 查看名稱……再用 …--asset NAME 下載、核對並解包所選包；將 NAME 換成清單中的名稱。
@@ -604,6 +604,19 @@ jobs:
           Invoke-Page -Pages README.md,README_en.md -Commands 'python scripts/fetch_course_models.py --list'
           # 不跑：會從 Hugging Face 匿名下載模型；這個 workflow 不連 Hugging Face。
           Skip-Page -Pages README.md,README_en.md -Reason 'downloads a model from Hugging Face' -Commands 'python scripts/check_course_models.py --model text_foundation'
+          # 不跑：這是緊接上面模型檢查的結束碼觀察。echo $? 是 macOS/Linux 的 POSIX 寫法，
+          # 不是本 Windows PowerShell 步驟要執行的命令。
+          Skip-Page -Pages README.md,README_en.md -Reason 'POSIX exit-code example; PowerShell uses LASTEXITCODE' -Commands 'echo $?'
+          # 不跑：上面的 Hugging Face 模型檢查在這個 job 明確略過，沒有該次程序的結束碼可觀察。
+          # 不能藉 Invoke-Page 每行先重設 LASTEXITCODE 為 0，就宣稱核過這次模型檢查的結束碼。
+          Skip-Page -Pages README.md,README_en.md -Reason 'exit-code observation belongs to the model check skipped above' -Commands '$LASTEXITCODE'
+          # 不跑：英文頁先解釋維護工具名稱，再列完整命令；中文頁的同一句在完整命令之後。
+          # 兩頁分別依正文順序登記，沒有放寬 compare 的命令順序檢查。
+          Skip-Page -Pages README_en.md -Reason 'tool-name explanations before the English maintainer command list' -Commands @'
+          pytest
+          ruff check
+          ruff format --check
+          '@
           # 不跑：維護者改教材時的建置與檢查命令，不是讀者的操作步驟。pytest 已由 ci.yml 在 windows-latest 執行，
           # ruff 也在 ci.yml；其餘會改寫追蹤中的 SVG、章檔與 Notebook，或屬於發布前的審閱檢查。
           Skip-Page -Pages README.md,README_en.md -Reason 'maintainer commands, not reader steps' -Commands @'
@@ -613,11 +626,19 @@ jobs:
           python scripts/build_course.py --check
           python scripts/check_course_reviews.py
           python scripts/check_technical_reviews.py
+          python docs/review-tools/check_review_round.py
           python scripts/check_notebooks.py --mode python
           python scripts/check_notebooks.py --mode kernel --lesson 3.6
           pytest -ra
           ruff check .
           ruff format --check .
+          '@
+          # 不跑：下一句只解釋上述維護工具的名字與用途，不是額外的讀者操作；完整命令仍由 ci.yml 核對。
+          # 逐一登記行內寫法，保持頁面抽取與 workflow 的序列比對，不放寬命令檢查。
+          Skip-Page -Pages README.md -Reason 'tool-name explanations of the Chinese maintainer commands already listed above' -Commands @'
+          pytest
+          ruff check
+          ruff format --check
           '@
 
       - name: 操作與數學暖身：不啟用的寫法
@@ -1001,8 +1022,11 @@ jobs:
           Assert-ModalAnswer $shown -Frequency 880
           Invoke-Page -Pages course/training.md -Commands '.\.venv\Scripts\python.exe scripts/infer_modal.py checkpoints/joint.pt --color red --shape square --frequency 220 --prompt "joint?" --tokens 16' | Tee-Object -Variable shown
           Assert-ModalAnswer $shown -Color red -Shape square -Frequency 220
-          # 不跑：固定的模態實驗要 --device cuda，windows-latest 沒有 GPU。
-          Skip-Page -Pages course/training.md -Reason 'fixed recipes use --device cuda' -Commands @'
+          # 不跑：固定圖文配方要 --device cuda，windows-latest 沒有 GPU。先建立固定 SFT 起點，再接 encoders、
+          # projector 與 vqa；這裡執行的手動500步路線不需要 ultrachat-sft 資料包，也不能代替固定題比較。
+          Skip-Page -Pages course/training.md -Reason 'fixed recipes use --device cuda; nothing run here needs this download' -Commands @'
+          .\.venv\Scripts\python.exe scripts/fetch_training_assets.py --asset ultrachat-sft
+          .\.venv\Scripts\python.exe -m scripts.course_experiments.run --experiment sft --device cuda
           .\.venv\Scripts\python.exe -m scripts.course_experiments.run --experiment encoders --device cuda
           .\.venv\Scripts\python.exe -m scripts.course_experiments.run --experiment projector --device cuda
           .\.venv\Scripts\python.exe -m scripts.course_experiments.run --experiment vqa --device cuda
@@ -1014,8 +1038,8 @@ jobs:
           . (Join-Path $env:RUNNER_TEMP 'page.ps1')
           Invoke-Page -Pages course/training.md -Commands @'
           .\.venv\Scripts\python.exe scripts/prepare_data.py --kind preference
-          .\.venv\Scripts\python.exe scripts/train.py --task dpo --checkpoint checkpoints/style.pt --data data/generated/preference/train.jsonl --train --steps 200 --output checkpoints/preferred.pt
           .\.venv\Scripts\python.exe scripts/infer.py checkpoints/style.pt --chat --prompt "0+5=?" --tokens 32 --temperature 0
+          .\.venv\Scripts\python.exe scripts/train.py --task dpo --checkpoint checkpoints/style.pt --data data/generated/preference/train.jsonl --train --steps 200 --output checkpoints/preferred.pt
           .\.venv\Scripts\python.exe scripts/infer.py checkpoints/preferred.pt --chat --prompt "0+5=?" --tokens 32 --temperature 0
           '@
           Assert-Paths checkpoints/preferred.pt
@@ -1061,9 +1085,9 @@ jobs:
           '@
           Assert-Paths checkpoints/attributes-int4.pt, checkpoints/attributes-int8.pt
           # 頁面只說「希望」答案是什麼，不保證；這裡只核對輸出是有 answer 欄位的 JSON。
-          Invoke-Page -Pages course/training.md -Commands '.\.venv\Scripts\python.exe scripts/infer.py checkpoints/attributes.pt --chat --prompt "color=blue;shape=circle;pitch=low;color?" --tokens 24 --device cpu --json' | Tee-Object -Variable shown
+          Invoke-Page -Pages course/training.md -Commands '.\.venv\Scripts\python.exe scripts/infer.py checkpoints/attributes.pt --chat --prompt "color=blue;shape=square;pitch=low;color?" --tokens 24 --device cpu --json' | Tee-Object -Variable shown
           if ((Read-JsonLine $shown).PSObject.Properties.Name -notcontains 'answer') { throw 'fp32 answer' }
-          Invoke-Page -Pages course/training.md -Commands '.\.venv\Scripts\python.exe scripts/infer.py checkpoints/attributes-int4.pt --chat --prompt "color=blue;shape=circle;pitch=low;color?" --tokens 24 --device cpu --json' | Tee-Object -Variable shown
+          Invoke-Page -Pages course/training.md -Commands '.\.venv\Scripts\python.exe scripts/infer.py checkpoints/attributes-int4.pt --chat --prompt "color=blue;shape=square;pitch=low;color?" --tokens 24 --device cpu --json' | Tee-Object -Variable shown
           if ((Read-JsonLine $shown).PSObject.Properties.Name -notcontains 'answer') { throw 'int4 answer' }
           # 頁面要讀者用純文字編輯器把下一段程式存成 outputs/size_check.py；這裡照頁面內容寫成檔案。
           Write-PageFile -Path outputs/size_check.py -Text (Get-PageCode -Page course/training.md -After '`outputs/size_check.py`')
@@ -1099,3 +1123,37 @@ jobs:
           .\.venv\Scripts\python.exe -m scripts.course_experiments.run --experiment joint --device cuda
           .\.venv\Scripts\python.exe -m scripts.course_experiments.run --experiment multimodal_distillation --device cuda
           '@
+
+      - name: 訓練頁：下載固定新版模組並以CPU操作
+        working-directory: tiny-perceptron-vlm
+        run: |
+          . (Join-Path $env:RUNNER_TEMP 'page.ps1')
+          # 實際匿名下載公開GitHub資產並核SHA；不連Modal、不下載成熟模型，也不訓練。
+          Invoke-Page -Pages course/training.md -Commands 'uv run --extra cpu python -m scripts.omni_revision.public_download --output checkpoints/omni-products-v1' | Tee-Object -Variable installed
+          $download = ($installed -join [Environment]::NewLine) | ConvertFrom-Json
+          if ($download.anonymous -ne $true -or @($download.components).Count -ne 4) {
+              throw 'the public download must install exactly four selected modules anonymously'
+          }
+          Assert-Paths checkpoints/omni-products-v1/download-receipt.json
+          Invoke-Page -Pages course/training.md -Commands 'uv run --extra cpu python -m scripts.omni_revision.public_demo av --model-root checkpoints/omni-products-v1' | Tee-Object -Variable shown
+          $candidate = ($shown -join [Environment]::NewLine) | ConvertFrom-Json
+          if ($candidate.answer -ne 'circle' -or $candidate.sound.samples -ne 4000) {
+              throw 'the fixed audiovisual example must return circle and its 4000-sample sound'
+          }
+
+      - name: 訓練頁：取得合格C-v3並操作預設裝置
+        working-directory: tiny-perceptron-vlm
+        run: |
+          . (Join-Path $env:RUNNER_TEMP 'page.ps1')
+          # 照目前推薦入口匿名下載固定C-v3，不重訓，不把舊C-v2測量改成新結果。
+          Invoke-Page -Pages course/training.md -Commands 'uv run --extra cpu python -m scripts.course_product download' | Tee-Object -Variable installed
+          $download = ($installed -join [Environment]::NewLine) | ConvertFrom-Json
+          if ($download.product -ne 'C-v3' -or $download.verified -ne $true) {
+              throw 'the qualified C-v3 bundle must pass the fixed release checks'
+          }
+          Invoke-Page -Pages course/training.md -Commands 'uv run --extra cpu python -m scripts.course_product judge' | Tee-Object -Variable shown
+          $candidate = ($shown -join [Environment]::NewLine) | ConvertFrom-Json
+          if ($candidate.product -ne 'C-v3' -or $candidate.dispatch -ne 'typed-devices' -or $candidate.results.choice.status -ne 'accepted' -or $candidate.results.choice.selected -ne 'record' -or $candidate.results.info.selected -ne 'yes' -or $candidate.results.rubric.selected -ne '2') {
+              throw 'the qualified default device request must return record, yes and grade 2'
+          }
+          Assert-FiniteNumber 'choice.confidence' $candidate.results.choice.confidence

@@ -1,0 +1,76 @@
+{
+  "checked_at": "2026-10-29T14:03:56.920791+00:00",
+  "scope": "Only explicitly linked context, exact relevant text slices; no entire-chapter dependency pin. Read complete linked sections as context, but do not certify their independent empirical claims or run their code.",
+  "slices": [
+    {
+      "source": "course/chapters/10.md",
+      "section": "10.7",
+      "slice_index": 0,
+      "start_utf8_byte": 27149,
+      "end_utf8_byte": 28860,
+      "slice_sha256": "c0ef3d1f953ec75a17748c6f41756fd848c1f1da6665e1a235557aec82294061",
+      "exact_text": "一串訊息裡，圖片原本只佔一個位置，用一個特殊 token 代表：ID 5，也就是 [6.6](06.md#6.6) 列出的 `<image>`，本章叫它圖片佔位 token。真正送進模型時，這一個位置要換成圖片入口算出的多條特徵；[10.5](10.md#10.5) 的圖片入口會給 16 條，本節為了好數，假設只有 3 條。替換後，後面的助手角色與回答都往後移兩個位置。除了移輸入，也要移對應的目標，讓助手位置仍然預測答案的第一個 token。\n\n[7.4](07.md#7.4) 用問題 Q、回答 A 的例子，完整序列是 BOS（開始標記）、user、Q、EOS（結束標記）、assistant、A、EOS。圖片放在使用者那一段，也就是把 Q 換成圖片佔位 token。為了讓位置好數，本節再拿掉 user 角色（3）和圖片後的 EOS（2），剩下五個 token：BOS（1）、圖片佔位 token（5）、assistant（4）、答案 A（73）、EOS（2）。A 的 ASCII byte 是 65，照 6.6 的規則加 8 得 73。拿掉的兩個 token 在完整序列裡也不是答案，目標都是 −100；換成完整序列，下面的展開與錯開步驟相同，只多了兩個不計代價的位置。\n\n交給函式的 `labels` 還沒錯開，和 `ids` 一個位置對一個位置：A 的位置標 73、EOS 的位置標 2，表示這兩個 token 要計分，還不是「這個位置要猜什麼」；其餘標 `IGNORE`，是函式庫裡表示不計代價的常數 −100。這和 [7.1](07.md#7.1) 的 `render_chat` 不同，它回傳的 Y 已經錯開。這裡的下一位置對齊（[7.4](07.md#7.4)）由 `expand_modalities` 在展開之後自己做一次，因為答案的前一個位置要看最後真正送進模型的序列。\n\n",
+      "current_semantics_checked": true
+    },
+    {
+      "source": "course/chapters/10.md",
+      "section": "10.7",
+      "slice_index": 1,
+      "start_utf8_byte": 29961,
+      "end_utf8_byte": 30796,
+      "slice_sha256": "7733b62a39f91b471a7b3fddb2d232699f819584fd591fde2138ae96a41f324f",
+      "exact_text": "def expand_modalities(ids, labels, embedding, features, marker_ids):\n    \"\"\"一筆無 padding 資料：marker 展開成多向量，新增位置不直接算 loss。\n\n    ids 與 labels 在此都尚未 shift。展開後才 shift，第一個答案的對齊才正確。\n    \"\"\"\n    pieces, targets = [], []\n    for token, label in zip(ids.tolist(), labels.tolist(), strict=True):\n        if token in marker_ids:\n            modal = features[token]\n            pieces.append(modal)\n            targets += [IGNORE] * len(modal)\n        else:\n            pieces.append(embedding(torch.tensor([token], device=embedding.weight.device)))\n            targets.append(label)\n    expanded = torch.cat(pieces)\n    target = torch.tensor(targets, device=expanded.device, dtype=torch.long)\n    return expanded[:-1].unsqueeze(0), target[1:].unsqueeze(0)\n",
+      "current_semantics_checked": true
+    },
+    {
+      "source": "course/chapters/12.md",
+      "section": "12.9",
+      "slice_index": 0,
+      "start_utf8_byte": 35493,
+      "end_utf8_byte": 37184,
+      "slice_sha256": "4d2cf126eee555984a8cc903d734cb6e1b7ffeaf09d529b397a76b750b0c9c33",
+      "exact_text": "用 440 Hz 單音做一題：規則是頻率高於 300 Hz 回 `high`，否則回 `low`，所以本題希望答案 `high`。先檢查聲音入口能否接到文字核心，讓答案的代價沿這條路徑傳回。\n\n文字序列中放一個聲音佔位 token `<audio>`（[6.6](06.md#6.6) 列出的特殊 token，ID 為 6），實際計算時以聲音的 11 條特徵取代它；接頭把聲音特徵的寬度轉成文字核心的特徵寬度。這個佔位 token 只提供放入聲音的位置，裡面沒有預先寫 `high`。\n\n做這件事的是 `MultiModalLM`。它怎麼包住文字模型、怎麼走圖片路線，見 [10.8 的精簡版](10.md#10.8)。函式庫版本的聲音路線和圖片路線一一對應，關鍵是下面三行：\n\n- `__init__` 裡的 `self.audio = AudioEncoder(width=audio_width)`：12.8 的聲音入口，每框輸出 `audio_width`（預設 16）個數字。\n- `__init__` 裡的 `self.audio_projector = nn.Linear(audio_width, language_model.config.width)`：聲音接頭，把每條聲音特徵從 16 個數字轉成文字核心的特徵寬度。\n- `forward` 裡的 `features[tok.audio_id] = self.audio_projector(self.audio(waveform.unsqueeze(0)))[0]`：波形 `(1600,)` 經 `unsqueeze(0)` 補上筆數軸，成為 `(1,1600)`；聲音入口輸出 `(1,11,16)`，接頭轉成 `(1,11,8)`，`[0]` 取出這段聲音的 `(11,8)`，記在 `features` 字典裡 `<audio>` 的 ID 底下。之後和圖片一樣，由 [10.7 的 `expand_modalities`](10.md#10.7) 把佔位 token 換成這 11 條特徵，再錯開一位。\n\n函式庫版本也檢查聲音佔位 token：序列裡有 `<audio>`、卻沒有給 `waveform` 時直接報錯，和 10.8 對圖片的檢查相同。\n\n",
+      "current_semantics_checked": true
+    },
+    {
+      "source": "course/chapters/12.md",
+      "section": "12.9",
+      "slice_index": 1,
+      "start_utf8_byte": 38915,
+      "end_utf8_byte": 39893,
+      "slice_sha256": "d7b341b4dd898b20d143471852a0c1fd41f3c8507450e5bbeca4c50d5f7315ed",
+      "exact_text": "真正更新參數的既有實驗也用同一個 `MultiModalLM`。聲音入口先用「高於 300 Hz 為 high」的單音分類單獨訓練過（見 12.8 的補充區），文字核心以第 7 章 SFT 後的模型為底座（base model）；這兩個起點都是本課自己從隨機初值訓練出來的，不是外部的預訓練模型。聲音入口、接頭與文字核心再一起訓練 300 步。它另用 14 道測試題，由 7 個沒拿來訓練的頻率組成：200、280、290、300 Hz 應回 low，310、320、400 Hz 應回 high；每個頻率有兩版，一版振幅 0.25、長 0.1 秒，一版振幅 0.5、長 0.12 秒。模型生成的回答對 11/14。答錯的三題是 290 Hz 的振幅 0.25 版與 300 Hz 的兩版，都是緊貼 300 Hz 分界、應回 low 卻回了 high。290 Hz 的兩版只錯一版，但兩版同時改了振幅與時長，無法分辨是哪一項造成差別。這是另一個實驗的成績，不是上面這段梯度示範的結果。\n\n",
+      "current_semantics_checked": true
+    },
+    {
+      "source": "course/chapters/11.md",
+      "section": "11.8",
+      "slice_index": 0,
+      "start_utf8_byte": 28922,
+      "end_utf8_byte": 30549,
+      "slice_sha256": "4686eace53444b9d852109f923cc1ac569a8a4ca58f502fcb48c7df4c30ef583",
+      "exact_text": "像這樣只改輸入裡的一樣東西（這裡是換圖），其他保持不變，再看答案怎麼變，叫介入（intervention）。專案拿 11.5 表中「全部」那一版、再用同一批訓練題多練 100 步的模型，做了幾種介入；不做任何更動時，它的 12 題測試題答對 9 題（9/12）。其中六題形狀題各換成同色、同位置的另一種形狀，正是圖中那種成對對照：模型一直答 circle，原圖題與替圖題各對 3/6，同一對兩題都對卻是 0/6。只看前後同樣是一半，會漏掉它根本沒有跟著形狀改答。\n\n遮圖是另一種檢查：移除像素、仍按原圖的正確答案評分，觀察成績有多依賴圖片，這叫消融（ablation）；把 12 張圖全換成黑圖後，只剩 5/12。錯配圖片時則要分清兩種評分：仍按原圖的正確答案評分，量的是答案和原圖有多一致；改按換入圖的正確答案評分，才是對新圖的正確率，兩者不能混報成同一能力。實驗把 12 題的圖片兩兩錯配（題目不變，圖換成另一題的），按原圖的正確答案只對 3 題，按換入圖的正確答案卻對 9 題：6 題顏色題都跟著換入圖改答，例如紅圖題換入綠圖後回答 green；形狀題仍一律答 circle。\n\n所以原圖的 9/12 其實是顏色 6/6 加形狀 3/6，總數掩蓋了模型只會用顏色線索。遮圖後分數下降可以提供線索；成對回答按規則改對，則是更直接的證據。替換要改和問題相關的屬性：紅圓換藍圓，形狀答案本來就不必變，不能把「沒變」一律算成沒看圖。\n\n",
+      "current_semantics_checked": true
+    },
+    {
+      "source": "course/chapters/12.md",
+      "section": "12.17",
+      "slice_index": 0,
+      "start_utf8_byte": 71740,
+      "end_utf8_byte": 72490,
+      "slice_sha256": "b27ea43d4030e5fe2dd888458db30a1713140f4dfa8929d5c2376d3dfbbe2c70",
+      "exact_text": "四秒短片前兩秒是圓，後兩秒是方；另有一段 800 ms 錄音，其中第 200–400 ms 是單音。把錄音放在短片的 1000 ms 開始，發聲中心是 1300 ms，答案應為圓；改放在 2000 ms 開始，中心變成 2300 ms，答案應為方。影格和波形都沒變，改變的是它們在**共同時間軸**上的相對位置。\n\n沿用[10.12](10.md#10.12)的影格保持規則，這次每 250 ms 取一格，共 16 張 32×32 灰階圖。`audio_start_ms` 表示錄音第一點在共同時間的起點；錄音內第 300 ms 的共同時間就是起點加 300。圖上方將錄音分為四個 200 ms 區塊，只有第 1 塊發聲。下方把整段錄音移到兩個合法起點，紅色發聲塊便分別對上圓和方。\n\n",
+      "current_semantics_checked": true
+    },
+    {
+      "source": "course/chapters/12.md",
+      "section": "12.17",
+      "slice_index": 1,
+      "start_utf8_byte": 72634,
+      "end_utf8_byte": 73514,
+      "slice_sha256": "fdd72cba6408c354dfac0d3f21ae34376d3bcec2da9b19367b33b994dd978e5b",
+      "exact_text": "本節要讓每條初始聲音特徵只讀自己的 200 ms 區塊，方便對回它觀察的那段波形。本節每 200 ms 獨立算 log-mel，再在塊內平均成一條**局部 token**：一條帶著局部觀測的數字向量。其支持區間（support）是它讀過的原始聲音範圍，`anchor_ms` 是該區間的中點。先切塊才正規化、算 STFT（短時傅立葉轉換），且 `center=False` 不在左右借樣本；因此另一塊的聲音不會改變這條向量。之後若融合不同區塊，融合後向量就已不是純局部觀測。\n\n下面是完整的**人工答案規則示範**，不是已訓練模型：用區塊能量找唯一發聲塊，以其中心查畫面，再與已知圖形模板逐點核對。它省略要學習的聲音／視覺入口，保留共同時間、局部支持與移時關係；輸入沒有 gold event ID 或形狀答案。\n\n",
+      "current_semantics_checked": true
+    }
+  ]
+}

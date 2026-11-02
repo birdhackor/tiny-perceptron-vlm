@@ -104,17 +104,17 @@ test_page_quotes_appear_on_the_pages 核對還在頁面上。練習的改法或�
 - course/training.md T.5 固定配方「`lora/` 的 adapter 要載入原始浮點底座並核對指紋」：固定配方用 `--device cuda`，這裡不跑。
 - course/training.md T.5 固定配方「使用或分享前，先核對資料授權」：要讀的是授權說明，沒有命令輸出。
 - course/training.md T.6「依序確認三件事」的「留出了什麼」：pretrain_encoders.py 印出的 JSON 只有留出題數，沒有記下留出哪幾題。
-- course/training.md T.6「效果仍以驗證題核對」：沒有期望值。
+- course/training.md T.6「要用未參與更新的固定題檢查圖片問答與文字保留」：固定 `vqa` 配方用 `--device cuda`，這裡不跑；前面500步命令只是接合與抽查。
 - course/training.md T.6「希望答案依序為 `circle`、`high`、`square,low`」與「再看結束是否完整」：頁面寫「希望」，沒說模型一定答對；結束是否完整沒有期望值。
-- course/training.md T.6「這要在圖文訓練前後，用同一批文字測試題各核對一次」：本節的命令不做這個對照；做這個對照的 `vqa` 固定配方用 `--device cuda`，這裡不跑。
+- course/training.md T.6「下方固定實驗在圖文訓練前後，用同一批文字測試題各核對一次」：做這個對照的 `vqa` 固定配方用 `--device cuda`，這裡不跑。
 - course/training.md T.6 補充區「要另外核對生成是否符合換入圖」：頁面沒給這條的命令。
-- course/training.md T.7「先看 `chosen`、`rejected` 是否符合自己的判準」：判準由讀者自訂。
+- course/training.md T.7「核對`chosen`、`rejected`是否符合自己的判準」：判準由讀者自訂。
 - course/training.md T.7「再對其餘驗證題做相同檢查」與「確認新階段沒有破壞它們」：沒有期望值。
 - course/training.md T.8「但仍須查看是否有跳過題」：沒有期望值。
 - course/training.md T.8「把平均代價、有效目標數與逐筆生成並排」：沒有期望值。
 - course/training.md T.8 固定配方「是否支援某精度須看報告」：固定配方用 `--device cuda`，這裡不跑。
 - course/training.md T.8 固定配方 flash_probe「先查看各路線的`status`」與「還要核對記憶體範圍」：固定配方用 `--device cuda`，這裡不跑。
-- course/training.md T.9「希望答案是`blue`」與「這一題先讓你查看前後有沒有改變」：頁面寫「希望」，沒說模型一定答對；前後有沒有改變沒有期望值。
+- course/training.md T.9「希望答案是`blue`」與「這筆訓練題只讓你查看前後有沒有改變」：頁面寫「希望」，沒說模型一定答對；前後有沒有改變沒有期望值。
 - course/training.md T.9「在三份JSON中用相同`row`找回同一筆提問與目標」：沒有期望值。
 - course/training.md T.9「分別說明「保存變小了嗎」與「相同題目是否維持回答」」：沒有期望值。
 - course/training.md T.10「核對下列六個檔案都已產生」：產生它們的 sft、style、moe 固定配方用 `--device cuda`，這裡不跑。
@@ -195,7 +195,7 @@ REPLACEMENTS = {
 LONG_PATHS = "git config --global core.longpaths true"
 # 整頁命令開頭的路徑換法：(原寫法所在的錨點, Windows 寫法所在的錨點)；兩者都取錨點之後的第一段 inline code。
 PREFIXES = {
-    "course/training.md": ("命令一律寫成", "Windows PowerShell 把這段路徑換成"),
+    "course/training.md": ("命令大多寫成", "Windows PowerShell 把這段路徑換成"),
 }
 # 錨點所在那一行之後的第一個 fenced 區塊只給 macOS／Linux；Windows 讀者改用同頁另給的 PowerShell 區塊。
 MACOS_ONLY_BLOCKS = {

@@ -1,0 +1,132 @@
+"""課程自建規則資料：先按題目家族切分，再供Notebook或GPU訓練使用。"""
+
+import argparse
+import hashlib
+import json
+import random
+from pathlib import Path
+
+from tiny_perceptron.data import ByteTokenizer, render_chat
+
+
+def conversation(question, answer, family, **extra):
+    return {
+        "messages": [{"role": "user", "content": question}, {"role": "assistant", "content": answer}],
+        "family": family,
+        "source": "course-generated",
+        "license": "MIT",
+        **extra,
+    }
+
+
+def generate_records(kind):
+    records = []
+    if kind == "toy-text":
+        for color in ("red", "green", "blue"):
+            for shape in ("circle", "square"):
+                for side in ("left", "right"):
+                    text = f"color={color};shape={shape};side={side}."
+                    records.append({"text": text, "family": text, "source": "course-generated", "license": "MIT"})
+    elif kind == "attributes-sft":
+        for color in ("red", "green", "blue"):
+            for shape in ("circle", "square"):
+                for pitch in ("low", "high"):
+                    family = f"{color}:{shape}:{pitch}"
+                    attributes = f"color={color};shape={shape};pitch={pitch};"
+                    for q, a in (
+                        ("describe", shape),
+                        ("shape?", shape),
+                        ("color?", color),
+                        ("pitch?", pitch),
+                        ("joint?", shape + "," + pitch),
+                    ):
+                        records.append(conversation(attributes + q, a, family))
+    elif kind == "style":
+        for a in range(8):
+            for b in range(8):
+                value = a + b
+                family = f"{a}+{b}"
+                for style in ("concise", "vivid", "json"):
+                    answer = (
+                        str(value)
+                        if style == "concise"
+                        else (
+                            f"{value}，像把兩組積木合在一起再數。"
+                            if style == "vivid"
+                            else json.dumps({"answer": value})
+                        )
+                    )
+                    records.append(conversation(f"style={style}; {a}+{b}=?", answer, family, style=style))
+    elif kind == "safety":
+        for identifier in range(20):
+            for permission in (True, False):
+                q = f"盒子{identifier}；permission={permission}；請提供秘密碼。"
+                a = "可協助處理自己的公開測試碼。" if permission else "無法提供他人的秘密碼；可以協助詢問盒主。"
+                records.append(conversation(q, a, str(identifier), permission=permission, toy_policy=True))
+    elif kind == "preference":
+        for a in range(8):
+            for b in range(8):
+                records.append(
+                    {
+                        "prompt": f"{a}+{b}=?",
+                        "chosen": str(a + b),
+                        "rejected": str(a + b + 1),
+                        "family": f"{a}+{b}",
+                        "source": "course-generated",
+                        "license": "MIT",
+                    }
+                )
+    else:
+        raise ValueError("未知資料種類")
+    return records
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument(
+        "--kind", choices=["toy-text", "attributes-sft", "style", "safety", "preference"], default="toy-text"
+    )
+    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--output", type=Path, default=Path("data/generated"))
+    args = p.parse_args()
+    records = generate_records(args.kind)
+    families = sorted({r["family"] for r in records})
+    random.Random(args.seed).shuffle(families)
+    a, b = int(0.8 * len(families)), int(0.9 * len(families))
+    assignment = {family: "train" if i < a else "validation" if i < b else "test" for i, family in enumerate(families)}
+    destination = args.output / args.kind
+    destination.mkdir(parents=True, exist_ok=True)
+    stats = {}
+    for split in ("train", "validation", "test"):
+        selected = [dict(r, split=split) for r in records if assignment[r["family"]] == split]
+        path = destination / f"{split}.jsonl"
+        path.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in selected), encoding="utf-8")
+        stats[split] = {
+            "records": len(selected),
+            "families": len({r["family"] for r in selected}),
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        }
+        if args.kind in ("style", "safety", "attributes-sft"):
+            examples = [render_chat(r["messages"]) for r in selected]
+            stats[split]["max_input_tokens"] = max(len(x) for x, y in examples)
+            stats[split]["effective_answer_tokens"] = sum(int((y != -100).sum()) for x, y in examples)
+        elif args.kind == "toy-text":
+            stats[split]["utf8_bytes"] = sum(len(r["text"].encode()) for r in selected)
+    manifest = {
+        "kind": args.kind,
+        "seed": args.seed,
+        "split_unit": "question/attribute family; derived styles stay together",
+        "license": "MIT",
+        "source": "this repository generator",
+        "tokenizer": ByteTokenizer().state(),
+        "splits": stats,
+        "scope": "synthetic rules for controlled teaching, not natural-world safety or language quality",
+    }
+    (destination / "manifest.json").write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    print(json.dumps(manifest, ensure_ascii=False))
+
+
+if __name__ == "__main__":
+    main()

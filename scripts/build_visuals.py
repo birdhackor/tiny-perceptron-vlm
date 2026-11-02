@@ -1,6 +1,8 @@
 """自行繪製、無外部圖像授權需求的SVG：每張具靜態標註與漸進提示。"""
 
+import hashlib
 import html
+import json
 import math
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -8,6 +10,72 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 DIRECTORY = ROOT / "course/figures"
 VISUALS = {}
+RESULT_PLOTS = {
+    "looped-mechanism-measured.svg": {
+        "title": "固定深度與混合深度的機制對照",
+        "caption": "相同初始化與1500次更新，在留出的箱子追蹤題以1至6輪推論，比較交叉熵與正確率。",
+        "generator": "scripts/lesson_products/plot_results.py",
+        "manifest": "docs/lesson-products/results/publication-spec-v1.json",
+    }
+}
+
+
+def index_existing_visuals():
+    """保留手寫圖的metadata檢查；實測圖另核已發布的精確bytes與來源。"""
+    metadata_path = DIRECTORY / "source-metadata.json"
+    metadata = {}
+    if metadata_path.exists():
+        document = json.loads(metadata_path.read_bytes())
+        if type(document.get("schema_version")) is not int or document["schema_version"] != 1:
+            raise ValueError("圖解metadata版本不支援")
+        metadata = document["figures"]
+    generated = {name for name, value in VISUALS.items() if "source" not in value}
+    for source in sorted(DIRECTORY.glob("*.svg")):
+        if source.stem in generated:
+            continue
+        raw = source.read_bytes()
+        drawing = ET.fromstring(raw)
+        if source.name in RESULT_PLOTS:
+            plot = RESULT_PLOTS[source.name]
+            manifest = json.loads((ROOT / plot["manifest"]).read_bytes())
+            expected = manifest["files"][source.name]
+            if hashlib.sha256(raw).hexdigest() != expected["sha256"] or len(raw) != expected["bytes"]:
+                raise ValueError(f"實測圖與固定發布清單不同：{source.name}")
+            VISUALS[source.stem] = {
+                "title": plot["title"],
+                "caption": plot["caption"],
+                "animated": False,
+                "source": "generated_result",
+                "generator": plot["generator"],
+                "result_manifest": plot["manifest"],
+            }
+            continue
+        namespace = {"svg": "http://www.w3.org/2000/svg"}
+        title = drawing.find("svg:title", namespace)
+        description = drawing.find("svg:desc", namespace)
+        title_text = "".join(title.itertext()) if title is not None else ""
+        description_text = "".join(description.itertext()) if description is not None else ""
+        external = None
+        if not title_text.strip() or not description_text.strip():
+            external = metadata.get(source.name, {})
+            if (
+                external.get("sha256") != hashlib.sha256(raw).hexdigest()
+                or external.get("bytes") != len(raw)
+                or not isinstance(external.get("title"), str)
+                or not external["title"].strip()
+                or not isinstance(external.get("description"), str)
+                or not external["description"].strip()
+            ):
+                raise ValueError(f"手寫圖解需要標題與描述或對應bytes的明示metadata：{source.name}")
+            title_text = external["title"]
+            description_text = external["description"]
+        VISUALS[source.stem] = {
+            "title": title_text,
+            "caption": description_text,
+            "animated": "@keyframes" in raw.decode("utf-8"),
+            "source": "handwritten",
+            **({"metadata_source": "source-metadata.json"} if external else {}),
+        }
 
 
 def escape(value):
@@ -235,7 +303,7 @@ def build():
             ("一個token", "[1,2,3]"),
             ("平均／尺度", "只沿feature"),
             ("LN或RMS", "兩種不同規則"),
-            ("可學縮放", "gamma / beta"),
+            ("縮放／偏移", "gamma；LN有beta"),
             ("同shape輸出", "下一個零件"),
         ],
     )
@@ -558,24 +626,8 @@ def build():
             ("成本表", "tokens+時間+正確"),
         ],
     )
-    import json
-
-    # 手寫的教材圖也是可直接修改的來源，重建時一併索引而不覆寫。
-    for source in sorted(DIRECTORY.glob("*.svg")):
-        if source.stem in VISUALS:
-            continue
-        drawing = ET.fromstring(source.read_text(encoding="utf-8"))
-        namespace = {"svg": "http://www.w3.org/2000/svg"}
-        title = drawing.find("svg:title", namespace)
-        description = drawing.find("svg:desc", namespace)
-        if title is None or description is None:
-            raise ValueError(f"手寫圖解需要標題與描述：{source.name}")
-        VISUALS[source.stem] = {
-            "title": "".join(title.itertext()),
-            "caption": "".join(description.itertext()),
-            "animated": "@keyframes" in source.read_text(encoding="utf-8"),
-            "source": "handwritten",
-        }
+    # 既有圖也是來源：只索引、不覆寫手寫圖或固定的實測圖。
+    index_existing_visuals()
     (DIRECTORY / "index.json").write_text(json.dumps(VISUALS, ensure_ascii=False, indent=2) + "\n")
     print(f"{len(VISUALS)} 張自行繪製SVG")
 

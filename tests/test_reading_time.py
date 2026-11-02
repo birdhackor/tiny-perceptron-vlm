@@ -3,6 +3,7 @@
 import copy
 import hashlib
 import json
+import subprocess
 import tomllib
 
 import pytest
@@ -271,17 +272,35 @@ def test_export_uses_estimates_for_each_page_and_stops_before_writing_stale_data
     write_metadata(path, inventory)
     destination = root / "outputs/site"
 
-    def build_site(*args, **kwargs):
+    # 正式建置同時核Notebook的真Git pin；fixture只提交兩個小Notebook，不動專案ref。
+    def git(*arguments):
+        return subprocess.run(["git", "-C", str(root), *arguments], check=True, capture_output=True, text=True)
+
+    git("init", "-q")
+    git("add", "notebooks")
+    git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "Notebook fixture")
+    revision = git("rev-parse", "HEAD").stdout.strip()
+    actual_run = subprocess.run
+
+    def build_site(command, *args, **kwargs):
+        if command[0] == "git":
+            return actual_run(command, *args, **kwargs)
+        assert "zensical" in command
         destination.mkdir(parents=True)
 
     monkeypatch.setattr(export_course.subprocess, "run", build_site)
     export_course.build(
-        destination, reading_times=path, reading_routes=root / "absent-routes.json", require_reading_times=True
+        destination,
+        revision=revision,
+        reading_times=path,
+        reading_routes=root / "absent-routes.json",
+        require_reading_times=True,
     )
     for page in inventory["pages"]:
         content = (root / "outputs/docs" / page["page_path"]).read_text()
         assert content.count("閱讀約 2–5 分鐘 · AI 估計") == 1
     assert json.loads((destination / "build-info.json").read_text())["reading_time_complete"] is True
+    assert json.loads((destination / "build-info.json").read_text())["colab_git_objects_verified"] is True
     previous = (root / "outputs/docs/1.1.md").read_text()
     (root / "course/chapters/01.md").write_text((root / "course/chapters/01.md").read_text().replace("逐行", "仔細"))
     with pytest.raises(ValueError, match="目前正文"):

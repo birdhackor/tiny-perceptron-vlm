@@ -36,6 +36,11 @@ def check(site):
         raise ValueError("網站節數與教材不一致")
     if info.get("builder") != "zensical":
         raise ValueError("網站必須使用 Zensical 建置")
+    colab_mode = info.get("colab_mode", "github")
+    if colab_mode not in {"github", "upload"}:
+        raise ValueError("未知Colab入口模式")
+    if info.get("publication_ready") and (colab_mode != "github" or info.get("colab_git_objects_verified") is not True):
+        raise ValueError("正式網站尚未核對Colab同版本Notebook")
     search = json.loads((site / "search.json").read_text(encoding="utf-8"))
     search_pages = {item["location"].split("#")[0] for item in search["items"]}
     pages = {}
@@ -107,12 +112,17 @@ def check(site):
                             failures.append(f"{item['id']}: Notebook 前置缺頁面或段落 {link}")
                     elif not urlsplit(link).scheme and ".md" in link:
                         failures.append(f"{item['id']}: Notebook 殘留原稿路徑 {link}")
-        colab = (
-            "https://colab.research.google.com/github/birdhackor/tiny-perceptron-vlm/blob/"
-            + info["revision"]
-            + "/"
-            + item["notebook"]
-        )
+        if colab_mode == "upload":
+            colab = "https://colab.research.google.com/"
+            if "colab-upload-instructions" not in pages[path].ids:
+                failures.append(f"Colab預覽缺上傳操作說明：{item['id']}")
+        else:
+            colab = (
+                "https://colab.research.google.com/github/birdhackor/tiny-perceptron-vlm/blob/"
+                + info["revision"]
+                + "/"
+                + item["notebook"]
+            )
         if colab not in pages[path].links:
             failures.append(f"Colab 入口版本不符：{item['id']}")
     if failures:
