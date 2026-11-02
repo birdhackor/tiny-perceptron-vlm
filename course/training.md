@@ -5,8 +5,8 @@
 開始前先確認四件事：
 
 - **在哪裡執行。** 這頁的命令都在本機的終端機執行，起點是有 `pyproject.toml` 的專案根目錄；它們不是 Notebook 的程式格，這頁也沒有對應的 Notebook。本課沒有在 Colab 實測過這些命令，請在自己的電腦上跑。第一次安裝請看 [W.1](first-steps.md#W.1)，檔案位置請看 [W.7](first-steps.md#W.7)。
-- **需要什麼。** 照 W.1 裝好 `.venv` 就能跑本機練習。用 `fetch_training_assets.py --asset` 下載資料包時需要 Git LFS，安裝與確認方式也在 W.1。命令寫 `--device cuda` 的固定配方需要 NVIDIA GPU，以及 CUDA 版的安裝（選擇見[環境說明](../docs/environment.md)）；沒有 NVIDIA GPU 時能否改用 CPU 跑完，各配方都未量測。下載公開模型需要連上 Hugging Face。
-- **Python 怎麼寫。** 命令一律寫成 `.venv/bin/python …`，直接使用專案工具箱裡的 Python，不必先啟用 `.venv`。Windows PowerShell 把這段路徑換成 `.\.venv\Scripts\python.exe`，其餘參數不變。`scripts/train.py`、`evaluate.py`、`infer.py` 這類訓練、評估與推論的工具，沒寫 `--device` 時會自動選裝置：有 NVIDIA GPU 時用 CUDA，Apple Silicon 可能用 MPS，否則用 CPU；本課沒有在 MPS 上驗證整套訓練，想固定用 CPU 就加 `--device cpu`。`scripts.course_experiments.run` 沒指定時用 CPU。`quantize.py` 固定用 CPU；`prepare_data.py`、`fetch_training_assets.py` 這類準備資料與下載的工具不處理裝置；這三個工具都沒有 `--device` 參數。
+- **需要什麼。** 照 W.1 裝好 `.venv` 就能跑本機練習。用 `fetch_training_assets.py --asset` 下載資料包時需要 Git LFS，安裝與確認方式也在 W.1。命令寫 `--device cuda` 的固定配方需要 NVIDIA GPU，以及 CUDA 版的安裝（選擇見[環境說明](../docs/environment.md)）；沒有 NVIDIA GPU 時能否改用 CPU 跑完，各配方都未量測。本頁既有公開模型下載連到Hugging Face；本輪新模組的正式配套另見[T.11](training.md#T.11)。
+- **Python 怎麼寫。** 命令大多寫成 `.venv/bin/python …`，直接使用專案工具箱裡的 Python，不必先啟用 `.venv`。Windows PowerShell 把這段路徑換成 `.\.venv\Scripts\python.exe`，其餘參數不變。`scripts/train.py`、`evaluate.py`、`infer.py` 這類訓練、評估與推論的工具，沒寫 `--device` 時會自動選裝置：有 NVIDIA GPU 時用 CUDA，Apple Silicon 可能用 MPS，否則用 CPU；本課沒有在 MPS 上驗證整套訓練，想固定用 CPU 就加 `--device cpu`。`scripts.course_experiments.run` 沒指定時用 CPU。`quantize.py` 固定用 CPU；`prepare_data.py`、`fetch_training_assets.py` 這類準備資料與下載的工具不處理裝置；這三個工具都沒有 `--device` 參數。
 - **要花多久。** 有作者實驗紀錄（JSON，這是機器可讀的完整結果）的命令會寫出時間與硬體，數字取自紀錄裡的 `elapsed_seconds`，只算實驗本身，不含安裝、啟動與下載。沒有寫出時間的命令都沒有量測紀錄，各節的本機訓練會再註明「未量測」。`train.py` 的報告有 `seconds` 欄，可以記下你自己這次訓練迴圈花的秒數。
 
 自己的報告和模型放在 `outputs/` 與 `checkpoints/`，不要用課程的歷史數字代替自己的結果。
@@ -71,6 +71,8 @@
 接字表（[1.5](chapters/01.md#1.5) 的 bigram 表）只看前一字；固定視窗 MLP 可以同時讀前面幾個字。先用相同短文與切分，分別保存更新前、更新後的代價，看看猜法是否改變。
 
 預設資料是十二篇中文的顏色與形狀短文，例如「顏色=紅；形狀=圓。」。這個工具以字元為單位，「下一字」就是下一個字元；T.4 起的 Transformer 改用 byte tokenizer，單位就不同了。工具先去掉完全重複的文件、按整篇切分，再取視窗；種子 42 的訓練／驗證／測試是 9／1／2 篇。字表只看訓練側。MLP 的 `--context 3` 表示看前三個字，也就是 [2.5](chapters/02.md#2.5) 的視窗長度；`--width 16` 是特徵寬度，讓每字查出 16 個特徵數字，中間寬度也是 16。本節命令在你電腦上的時間未量測。先建立輸出資料夾（Windows PowerShell 把 `mkdir -p outputs checkpoints` 換成 `New-Item -ItemType Directory -Force -Path outputs,checkpoints`），再取得未更新的起點：
+
+下方命令末尾的`>`把本來印在終端機的JSON報告寫進右側檔案；再次使用同名檔會覆寫，想保留多次結果時換個檔名。
 
 ```bash
 mkdir -p outputs checkpoints
@@ -145,7 +147,7 @@ mkdir -p outputs checkpoints
 
 第一行練下一個 token；本課的 byte tokenizer 把一個 UTF-8 byte 或一個特殊 token（例如 EOS）算成一個 token。第二行的問題提供線索，只有助手的`circle`與EOS結束目標計回答代價，結束標記見[7.9](chapters/07.md#7.9)。同一家族的五種問法都放在同一份train、validation或test，避免教過同一組素材的一種問法，再把另一問法當全新素材。預設文字是train 9篇、validation 1篇、test 2篇；問答是train 45題、validation 5題、test 10題。
 
-先保存同一個未訓練起點。用任何純文字編輯器（例如 VS Code）把下段存成 `outputs/save_start.py`，再用 `.venv/bin/python outputs/save_start.py` 執行：
+先保存同一個未訓練起點。若直接從本節開始，先依[T.3的建夾步驟](#T.3)建立`outputs/`與`checkpoints/`。用任何純文字編輯器（例如 VS Code）把下段存成 `outputs/save_start.py`，再用 `.venv/bin/python outputs/save_start.py` 執行：
 
 ```python
 from tiny_perceptron.model import ModelConfig, TinyLM
@@ -160,6 +162,8 @@ print("保存隨機起點；沒有更新參數")
 這個模型特徵寬度 32、一層、一個注意力頭，最多 128 個位置。保存起點是為了前後比較；檔案裡沒有最佳化器狀態，不能拿來從中斷處精確接續訓練。
 
 文字路線先評估、更新、再評估。本節的訓練與評估命令在你電腦上的時間未量測；`train.py` 報告的 `seconds` 欄會記下你這次的訓練迴圈時間。
+
+以下的`evaluate.py`生成答案時固定採用**greedy（貪婪選取）**：每一步取目前機率最高的token，再接著生成下一步，不做隨機抽樣。這個工具目前沒有切換選字方式的命令列參數；前後比較使用同一份驗證題與這項選字規則。
 
 ```bash
 .venv/bin/python scripts/evaluate.py checkpoints/start.pt --data data/generated/toy-text/validation.jsonl --mode text --tokens 32 --device cpu --limit all --output outputs/text-before.json
@@ -189,7 +193,7 @@ print("保存隨機起點；沒有更新參數")
 
 | 欄位 | 要核對什麼 |
 | --- | --- |
-| `mean_token_nll`、`effective_tokens` | 有效目標的平均代價（平均 NLL），以及有效目標數 |
+| `mean_token_nll`、`effective_tokens` | 有效目標的平均代價（負對數似然，negative log-likelihood，NLL），以及有效目標數 |
 | `exact_match` | SFT 回答內容 ID 是否和目標一致；不刪空白或藏非法角色標記 |
 | `completed_exact_match`、`eos_rate` | 內容匹配且正常結束；另記主動結束比例 |
 | `samples` | 逐題的目標、實際生成、原始 ID 與停止原因 |
@@ -298,7 +302,7 @@ PKU-SafeRLHF 起步包標示 CC-BY-NC-4.0；它與本課原創盒子題的授權
 - `partial`：接頭之外，再開放文字核心的第一個與最後一個區塊。
 - `none`：所有參數都更新，包括兩個入口。
 
-這是本工具自己的凍結方案，不是照名稱只凍結某個零件。開放更新也要有本次輸入帶來的梯度，沒用到的入口不會因此自動學習。本練習的聯合路線選 `partial`，目的是讓接頭與首末文字區塊一起適應圖片、聲音兩種輸入；這是一組示範設定，效果仍以驗證題核對。
+這是本工具自己的凍結方案，不是照名稱只凍結某個零件。開放更新也要有本次輸入帶來的梯度，沒用到的入口不會因此自動學習。本練習的聯合路線選 `partial`，目的是讓接頭與首末文字區塊一起適應圖片、聲音兩種輸入。下面三條500步路線先示範接合與抽查，沒有固定的整合驗證題，不能據此驗收這組設定的效果。要用未參與更新的固定題檢查圖片問答與文字保留，再接著完成本節正文的固定圖文路線；兩套配方的模型與成績分開。
 
 接著選圖片、聲音或聯合路線：
 
@@ -318,20 +322,17 @@ PKU-SafeRLHF 起步包標示 CC-BY-NC-4.0；它與本課原創盒子題的授權
 .venv/bin/python scripts/infer_modal.py checkpoints/joint.pt --color red --shape square --frequency 220 --prompt "joint?" --tokens 16
 ```
 
-希望答案依序為 `circle`、`high`、`square,low`。開啟 JSON 的 `answer` 和它們比較，再看結束是否完整。兩個入口的驗證題全對，也沒有保證接上文字核心後每題都對。模型小、訓練短，同一個固定配方在不同電腦上也可能訓練出不同結果，所以你看到的答案可能和希望的不同；不同時先確認命令照抄、檢查點存在。這三題只是抽查：`train.py` 這三條路線的訓練例子是每一步隨機產生的，也沒有另外準備固定的驗證題，所以不要只憑這三題判斷整體能力；用固定測試題比較的做法，見下方摺疊區的〈重跑第11章的固定實驗〉。
+希望答案依序為 `circle`、`high`、`square,low`。開啟 JSON 的 `answer` 和它們比較，再看結束是否完整。兩個入口的驗證題全對，也沒有保證接上文字核心後每題都對。模型小、訓練短，同一個固定配方在不同電腦上也可能訓練出不同結果，所以你看到的答案可能和希望的不同；不同時先確認命令照抄、檢查點存在。這三題只是抽查：`train.py` 這三條路線的訓練例子是每一步隨機產生的，不要只憑三題判斷整體能力。
 
-`vision.pt`、`audio.pt`、`joint.pt` 是多模態檢查點：裡面同時有文字核心（`model.language`）與圖片、聲音的入口和接頭。`evaluate.py` 只接受純文字的檢查點，直接把多模態檢查點交給它會報錯，所以本節的命令不檢查文字能力有沒有退步。這要在圖文訓練前後，用同一批文字測試題各核對一次；下方摺疊區的 `vqa` 固定實驗做了這個對照，[11.7](chapters/11.md#11.7)解釋怎麼讀它的結果。
+`vision.pt`、`audio.pt`、`joint.pt` 是多模態檢查點：裡面同時有文字核心（`model.language`）與圖片、聲音的入口和接頭。`evaluate.py` 只接受純文字的檢查點，直接把多模態檢查點交給它會報錯，所以前面的手動命令沒有檢查文字能力有沒有退步。下方固定實驗在圖文訓練前後，用同一批文字測試題各核對一次，[11.7](chapters/11.md#11.7)解釋怎麼讀它的結果。
 
-<details>
-<summary>續訓、固定模態比較與自己的檔案</summary>
+### 用固定題完成圖文比較
 
-自己用命令保存的完整 `multimodal-v1` 檢查點含最佳化器狀態、進度、隨機狀態與可訓練名單。原排程未完成時，用相同任務、資料、總步數和凍結範圍，加 `--resume` 接續；不要再加 `--vision-encoder` 或 `--audio-encoder`，入口已經存在檢查點裡。僅供推論的學生包不能精確恢復原訓練，格式與例子見[5.7](chapters/05.md#5.7)。
-
-### 重跑第11章的固定實驗
-
-先完成 T.4 的固定 `sft`，再依序執行：
+這條路線依序建立固定的SFT文字起點、圖片／聲音入口、圖片接頭，最後做圖片問答（visual question answering，VQA）比較。命令共用`outputs/course-experiments/course-v1/`根目錄，後續實驗從這裡讀取所需的已完成配套；工具不自動補齊前置。若[T.4的固定SFT配方](#fixed-sft-recipe)已完成並保留`sft/model.pt`與`dataset.json`，可從`encoders`開始；不能用上方手動保存的`attributes.pt`替代：
 
 ```bash
+.venv/bin/python scripts/fetch_training_assets.py --asset ultrachat-sft
+.venv/bin/python -m scripts.course_experiments.run --experiment sft --device cuda
 .venv/bin/python -m scripts.course_experiments.run --experiment encoders --device cuda
 .venv/bin/python -m scripts.course_experiments.run --experiment projector --device cuda
 .venv/bin/python -m scripts.course_experiments.run --experiment vqa --device cuda
@@ -339,7 +340,14 @@ PKU-SafeRLHF 起步包標示 CC-BY-NC-4.0；它與本課原創盒子題的授權
 
 作者在 Modal 的 NVIDIA L4 上的紀錄：`encoders` 10.2 秒、`projector` 15.9 秒、`vqa` 83.8 秒。沒有 NVIDIA GPU 時可以改成 `--device cpu`，但這三組屬於模態實驗，工具會把 CPU 的結果標成只檢查通路（`evidence_status` 為 `interface_smoke_only`），不算正式結果；CPU 時間未量測。
 
-這套 `vqa` 的 `partial` 只開圖片接頭與最後文字區塊，和本節 CLI 不同。完整配方的依賴、數據和歷史結果見[實驗說明](../docs/course-experiments/README.md)，不能套成上面 500 步的預期成績。
+開啟自己的`outputs/course-experiments/course-v1/vqa/result.json`，先看`results.data.splits`：同一顏色、形狀與位移的問答留在同一組，訓練、驗證、測試各有36、12、12題。再看`results.variants.partial`：`test.correct`與`test.examples`是固定圖片測試題的答對數與題數；`text_before.matches`、`text_after.matches`各配上自己的`examples`，比較同一批文字留出題在更新前後的表現。現有[歷史紀錄](../docs/course-experiments/results/vqa.json)中，這支圖片12／12題對，文字卻由5／10降到2／10，不能只看圖片答對就說原能力保住了。重做時保存自己的前後結果，不能抄歷史數字代替驗收。
+
+這套 `vqa` 的 `partial` 只開圖片接頭與最後文字區塊，和前面手動CLI不同；固定圖文比較也不代替聲音／圖音聯合的驗收。完整配方的依賴、數據和歷史結果見[實驗說明](../docs/course-experiments/README.md)，不能套成上面500步的預期成績。
+
+<details>
+<summary>接續手動訓練與使用自己的檔案</summary>
+
+自己用命令保存的完整 `multimodal-v1` 檢查點含最佳化器狀態、進度、隨機狀態與可訓練名單。原排程未完成時，用相同任務、資料、總步數和凍結範圍，加 `--resume` 接續；不要再加 `--vision-encoder` 或 `--audio-encoder`，入口已經存在檢查點裡。僅供推論的學生包不能精確恢復原訓練，格式與例子見[5.7](chapters/05.md#5.7)。
 
 自己的圖像紀錄可寫成 `{"image":"images/12.png","question":"read digits","answer":"12"}`，路徑相對 JSONL。這個局部工具會轉 RGB 並縮至 16×16，可能丟失細字；聲音入口要求非空、取樣率16kHz的單聲道檔案，即每秒保存16,000個聲音數字，不會自動重新取樣。取樣率不同於前面`--frequency`所設定的單音音高頻率，區別見[12.1](chapters/12.md#12.1)。輸入必須和模型學過的任務匹配。
 
@@ -349,21 +357,31 @@ PKU-SafeRLHF 起步包標示 CC-BY-NC-4.0；它與本課原創盒子題的授權
 
 ## T.7 先檢查回答能力，再學較偏好的回答
 
-偏好資料讓同一題有兩篇候選，再指出較合適的一篇。例如 `0+5=?` 的候選 5 與 6，可以依正確答案選 5。DPO 直接用這種同題偏好更新模型，讓它比固定起點參考更偏向較合適的回答；固定參考不更新，也不是提供正確答案的老師，角色見[13.4](chapters/13.md#13.4)。
+偏好資料讓同一題有兩篇候選，再指出較合適的一篇。例如 `0+5=?` 的候選 5 與 6，可以依正確答案選 5；資料中的`chosen`欄保存較合適的回答，`rejected`欄保存較不合適的回答，兩欄配同一題。DPO 直接用這種同題偏好更新模型，讓它比固定起點參考更偏向較合適的回答；固定參考不更新，也不是提供正確答案的老師，角色見[13.4](chapters/13.md#13.4)。
 
 下面是本機小型練習：使用 [T.5](#T.5) 自行訓練的 `checkpoints/style.pt`，在程式產生的偏好材料上更新 200 步，再比較前後回答。它和後面下載外部偏好包的固定完整配方是兩套做法，結果由各自報告決定。這些命令在你電腦上的時間未量測。
 
 ```bash
 .venv/bin/python scripts/prepare_data.py --kind preference
-.venv/bin/python scripts/train.py --task dpo --checkpoint checkpoints/style.pt --data data/generated/preference/train.jsonl --train --steps 200 --output checkpoints/preferred.pt
 ```
 
-這裡用 T.5 的 `style.pt` 作起點，另保留不更新的參考副本。先看 `chosen`、`rejected` 是否符合自己的判準；參考是原回答傾向，不是提供正確答案的老師。
+先開啟`data/generated/preference/train.jsonl`，核對`chosen`、`rejected`是否符合自己的判準。這裡用T.5的`style.pt`作起點，另保留不更新的參考副本；參考是原回答傾向，不是提供正確答案的老師。
 
-訓練前後用同一題生成；下方`--temperature 0`在本工具中表示每步直接選最高分候選，沿用[1.15的greedy規則](chapters/01.md#1.15)，讓前後比較固定選字方式：
+更新前先保存這一題的起點回答。兩次生成使用同一題；下方`--temperature 0`在本工具中表示每步直接選最高分候選，沿用[1.15的greedy規則](chapters/01.md#1.15)，讓前後比較固定選字方式：
 
 ```bash
 .venv/bin/python scripts/infer.py checkpoints/style.pt --chat --prompt "0+5=?" --tokens 32 --temperature 0
+```
+
+核對偏好標註並保存起點回答後，再更新200步；輸出另存`preferred.pt`，保留原`style.pt`：
+
+```bash
+.venv/bin/python scripts/train.py --task dpo --checkpoint checkpoints/style.pt --data data/generated/preference/train.jsonl --train --steps 200 --output checkpoints/preferred.pt
+```
+
+完成後用相同方式取得新回答：
+
+```bash
 .venv/bin/python scripts/infer.py checkpoints/preferred.pt --chat --prompt "0+5=?" --tokens 32 --temperature 0
 ```
 
@@ -488,12 +506,14 @@ FlashAttention是分塊安排注意力計算、減少中間表儲存與搬移的
 
 這些保留部分與刻度都要儲存。本課推論會先把碼換回浮點數再計算，所以檔案變小沒有直接證明執行時記憶體同樣變小或更快。
 
+先用T.4在seed=42生成的訓練家族`blue:square:low`查看一次推論，不提前打開測試題。下面兩次推論都沿用本工具的預設 `--temperature 0`，也就是[1.15的greedy規則](chapters/01.md#1.15)：每步直接取最高分候選，不做隨機抽樣。題目、新增上限24個token與CPU裝置也相同，這樣比較原版與量化版時就固定了選字條件；是否維持回答仍要看實際輸出。
+
 ```bash
-.venv/bin/python scripts/infer.py checkpoints/attributes.pt --chat --prompt "color=blue;shape=circle;pitch=low;color?" --tokens 24 --device cpu --json
-.venv/bin/python scripts/infer.py checkpoints/attributes-int4.pt --chat --prompt "color=blue;shape=circle;pitch=low;color?" --tokens 24 --device cpu --json
+.venv/bin/python scripts/infer.py checkpoints/attributes.pt --chat --prompt "color=blue;shape=square;pitch=low;color?" --tokens 24 --device cpu --json
+.venv/bin/python scripts/infer.py checkpoints/attributes-int4.pt --chat --prompt "color=blue;shape=square;pitch=low;color?" --tokens 24 --device cpu --json
 ```
 
-希望答案是`blue`。這一題先讓你查看前後有沒有改變；完整能力檢查仍用同一份驗證題。原模型若本來就沒答 `blue`，量化後也不必是 `blue`：這一題比的是前後兩次的答案是否一致。原訓練檔可能含最佳化器狀態與隨機狀態，不能把訓練狀態的差異也算作量化收益。
+希望答案是`blue`。這筆訓練題只讓你查看前後有沒有改變，不能代表新題能力；位數取捨仍依下方完整validation題組的比較，選完設定才查看test。原模型若本來就沒答 `blue`，量化後也不必是 `blue`：這一題比的是前後兩次的答案是否一致。原訓練檔可能含最佳化器狀態與隨機狀態，不能把訓練狀態的差異也算作量化收益。
 
 本機練習先比較純模型張量 bytes，不要求另做原版部署匯出。用任何純文字編輯器把下段存成 `outputs/size_check.py`，再用 `.venv/bin/python outputs/size_check.py` 執行，應印出三行，每個檔案一行。它只讀剛才的三個檔案：`model` 保存模型數字，最佳化器與其他訓練狀態在它之外。每份模型張量的格數乘每格 bytes，再加總；量化版的低位元碼、刻度與保留的浮點張量都計入。
 
@@ -571,7 +591,7 @@ for path in paths:
 
 蒸餾命令寫的是 `--device cpu`。它要訓練多支學生，涵蓋不同任務、學生尺寸與教師訊號，CPU 時間未量測；作者的紀錄是在 Modal 的 NVIDIA L4 上用 `--device cuda` 跑的，90.1 秒。有相容環境可改成 `--device cuda`。產物在 `distillation/`，不同任務、學生尺寸與教師訊號各有檔名。GSM8K 是一份英文小學數學應用題資料集；這裡只拿它看學生遇到訓練範圍外的題型時表現如何，也就是有限的域外診斷，並不是這份屬性模型已具備解應用題的證據。
 
-先選同寬度的兩支，用相同題目檢查。下方檔名的`w32`表示學生的特徵寬度是 32；`ce`只用正確答案的交叉熵（cross entropy，見[1.8](chapters/01.md#1.8)）訓練，`ce_kl`同時學正確答案與教師在相同位置的候選機率。KL在此衡量教師、學生兩份機率分佈的差異，方法見[18.8](chapters/18.md#18.8)與[18.9](chapters/18.md#18.9)：
+先選同寬度的兩支，用相同題目檢查。下方檔名的`w32`表示學生的特徵寬度是 32；`ce`只用正確答案的交叉熵（cross entropy，見[1.8](chapters/01.md#1.8)）訓練，`ce_kl`同時學正確答案與教師在相同位置的候選機率。KL是Kullback–Leibler divergence（KL散度），在此衡量教師、學生兩份機率分佈的差異，方法見[18.8](chapters/18.md#18.8)與[18.9](chapters/18.md#18.9)。兩行推論也固定相同題目、24個新增token上限與CPU；都沿用本工具預設的 `--temperature 0`，每步選最高分候選，不做隨機抽樣，與T.7、T.9的比較規則相同：
 
 ```bash
 .venv/bin/python scripts/infer.py outputs/course-experiments/course-v1/distillation/sft-w32-ce.pt --chat --prompt "color=red;shape=square;pitch=high;joint?" --tokens 24 --device cpu --json
@@ -620,6 +640,26 @@ SHA-256是檔案指紋，Git commit是程式版本；兩者讓你取得同一份
 比較時也留原始逐題結果。兩版都4/5，可能錯在不同題；一版先丟掉難題，也不能和另一版的全檔比例直接比較。驗證題可以用來選設定，測試題留到選完後才開啟。
 
 紀錄做到能回答「改了什麼、哪個條件固定、結果支持哪件事」，就能完成一次有限比較。文字、圖解或排版修訂本身不需要重跑訓練；模型、資料或能力宣稱改變時，再做相應驗收。
+
+本輪新增的影音對齊、有限音調與C-v2，在[19.21–19.24](chapters/19.md#19.21)直接內建必要程式、輸入、關鍵輸出、資料切分及真實驗收；Colab只供重跑小例子。十個正式工作已在標準Linux CPU完成訓練並保存最佳及最後續訓狀態：六個影音模型、兩個候選判斷器、codec（聲音編碼／解碼器）與Talker（聲音碼生成器）。看過開發資料選好權重、校準溫度T與接受門檻tau後才量最後測試（final），該批沒有看final再重訓或換門檻；後續C-v3另開訓練與驗收，沒有把這批已看過的世界當成新最後測試。本頁前面的既有配方不會自動訓練這些新模組。
+
+新版配套使用固定版本的GitHub Release資產，分清「可推論權重」與「連同最佳化器、隨機狀態保存的完整續訓檢查點」，另附資料與版本清單。四個預選模組的safetensors權重合計2,192,940 bytes，約2.09 MiB；這只算參數檔，沒有量測整個Python／PyTorch的執行記憶體。以下可下載並以CPU操作，不必重跑正式訓練：
+
+```bash
+uv run --extra cpu python -m scripts.omni_revision.public_download --output checkpoints/omni-products-v1
+uv run --extra cpu python -m scripts.omni_revision.public_demo av --model-root checkpoints/omni-products-v1
+```
+
+影音與聲音操作、實際輸出及完整檢查點選項見[新版模型操作](../docs/omni-products/README.md)。這份清單中的C-v2固定final未過候選判斷與接受風險門檻，仍只用於研究重現；[9.18](chapters/09.md#9.18)已用這次失敗解讀固定校準的限制。自製音調／節奏的訓練沒有使用Qwen或Kev作教師，成熟模型研究另見[20.16](chapters/20.md#20.16)。既有HF固定revision與歷史結果不覆寫。
+
+目前裝置決策請用[19.25](chapters/19.md#19.25)的合格C-v3。一次提交3–6個裝置的明確JSON欄位；需要的機制程式、固定規則與真實驗收都直接在正文，學生不必重訓。從同一repo根目錄執行：
+
+```bash
+uv run --extra cpu python -m scripts.course_product download
+uv run --extra cpu python -m scripts.course_product judge
+```
+
+下載後安裝四個推論檔，下一條在本機回覆預設的主錄音室請求。這份內建範例的主錄音室要record，許可與就緒都為true；因此應建議record、資訊yes，並按record數true欄位的固定規準得2分；未知與移除候選的完整JSON及命令見[合格C-v3操作](../docs/decision-product/README.md)。C-v3的固定ZIP為6,168,350 bytes，含2,818,540-byte推論權重、原始碼與驗收，不是含完整optimizer／RNG的精確續訓包。這個typed入口不把C-v3拿來判B算式的資訊是否足夠，舊B Auto仍用自己的已驗介面。
 
 <details>
 <summary>共同成品、成熟模型與完整歷史紀錄</summary>

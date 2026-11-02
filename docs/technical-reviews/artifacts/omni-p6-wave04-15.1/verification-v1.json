@@ -1,0 +1,478 @@
+{
+  "schema_version": 1,
+  "reviewer_task": "/root/omni_p6_technical_15_1",
+  "lesson_id": "15.1",
+  "verification_code": "import ast, contextlib, datetime, hashlib, io, json, platform, re, subprocess, tarfile\nfrom collections import Counter\nfrom pathlib import Path\nimport torch\nfrom tiny_perceptron.modern import DenseFFN\nfrom tiny_perceptron.model import ModelConfig, TinyLM\nfrom scripts.course_experiments.common import split_records, records_sha256, text_examples\n\nroot = Path.cwd()\nartifact = root / \"docs/technical-reviews/artifacts/omni-p6-wave04-15.1/verification-v1.json\"\ncache = Path(\"/workspace/work/reference/omni-p6-wave04-15.1\")\nsha = lambda b: hashlib.sha256(b).hexdigest()\nfreeze_path = \"docs/course-revision-20261029-omni/reviews/P5-actual/source-freeze-v18.json\"\nfreeze = json.loads((root / freeze_path).read_bytes())\npage = next(p for p in freeze[\"pages\"] if p[\"page_id\"] == \"15.1\")\nraw = (root / page[\"snapshot\"]).read_bytes()\nassert sha(raw) == page[\"source_sha256\"] == \"08209b8a0bcb4586de9d24243c264bcf5dba65b6d7705edd7a02fa9b1ea85f87\"\ntext = raw.decode(\"utf-8\")\ninline = re.search(r\"```python\\n(.*?)```\", text, re.S).group(1)\ndef run_snippet(snippet):\n    namespace = {}\n    stream = io.StringIO()\n    with contextlib.redirect_stdout(stream):\n        exec(compile(snippet, \"<frozen-15.1-inline>\", \"exec\"), namespace)\n    return namespace, stream.getvalue()\nbase, base_stdout = run_snippet(inline)\nup, down, x = (base[k] for k in (\"up\", \"down\", \"x\"))\nexpected = [[4., 5.], [5., 4.]]\nassert base[\"ffn\"](x).tolist() == expected\nassert base[\"ffn\"](torch.cat([x, x], dim=0)).tolist() == expected * 2\nweights_before = (up.clone(), down.clone(), up.data_ptr(), down.data_ptr())\ntriple_code = inline.replace(\"torch.cat([x, x], dim=0)\", \"torch.cat([x, x, x], dim=0)\")\ntriple, triple_stdout = run_snippet(triple_code)\nassert len(triple[\"batch\"]) == 6 and triple[\"ffn\"](triple[\"batch\"]).tolist() == expected * 3\nnegative_code = triple_code.replace(\"[[1.0, 2.0], [2.0, 1.0]]\", \"[[1.0, -2.0], [2.0, 1.0]]\")\nnegative, negative_stdout = run_snippet(negative_code)\nnegative_pre = negative[\"x\"] @ negative[\"up\"]\nnegative_post = torch.relu(negative_pre)\nassert negative_pre[0].tolist() == [1., -2., -1.]\nassert negative_post[0].tolist() == [1., 0., 0.]\nassert negative[\"ffn\"](negative[\"x\"])[0].tolist() == [1., 0.]\nassert torch.equal(up, weights_before[0]) and torch.equal(down, weights_before[1])\nassert (up.data_ptr(), down.data_ptr()) == weights_before[2:]\n# Ordinary FFN weights use the transpose convention of the hand-written tables.\nlinear_up = torch.nn.Linear(2, 3, bias=False)\nlinear_down = torch.nn.Linear(3, 2, bias=False)\nwith torch.no_grad():\n    linear_up.weight.copy_(up.T)\n    linear_down.weight.copy_(down.T)\n    assert torch.equal(linear_down(torch.relu(linear_up(x))), base[\"ffn\"](x))\nsmall = DenseFFN(2, hidden=3)\nassert small.activation == \"gelu\"\nassert sum(p.numel() for p in small.parameters()) == 17\nassert sum(p.numel() for p in (small.up.bias, small.down.bias)) == 5\n\nresult_path = root / \"docs/course-experiments/results/moe.json\"\nreport = json.loads(result_path.read_bytes())\nv = report[\"results\"][\"variants\"][\"dense_active_top1\"]\ncfg = ModelConfig(**v[\"model\"][\"config\"])\n# Construct and count only. No training, model forward, weights load, or evaluation.\nmodel = TinyLM(cfg)\ncounts = {name: p.numel() for name, p in model.named_parameters()}\nassert sum(counts.values()) == 141568 == v[\"model\"][\"parameters\"]\nffn_counts = [sum(p.numel() for p in block.ffn.parameters()) for block in model.blocks]\nassert ffn_counts == [33088, 33088]\nassert [block.ffn.up.out_features for block in model.blocks] == [256, 256]\nheldout = {}\nfor split, displayed in [(\"validation\", \"2.29999\"), (\"test\", \"2.32093\")]:\n    z = v[\"heldout\"][split]\n    recomputed = z[\"nll_sum\"] / z[\"effective_tokens\"]\n    assert recomputed == z[\"nll\"] and f\"{recomputed:.5f}\" == displayed\n    heldout[split] = {k: z[k] for k in [\"nll\", \"nll_sum\", \"effective_tokens\", \"examples\", \"records\"]}\n    heldout[split][\"recomputed_nll\"] = recomputed\n    heldout[split][\"rounded_5dp\"] = f\"{recomputed:.5f}\"\nassert v[\"training\"][\"optimizer_updates\"] == v[\"training\"][\"steps\"] == 180\nassert v[\"training\"][\"skipped_updates\"] == 0\nassert len(report[\"results\"][\"variants\"]) == 7\n\narchive = root / \"assets/training/tinystories-v1.tar.gz\"\nwith tarfile.open(archive, \"r:gz\") as tf:\n    member = next(m for m in tf.getmembers() if m.name.endswith(\"tinystories-train-512.jsonl\"))\n    dataset_raw = tf.extractfile(member).read()\nrecords = [json.loads(line) for line in dataset_raw.decode(\"utf-8\").splitlines()]\nassert len(records) == 512\nassert sha(dataset_raw) == \"7aa55a657de6499be64a513aa76eb21a9cd52276bf836ba725e1d7f52ea511e0\"\nupstream = (cache / \"TinyStories-train-first-458752.bin\").read_bytes()\nupstream_stories = upstream.decode(\"utf-8\").split(\"<|endoftext|>\")[:-1][:512]\nassert len(upstream_stories) == 512\nassert [r[\"text\"] for r in records] == [t.strip() for t in upstream_stories]\nfor r in records:\n    r[\"family\"] = r.get(\"text_sha256\", records_sha256([{\"text\": r[\"text\"]}]))\nsplits = split_records(records, report[\"seed\"])\ndataset_check = {}\nfor name, rows in splits.items():\n    examples = text_examples(rows, max_length=cfg.max_length)\n    effective = sum(int((y != -100).sum()) for _, y in examples)\n    actual = {\"records\": len(rows), \"sha256\": records_sha256(rows)}\n    assert actual == report[\"results\"][\"dataset\"][name]\n    if name in heldout:\n        assert effective == heldout[name][\"effective_tokens\"]\n        assert len(examples) == heldout[name][\"examples\"]\n    dataset_check[name] = {**actual, \"effective_targets\": effective, \"chunk_examples\": len(examples)}\nfamily_sets = {k: {r[\"family\"] for r in rows} for k, rows in splits.items()}\nassert not (family_sets[\"train\"] & family_sets[\"validation\"] or family_sets[\"train\"] & family_sets[\"test\"] or family_sets[\"validation\"] & family_sets[\"test\"])\n\nrevision = report[\"revision\"]\np = \"scripts/course_experiments/architecture.py\"\nold = subprocess.check_output([\"git\", \"show\", f\"{revision}:{p}\"])\nassert sha(old) == report[\"code_sha256\"][p]\nold_defs = {n.name: n for n in ast.parse(old).body if isinstance(n, ast.FunctionDef)}\nnew_defs = {n.name: n for n in ast.parse((root / p).read_bytes()).body if isinstance(n, ast.FunctionDef)}\nfunctions = [\"_description\", \"_clone_config\", \"_text_dataset\", \"_data_report\", \"_steps\", \"_forward\", \"_nll\", \"_train\", \"_heldout\", \"run_moe\"]\nfunction_comparison = {}\nfor name in functions:\n    equal = ast.dump(old_defs[name], include_attributes=False) == ast.dump(new_defs[name], include_attributes=False)\n    assert equal\n    function_comparison[name] = {\"AST_equal\": equal, \"original_lines\": [old_defs[name].lineno, old_defs[name].end_lineno]}\ncode_hashes = {}\nfor name in [\"tiny_perceptron/modern.py\", \"tiny_perceptron/model.py\", \"tiny_perceptron/attention.py\", \"tiny_perceptron/data.py\", \"scripts/course_experiments/common.py\"]:\n    digest = sha((root / name).read_bytes())\n    assert digest == report[\"code_sha256\"][name]\n    code_hashes[name] = digest\nplan = json.loads((root / \"docs/course-experiments/plan.json\").read_bytes())\nspec = next(p for p in plan[\"sequence\"] if p[\"id\"] == \"moe\")\nassert spec[\"module\"] == \"architecture\" and spec[\"function\"] == \"run_moe\"\n# Resolve the cited CLI without running an experiment, and check the linked table.\nimport sys\nhelp_result = subprocess.run([sys.executable, \"-m\", \"scripts.course_experiments.run\", \"--help\"], capture_output=True, text=True, check=True)\nassert \"--experiment\" in help_result.stdout\nassets_result = subprocess.run([sys.executable, \"-m\", \"scripts.course_experiments.run\", \"--list-assets\", \"moe\"], capture_output=True, text=True, check=True)\nassert \"assets/training/tinystories-v1.tar.gz\" in assets_result.stdout\nchapter = (root / \"course/chapters/15.md\").read_text()\ntable_section = re.search(r\"^## 15\\.13 .*?(?=^## |\\Z)\", chapter, re.M | re.S).group(0)\nfor variant in report[\"results\"][\"variants\"].values():\n    for split in [\"validation\", \"test\"]:\n        assert f\"{variant['heldout'][split]['nll']:.5f}\" in table_section\nfor target_count in [\"39,256\", \"41,914\"]:\n    assert target_count in table_section\ntraining_page = (root / \"course/training.md\").read_text()\nassert 'id=\"fixed-moe-recipe\"' in training_page and \"--experiment moe\" in training_page\nresult = {\n    \"executed_at\": datetime.datetime.now(datetime.timezone.utc).isoformat(),\n    \"environment\": {\"python\": platform.python_version(), \"torch\": str(torch.__version__), \"torch_git\": str(torch.version.git_version), \"device\": \"cpu\"},\n    \"freeze\": {\"path\": freeze_path, \"sha256\": sha((root / freeze_path).read_bytes()), \"snapshot\": page[\"snapshot\"], \"snapshot_bytes\": len(raw), \"source_sha256\": sha(raw), \"figure_sha256\": page[\"figures_sha256\"]},\n    \"inline\": {\"code\": inline, \"stdout\": base_stdout, \"dtype\": str(up.dtype), \"up_shape\": list(up.shape), \"down_shape\": list(down.shape), \"up_numel\": up.numel(), \"down_numel\": down.numel(), \"hidden\": (x @ up).tolist(), \"relu_hidden\": torch.relu(x @ up).tolist(), \"output\": base[\"ffn\"](x).tolist(), \"repeated_shape\": list(base[\"batch\"].shape), \"same_weights_after_cat\": True},\n    \"triple_exercise\": {\"stdout\": triple_stdout, \"rows\": len(triple[\"batch\"]), \"parameters\": triple[\"up\"].numel() + triple[\"down\"].numel()},\n    \"negative_exercise\": {\"stdout\": negative_stdout, \"first_pre_relu\": negative_pre[0].tolist(), \"first_post_relu\": negative_post[0].tolist(), \"first_output\": negative[\"ffn\"](negative[\"x\"])[0].tolist()},\n    \"DenseFFN_2_3\": {\"activation\": small.activation, \"parameters_with_bias\": 17, \"bias_parameters\": 5, \"linear_transpose_equivalence\": True},\n    \"parameter_count\": {\"config\": v[\"model\"][\"config\"], \"by_parameter\": counts, \"per_layer_ffn\": ffn_counts, \"total\": sum(counts.values())},\n    \"preserved_result\": {\"path\": str(result_path.relative_to(root)), \"sha256\": sha(result_path.read_bytes()), \"revision\": revision, \"recorded_environment\": {k: report[k] for k in [\"device\", \"seed\", \"torch_version\", \"python_version\", \"gpu\"]}, \"optimizer_updates\": v[\"training\"][\"optimizer_updates\"], \"skipped_updates\": v[\"training\"][\"skipped_updates\"], \"training_effective_targets\": v[\"training\"][\"effective_tokens\"], \"heldout\": heldout, \"variant_names\": list(report[\"results\"][\"variants\"])},\n    \"raw_dataset\": {\"archive\": str(archive.relative_to(root)), \"archive_sha256\": sha(archive.read_bytes()), \"member\": member.name, \"member_sha256\": sha(dataset_raw), \"upstream_prefix_sha256\": sha(upstream), \"first_512_texts_match_original_upstream\": True, \"splits\": dataset_check, \"family_overlap\": False},\n    \"historical_code\": {\"revision\": revision, \"path\": p, \"sha256\": sha(old), \"current_sha256\": sha((root / p).read_bytes()), \"relevant_functions\": function_comparison, \"other_run_code_sha256_matched\": code_hashes},\n    \"recipe_resolution\": {\"plan_id\": spec[\"id\"], \"module\": spec[\"module\"], \"function\": spec[\"function\"], \"executed_training_recipe\": False, \"help_command_returncode\": help_result.returncode, \"list_assets_stdout\": assets_result.stdout, \"all_seven_heldout_rows_and_denominators_found_in_15_13\": True, \"T8_anchor_and_moe_option_found\": True},\n    \"scope\": \"Verbatim frozen inline and both modifications on synthetic CPU tensors; model construction/count only; preserved raw JSON arithmetic; 512-story prefix and split/token recomputation. No model training, historical model forward, teacher forward, weights download, GPU, Modal, paid compute, publication, or evaluation rerun. Recorded losses are inspected preserved results, not freshly reproduced measurements.\"\n}\nrecord = json.loads(artifact.read_bytes())\nrecord[\"execution\"] = result\nartifact.write_text(json.dumps(record, ensure_ascii=False, indent=2) + \"\\n\")\nprint(json.dumps({\"status\": \"all_assertions_passed\", \"artifact\": str(artifact.relative_to(root)), \"inline_stdout\": base_stdout, \"triple_rows\": len(triple[\"batch\"]), \"negative_first\": result[\"negative_exercise\"][\"first_output\"], \"ffn_parameters\": ffn_counts, \"total_parameters\": sum(counts.values()), \"validation\": heldout[\"validation\"], \"test\": heldout[\"test\"], \"dataset\": dataset_check}, ensure_ascii=False, indent=2))\n",
+  "source_receipts": [
+    {
+      "name": "attention-1706.03762v7.pdf",
+      "url": "https://arxiv.org/pdf/1706.03762v7",
+      "bytes": 2215244,
+      "sha256": "bdfaa68d8984f0dc02beaca527b76f207d99b666d31d1da728ee0728182df697",
+      "status": 200,
+      "downloaded_at": "2026-10-30T17:44:27.891555+00:00"
+    },
+    {
+      "name": "sparsely-gated-1701.06538v1.pdf",
+      "url": "https://arxiv.org/pdf/1701.06538v1",
+      "bytes": 544288,
+      "sha256": "2567713d198a376b65b92f0c60b9f58c8c5f66755530b92203533a17c4ec4b8e",
+      "status": 200,
+      "downloaded_at": "2026-10-30T17:44:29.499269+00:00"
+    },
+    {
+      "name": "pytorch-_torch_docs.py",
+      "url": "https://raw.githubusercontent.com/pytorch/pytorch/5c4886908584029761b579af026dcfb627c84070/torch/_torch_docs.py",
+      "bytes": 445068,
+      "sha256": "f3962a2a4973e7d4917a3b3f265903d4a534085343bbe40d003728385d1949e5",
+      "status": 200,
+      "downloaded_at": "2026-10-30T17:44:30.566111+00:00"
+    },
+    {
+      "name": "pytorch-linear.py",
+      "url": "https://raw.githubusercontent.com/pytorch/pytorch/5c4886908584029761b579af026dcfb627c84070/torch/nn/modules/linear.py",
+      "bytes": 12376,
+      "sha256": "1961ad1a1f650e104b3c7f78d19af2d21bf977e7af6c3fdf2420aad563c9e202",
+      "status": 200,
+      "downloaded_at": "2026-10-30T17:44:31.375696+00:00"
+    },
+    {
+      "name": "pytorch-functional.py",
+      "url": "https://raw.githubusercontent.com/pytorch/pytorch/5c4886908584029761b579af026dcfb627c84070/torch/nn/functional.py",
+      "bytes": 278980,
+      "sha256": "95ff403085bb179477a01df63acfddf59dfac0fb58829e99a9c8b5c2fe98899b",
+      "status": 200,
+      "downloaded_at": "2026-10-30T17:44:32.579546+00:00"
+    },
+    {
+      "name": "pytorch-activation.py",
+      "url": "https://raw.githubusercontent.com/pytorch/pytorch/5c4886908584029761b579af026dcfb627c84070/torch/nn/modules/activation.py",
+      "bytes": 62517,
+      "sha256": "9b1ef5c6daeaf392b9267f82a7212da22233c23b8b344a7494d58426a2bf3679",
+      "status": 200,
+      "downloaded_at": "2026-10-30T17:45:40.303111+00:00",
+      "scope": "full source"
+    },
+    {
+      "name": "pytorch-_tensor.py",
+      "url": "https://raw.githubusercontent.com/pytorch/pytorch/5c4886908584029761b579af026dcfb627c84070/torch/_tensor.py",
+      "bytes": 70738,
+      "sha256": "dead69ea4e782ca5f68f046115b2a6defb3c93fe8ff671d93fa84d139f3d9f33",
+      "status": 200,
+      "downloaded_at": "2026-10-30T17:45:41.414233+00:00",
+      "scope": "full source"
+    },
+    {
+      "name": "pytorch-_tensor_docs.py",
+      "url": "https://raw.githubusercontent.com/pytorch/pytorch/5c4886908584029761b579af026dcfb627c84070/torch/_tensor_docs.py",
+      "bytes": 142677,
+      "sha256": "9c3d4d0bcef8041352cc87cff68980c39ddd8c506d4e8db6410af306bd46f189",
+      "status": 200,
+      "downloaded_at": "2026-10-30T17:45:42.356800+00:00",
+      "scope": "full source"
+    },
+    {
+      "name": "TinyStories-train-first-458752.bin",
+      "url": "https://huggingface.co/datasets/roneneldan/TinyStories/resolve/f54c09fd23315a6f9c86f9dc80f725de7d8f9c64/TinyStories-train.txt",
+      "bytes": 458752,
+      "sha256": "1687f642d2a5976bb7c2e7aecd16990e04bf7729be53590d78bf52dc4ea580aa",
+      "status": 206,
+      "downloaded_at": "2026-10-30T17:45:46.958237+00:00",
+      "scope": "first 458752 bytes only"
+    }
+  ],
+  "source_inspection": [
+    {
+      "name": "attention-1706.03762v7.pdf",
+      "locator": "§3.1 pp.3; §3.3 equation(2), §3.4 p.5",
+      "excerpt": "applied to each position separately and identically; FFN(x) = max(0, xW1 + b1)W2 + b2",
+      "inspection": "Same linear transformations across positions, distinct parameters by layer. §3.1 attention precedes FFN; §3.4 embeds tokens into d_model vectors. Original architecture is post-norm; the lesson refers to its own 4.5 pre-norm block, independently checked in repository code."
+    },
+    {
+      "name": "sparsely-gated-1701.06538v1.pdf",
+      "locator": "§2 equation(1) p.3; §2.1 equations(3)-(5) p.4",
+      "excerpt": "Wherever G(x)i = 0, we need not compute Ei(x).",
+      "inspection": "Separate expert parameters; top-k creates sparse gating. Supports the local contrast with Dense, without any speed or quality guarantee for this lesson."
+    },
+    {
+      "name": "pytorch-linear.py",
+      "locator": "Linear lines53-132",
+      "excerpt": "y = xA^T + b; bias default True",
+      "inspection": "Weights shaped (out_features,in_features), bias out_features; leading input axes preserved."
+    },
+    {
+      "name": "pytorch-_torch_docs.py",
+      "locator": "cat2531-2555; matmul7909-7939; numel8814-8834",
+      "excerpt": "Returns the total number of elements in the input tensor.",
+      "inspection": "cat concatenates in dim; 2-D matmul is matrix-matrix product. Neither concatenation nor numel creates additional model weights in the snippet."
+    },
+    {
+      "name": "pytorch-activation.py",
+      "locator": "ReLU104-116",
+      "excerpt": "ReLU(x) = max(0,x)",
+      "inspection": "Elementwise operation with preserved input shape."
+    },
+    {
+      "name": "pytorch-functional.py",
+      "locator": "relu1766-1778; gelu2060-2077",
+      "excerpt": "GELU(x) = x * Phi(x)",
+      "inspection": "Functional relu delegates to torch.relu; default GELU differs from ReLU as stated."
+    },
+    {
+      "name": "pytorch-_tensor.py",
+      "locator": "Tensor.__len__1189-1204",
+      "excerpt": "return self.shape[0]",
+      "inspection": "For non-scalar tensors len counts the first axis."
+    },
+    {
+      "name": "pytorch-_tensor_docs.py",
+      "locator": "numel3622-3630; tolist5444-5463",
+      "excerpt": "Returns the tensor as a (nested) list.",
+      "inspection": "Tensor.numel delegates to torch.numel contract; tolist yields printable Python list."
+    },
+    {
+      "name": "TinyStories-train-first-458752.bin",
+      "locator": "Pinned original upstream train split, bytes0-458751",
+      "excerpt": "No story text copied into this receipt.",
+      "inspection": "Downloaded only first458752 raw bytes, status206. Compared first512 complete story texts with local archive after edge whitespace stripping."
+    }
+  ],
+  "derivations": {
+    "row_1": "[1,2] @ up = [1*1+2*0,1*0+2*1,1*1+2*1]=[1,2,3]; ReLU unchanged; @down=[1*1+2*0+3*1,1*0+2*1+3*1]=[4,5].",
+    "row_2": "[2,1] @ up=[2,1,3]; ReLU unchanged; @down=[2+3,1+3]=[5,4].",
+    "negative_row": "[1,-2] @ up=[1,-2,-1]; ReLU=[1,0,0]; @down=[1,0].",
+    "toy_weight_count": "2*3+3*2=6+6=12; default bias contributes3+2=5, hence DenseFFN(2,3) has17 parameters.",
+    "workload": "For N rows, first matmul has N*2*3 scalar products and N*3*(2-1) additions; second has N*3*2 products and N*2*(3-1) additions, plus3N ReLU comparisons. This implementation-level arithmetic scales linearly with N. Wall-clock behavior is not inferred.",
+    "shape_contract": "[N,2]@[2,H] -> [N,H]; activation preserves shape; [N,H]@[H,2] -> [N,2]. Altering H changes both shared dimensions; altering N does not change either weight shape.",
+    "ffn_64_256": "64*256+256+256*64+64=16384+256+16384+64=33088 per layer.",
+    "model_total": "embedding264*64=16896; positional128*64=8192; each of2 blocks has attention4*64*64=16384, two LayerNorms2*(64+64)=256, FFN33088; final LayerNorm128; untied output64*264=16896. Total16896+8192+2*(16384+256+33088)+128+16896=141568."
+  },
+  "independence": {
+    "reviewer_context": "fresh",
+    "read": "assigned frozen15.1, its explicit prerequisites/direct dependencies, designated primary-input locations, original papers/official PyTorch source/raw data and direct repository implementation",
+    "not_read": "old reviews/issues/peer verdicts/author summaries",
+    "incidental_listing": "A filename-only rg --files query under the neutral outside-Git cache returned historical cache paths. No historical review, issue, integrity JSON or verdict content was opened or used."
+  },
+  "command": "UV_PROJECT_ENVIRONMENT=/workspace/tiny-perceptron-vlm/.venv PYTHONPATH=/workspace/work/omni-book-integrated-v1 uv run --extra cpu --group notebook --no-sync python -c 'import json; from pathlib import Path; p=Path(\"docs/technical-reviews/artifacts/omni-p6-wave04-15.1/verification-v1.json\"); exec(json.loads(p.read_text())[\"verification_code\"])'",
+  "execution": {
+    "executed_at": "2026-10-30T17:48:48.500331+00:00",
+    "environment": {
+      "python": "3.13.5",
+      "torch": "2.14.1+cpu",
+      "torch_git": "5c4886908584029761b579af026dcfb627c84070",
+      "device": "cpu"
+    },
+    "freeze": {
+      "path": "docs/course-revision-20261029-omni/reviews/P5-actual/source-freeze-v18.json",
+      "sha256": "d74eb6e0fc958fbd410c7588dbe4d96a7ced72ff512c7ea8f8863c87f68c9108",
+      "snapshot": "docs/course-review-20261019/freeze-01/sources/15.1.md",
+      "snapshot_bytes": 4586,
+      "source_sha256": "08209b8a0bcb4586de9d24243c264bcf5dba65b6d7705edd7a02fa9b1ea85f87",
+      "figure_sha256": {}
+    },
+    "inline": {
+      "code": "import torch\n\nup = torch.tensor([[1.0, 0.0, 1.0], [0.0, 1.0, 1.0]])\ndown = torch.tensor([[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]])\n\n\ndef ffn(x):\n    return torch.relu(x @ up) @ down\n\n\nx = torch.tensor([[1.0, 2.0], [2.0, 1.0]])\nfor batch in (x, torch.cat([x, x], dim=0)):\n    print(\"輸出\", ffn(batch).tolist())\n    print(\"token數\", len(batch), \"權重數\", up.numel() + down.numel())\n",
+      "stdout": "輸出 [[4.0, 5.0], [5.0, 4.0]]\ntoken數 2 權重數 12\n輸出 [[4.0, 5.0], [5.0, 4.0], [4.0, 5.0], [5.0, 4.0]]\ntoken數 4 權重數 12\n",
+      "dtype": "torch.float32",
+      "up_shape": [
+        2,
+        3
+      ],
+      "down_shape": [
+        3,
+        2
+      ],
+      "up_numel": 6,
+      "down_numel": 6,
+      "hidden": [
+        [
+          1.0,
+          2.0,
+          3.0
+        ],
+        [
+          2.0,
+          1.0,
+          3.0
+        ]
+      ],
+      "relu_hidden": [
+        [
+          1.0,
+          2.0,
+          3.0
+        ],
+        [
+          2.0,
+          1.0,
+          3.0
+        ]
+      ],
+      "output": [
+        [
+          4.0,
+          5.0
+        ],
+        [
+          5.0,
+          4.0
+        ]
+      ],
+      "repeated_shape": [
+        4,
+        2
+      ],
+      "same_weights_after_cat": true
+    },
+    "triple_exercise": {
+      "stdout": "輸出 [[4.0, 5.0], [5.0, 4.0]]\ntoken數 2 權重數 12\n輸出 [[4.0, 5.0], [5.0, 4.0], [4.0, 5.0], [5.0, 4.0], [4.0, 5.0], [5.0, 4.0]]\ntoken數 6 權重數 12\n",
+      "rows": 6,
+      "parameters": 12
+    },
+    "negative_exercise": {
+      "stdout": "輸出 [[1.0, 0.0], [5.0, 4.0]]\ntoken數 2 權重數 12\n輸出 [[1.0, 0.0], [5.0, 4.0], [1.0, 0.0], [5.0, 4.0], [1.0, 0.0], [5.0, 4.0]]\ntoken數 6 權重數 12\n",
+      "first_pre_relu": [
+        1.0,
+        -2.0,
+        -1.0
+      ],
+      "first_post_relu": [
+        1.0,
+        0.0,
+        0.0
+      ],
+      "first_output": [
+        1.0,
+        0.0
+      ]
+    },
+    "DenseFFN_2_3": {
+      "activation": "gelu",
+      "parameters_with_bias": 17,
+      "bias_parameters": 5,
+      "linear_transpose_equivalence": true
+    },
+    "parameter_count": {
+      "config": {
+        "vocab_size": 264,
+        "width": 64,
+        "layers": 2,
+        "heads": 4,
+        "max_length": 128,
+        "norm": "layer",
+        "activation": "gelu",
+        "rotary": false,
+        "tied": false,
+        "kv_heads": null,
+        "backend": "manual",
+        "experts": 0,
+        "top_k": 2
+      },
+      "by_parameter": {
+        "embedding.weight": 16896,
+        "position.weight": 8192,
+        "blocks.0.norm1.weight": 64,
+        "blocks.0.norm1.bias": 64,
+        "blocks.0.norm2.weight": 64,
+        "blocks.0.norm2.bias": 64,
+        "blocks.0.attention.q.weight": 4096,
+        "blocks.0.attention.k.weight": 4096,
+        "blocks.0.attention.v.weight": 4096,
+        "blocks.0.attention.out.weight": 4096,
+        "blocks.0.ffn.up.weight": 16384,
+        "blocks.0.ffn.up.bias": 256,
+        "blocks.0.ffn.down.weight": 16384,
+        "blocks.0.ffn.down.bias": 64,
+        "blocks.1.norm1.weight": 64,
+        "blocks.1.norm1.bias": 64,
+        "blocks.1.norm2.weight": 64,
+        "blocks.1.norm2.bias": 64,
+        "blocks.1.attention.q.weight": 4096,
+        "blocks.1.attention.k.weight": 4096,
+        "blocks.1.attention.v.weight": 4096,
+        "blocks.1.attention.out.weight": 4096,
+        "blocks.1.ffn.up.weight": 16384,
+        "blocks.1.ffn.up.bias": 256,
+        "blocks.1.ffn.down.weight": 16384,
+        "blocks.1.ffn.down.bias": 64,
+        "final_norm.weight": 64,
+        "final_norm.bias": 64,
+        "output.weight": 16896
+      },
+      "per_layer_ffn": [
+        33088,
+        33088
+      ],
+      "total": 141568
+    },
+    "preserved_result": {
+      "path": "docs/course-experiments/results/moe.json",
+      "sha256": "a95f60479ef6c51b018af486b1e42d3f8e6ea99bb90c88470184406adb8f9890",
+      "revision": "48a4f3e912b483d70aee57c42c2aac226534a9a6",
+      "recorded_environment": {
+        "device": "cuda",
+        "seed": 42,
+        "torch_version": "2.14.1+cu126",
+        "python_version": "3.13.3",
+        "gpu": "NVIDIA L4"
+      },
+      "optimizer_updates": 180,
+      "skipped_updates": 0,
+      "training_effective_targets": 337761,
+      "heldout": {
+        "validation": {
+          "nll": 2.2999883651344697,
+          "nll_sum": 90288.34326171875,
+          "effective_tokens": 39256,
+          "examples": 334,
+          "records": 51,
+          "recomputed_nll": 2.2999883651344697,
+          "rounded_5dp": "2.29999"
+        },
+        "test": {
+          "nll": 2.320927383256117,
+          "nll_sum": 97279.35034179688,
+          "effective_tokens": 41914,
+          "examples": 352,
+          "records": 52,
+          "recomputed_nll": 2.320927383256117,
+          "rounded_5dp": "2.32093"
+        }
+      },
+      "variant_names": [
+        "dense_active_top1",
+        "dense_active_top2",
+        "dense_total",
+        "top1_aux0",
+        "top1_aux0.01",
+        "top2_aux0",
+        "top2_aux0.01"
+      ]
+    },
+    "raw_dataset": {
+      "archive": "assets/training/tinystories-v1.tar.gz",
+      "archive_sha256": "1ac125d427040eb3311c237fbbc65102adfefe62e0a4ecafd78c395a5db59e23",
+      "member": "text-initial/tinystories-train-512.jsonl",
+      "member_sha256": "7aa55a657de6499be64a513aa76eb21a9cd52276bf836ba725e1d7f52ea511e0",
+      "upstream_prefix_sha256": "1687f642d2a5976bb7c2e7aecd16990e04bf7729be53590d78bf52dc4ea580aa",
+      "first_512_texts_match_original_upstream": true,
+      "splits": {
+        "train": {
+          "records": 409,
+          "sha256": "b77c16b6cb0e52c682b0750f9eef353e9f09ffb8bba31057f0fd7d70fee503dd",
+          "effective_targets": 329581,
+          "chunk_examples": 2789
+        },
+        "validation": {
+          "records": 51,
+          "sha256": "038253cff5215f623743ce4508245e9f86d5639b3a628d8609c2c3cc5096e860",
+          "effective_targets": 39256,
+          "chunk_examples": 334
+        },
+        "test": {
+          "records": 52,
+          "sha256": "8d705845f4aeb3c48fa48fe4f226826b161aa463a285c94efb98723d2948dc01",
+          "effective_targets": 41914,
+          "chunk_examples": 352
+        }
+      },
+      "family_overlap": false
+    },
+    "historical_code": {
+      "revision": "48a4f3e912b483d70aee57c42c2aac226534a9a6",
+      "path": "scripts/course_experiments/architecture.py",
+      "sha256": "1ad0b0789318236d5e1a8fc1117cb65758bbd6e3ad62dc2d646a111ae1ea37a3",
+      "current_sha256": "7d91f0bce271d18cd3bfbc15e8c44fd7677c92fe5796a13835ec49ab426b3fc1",
+      "relevant_functions": {
+        "_description": {
+          "AST_equal": true,
+          "original_lines": [
+            47,
+            48
+          ]
+        },
+        "_clone_config": {
+          "AST_equal": true,
+          "original_lines": [
+            66,
+            69
+          ]
+        },
+        "_text_dataset": {
+          "AST_equal": true,
+          "original_lines": [
+            72,
+            82
+          ]
+        },
+        "_data_report": {
+          "AST_equal": true,
+          "original_lines": [
+            93,
+            94
+          ]
+        },
+        "_steps": {
+          "AST_equal": true,
+          "original_lines": [
+            106,
+            108
+          ]
+        },
+        "_forward": {
+          "AST_equal": true,
+          "original_lines": [
+            115,
+            135
+          ]
+        },
+        "_nll": {
+          "AST_equal": true,
+          "original_lines": [
+            139,
+            149
+          ]
+        },
+        "_train": {
+          "AST_equal": true,
+          "original_lines": [
+            152,
+            284
+          ]
+        },
+        "_heldout": {
+          "AST_equal": true,
+          "original_lines": [
+            287,
+            288
+          ]
+        },
+        "run_moe": {
+          "AST_equal": true,
+          "original_lines": [
+            428,
+            491
+          ]
+        }
+      },
+      "other_run_code_sha256_matched": {
+        "tiny_perceptron/modern.py": "02f6332a7676f98342ed3f168f5c178e466f7acb649bdd48554b87dc66caf24a",
+        "tiny_perceptron/model.py": "176e3a2c305f3ec509934abe41a1e8e48c5a76de8e9b0cea5c41eefd5a9adf69",
+        "tiny_perceptron/attention.py": "edb29d24392f1b7aedf04890b106add669bc0e31bfde7fde7f80ad190b007c15",
+        "tiny_perceptron/data.py": "6b40ba4bccc4a1ce169a90df8ce71f40e7c9e33e3d7633a36fdd8348d9536321",
+        "scripts/course_experiments/common.py": "df08fb4d378170e930bb5deb50b97749c33e5d97d0fbd3ce77ba916b12b07206"
+      }
+    },
+    "recipe_resolution": {
+      "plan_id": "moe",
+      "module": "architecture",
+      "function": "run_moe",
+      "executed_training_recipe": false,
+      "help_command_returncode": 0,
+      "list_assets_stdout": "assets/training/tinystories-v1.tar.gz\n",
+      "all_seven_heldout_rows_and_denominators_found_in_15_13": true,
+      "T8_anchor_and_moe_option_found": true
+    },
+    "scope": "Verbatim frozen inline and both modifications on synthetic CPU tensors; model construction/count only; preserved raw JSON arithmetic; 512-story prefix and split/token recomputation. No model training, historical model forward, teacher forward, weights download, GPU, Modal, paid compute, publication, or evaluation rerun. Recorded losses are inspected preserved results, not freshly reproduced measurements."
+  }
+}

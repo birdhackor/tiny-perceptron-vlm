@@ -1,0 +1,294 @@
+# scripts/course_experiments/common.py@b52935d99f58b694cd932ac158c10c4d8d92d4c2 L45-L47; full_file_sha256=e79d98e82b60fd1bc738bf40f4eef1407cc6e3097f245ef82151ad429b063cb5
+def new_lm(ctx, width=64, layers=2, max_length=128, **kwargs):
+    seed(ctx.seed)
+    return TinyLM(ModelConfig(width=width, layers=layers, max_length=max_length, **kwargs)).to(ctx.device)
+
+
+# scripts/course_experiments/common.py@b52935d99f58b694cd932ac158c10c4d8d92d4c2 L50-L70; full_file_sha256=e79d98e82b60fd1bc738bf40f4eef1407cc6e3097f245ef82151ad429b063cb5
+def split_records(records, seed=42, family="family"):
+    """Keep all descendants of a family in one split; never split individual answers."""
+    groups = {}
+    seen = set()
+    for record in records:
+        encoded = json.dumps(record, ensure_ascii=False, sort_keys=True)
+        if encoded in seen:
+            continue
+        seen.add(encoded)
+        key = str(record.get(family, hashlib.sha256(encoded.encode()).hexdigest()))
+        groups.setdefault(key, []).append(record)
+    keys = sorted(groups)
+    if len(keys) < 3:
+        raise ValueError("At least three distinct families are required for train/validation/test")
+    random.Random(seed).shuffle(keys)
+    a = min(max(1, int(len(keys) * 0.8)), len(keys) - 2)
+    b = min(max(a + 1, int(len(keys) * 0.9)), len(keys) - 1)
+    return {
+        name: [record for key in selected for record in groups[key]]
+        for name, selected in (("train", keys[:a]), ("validation", keys[a:b]), ("test", keys[b:]))
+    }
+
+
+# scripts/course_experiments/common.py@b52935d99f58b694cd932ac158c10c4d8d92d4c2 L77-L97; full_file_sha256=e79d98e82b60fd1bc738bf40f4eef1407cc6e3097f245ef82151ad429b063cb5
+def text_examples(records, mode="text", max_length=128, tokenizer=None):
+    tok = tokenizer or ByteTokenizer()
+    examples = []
+    for record in records:
+        if mode == "sft":
+            messages = record["messages"] if isinstance(record, dict) else record
+            x, y = render_chat(messages, tok)
+            if len(x) > max_length:
+                raise ValueError(f"SFT record has {len(x)} tokens, exceeding {max_length}; crop explicitly upstream")
+            examples.append((x, y))
+        elif mode == "text":
+            text = record["text"] if isinstance(record, dict) else record
+            ids = [tok.bos_id] + tok.encode(text) + [tok.eos_id]
+            # Every next-token label appears once; chunk boundaries share only the preceding input token.
+            for start in range(0, len(ids) - 1, max_length):
+                examples.append(shifted(ids[start : start + max_length + 1]))
+        else:
+            raise ValueError("mode must be text or sft")
+    if not examples:
+        raise ValueError("No examples to train or evaluate")
+    return examples
+
+
+# scripts/course_experiments/common.py@b52935d99f58b694cd932ac158c10c4d8d92d4c2 L100-L102; full_file_sha256=e79d98e82b60fd1bc738bf40f4eef1407cc6e3097f245ef82151ad429b063cb5
+def _sync(device):
+    if str(device).startswith("cuda"):
+        torch.cuda.synchronize(device)
+
+
+# scripts/course_experiments/common.py@b52935d99f58b694cd932ac158c10c4d8d92d4c2 L122-L202; full_file_sha256=e79d98e82b60fd1bc738bf40f4eef1407cc6e3097f245ef82151ad429b063cb5
+def fit_lm(
+    model, records, ctx, mode="text", steps=600, batch_size=16, lr=0.003, auxiliary=0.01, name="model", tokenizer=None
+):
+    examples = text_examples(records, mode, model.config.max_length, tokenizer)
+    initial = _nll(model, examples)
+    optimizer = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=lr)
+    sampler = random.Random(ctx.seed)
+    history, effective_tokens = [], 0
+    model.train()
+    _sync(ctx.device)
+    started = time.perf_counter()
+    for step in range(steps):
+        batch = sampler.choices(examples, k=batch_size)
+        x, y, valid = (t.to(ctx.device) for t in pad_batch(batch))
+        optimizer.zero_grad(set_to_none=True)
+        result = model(x, valid=valid)
+        loss = masked_loss(result["logits"], y) + auxiliary * result["auxiliary"]
+        if not torch.isfinite(loss):
+            raise FloatingPointError(f"Nonfinite training loss at step {step + 1}")
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0, error_if_nonfinite=True)
+        optimizer.step()
+        effective_tokens += int((y != IGNORE).sum())
+        if step == 0 or (step + 1) % max(1, steps // 10) == 0:
+            history.append({"step": step + 1, "batch_loss_before_update": float(loss.detach())})
+        if (step + 1) % max(1, steps // 4) == 0:
+            save_checkpoint(
+                ctx.output / f"{name}-step-{step + 1}.pt",
+                model,
+                optimizer,
+                step + 1,
+                {
+                    "mode": mode,
+                    "schedule": "constant",
+                    "lr": lr,
+                    "records_sha256": records_sha256(records),
+                    "effective_tokens": effective_tokens,
+                },
+                training_state={
+                    "sampler_rng": sampler.getstate(),
+                    "batch_size": batch_size,
+                    "planned_steps": steps,
+                    "auxiliary": auxiliary,
+                },
+            )
+    _sync(ctx.device)
+    seconds = time.perf_counter() - started
+    final = _nll(model, examples)
+    save_checkpoint(
+        ctx.output / f"{name}.pt",
+        model,
+        optimizer,
+        steps,
+        {
+            "mode": mode,
+            "schedule": "constant",
+            "lr": lr,
+            "seed": ctx.seed,
+            "records_sha256": records_sha256(records),
+            "effective_tokens": effective_tokens,
+        },
+        training_state={
+            "sampler_rng": sampler.getstate(),
+            "batch_size": batch_size,
+            "planned_steps": steps,
+            "auxiliary": auxiliary,
+        },
+    )
+    return {
+        "initial_loss": initial["nll"],
+        "final_loss": final["nll"],
+        "history": history,
+        "steps": steps,
+        "seconds": seconds,
+        "effective_tokens": effective_tokens,
+        "checkpoint": f"{name}.pt",
+        "parameters": sum(p.numel() for p in model.parameters()),
+        "trainable_parameters": sum(p.numel() for p in model.parameters() if p.requires_grad),
+        "records": len(records),
+        "records_sha256": records_sha256(records),
+    }
+
+
+# scripts/course_experiments/text.py@b52935d99f58b694cd932ac158c10c4d8d92d4c2 L262-L314; full_file_sha256=c3c98e1b2ff5dce288308afe105ed0307aabe473458cabfc0d66d99bef5a0c3c
+def run_text_foundation(ctx):
+    records = generate_records("toy-text")
+    parts = split_records(records, seed=ctx.seed)
+    manifest = _save_splits(ctx, parts)
+    seed(ctx.seed)
+    model = new_lm(ctx, width=64, layers=2)
+    save_checkpoint(ctx.output / "start.pt", model, step=0, metadata={"seed": ctx.seed, "data": manifest})
+    before = _evaluations(model, parts, mode="text")
+    training = fit_lm(model, parts["train"], ctx, mode="text", steps=_steps(ctx, 600))
+    after = _evaluations(model, parts, mode="text")
+    probe = torch.tensor([[1, 10, 11, 12, 13]], device=ctx.device)
+    changed = probe.clone()
+    changed[0, -1] = 14
+    with torch.no_grad():
+        causal_difference = float((model(probe)["logits"][:, :-1] - model(changed)["logits"][:, :-1]).abs().max())
+    if causal_difference > 1e-6:
+        raise ValueError("future token affected past logits")
+    factorial = {}
+    pool = [
+        {"text": f"object={index};color={color};shape={shape}.", "family": str(index)}
+        for index in range(80)
+        for color, shape in [("red" if index % 2 else "blue", "circle" if index % 3 else "square")]
+    ]
+    scale_parts = split_records(pool, seed=ctx.seed)
+    scale_manifest = _save_splits(ctx, scale_parts, name="scaling-data")
+    for width in (16, 32):
+        for count in (16, 64):
+            seed(ctx.seed)
+            current = new_lm(ctx, width=width, layers=1)
+            name = f"scaling-w{width}-n{count}"
+            fit_result = fit_lm(
+                current, scale_parts["train"][:count], ctx, mode="text", steps=_steps(ctx, 150), batch_size=4, name=name
+            )
+            factorial[name] = {
+                "training": fit_result,
+                "parameters": sum(p.numel() for p in current.parameters()),
+                "unique_training_records": min(count, len(scale_parts["train"])),
+                "evaluation": _evaluations(current, scale_parts, mode="text"),
+            }
+    return {
+        "experiment": "text_foundation",
+        "sections": ["4.5", "4.7", "5.1", "5.7", "5.8", "5.9", "5.13", "T.4"],
+        "data": manifest,
+        "training": training,
+        "before": before,
+        "after": after,
+        "causal_max_difference": causal_difference,
+        "resume": _resume_probe(ctx),
+        "scaling": factorial,
+        "scaling_data": scale_manifest,
+        "comparison_budget": "same optimizer steps and batch size; record measured effective tokens and parameters",
+        "scope": "controlled short text; factorial points do not establish a scaling law",
+    }
+
+
+# scripts/course_experiments/run.py@b52935d99f58b694cd932ac158c10c4d8d92d4c2 L41-L122; full_file_sha256=0298ab6b9888491921aafa624c7ec3fa86013a29c315f0aa93f91825bcce349c
+def execute(experiment_id, device, output, dependencies, assets, revision=None, step_scale=1.0):
+    import torch
+
+    from scripts.course_experiments.common import Context, seed, write_json
+
+    spec = experiment_spec(experiment_id)
+    if not 0 < step_scale <= 1:
+        raise ValueError("step_scale must be between zero and one")
+    if device == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("A GPU experiment must not silently fall back to CPU")
+    output = Path(output)
+    output.mkdir(parents=True, exist_ok=True)
+    context = Context(str(device), output, Path(dependencies), Path(assets), seed=42)
+    context.step_scale = step_scale
+    seed(context.seed)
+    torch.set_num_threads(2)
+    module = importlib.import_module(f"scripts.course_experiments.{spec['module']}")
+    experiment = getattr(module, spec["function"])
+    code_hashes = {
+        str(path.relative_to(ROOT)): hashlib.sha256(path.read_bytes()).hexdigest()
+        for directory in (ROOT / "tiny_perceptron", ROOT / "scripts/course_experiments")
+        for path in sorted(directory.rglob("*.py"))
+    }
+    source_manifest = json.loads((Path(assets) / "manifest.json").read_text(encoding="utf-8"))
+    source_assets = [item for item in source_manifest["assets"] if item["id"] in spec["assets"]]
+    started = time.perf_counter()
+    if device == "cuda":
+        torch.cuda.synchronize()
+        torch.cuda.reset_peak_memory_stats()
+    try:
+        results = experiment(context)
+        # Ensure all returned data can cross machines without unpickling PyTorch objects.
+        json.dumps(results, ensure_ascii=False, allow_nan=False)
+    except Exception as error:
+        write_json(
+            output / "failure.json",
+            {
+                "experiment_id": experiment_id,
+                "revision": revision or _revision(),
+                "error_type": type(error).__name__,
+                "error": str(error),
+                "elapsed_seconds": time.perf_counter() - started,
+                "code_sha256": code_hashes,
+                "step_scale": step_scale,
+            },
+        )
+        raise
+    if device == "cuda":
+        torch.cuda.synchronize()
+    elapsed = time.perf_counter() - started
+    artifacts = [
+        {
+            "path": str(path.relative_to(output)),
+            "bytes": path.stat().st_size,
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        }
+        for path in sorted(output.rglob("*"))
+        if path.is_file() and path.name not in ("result.json", "failure.json")
+    ]
+    result = {
+        "schema_version": 1,
+        "experiment_id": experiment_id,
+        "title": spec["title"],
+        "revision": revision or _revision(),
+        "device": str(device),
+        "seed": context.seed,
+        "torch_version": str(torch.__version__),
+        "python_version": platform.python_version(),
+        "gpu": torch.cuda.get_device_name() if device == "cuda" else None,
+        "elapsed_seconds": elapsed,
+        "timing_scope": "experiment training, evaluation and local checkpoint saves; excludes image build, startup and HF uploads",
+        "step_scale": step_scale,
+        "evidence_status": "complete_run" if step_scale == 1 else "interface_smoke_only",
+        "peak_allocated_bytes": torch.cuda.max_memory_allocated() if device == "cuda" else None,
+        "results": results,
+        "artifacts": artifacts,
+        "assets": source_assets,
+        "code_sha256": code_hashes,
+        "public_exports": [],
+    }
+    write_json(output / "result.json", result)
+    return result
+
+
+# scripts/prepare_data.py@b52935d99f58b694cd932ac158c10c4d8d92d4c2 L22-L29; full_file_sha256=d5cfe23d628e81a31d7d2030a4f6349dcff7bc95ad2c4c4b627fb417e961a429
+def generate_records(kind):
+    records = []
+    if kind == "toy-text":
+        for color in ("red", "green", "blue"):
+            for shape in ("circle", "square"):
+                for side in ("left", "right"):
+                    text = f"color={color};shape={shape};side={side}."
+                    records.append({"text": text, "family": text, "source": "course-generated", "license": "MIT"})

@@ -26,9 +26,13 @@ PATCH_LIMIT = 80
 PATCH_FORBIDDEN = {"\n": "換行", "\r": "換行", "```": "「```」", "~~~": "「~~~」", "![": "「![」", "](": "「](」"}
 HISTORICAL_INPUTS = {
     "docs/review-tools/historical_fix_rechecks.py",
+    "docs/review-tools/historical_fix_rechecks_v2.py",
+    "scripts/omni_revision/review_setup.py",
+    "scripts/reading_time.py",
     "docs/course-review-20261019/tools/preflight.py",
     "docs/course-review-20261019/tools/issue_inventory.py",
     "tests/test_historical_rechecks.py",
+    "tests/test_historical_rechecks_v2.py",
 }
 # 程式圍欄所在的行：行首（空白與引用記號 >）、三個以上的反引號或波浪號、同一行其餘的字。
 FENCE = re.compile(r"([> \t]*)(`{3,}|~{3,})(.*)")
@@ -318,7 +322,13 @@ def historical_rechecks(root, manifest, live, tasks, sealed):
         return None
     from types import SimpleNamespace
 
-    helper = module("revision_historical_rechecks", Path(__file__).with_name("historical_fix_rechecks.py"))
+    sidecar = document(root, manifest["historical_fix_rechecks"])
+    filename = (
+        "historical_fix_rechecks_v2.py"
+        if type(sidecar.get("schema_version")) is int and sidecar["schema_version"] == 2
+        else "historical_fix_rechecks.py"
+    )
+    helper = module("revision_historical_rechecks", Path(__file__).with_name(filename))
     names = (
         "require",
         "document",

@@ -1,8 +1,10 @@
 """將教材與核對過的 Notebook 輸出整理成 Markdown，再由 Zensical 建置全站。"""
 
 import argparse
+import copy
 import hashlib
 import html
+import io
 import json
 import re
 import shutil
@@ -99,7 +101,8 @@ def checked_notebook(original, executed_path):
     executed = json.loads(executed_path.read_text(encoding="utf-8"))
     if len(original["cells"]) != len(executed["cells"]):
         raise ValueError(f"執行副本的 cell 數量不同：{executed_path}")
-    for source, result in zip(original["cells"], executed["cells"], strict=True):
+    checked = copy.deepcopy(original)
+    for source, result, target in zip(original["cells"], executed["cells"], checked["cells"], strict=True):
         if source["cell_type"] != result["cell_type"] or joined(source["source"]) != joined(result["source"]):
             raise ValueError(f"執行結果不是目前的教材：{executed_path}")
         if result["cell_type"] == "code":
@@ -107,7 +110,10 @@ def checked_notebook(original, executed_path):
                 raise ValueError(f"程式尚未執行：{executed_path}")
             if any(output["output_type"] == "error" for output in result.get("outputs", [])):
                 raise ValueError(f"程式執行失敗：{executed_path}")
-    return executed
+            target["execution_count"] = result["execution_count"]
+            target["outputs"] = copy.deepcopy(result.get("outputs", []))
+    # course_setup/course_figure等呈現規則仍取自已審Notebook；執行副本只提供結果。
+    return checked
 
 
 def reading_markdown(content, source_path, targets, lesson_targets, revision):
@@ -188,7 +194,49 @@ def code_markdown(source):
     return f"{fence}python\n{source.rstrip()}\n{fence}\n"
 
 
-def section_footer(item, notebook, revision, executed_outputs):
+def verify_colab_notebooks(index, revision):
+    """正式入口只接受包含同bytes Notebook的固定commit；不呼叫雲端。"""
+    if not re.fullmatch(r"[a-f0-9]{40}", revision):
+        raise ValueError("正式Colab入口需要--revision指定完整40位Git commit")
+    paths = [item["notebook"] for item in index]
+    if any("\n" in path or "\r" in path for path in paths):
+        raise ValueError("Notebook路徑不能包含換行")
+    process = subprocess.Popen(
+        ["git", "cat-file", "--batch"],
+        cwd=ROOT,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    requests = revision + "\n" + "".join(f"{revision}:{path}\n" for path in paths)
+    output, error = process.communicate(requests.encode())
+    if process.returncode:
+        raise ValueError("無法核對Colab固定版本：" + error.decode(errors="replace"))
+    stream = io.BytesIO(output)
+    commit_header = stream.readline().rstrip(b"\n").split()
+    if len(commit_header) != 3 or commit_header[1] != b"commit" or not commit_header[2].isdigit():
+        raise ValueError("Colab固定版本不是已存在的Git commit")
+    stream.read(int(commit_header[2]))
+    if stream.read(1) != b"\n":
+        raise ValueError("Colab commit物件輸出不完整")
+    failures = []
+    for path in paths:
+        header = stream.readline().rstrip(b"\n").split()
+        if len(header) == 2 and header[-1] == b"missing":
+            failures.append(path + "：固定版本沒有此檔案")
+            continue
+        if len(header) != 3 or header[1] != b"blob" or not header[2].isdigit():
+            raise ValueError("Colab版本物件不是Notebook blob：" + path)
+        raw = stream.read(int(header[2]))
+        if stream.read(1) != b"\n":
+            raise ValueError("Colab版本物件輸出不完整：" + path)
+        if raw != (ROOT / path).read_bytes():
+            failures.append(path + "：固定版本與目前下載內容不同")
+    if failures:
+        raise ValueError("Colab入口尚未對上本次Notebook：\n" + "\n".join(failures))
+
+
+def section_footer(item, notebook, revision, executed_outputs, direct_colab=True):
     """每節頁尾：Notebook 下載與 Colab 兩個同級入口，以及依本節有沒有教材程式選出的說明。"""
     colab = f"https://colab.research.google.com/github/{REPOSITORY}/blob/{revision}/{item['notebook']}"
     # 只有圖解的小節，Notebook 裡也有準備工具與圖解用的程式格；這兩種都不算教材程式。
@@ -212,22 +260,50 @@ def section_footer(item, notebook, revision, executed_outputs):
             "本節沒有要在 Notebook 執行的 Python 程式；正文若有終端機指令，請在自己電腦的終端機執行。"
             "Notebook 與本頁是同一份內容。"
         )
+    if direct_colab:
+        colab_label = "在 Colab 開啟 ↗"
+    else:
+        colab = "https://colab.research.google.com/"
+        colab_label = "開啟 Colab ↗"
+        if has_code:
+            shown = "本節的程式與 CPU 實際輸出都在上方" if executed_outputs else "本節的程式都在上方"
+            note = (
+                f"{shown}，不開 Colab 也能讀完。想在本機重跑，先依[暖身 W.1](first-steps.md#W.1)準備工具，"
+                "再把本頁下載的 `.ipynb` 放入專案相對應的 `notebooks/` 資料夾。"
+            )
+        note += (
+            '\n\n<span id="colab-upload-instructions"></span>\n\n'
+            "這是尚未發布的預覽版，Colab 直連尚未提供。要在 Colab 使用目前這一份內容，"
+            "請先按「下載本節 .ipynb」，再按「開啟 Colab」，在首頁按 **Upload notebook**，選剛下載的檔案。"
+            "若已在 Notebook 畫面，則選 **File → Upload notebook**。"
+            "需要 Google 帳號；雲端環境未經本課實測。"
+        )
     return (
         '<div class="actions">'
         f'<a class="md-button" href="{item["notebook"]}" download>下載本節 .ipynb</a>'
-        f'<a class="md-button" href="{html.escape(colab, quote=True)}" target="_blank" rel="noopener">在 Colab 開啟 ↗</a>'
+        f'<a class="md-button" href="{html.escape(colab, quote=True)}" target="_blank" rel="noopener">{colab_label}</a>'
         f"</div>\n\n{note}"
     )
 
 
 def home_introduction(index, executed_outputs=False):
     """首頁的作者說明；生成章節清單與閱讀時間不納入這段來源。"""
-    return (
-        "# 電腦怎麼學會接話？\n\n"
+    # 依傳入的課表重建對應版本，不讓舊課表套用現行課程的作者文案。
+    overview = (
         "看到「今天天氣」，你會怎麼接下一個字？這套教材從這個問題開始，"
         "用接字表、具體數字與短程式，逐步解釋語言模型如何學習。"
         "之後再看圖片與聲音怎麼接進同一套系統。\n\n"
-        "[從第一節開始](1.1.md){ .md-button .md-button--primary }\n"
+    )
+    if any(section["id"] == "19.21" for section in index):
+        overview = (
+            "看到「今天天氣」，你會怎麼接下一個字？只看上一字的接字表，"
+            "分不開結尾相同、前文不同的情境；這套教材用具體數字與短程式，"
+            "先讓模型讀前文，再練習回答問題與停下來。當答案要用來做決定、"
+            "線索藏在圖片與聲音裡，還要檢查資訊是否齊備、對齊發生時間，"
+            "並處理材料變長後的計算與記憶體限制。\n\n"
+        )
+    return (
+        "# 電腦怎麼學會接話？\n\n" + overview + "[從第一節開始](1.1.md){ .md-button .md-button--primary }\n"
         "[先看基礎暖身](first-steps.md){ .md-button }\n\n"
         + (
             "可以先當書讀：程式下方已有實際結果，不必先安裝工具或準備 GPU。"
@@ -266,6 +342,8 @@ def build(
     inventory = build_inventory(ROOT, index, DOCUMENTS, home_source)
     estimates = load_estimates(reading_times, inventory, require_complete=require_reading_times)
     routes = load_routes(reading_routes, inventory)
+    if require_reading_times:
+        verify_colab_notebooks(index, revision)
     targets = {(ROOT / path).resolve(): name + ".md" for name, path in DOCUMENTS.items()}
     targets[(ROOT / "course/lessons.md").resolve()] = "index.md"
     chapters = {item["source"]: "chapter-" + Path(item["source"]).stem + ".md" for item in index}
@@ -321,7 +399,9 @@ def build(
             elif not cell.get("metadata", {}).get("course_setup"):
                 content.append(code_markdown(source))
                 content.append(output_html(cell.get("outputs", [])))
-        content.append(section_footer(item, notebook, revision, bool(executed_root)))
+        content.append(
+            section_footer(item, notebook, revision, bool(executed_root), direct_colab=require_reading_times)
+        )
         (docs / f"{item['id']}.md").write_text("\n\n".join(content) + "\n", encoding="utf-8")
     for name, relative in DOCUMENTS.items():
         path = ROOT / relative
@@ -396,6 +476,9 @@ def build(
                 "builder_version": version("zensical"),
                 "reading_time_pages": len(estimates),
                 "reading_time_complete": len(estimates) == len(inventory["pages"]),
+                "colab_mode": "github" if require_reading_times else "upload",
+                "publication_ready": require_reading_times,
+                "colab_git_objects_verified": require_reading_times,
             },
             indent=2,
         )

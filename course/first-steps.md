@@ -99,7 +99,7 @@ assert len(animals) == 2
 | 生成式 `[... for ... in ...]` | 對每一項做同一件事，收成新清單；改用小括號時不先存成清單，需要時才逐項算出 | `[x * 2 for x in [1, 2, 3]]` → `[2, 4, 6]`；`sum(x * 2 for x in [1, 2, 3])` → `12` |
 | `next(...)` | 從小括號生成式這類需要時才逐項算出的來源，取出下一個值；配合生成式的 `if`，就是取第一個符合條件的值，找不到時改用第二個值（`None` 表示沒有值） | `next(x for x in [3, 8, 12] if x > 5)` → `8`；`next((x for x in [3] if x > 5), None)` → `None` |
 | f 字串 | 字串前加 `f`，大括號裡的名字或算式會換成它的值 | `animal = "貓"` 時，`f"看到{animal}"` → `'看到貓'` |
-| `//` | 整數除法：只留整數的商，捨去餘數 | `7 // 2` → `3` |
+| `//` | 向下取整的除法；`-7 // 2` 會取成 `-4` | `7 // 2` → `3` |
 | `class` | 定義一種新的物件 | 本頁不舉例；PyTorch 的模型零件都用它定義，[3.7](chapters/03.md#3.7) 第一次用到時才完整說明 |
 
 `while`、`try`／`except` 與位元運算要寫成好幾行，放在下面一起執行：
@@ -122,7 +122,7 @@ packed = (3 << 4) | 5
 print(packed, packed >> 4, packed & 15)
 ```
 
-`while` 在條件成立時一直重複縮排的那一行：`n` 從 1 開始每次乘 2，變成 16 時 `n < 10` 不再成立，迴圈停止，第一行輸出 `16`。`try` 底下的程式先試著執行；字典裡沒有「狗」這個鍵，取值會引發 `KeyError`，程式就跳到 `except KeyError as error:` 底下，把錯誤訊息存在 `error`，改設 `value = -1`，所以接著印出 `找不到 '狗'` 與 `-1`，而不是停在紅色錯誤。
+`while` 在條件成立時一直重複縮排的那一行：`n` 從 1 開始每次乘 2，變成 16 時 `n < 10` 不再成立，迴圈停止，第一行輸出 `16`。`try` 底下的程式先試著執行；字典裡沒有「狗」這個鍵，取值會引發 `KeyError`，程式就跳到 `except KeyError as error:` 底下，把這次的錯誤物件暫時叫作 `error`，由 `print` 顯示它的訊息，再設 `value = -1`，所以接著印出 `找不到 '狗'` 與 `-1`，而不是停在紅色錯誤。
 
 最後一段把整數寫成二進位逐位處理，叫位元運算。3 的二進位是 `11`，`<< 4` 往左移四位變成 `110000`，也就是十進位的 48；`|` 把兩邊的 1 合在一起，併入 5（二進位 `101`）得到 `110101`，也就是 53。`>> 4` 往右移四位、丟掉最低四位，取回 3；`&` 只留兩邊都是 1 的位，15 的二進位是 `1111`，所以 `& 15` 取回最低四位的 5。輸出是 `53 3 5`。[17.8](chapters/17.md#17.8) 用同樣的方法把兩個 4 位元的數裝進一個 byte。
 
@@ -296,11 +296,12 @@ print(w.item(), (w - 3).square().item())
 | `tiny_perceptron/tokenization.py` | [6.6](chapters/06.md#6.6) |
 | `tiny_perceptron/alignment.py` | [8.8](chapters/08.md#8.8)、[9.10](chapters/09.md#9.10)、[13.3](chapters/13.md#13.3)、[13.5](chapters/13.md#13.5)、[18.8](chapters/18.md#18.8)–18.9 |
 | `tiny_perceptron/multimodal.py` | [10.1](chapters/10.md#10.1)–10.2、[10.5](chapters/10.md#10.5)、[10.7](chapters/10.md#10.7)–10.8、[12.1](chapters/12.md#12.1)、[12.6](chapters/12.md#12.6)、[12.8](chapters/12.md#12.8) |
-| `tiny_perceptron/natural_concepts.py` | [11.14](chapters/11.md#11.14)–11.16、[12.13](chapters/12.md#12.13)–12.14 |
+| `tiny_perceptron/natural_concepts.py` | [11.14](chapters/11.md#11.14)–11.16、[12.14](chapters/12.md#12.14) |
 | `tiny_perceptron/selftrained/` | [12.15](chapters/12.md#12.15)、[19.2](chapters/19.md#19.2)–19.3、[19.5](chapters/19.md#19.5)–19.7、[19.9](chapters/19.md#19.9) |
 | `tiny_perceptron/posttraining.py` | [13.10](chapters/13.md#13.10)–13.11、[13.13](chapters/13.md#13.13)–13.15 |
-| `tiny_perceptron/lesson_products/` | [14.15](chapters/14.md#14.15)、[19.14](chapters/19.md#19.14)–19.17 |
+| `tiny_perceptron/lesson_products/` | [14.15](chapters/14.md#14.15)、[16.15](chapters/16.md#16.15)、[19.14](chapters/19.md#19.14)–19.17 |
 | `tiny_perceptron/quantization.py` | [17.5](chapters/17.md#17.5)、[17.7](chapters/17.md#17.7)–17.9、[17.14](chapters/17.md#17.14) |
+| `tiny_perceptron/omni_products/` | [19.21](chapters/19.md#19.21)的影音分支、[19.22](chapters/19.md#19.22)的聲音碼與Talker、[19.23](chapters/19.md#19.23)的新版候選判斷；完整計算都內建在各節 |
 | `tiny_perceptron/retrieval.py` | [A.3](chapters/0A.md#A.3)、[B.2](chapters/0B.md#B.2)、[B.4](chapters/0B.md#B.4) |
 
 </details>

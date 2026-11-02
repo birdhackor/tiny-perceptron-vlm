@@ -2,6 +2,7 @@
 
 import copy
 import json
+import subprocess
 from html.parser import HTMLParser
 from pathlib import Path, PureWindowsPath
 
@@ -36,6 +37,33 @@ def test_rejects_unverified_execution(tmp_path, problem):
     path.write_text(json.dumps(executed), encoding="utf-8")
     with pytest.raises(ValueError):
         checked_notebook(original, path)
+
+
+@pytest.mark.parametrize("rendering_key", ["course_setup", "course_figure"])
+def test_execution_metadata_cannot_hide_reviewed_code_or_replace_figures(tmp_path, rendering_key):
+    original = {
+        "metadata": {"lesson_id": "1.1", "reviewed": True},
+        "cells": [
+            {"cell_type": "code", "source": ["import math\n"], "metadata": {"course_setup": True}},
+            {"cell_type": "code", "source": ["print('REVIEWED_TEACHING_CODE')\n"], "metadata": {}},
+        ],
+    }
+    before = copy.deepcopy(original)
+    executed = copy.deepcopy(original)
+    executed["metadata"] = {"lesson_id": "OTHER_LESSON"}
+    executed["cells"][0]["metadata"] = {}
+    executed["cells"][1]["metadata"] = {rendering_key: "unreviewed.svg" if rendering_key == "course_figure" else True}
+    for cell in executed["cells"]:
+        cell.update(execution_count=3, outputs=[{"output_type": "stream", "text": "actual\n"}])
+    path = tmp_path / "executed.ipynb"
+    path.write_text(json.dumps(executed), encoding="utf-8")
+    checked = checked_notebook(original, path)
+    assert original == before
+    assert checked["metadata"] == before["metadata"]
+    assert [cell["metadata"] for cell in checked["cells"]] == [cell["metadata"] for cell in before["cells"]]
+    assert checked["cells"][1]["source"] == ["print('REVIEWED_TEACHING_CODE')\n"]
+    assert checked["cells"][1]["outputs"] == executed["cells"][1]["outputs"]
+    assert checked["cells"][1]["execution_count"] == 3
 
 
 def test_links_and_bookmarks_survive_without_editing_programs():
@@ -291,8 +319,10 @@ def test_each_published_page_gets_the_footer_for_its_own_section(tmp_path, monke
         links = [anchor["href"] for anchor in anchors_of(page.rpartition('<div class="actions">')[2])]
         assert links == [
             f"notebooks/01/{lesson}.ipynb",
-            f"https://colab.research.google.com/github/{export_course.REPOSITORY}/blob/abc123/notebooks/01/{lesson}.ipynb",
+            "https://colab.research.google.com/",
         ]
+        assert "colab-upload-instructions" in page and "File → Upload notebook" in page
+        assert "尚未發布的預覽版" in page
 
 
 def test_the_published_footer_claims_outputs_only_for_a_build_with_executed_notebooks(tmp_path, monkeypatch):
@@ -300,6 +330,82 @@ def test_the_published_footer_claims_outputs_only_for_a_build_with_executed_note
     executed = build_fake_site(tmp_path / "executed", monkeypatch, executed=True)
     assert "輸出" in note_of(executed["1.1"]) and "輸出" not in note_of(plain["1.1"])
     assert note_of(executed["1.2"]) == note_of(plain["1.2"])
+
+
+@pytest.fixture
+def pinned_notebooks(tmp_path, monkeypatch):
+    """真臨時Git物件；不發布fixture、不改專案的任何ref或設定。"""
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    paths = ["notebooks/01/1.1.ipynb", "notebooks/01/1.2.ipynb"]
+    for path in paths:
+        target = tmp_path / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps({"cells": [], "metadata": {}, "nbformat": 4, "nbformat_minor": 5}) + "\n")
+    subprocess.run(["git", "add", "notebooks"], cwd=tmp_path, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-qm",
+            "Notebook fixture",
+        ],
+        cwd=tmp_path,
+        check=True,
+    )
+    revision = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=tmp_path, check=True, capture_output=True, text=True
+    ).stdout.strip()
+    monkeypatch.setattr(export_course, "ROOT", tmp_path)
+    return [{"notebook": path} for path in paths], revision
+
+
+def test_formal_colab_pin_matches_every_actual_notebook_blob(pinned_notebooks):
+    index, revision = pinned_notebooks
+    assert export_course.verify_colab_notebooks(index, revision) is None
+
+
+def test_formal_colab_rejects_uncommitted_content_change(pinned_notebooks):
+    index, revision = pinned_notebooks
+    target = export_course.ROOT / index[1]["notebook"]
+    target.write_bytes(target.read_bytes() + b"\n")
+    with pytest.raises(ValueError, match="下載內容不同"):
+        export_course.verify_colab_notebooks(index, revision)
+
+
+def test_formal_colab_rejects_notebook_absent_from_pin(pinned_notebooks):
+    index, revision = pinned_notebooks
+    path = "notebooks/01/1.3.ipynb"
+    (export_course.ROOT / path).write_text("{}\n")
+    with pytest.raises(ValueError, match="沒有此檔案"):
+        export_course.verify_colab_notebooks([*index, {"notebook": path}], revision)
+
+
+@pytest.mark.parametrize("revision", ["main", "abc123", "a" * 40 + "\n"])
+def test_formal_colab_needs_an_immutable_full_commit(pinned_notebooks, revision):
+    with pytest.raises(ValueError, match="40位"):
+        export_course.verify_colab_notebooks(pinned_notebooks[0], revision)
+
+
+def test_formal_colab_rejects_a_tree_instead_of_a_commit(pinned_notebooks):
+    index, _ = pinned_notebooks
+    tree = subprocess.run(
+        ["git", "rev-parse", "HEAD^{tree}"], cwd=export_course.ROOT, check=True, capture_output=True, text=True
+    ).stdout.strip()
+    with pytest.raises(ValueError, match="不是已存在的Git commit"):
+        export_course.verify_colab_notebooks(index, tree)
+
+
+def test_preview_footer_gives_upload_route_instead_of_stale_notebook_link(make_notebook):
+    footer = section_footer(ITEM, make_notebook(CODE), "a" * 40, True, direct_colab=False)
+    download, colab = anchors_of(footer)
+    assert download["href"] == ITEM["notebook"]
+    assert colab["href"] == "https://colab.research.google.com/"
+    assert "File → Upload notebook" in footer and "直連尚未提供" in footer
+    assert "google.com/github/" not in footer
 
 
 # ---- 索引與小節表裡的路徑 ----------------------------------------------------------------------------------------

@@ -1,0 +1,356 @@
+URL https://github.com/pytorch/pytorch/blob/5c4886908584029761b579af026dcfb627c84070/torch/_tensor.py
+Installed path: /workspace/tiny-perceptron-vlm/.venv/lib/python3.13/site-packages/torch/_tensor.py
+Symbol: Tensor.backward
+566:     def backward(
+567:         self, gradient=None, retain_graph=None, create_graph=False, inputs=None
+568:     ):
+569:         r"""Computes the gradient of current tensor wrt graph leaves.
+570: 
+571:         The graph is differentiated using the chain rule. If the tensor is
+572:         non-scalar (i.e. its data has more than one element) and requires
+573:         gradient, the function additionally requires specifying a ``gradient``.
+574:         It should be a tensor of matching type and shape, that represents
+575:         the gradient of the differentiated function w.r.t. ``self``.
+576: 
+577:         This function accumulates gradients in the leaves - you might need to zero
+578:         ``.grad`` attributes or set them to ``None`` before calling it.
+579:         See :ref:`Default gradient layouts<default-grad-layouts>`
+580:         for details on the memory layout of accumulated gradients.
+581: 
+582:         .. note::
+583: 
+584:             If you run any forward ops, create ``gradient``, and/or call ``backward``
+585:             in a user-specified CUDA stream context, see
+586:             :ref:`Stream semantics of backward passes<bwd-cuda-stream-semantics>`.
+587: 
+588:         .. note::
+589: 
+590:             When ``inputs`` are provided and a given input is not a leaf,
+591:             the current implementation will call its grad_fn (though it is not strictly needed to get this gradients).
+592:             It is an implementation detail on which the user should not rely.
+593:             See https://github.com/pytorch/pytorch/pull/60521#issuecomment-867061780 for more details.
+594: 
+595:         Args:
+596:             gradient (Tensor, optional): The gradient of the function
+597:                 being differentiated w.r.t. ``self``.
+598:                 This argument can be omitted if ``self`` is a scalar. Defaults to ``None``.
+599:             retain_graph (bool, optional): If ``False``, the graph used to compute the grads will be freed;
+600:                 If ``True``, it will be retained. The default is ``None``, in which case the value is inferred from ``create_graph``
+601:                 (i.e., the graph is retained only when higher-order derivative tracking is requested). Note that in nearly all cases
+602:                 setting this option to True is not needed and often can be worked around in a much more efficient way.
+603:             create_graph (bool, optional): If ``True``, graph of the derivative will
+604:                 be constructed, allowing to compute higher order derivative
+605:                 products. Defaults to ``False``.
+606:             inputs (Sequence[Tensor] or dict[str, Tensor], optional): Inputs w.r.t. which
+607:                 the gradient will be accumulated into ``.grad``. All other tensors will be
+608:                 ignored. If not provided, the gradient is accumulated into all the leaf
+609:                 Tensors that were used to compute the :attr:`tensors`. A dict of tensors
+610:                 (e.g. ``dict(model.named_parameters())``) is also accepted.
+611:                 Defaults to ``None``.
+612:         """
+613:         if has_torch_function_unary(self):
+614:             return handle_torch_function(
+615:                 Tensor.backward,
+616:                 (self,),
+617:                 self,
+618:                 gradient=gradient,
+619:                 retain_graph=retain_graph,
+620:                 create_graph=create_graph,
+621:                 inputs=inputs,
+622:             )
+623:         torch.autograd.backward(
+624:             self, gradient, retain_graph, create_graph, inputs=inputs
+625:         )
+
+URL https://github.com/pytorch/pytorch/blob/5c4886908584029761b579af026dcfb627c84070/torch/optim/optimizer.py
+Installed path: /workspace/tiny-perceptron-vlm/.venv/lib/python3.13/site-packages/torch/_compile.py
+Symbol: Optimizer.zero_grad
+1047:     @torch._disable_dynamo
+1048:     def zero_grad(self, set_to_none: bool = True) -> None:
+1049:         r"""Reset the gradients of all optimized :class:`torch.Tensor` s.
+1050: 
+1051:         Args:
+1052:             set_to_none (bool, optional): Instead of setting to zero, set the grads to None. Default: ``True``
+1053: 
+1054:                 This will in general have lower memory footprint, and can modestly improve performance.
+1055:                 However, it changes certain behaviors. For example:
+1056: 
+1057:                 1. When the user tries to access a gradient and perform manual ops on it,
+1058:                    a None attribute or a Tensor full of 0s will behave differently.
+1059:                 2. If the user requests ``zero_grad(set_to_none=True)`` followed by a backward pass, ``.grad``\ s
+1060:                    are guaranteed to be None for params that did not receive a gradient.
+1061:                 3. ``torch.optim`` optimizers have a different behavior if the gradient is 0 or None
+1062:                    (in one case it does the step with a gradient of 0 and in the other it skips
+1063:                    the step altogether).
+1064:         """
+1065:         foreach = self.defaults.get("foreach", False) or self.defaults.get(
+1066:             "fused", False
+1067:         )
+1068: 
+1069:         if not hasattr(self, "_zero_grad_profile_name"):
+1070:             self._patch_step_function()
+1071: 
+1072:         per_device_and_dtype_grads: (
+1073:             defaultdict[torch.device, defaultdict[torch.dtype, list[torch.Tensor]]]
+1074:             | None
+1075:         )
+1076:         if foreach:
+1077:             per_device_and_dtype_grads = defaultdict(lambda: defaultdict(list))
+1078:         else:
+1079:             per_device_and_dtype_grads = None
+1080: 
+1081:         with torch.autograd.profiler.record_function(self._zero_grad_profile_name):
+1082:             for group in self.param_groups:
+1083:                 for p in group["params"]:
+1084:                     if p.grad is not None:
+1085:                         if set_to_none:
+1086:                             p.grad = None
+1087:                         else:
+1088:                             if p.grad.grad_fn is not None:
+1089:                                 p.grad.detach_()
+1090:                             else:
+1091:                                 p.grad.requires_grad_(False)
+1092:                             if not foreach or p.grad.is_sparse:
+1093:                                 p.grad.zero_()
+1094:                             else:
+1095:                                 if per_device_and_dtype_grads is None:
+1096:                                     raise AssertionError(
+1097:                                         "Expected per_device_and_dtype_grads to be set"
+1098:                                     )
+1099:                                 per_device_and_dtype_grads[p.grad.device][
+1100:                                     p.grad.dtype
+1101:                                 ].append(p.grad)
+1102:             if foreach:
+1103:                 if per_device_and_dtype_grads is None:
+1104:                     raise AssertionError(
+1105:                         "Expected per_device_and_dtype_grads to be set"
+1106:                     )
+1107:                 for per_dtype_grads in per_device_and_dtype_grads.values():
+1108:                     for grads in per_dtype_grads.values():
+1109:                         torch._foreach_zero_(grads)
+
+URL https://github.com/pytorch/pytorch/blob/5c4886908584029761b579af026dcfb627c84070/torch/nn/functional.py
+Installed path: /workspace/tiny-perceptron-vlm/.venv/lib/python3.13/site-packages/torch/nn/functional.py
+Symbol: cross_entropy
+3478: def cross_entropy(
+3479:     input: Tensor,
+3480:     target: Tensor,
+3481:     weight: Tensor | None = None,
+3482:     size_average: bool | None = None,
+3483:     ignore_index: int = -100,
+3484:     reduce: bool | None = None,
+3485:     reduction: str = "mean",
+3486:     label_smoothing: float = 0.0,
+3487: ) -> Tensor:
+3488:     r"""Compute the cross entropy loss between input logits and target.
+3489: 
+3490:     See :class:`~torch.nn.CrossEntropyLoss` for details.
+3491: 
+3492:     Args:
+3493:         input (Tensor) : Predicted unnormalized logits;
+3494:             see Shape section below for supported shapes.
+3495:         target (Tensor) : Ground truth class indices or class probabilities;
+3496:             see Shape section below for supported shapes.
+3497:         weight (Tensor, optional): a manual rescaling weight given to each
+3498:             class. If given, has to be a Tensor of size `C`
+3499:         size_average (bool, optional): Deprecated (see :attr:`reduction`).
+3500:         ignore_index (int, optional): Specifies a target value that is ignored
+3501:             and does not contribute to the input gradient. When :attr:`size_average` is
+3502:             ``True``, the loss is averaged over non-ignored targets. Note that
+3503:             :attr:`ignore_index` is only applicable when the target contains class indices.
+3504:             Default: -100
+3505:         reduce (bool, optional): Deprecated (see :attr:`reduction`).
+3506:         reduction (str, optional): Specifies the reduction to apply to the output:
+3507:             ``'none'`` | ``'mean'`` | ``'sum'``. ``'none'``: no reduction will be applied,
+3508:             ``'mean'``: the sum of the output will be divided by the number of
+3509:             elements in the output, ``'sum'``: the output will be summed. Note: :attr:`size_average`
+3510:             and :attr:`reduce` are in the process of being deprecated, and in the meantime,
+3511:             specifying either of those two args will override :attr:`reduction`. Default: ``'mean'``
+3512:         label_smoothing (float, optional): A float in [0.0, 1.0]. Specifies the amount
+3513:             of smoothing when computing the loss, where 0.0 means no smoothing. The targets
+3514:             become a mixture of the original ground truth and a uniform distribution as described in
+3515:             `Rethinking the Inception Architecture for Computer Vision <https://arxiv.org/abs/1512.00567>`__. Default: :math:`0.0`.
+3516: 
+3517:     Shape:
+3518:         - Input: Shape :math:`(C)`, :math:`(N, C)` or :math:`(N, C, d_1, d_2, ..., d_K)` with :math:`K \geq 1`
+3519:           in the case of `K`-dimensional loss.
+3520:         - Target: If containing class indices, shape :math:`()`, :math:`(N)` or :math:`(N, d_1, d_2, ..., d_K)` with
+3521:           :math:`K \geq 1` in the case of K-dimensional loss where each value should be between :math:`[0, C)`.
+3522:           If containing class probabilities, same shape as the input and each value should be between :math:`[0, 1]`.
+3523: 
+3524:         where:
+3525: 
+3526:         .. math::
+3527:             \begin{aligned}
+3528:                 C ={} & \text{number of classes} \\
+3529:                 N ={} & \text{batch size} \\
+3530:             \end{aligned}
+3531: 
+3532:     Examples::
+3533: 
+3534:         >>> # Example of target with class indices
+3535:         >>> input = torch.randn(3, 5, requires_grad=True)
+3536:         >>> target = torch.randint(5, (3,), dtype=torch.int64)
+3537:         >>> loss = F.cross_entropy(input, target)
+3538:         >>> loss.backward()
+3539:         >>>
+3540:         >>> # Example of target with class probabilities
+3541:         >>> input = torch.randn(3, 5, requires_grad=True)
+3542:         >>> target = torch.randn(3, 5).softmax(dim=1)
+3543:         >>> loss = F.cross_entropy(input, target)
+3544:         >>> loss.backward()
+3545:     """
+3546:     if has_torch_function_variadic(input, target, weight):
+3547:         return handle_torch_function(
+3548:             cross_entropy,
+3549:             (input, target, weight),
+3550:             input,
+3551:             target,
+3552:             weight=weight,
+3553:             size_average=size_average,
+3554:             ignore_index=ignore_index,
+3555:             reduce=reduce,
+3556:             reduction=reduction,
+3557:             label_smoothing=label_smoothing,
+3558:         )
+3559:     if size_average is not None or reduce is not None:
+3560:         reduction = _Reduction.legacy_get_string(size_average, reduce)
+3561:     return torch._C._nn.cross_entropy_loss(
+3562:         input,
+3563:         target,
+3564:         weight,
+3565:         # pyrefly: ignore [bad-argument-type]
+3566:         _Reduction.get_enum(reduction),
+3567:         ignore_index,
+3568:         label_smoothing,
+3569:     )
+
+URL https://github.com/pytorch/pytorch/blob/5c4886908584029761b579af026dcfb627c84070/torch/nn/modules/activation.py
+Installed path: /workspace/tiny-perceptron-vlm/.venv/lib/python3.13/site-packages/torch/nn/modules/activation.py
+Symbol: MultiheadAttention.forward
+1256:     def forward(
+1257:         self,
+1258:         query: Tensor,
+1259:         key: Tensor,
+1260:         value: Tensor,
+1261:         key_padding_mask: Tensor | None = None,
+1262:         need_weights: bool = True,
+1263:         attn_mask: Tensor | None = None,
+1264:         average_attn_weights: bool = True,
+1265:         is_causal: bool = False,
+1266:     ) -> tuple[Tensor, Tensor | None]:
+1267:         r"""Compute attention outputs using query, key, and value embeddings.
+1268: 
+1269:             Supports optional parameters for padding, masks and attention weights.
+1270: 
+1271:         Args:
+1272:             query: Query embeddings of shape :math:`(L, E_q)` for unbatched input, :math:`(L, N, E_q)` when ``batch_first=False``
+1273:                 or :math:`(N, L, E_q)` when ``batch_first=True``, where :math:`L` is the target sequence length,
+1274:                 :math:`N` is the batch size, and :math:`E_q` is the query embedding dimension ``embed_dim``.
+1275:                 Queries are compared against key-value pairs to produce the output.
+1276:                 See "Attention Is All You Need" for more details.
+1277:             key: Key embeddings of shape :math:`(S, E_k)` for unbatched input, :math:`(S, N, E_k)` when ``batch_first=False``
+1278:                 or :math:`(N, S, E_k)` when ``batch_first=True``, where :math:`S` is the source sequence length,
+1279:                 :math:`N` is the batch size, and :math:`E_k` is the key embedding dimension ``kdim``.
+1280:                 See "Attention Is All You Need" for more details.
+1281:             value: Value embeddings of shape :math:`(S, E_v)` for unbatched input, :math:`(S, N, E_v)` when
+1282:                 ``batch_first=False`` or :math:`(N, S, E_v)` when ``batch_first=True``, where :math:`S` is the source
+1283:                 sequence length, :math:`N` is the batch size, and :math:`E_v` is the value embedding dimension ``vdim``.
+1284:                 See "Attention Is All You Need" for more details.
+1285:             key_padding_mask: If specified, a mask of shape :math:`(N, S)` indicating which elements within ``key``
+1286:                 to ignore for the purpose of attention (i.e. treat as "padding"). For unbatched `query`, shape should be :math:`(S)`.
+1287:                 Binary and float masks are supported.
+1288:                 For a binary mask, a ``True`` value indicates that the corresponding ``key`` value will be ignored for
+1289:                 the purpose of attention. For a float mask, it will be directly added to the corresponding ``key`` value.
+1290:             need_weights: If specified, returns ``attn_output_weights`` in addition to ``attn_outputs``.
+1291:                 Set ``need_weights=False`` to use the optimized ``scaled_dot_product_attention``
+1292:                 and achieve the best performance for MHA.
+1293:                 Default: ``True``.
+1294:             attn_mask: If specified, a 2D or 3D mask preventing attention to certain positions. Must be of shape
+1295:                 :math:`(L, S)` or :math:`(N\cdot\text{num\_heads}, L, S)`, where :math:`N` is the batch size,
+1296:                 :math:`L` is the target sequence length, and :math:`S` is the source sequence length. A 2D mask will be
+1297:                 broadcasted across the batch while a 3D mask allows for a different mask for each entry in the batch.
+1298:                 Binary and float masks are supported. For a binary mask, a ``True`` value indicates that the
+1299:                 corresponding position is not allowed to attend. For a float mask, the mask values will be added to
+1300:                 the attention weight.
+1301:                 If both attn_mask and key_padding_mask are supplied, their types should match.
+1302:             average_attn_weights: If true, indicates that the returned ``attn_weights`` should be averaged across
+1303:                 heads. Otherwise, ``attn_weights`` are provided separately per head. Note that this flag only has an
+1304:                 effect when ``need_weights=True``. Default: ``True`` (i.e. average weights across heads)
+1305:             is_causal: If specified, applies a causal mask as attention mask.
+1306:                 Default: ``False``.
+1307:                 Warning:
+1308:                 ``is_causal`` provides a hint that ``attn_mask`` is the
+1309:                 causal mask. Providing incorrect hints can result in
+1310:                 incorrect execution, including forward and backward
+1311:                 compatibility.
+1312: 
+1313:         Outputs:
+1314:             - **attn_output** - Attention outputs of shape :math:`(L, E)` when input is unbatched,
+1315:               :math:`(L, N, E)` when ``batch_first=False`` or :math:`(N, L, E)` when ``batch_first=True``,
+1316:               where :math:`L` is the target sequence length, :math:`N` is the batch size, and :math:`E` is the
+1317:               embedding dimension ``embed_dim``.
+1318:             - **attn_output_weights** - Only returned when ``need_weights=True``. If ``average_attn_weights=True``,
+1319:               returns attention weights averaged across heads of shape :math:`(L, S)` when input is unbatched or
+1320:               :math:`(N, L, S)`, where :math:`N` is the batch size, :math:`L` is the target sequence length, and
+1321:               :math:`S` is the source sequence length. If ``average_attn_weights=False``, returns attention weights per
+1322:               head of shape :math:`(\text{num\_heads}, L, S)` when input is unbatched or :math:`(N, \text{num\_heads}, L, S)`.
+1323: 
+1324:             .. note::
+1325:                 `batch_first` argument is ignored for unbatched inputs.
+1326:         """
+1327:         why_not_fast_path = ""
+1328:         if (
+1329:             (attn_mask is not None and torch.is_floating_point(attn_mask))
+1330:             or (key_padding_mask is not None)
+1331:             and torch.is_floating_point(key_padding_mask)
+1332:         ):
+1333:             why_not_fast_path = "floating-point masks are not supported for fast path."
+1334: 
+1335:         is_batched = query.dim() == 3
+1336: 
+1337:         key_padding_mask = F._canonical_mask(
+1338:             mask=key_padding_mask,
+1339:             mask_name="key_padding_mask",
+1340:             other_type=F._none_or_dtype(attn_mask),
+1341:             other_name="attn_mask",
+1342:             target_type=query.dtype,
+1343:         )
+1344: 
+1345:         attn_mask = F._canonical_mask(
+1346:             mask=attn_mask,
+1347:             mask_name="attn_mask",
+1348:             other_type=None,
+1349:             other_name="",
+1350:             target_type=query.dtype,
+1351:             check_other=False,
+1352:         )
+1353: 
+1354:         is_fastpath_enabled = torch.backends.mha.get_fastpath_enabled()
+1355: 
+1356:         if not is_fastpath_enabled:
+1357:             why_not_fast_path = "torch.backends.mha.get_fastpath_enabled() was not True"
+1358:         elif not is_batched:
+1359:             why_not_fast_path = (
+1360:                 f"input not batched; expected query.dim() of 3 but got {query.dim()}"
+1361:             )
+1362:         elif query is not key or key is not value:
+1363:             # When lifting this restriction, don't forget to either
+1364:             # enforce that the dtypes all match or test cases where
+1365:             # they don't!
+1366:             why_not_fast_path = "non-self attention was used (query, key, and value are not the same Tensor)"
+1367:         elif self.in_proj_bias is not None and query.dtype != self.in_proj_bias.dtype:
+1368:             why_not_fast_path = f"dtypes of query ({query.dtype}) and self.in_proj_bias ({self.in_proj_bias.dtype}) don't match"
+1369:         elif self.in_proj_weight is None:
+1370:             why_not_fast_path = "in_proj_weight was None"
+1371:         elif query.dtype != self.in_proj_weight.dtype:
+1372:             # this case will fail anyway, but at least they'll get a useful error message.
+1373:             why_not_fast_path = f"dtypes of query ({query.dtype}) and self.in_proj_weight ({self.in_proj_weight.dtype}) don't match"
+1374:         elif self.training:
+1375:             why_not_fast_path = "training is enabled"
+1376:         elif (self.num_heads % 2) != 0:
+1377:             why_not_fast_path = "self.num_heads is not even"
+1378:         elif not self.batch_first:
+1379:             why_not_fast_path = "batch_first was not True"
+1380:         elif self.bias_k is not None:
+

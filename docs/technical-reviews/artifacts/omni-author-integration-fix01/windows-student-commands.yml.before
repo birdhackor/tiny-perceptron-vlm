@@ -1,0 +1,1101 @@
+name: Windows 入口頁指令
+
+# 在 windows-latest 照 README.md、README_en.md、course/first-steps.md、course/training.md 寫給 Windows 讀者的方式，
+# 用 Windows PowerShell 5.1 與 PowerShell 7 各跑一次學生要在 PowerShell 輸入的命令。
+# 頁面上的命令一律寫在 Invoke-Page（照頁面執行）或 Skip-Page（刻意不跑；-Reason 是印進記錄的簡短理由，完整理由寫在
+# 呼叫處的註解）裡，順序跟頁面一樣；tests/test_windows_student_commands.py 逐條比對它們和頁面，頁面改了而這裡沒跟著改，
+# 測試就失敗。
+# 頁面命令以外，runner 和學生電腦不同的地方寫在各自的設定旁：拿得掉的拿掉；設回學生預設的，設定後核對；拿不掉的註明
+# 為什麼需要、可能遮住學生的哪一種失敗、什麼情況要重新判斷。
+
+on:
+  push:
+    # 只看 branch；推 tag 不跑。
+    branches: ["**"]
+    # 預設觸發：第一條 '**' 讓改到任何檔都跑，新出現的檔與資料夾也一樣；之後每一條 '!' 排除一棵樹，這個 workflow 每一步
+    # 的結果都不依賴樹裡檔案的內容。這次改到的每一個檔都落在排除的樹裡時不跑。同一事件不能同時用 paths
+    # 與 paths-ignore，所以排除寫成 paths 裡的 '!'。pull_request 用同一份，tests/test_windows_student_commands.py 核對
+    # 兩份相同；讀檔集合怎麼推導、什麼時候要重推，以及這個做法看不到的地方，寫在那個測試檔開頭。
+    paths:
+      - '**'
+      # 下面排除的都是審閱輪次的紀錄。會讀審閱紀錄的命令，例如 scripts/check_course_reviews.py、
+      # scripts/check_technical_reviews.py 與 pytest -ra，在這個 workflow 都是 Skip-Page，不執行。改成照頁面執行它們，
+      # 或這個 workflow 執行的任何程式開始讀審閱紀錄時，這條理由就不成立，排除要重新判斷。git clone 與 checkout 會把這些樹裡
+      # 每個檔的內容寫進工作樹，status --porcelain 與 ls-files 也經手它們的路徑；沒有任何步驟的結果依賴那些檔的內容。
+      # clone 在路徑層的影響列在 tests/test_windows_student_commands.py 開頭的〈不涵蓋〉。
+      - '!docs/course-publish-20261008/**' # 發布輪次的審閱紀錄、凍結原稿與證據
+      - '!docs/course-repair-20261008/**' # 修補輪次的審閱紀錄、凍結原稿與證據
+      - '!docs/course-repair-20261017/**' # 審閱輪次的紀錄、凍結原稿與證據
+      - '!docs/course-review-20261019/**' # 審閱輪次的紀錄、凍結原稿、提示與審閱工具
+      - '!docs/course-revision-20261005/**' # 修訂輪次的審閱紀錄
+      - '!docs/course-revision-20261007-phase7/**' # 修訂輪次的審閱紀錄
+      - '!docs/course-revision-20261016/**' # 修訂輪次的審閱紀錄、凍結原稿與工具快照
+      - '!docs/technical-reviews/**' # 逐節技術審閱的紀錄與證據
+      - '!docs/reader-reviews/**' # 逐節讀者審閱的紀錄
+  pull_request:
+    # 與 push 的 paths 相同；各條的理由寫在 push。
+    paths:
+      - '**'
+      - '!docs/course-publish-20261008/**'
+      - '!docs/course-repair-20261008/**'
+      - '!docs/course-repair-20261017/**'
+      - '!docs/course-review-20261019/**'
+      - '!docs/course-revision-20261005/**'
+      - '!docs/course-revision-20261007-phase7/**'
+      - '!docs/course-revision-20261016/**'
+      - '!docs/technical-reviews/**'
+      - '!docs/reader-reviews/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # 為什麼需要：CI 把命令的輸出接到管線或記錄，不是主控台。Python 這時用 locale 的編碼寫標準輸出（runner 是英文 Windows，
+  # cp1252），印中文的報告（例如 pretrain_encoders.py 的 note）會丟 UnicodeEncodeError；學生在主控台執行時，Python 直接
+  # 寫主控台，沒有這個問題。所以只指定標準輸出入的編碼，不用 PYTHONUTF8：UTF-8 mode 連 open() 沒寫 encoding 時也改用
+  # UTF-8，會遮住檔案讀寫的編碼失敗。學生多是中文 Windows（cp950），這一步是拿掉遮罩，不是重現中文 Windows：cp950 特有的
+  # 檔案編碼失敗這裡仍測不到。入口頁的步驟會印出 Python 看到的 locale 編碼，並核對 UTF-8 mode 是關的。
+  # 可能遮住：學生把印出非 ASCII 的命令導到檔案或管線時的編碼失敗；頁面導到檔案的命令只有 train_simple.py，它只印 ASCII。
+  # 要重新判斷：頁面新增導到檔案或管線、又會印出非 ASCII 的命令，或 .python-version 換成 UTF-8 mode 預設開啟的版本時。
+  PYTHONIOENCODING: utf-8
+
+jobs:
+  student-commands:
+    name: 學生指令（${{ matrix.shell }}）
+    runs-on: windows-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        # powershell 是 Windows PowerShell 5.1，pwsh 是 PowerShell 7；學生的電腦可能是任一種。
+        shell: [powershell, pwsh]
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}
+    steps:
+      - name: 準備 runner（頁面以外：Git 設回學生預設、Git LFS、torch 設定、共用函式）
+        env:
+          # 照 ci.yml 的寫法：部分 Windows runner 的 CPU 回報的 AMX 能力不一致（oneDNN #5689、runner-images #14483），
+          # torch 限用 AVX2。學生電腦沒有這個設定，所以它可能遮住 oneDNN 用 AVX2 以上的指令集時才出現的失敗。
+          # 那兩個問題修好、ci.yml 拿掉這項設定時，這裡跟著拿掉。runner context 只能在步驟裡用，所以在這裡寫進
+          # GITHUB_ENV，之後每個步驟都帶著。
+          ONEDNN_MAX_CPU_ISA: ${{ runner.os == 'Windows' && 'AVX2' || '' }}
+          # 每個步驟開頭載入的函式。放在環境變數裡傳進來，中文註解不受 Windows PowerShell 5.1 讀檔編碼影響；
+          # 下面寫成帶 BOM 的 UTF-8 檔，5.1 才會照 UTF-8 讀。訊息只用 ASCII 寫，印進記錄時不受主控台編碼影響。
+          PAGE_HELPERS: |
+            $ErrorActionPreference = 'Stop'
+
+            # 照頁面安裝 uv 的學生電腦沒有 UV_ 開頭的環境變數（官方安裝程式只改 PATH）；setup-uv 會設 UV_TOOL_DIR、
+            # UV_TOOL_BIN_DIR、UV_PYTHON_INSTALL_DIR 這類變數。每個步驟載入這個檔時，UV_ 開頭的變數一律拿掉，uv 就用預設的
+            # 位置。setup-uv 加進 PATH 的資料夾留著：其中一個放 uv 本身；另外兩個是工具與 Python 的資料夾，頁面命令不用
+            # uv tool，拿掉變數後 uv 下載的 Python 也不會放進去。
+            @(Get-ChildItem -Path Env: | Where-Object { $_.Name -like 'UV_*' }) | ForEach-Object {
+                Remove-Item -LiteralPath ('Env:' + $_.Name)
+            }
+
+            function Invoke-Page {
+                # 執行頁面上的命令：$Commands 的每一行依序交給 Invoke-Expression。PowerShell 不會因為原生命令失敗而停，
+                # 所以每行之後檢查結束碼。-Pages 記錄命令出自哪幾頁；-Stdin 的內容從管線送進命令，給 Python 這類會等人
+                # 輸入的命令，命令讀完就自己結束。和學生在提示字元逐行輸入不同的地方：
+                # - 每次呼叫都在這個函式的範圍內執行。同一次呼叫的各行共用變數，但頁面某行設的 PowerShell 變數，到下一次
+                #   呼叫就不見了；$env: 環境變數與 cd 換到的資料夾會留著。
+                # - 一行寫成 a; b 時只看最後一個結束碼，a 失敗會被 b 蓋掉。
+                # - -Stdin 用管線把程式送進 Python，Python 以腳本模式執行，不是互動模式：不印 >>>、不自動印出運算式的值，
+                #   複合敘述後也不必空一行。
+                # - $ErrorActionPreference 是 'Stop'（這個檔與 GitHub 包裝 PowerShell 步驟的程式都會設），學生預設是
+                #   'Continue'：cmdlet 的非終止錯誤在 CI 會停下，在學生電腦只印出錯誤、接著執行下一行。
+                # - Windows PowerShell 5.1 的 $OutputEncoding 預設是 ASCII，-Stdin 送進去的非 ASCII 字元會變成問號；
+                #   PowerShell 7 預設是 UTF-8。
+                # - 命令的輸出接到管線或記錄，不是主控台；Python 因此用 PYTHONIOENCODING 指定的編碼輸出（見 workflow 開頭的 env）。
+                param(
+                    [Parameter(Mandatory = $true)][string[]]$Pages,
+                    [Parameter(Mandatory = $true)][string]$Commands,
+                    [string]$Stdin
+                )
+                foreach ($line in ($Commands -split "\r?\n")) {
+                    if (-not $line.Trim()) { continue }
+                    Write-Host ('PS> ' + $line)
+                    $global:LASTEXITCODE = 0
+                    if ($PSBoundParameters.ContainsKey('Stdin')) {
+                        Invoke-Expression ('$Stdin | ' + $line)
+                    } else {
+                        Invoke-Expression $line
+                    }
+                    if ($global:LASTEXITCODE -ne 0) {
+                        throw ('page command exited with code {0}: {1}' -f $global:LASTEXITCODE, $line)
+                    }
+                }
+            }
+
+            function Skip-Page {
+                # 頁面上要 Windows 讀者輸入、但這裡刻意不跑的命令。-Reason 是印進記錄的簡短理由，讀記錄的人才分得出
+                # 「這裡沒跑」與「前面已經跑過」；完整理由寫在呼叫處的註解。
+                param(
+                    [Parameter(Mandatory = $true)][string[]]$Pages,
+                    [Parameter(Mandatory = $true)][string]$Reason,
+                    [Parameter(Mandatory = $true)][string]$Commands
+                )
+                foreach ($line in ($Commands -split "\r?\n")) {
+                    if ($line.Trim()) { Write-Host ('not run here ({0}): {1}' -f $Reason, $line) }
+                }
+            }
+
+            function Assert-LastExit([string]$What) {
+                if ($global:LASTEXITCODE -ne 0) { throw ('{0} exited with code {1}' -f $What, $global:LASTEXITCODE) }
+            }
+
+            function Assert-Paths {
+                param([Parameter(Mandatory = $true)][string[]]$Paths)
+                foreach ($path in $Paths) {
+                    if (-not (Test-Path -LiteralPath $path)) { throw ('missing: ' + $path) }
+                }
+            }
+
+            function Get-PageCode {
+                # 學生從頁面複製的 Python 程式：$After 所在那一行之後的第一個 python 程式區塊，原樣取出。
+                param([Parameter(Mandatory = $true)][string]$Page, [Parameter(Mandatory = $true)][string]$After)
+                $lines = [IO.File]::ReadAllLines((Join-Path (Get-Location).ProviderPath $Page), [Text.Encoding]::UTF8)
+                $start = -1
+                for ($i = 0; $i -lt $lines.Count; $i++) { if ($lines[$i].Contains($After)) { $start = $i; break } }
+                if ($start -lt 0) { throw ('{0}: no line contains {1}' -f $Page, $After) }
+                $open = -1
+                for ($i = $start + 1; $i -lt $lines.Count; $i++) { if ($lines[$i].Trim() -eq '```python') { $open = $i; break } }
+                $close = -1
+                if ($open -ge 0) {
+                    for ($i = $open + 1; $i -lt $lines.Count; $i++) { if ($lines[$i].Trim() -eq '```') { $close = $i; break } }
+                }
+                if ($close -le $open + 1) { throw ('{0}: no python block after {1}' -f $Page, $After) }
+                (($lines[($open + 1)..($close - 1)]) -join "`n") + "`n"
+            }
+
+            function Write-PageFile {
+                # 頁面要讀者用純文字編輯器另存的檔案：照頁面內容寫成不帶 BOM 的 UTF-8（VS Code 等編輯器的預設）。
+                param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][string]$Text)
+                $target = Join-Path (Get-Location).ProviderPath $Path
+                [IO.File]::WriteAllText($target, $Text, (New-Object Text.UTF8Encoding $false))
+            }
+
+            function Read-JsonFile {
+                # 讀命令寫出的 JSON。Windows PowerShell 5.1 的 > 寫成 UTF-16LE（開頭 FF FE），7 寫成命令原本的 bytes；
+                # Get-Content 兩種都讀得懂，解得開就表示讀者打開的是完整的 JSON。
+                param([Parameter(Mandatory = $true)][string]$Path)
+                $bytes = [IO.File]::ReadAllBytes((Join-Path (Get-Location).ProviderPath $Path))
+                if ($bytes.Length -ge 2 -and $bytes[0] -eq 0xFF -and $bytes[1] -eq 0xFE) { Write-Host ($Path + ' is UTF-16LE') }
+                Get-Content -Raw -LiteralPath $Path | ConvertFrom-Json
+            }
+
+            function Read-JsonLine {
+                # 命令輸出的最後一行（報告）解成物件。
+                param([object[]]$Output)
+                ('' + (@($Output) | Select-Object -Last 1)) | ConvertFrom-Json
+            }
+
+            function Assert-LfsPointers {
+                # 頁面說：照 W.1 的寫法 clone 下來時，專案裡的資料包只是 Git LFS 的指標檔……
+                # 逐一確認目前工作樹裡的 assets/training/*.tar.gz 都是指標檔。
+                $archives = @(Get-ChildItem -LiteralPath assets/training -Filter *.tar.gz -File)
+                if ($archives.Count -eq 0) { throw 'no assets/training/*.tar.gz in the clone' }
+                foreach ($archive in $archives) {
+                    # Git LFS 規格：指標檔小於 1024 bytes。
+                    if ($archive.Length -ge 1024) { throw ('{0} has {1} bytes: the archive itself was downloaded' -f $archive.Name, $archive.Length) }
+                    $text = [IO.File]::ReadAllText($archive.FullName)
+                    if ($text -notmatch '^version https://git-lfs\.github\.com/spec/v1\r?\noid sha256:[0-9a-f]{64}\r?\nsize \d+\r?\n$') {
+                        throw ($archive.Name + ' is not a Git LFS pointer')
+                    }
+                }
+                Write-Host ('{0} archives are Git LFS pointers' -f $archives.Count)
+            }
+
+            function Assert-CompleteWorktree {
+                # 頁面以外：git status --porcelain 沒有輸出，表示工作樹和 commit 一致、每個檔都取出了。少了檔的工作樹（例如
+                # 路徑太長而取不出檔）會讓它有輸出，這裡印出來並失敗。
+                param([Parameter(Mandatory = $true)][string]$After)
+                $status = @(git status --porcelain)
+                Assert-LastExit 'git status'
+                if ($status.Count -gt 0) {
+                    $status | ForEach-Object { Write-Host $_ }
+                    throw ('the working tree is incomplete after {0}: git status --porcelain printed {1} lines' -f $After, $status.Count)
+                }
+                Write-Host ('the working tree is complete after ' + $After)
+            }
+
+            function Write-PathLengths {
+                # 頁面以外：印出 clone 資料夾的完整路徑長度與 repo 裡最長的路徑，看得出這台 runner 上的完整路徑離 260 字元多遠。
+                $root = (Get-Location).ProviderPath + '\'
+                $paths = @(git -c core.quotepath=false ls-files)
+                Assert-LastExit 'git ls-files'
+                $longest = $paths | Sort-Object -Property Length -Descending | Select-Object -First 1
+                $over = @($paths | Where-Object { $root.Length + $_.Length -ge 260 }).Count
+                Write-Host ('clone folder {0} is {1} characters; the longest path in the repository is {2} characters ({3}); {4} files reach 260 characters or more under this folder' -f $root, $root.Length, $longest.Length, $longest, $over)
+            }
+
+            function Assert-VenvPython {
+                # 頁面說：啟用後，python 指向剛安裝的 Python 工具箱。
+                # uv 的啟用腳本加進 PATH 的是「.venv 路徑/Scripts」，/ 與 \ 混用；比較前用 GetFullPath 換成同一種寫法。
+                $venv = Join-Path (Get-Location).ProviderPath '.venv'
+                $expected = Join-Path $venv 'Scripts\python.exe'
+                $command = Get-Command python -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+                if (-not $command) { throw 'python is not on PATH' }
+                if ([IO.Path]::GetFullPath($command.Path) -ne $expected) {
+                    throw ('python resolves to {0}, expected {1}' -f $command.Path, $expected)
+                }
+                $prefix = python -c "import sys; print(sys.prefix)"
+                Assert-LastExit 'python -c'
+                if ([IO.Path]::GetFullPath($prefix) -ne $venv) { throw ('sys.prefix is {0}, expected {1}' -f $prefix, $venv) }
+                Write-Host ('python is ' + $command.Path)
+            }
+
+            function Assert-CheckEnv {
+                # 頁面說：看到 compute 那列為 OK（括號中的裝置名稱依電腦而異），且套件沒有「未安裝」或紅色錯誤訊息，
+                # 就表示計算環境可以使用。套件清單取自 scripts/check_env.py 的 PACKAGES；只比對 ASCII 的名稱與版本號，
+                # 不受主控台編碼影響。stderr 沒有擷取比對，紅色錯誤只靠結束碼。
+                param([object[]]$Output)
+                $lines = @($Output | ForEach-Object { '' + $_ })
+                if (-not ($lines | Where-Object { $_ -cmatch '^compute\s+OK' })) { throw 'check_env.py did not report compute OK' }
+                $source = [IO.File]::ReadAllText((Join-Path (Get-Location).ProviderPath 'scripts/check_env.py'))
+                $listed = [regex]::Match($source, 'PACKAGES = \[([^\]]*)\]')
+                if (-not $listed.Success) { throw 'PACKAGES not found in scripts/check_env.py' }
+                foreach ($match in [regex]::Matches($listed.Groups[1].Value, '"([^"]+)"')) {
+                    $name = [regex]::Escape($match.Groups[1].Value)
+                    if (-not ($lines | Where-Object { $_ -match ('^' + $name + '\s+\d') })) {
+                        throw ('check_env.py does not report a version for ' + $match.Groups[1].Value)
+                    }
+                }
+            }
+
+            function Assert-Kernelspec {
+                # 頁面說：第二行把工具箱登記成工作頁可以選用的執行環境，名稱叫 Tiny Perceptron。名稱分大小寫比對。
+                $path = '.venv\share\jupyter\kernels\tiny-perceptron\kernel.json'
+                if (-not (Test-Path -LiteralPath $path)) { throw ('kernel was not registered: ' + $path) }
+                $spec = Get-Content -Raw -LiteralPath $path | ConvertFrom-Json
+                if ($spec.display_name -cne 'Tiny Perceptron') { throw ('kernel display name is ' + $spec.display_name) }
+                $python = Join-Path (Get-Location).ProviderPath '.venv\Scripts\python.exe'
+                if ([IO.Path]::GetFullPath($spec.argv[0]) -ne $python) {
+                    throw ('kernel starts {0}, expected {1}' -f $spec.argv[0], $python)
+                }
+            }
+
+            function Assert-FiniteNumber {
+                # 報告裡的數字要是有限的數；-Positive 另要求大於 0。Windows PowerShell 5.1 的 .NET Framework 沒有
+                # [double]::IsFinite，所以用 IsNaN 與 IsInfinity。ConvertFrom-Json 解不開 NaN 時，Read-JsonLine 就先失敗了。
+                param([Parameter(Mandatory = $true)][string]$Name, $Value, [switch]$Positive)
+                # 訊息裡的數字用 InvariantCulture 寫，NaN 與無窮大才會印成 ASCII 的 NaN、Infinity。
+                $shown = if ($null -eq $Value) { 'null' } else { [Convert]::ToString($Value, [Globalization.CultureInfo]::InvariantCulture) }
+                if (-not ($Value -is [ValueType]) -or $Value -is [bool]) { throw ('{0} is not a number: {1}' -f $Name, $shown) }
+                $number = [double]$Value
+                if ([double]::IsNaN($number) -or [double]::IsInfinity($number)) { throw ('{0} is {1}, not a finite number' -f $Name, $shown) }
+                if ($Positive -and -not ($number -gt 0)) { throw ('{0} is {1}, expected a number greater than 0' -f $Name, $shown) }
+            }
+
+            function Assert-TrainReport {
+                # 核對報告的 mode 與 task，以及 history 第一筆的 loss 是有限數字、grad_norm 有限且大於零；頁面原話寫在呼叫處。
+                param([object[]]$Output, [string]$Mode, [string]$Task)
+                $report = Read-JsonLine $Output
+                if ($report.mode -cne $Mode) { throw ('mode is {0}, expected {1}' -f $report.mode, $Mode) }
+                if ($Task -and $report.task -cne $Task) { throw ('task is {0}, expected {1}' -f $report.task, $Task) }
+                $first = @($report.history)[0]
+                if ($null -eq $first) { throw 'history is empty' }
+                Assert-FiniteNumber 'history[0].loss' $first.loss
+                Assert-FiniteNumber 'history[0].grad_norm' $first.grad_norm -Positive
+                $report
+            }
+
+            function Assert-EncoderReport {
+                # 頁面說：命令有 --train，mode 應為 train……
+                # 頁面說：留出的驗證題全對才接續。
+                # 頁面說：holdout_examples 應為 2，holdout_accuracy 要等於 1……
+                param([object[]]$Output, [Parameter(Mandatory = $true)][string]$Modality)
+                $report = Read-JsonLine $Output
+                if ($report.mode -cne 'train') { throw ('{0} encoder: mode is {1}, expected train' -f $Modality, $report.mode) }
+                if ($report.holdout_examples -ne 2) { throw ('{0} encoder: holdout_examples is {1}, expected 2' -f $Modality, $report.holdout_examples) }
+                Assert-FiniteNumber ($Modality + ' encoder holdout_accuracy') $report.holdout_accuracy
+                if ($report.holdout_accuracy -ne 1) {
+                    throw ('{0} encoder: holdout_accuracy is {1}; the page says to continue only when it equals 1' -f $Modality, $report.holdout_accuracy)
+                }
+            }
+
+            function Assert-TextEvaluation {
+                # 頁面說：文字模式沒有一問一答的正確答案，因此匹配率為 null。
+                param([Parameter(Mandatory = $true)][string]$Path)
+                $report = Read-JsonFile $Path
+                foreach ($name in 'exact_match', 'completed_exact_match') {
+                    if ($report.PSObject.Properties.Name -notcontains $name) { throw ('{0} has no {1}' -f $Path, $name) }
+                    if ($null -ne $report.$name) { throw ('{0}: {1} is {2}, expected null in text mode' -f $Path, $name, $report.$name) }
+                }
+            }
+
+            function Assert-ModalAnswer {
+                # 頁面說：沒有指定圖片或音訊檔時，--color 與 --shape 用來畫出合成圖片……--frequency
+                # 則製作該音高、取樣率 16 kHz 的單音波形。
+                # 頁面說：輸出 JSON 的 input_sources 會另外記下素材怎麼產生，供你核對。
+                # input_sources 只比對 type、命令給的 color、shape、frequency 與 sample_rate 16000，命令沒做的那種素材也
+                # 不能出現；image 的 size 不比對。
+                # 答案頁面只說「希望」是什麼，不核對內容，只核對有 answer 欄位。
+                param([object[]]$Output, [string]$Color, [string]$Shape, [double]$Frequency)
+                $report = Read-JsonLine $Output
+                if ($report.PSObject.Properties.Name -notcontains 'answer') { throw 'the report has no answer' }
+                $sources = $report.input_sources
+                if ($null -eq $sources) { throw 'the report has no input_sources' }
+                $kinds = @($sources.PSObject.Properties.Name)
+                $image = $sources.image
+                if ($Color) {
+                    if ($image.type -cne 'synthetic' -or $image.color -cne $Color -or $image.shape -cne $Shape) {
+                        throw ('input_sources.image is {0}, expected a synthetic {1} {2}' -f ($image | ConvertTo-Json -Compress), $Color, $Shape)
+                    }
+                } elseif ($kinds -contains 'image') { throw 'input_sources lists an image, but the command made none' }
+                $audio = $sources.audio
+                if ($Frequency) {
+                    if ($audio.type -cne 'synthetic-tone' -or $audio.frequency -ne $Frequency -or $audio.sample_rate -ne 16000) {
+                        throw ('input_sources.audio is {0}, expected a synthetic {1} Hz tone at 16000 Hz' -f ($audio | ConvertTo-Json -Compress), $Frequency)
+                    }
+                } elseif ($kinds -contains 'audio') { throw 'input_sources lists audio, but the command made none' }
+            }
+
+            function Assert-PathCheck {
+                # 「檔案放哪裡」那段程式印三行：目前資料夾，以及 pyproject.toml、tiny_perceptron 在不在。
+                param([object[]]$Output, [string]$Directory, [string]$Expected)
+                $lines = @($Output | ForEach-Object { '' + $_ })
+                if ($lines.Count -ne 3) { throw ('expected 3 lines, got {0}: {1}' -f $lines.Count, ($lines -join ' | ')) }
+                if ($lines[0] -ne $Directory) { throw ('current folder is {0}, expected {1}' -f $lines[0], $Directory) }
+                if ($lines[1] -cne $Expected -or $lines[2] -cne $Expected) {
+                    throw ('expected {0} twice, got {1} and {2}' -f $Expected, $lines[1], $lines[2])
+                }
+            }
+
+            function Start-JupyterProbe {
+                # jupyter lab 啟動伺服器後會一直等人用瀏覽器操作。這裡讓同一個命令照樣啟動：token 與 port 用
+                # jupyter_server 讀的環境變數給，設定檔只關掉開瀏覽器。和學生電腦不同的地方：學生的瀏覽器會自動打開；
+                # port 用不了時學生的 jupyter 會改試下一個，這裡不試，直接失敗。終端機印出的網址也不同：學生的 jupyter 自己
+                # 產生 token，網址裡印出完整的 token，port 預設是 8888；這裡的 token 由環境變數給，jupyter 只印成 token=...，
+                # port 是 18888。這裡印出的不是學生會看到的網址，所以不核終端機印出的網址，也沒有程式讀前景命令的輸出：
+                # jupyter 若不再印出可用的網址，這裡看不出來。背景工作核對下面幾項，再呼叫 /api/shutdown，讓前景的命令自己結束。
+                $env:JUPYTER_TOKEN = [guid]::NewGuid().ToString('N')
+                $env:JUPYTER_PORT = '18888'
+                $env:JUPYTER_PORT_RETRIES = '0'
+                $config = Join-Path $env:RUNNER_TEMP 'jupyter-config'
+                New-Item -ItemType Directory -Force -Path $config | Out-Null
+                [IO.File]::WriteAllText((Join-Path $config 'jupyter_server_config.json'), '{"ServerApp": {"open_browser": false}}')
+                $env:JUPYTER_CONFIG_DIR = $config
+                Start-Job -ArgumentList $env:JUPYTER_PORT, $env:JUPYTER_TOKEN -ScriptBlock {
+                    param($Port, $Token)
+                    $ErrorActionPreference = 'Stop'
+                    $base = 'http://127.0.0.1:' + $Port
+                    $headers = @{ Authorization = 'token ' + $Token }
+                    $problem = $null
+                    try {
+                        $deadline = (Get-Date).AddMinutes(3)
+                        while ($true) {
+                            try {
+                                Invoke-RestMethod -UseBasicParsing -Uri ($base + '/api/status') -Headers $headers -TimeoutSec 5 | Out-Null
+                                break
+                            } catch {
+                                if ((Get-Date) -gt $deadline) { throw 'the server did not answer within 3 minutes' }
+                                Start-Sleep -Seconds 2
+                            }
+                        }
+                        # 頁面說：第三行啟動 JupyterLab……
+                        # 裝了 jupyterlab 時，一般的 jupyter server 也提供 /lab 與 /lab/api/settings，只看這兩個分不出是哪個
+                        # 命令；分得出來的是根網址：jupyter lab 把 / 轉到 /lab，jupyter server 的 / 是它自己的頁面。所以先看 /
+                        # 不跟著轉址時的回應，再確認 /lab 是 JupyterLab 的頁面。
+                        $request = [Net.HttpWebRequest]::Create($base + '/')
+                        $request.AllowAutoRedirect = $false
+                        $request.Timeout = 10000
+                        $request.Headers.Add('Authorization', 'token ' + $Token)
+                        $response = $request.GetResponse()
+                        try {
+                            $status = [int]$response.StatusCode
+                            $location = '' + $response.Headers['Location']
+                        } finally {
+                            $response.Close()
+                        }
+                        # Location 可能是相對網址，也可能帶空的查詢字串（例如 /lab?）；換成完整網址後只比路徑。
+                        $target = (New-Object Uri ((New-Object Uri ($base + '/')), $location)).AbsolutePath
+                        if ($status -lt 300 -or $status -ge 400 -or $target -cne '/lab') {
+                            throw ('/ answered {0} with Location "{1}"; JupyterLab redirects it to /lab' -f $status, $location)
+                        }
+                        $lab = Invoke-WebRequest -UseBasicParsing -Uri ($base + '/lab') -Headers $headers -TimeoutSec 10
+                        if ($lab.Content -cnotmatch '"appName":\s*"JupyterLab"') { throw '/lab is not the JupyterLab page' }
+                        # 頁面說：JupyterLab 從 notebooks 資料夾開始列出檔案；在其中開啟 01/1.1.ipynb……
+                        # 這裡只核對伺服器以 notebooks 為起點找得到 01/1.1.ipynb、類型是 notebook；在瀏覽器裡開啟它，這裡測不到。
+                        $notebook = Invoke-RestMethod -UseBasicParsing -Uri ($base + '/api/contents/01/1.1.ipynb?content=0') -Headers $headers
+                        if ($notebook.type -cne 'notebook') { throw ('01/1.1.ipynb is listed as ' + $notebook.type) }
+                        # 頁面說：選 Tiny Perceptron……
+                        # 名稱分大小寫比對。這裡只核對伺服器列得出這個 kernel；瀏覽器裡的操作測不到，列在
+                        # tests/test_windows_student_commands.py 開頭的〈不涵蓋〉。kernel 真的執行 1.1 的程式格，由後面用
+                        # nbclient 執行改字練習的那一步核對。
+                        $specs = Invoke-RestMethod -UseBasicParsing -Uri ($base + '/api/kernelspecs') -Headers $headers
+                        $spec = $specs.kernelspecs.'tiny-perceptron'
+                        if (-not $spec) { throw 'the tiny-perceptron kernel is not listed' }
+                        if ($spec.spec.display_name -cne 'Tiny Perceptron') { throw ('the kernel is listed as ' + $spec.spec.display_name) }
+                    } catch {
+                        $problem = $_.Exception.Message
+                    }
+                    try {
+                        Invoke-RestMethod -UseBasicParsing -Method Post -Uri ($base + '/api/shutdown') -Headers $headers -TimeoutSec 10 | Out-Null
+                    } catch {
+                        # 伺服器沒照 API 關掉時，直接結束占用這個 port 的程式，免得前景的命令一直等。
+                        $problem = (@($problem, ('shutdown failed: ' + $_.Exception.Message)) | Where-Object { $_ }) -join '; '
+                        Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue |
+                            ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }
+                    }
+                    if ($problem) { 'FAIL: ' + $problem } else { 'OK' }
+                }
+            }
+
+            function Complete-JupyterProbe($Job) {
+                $result = Receive-Job -Job $Job -Wait -AutoRemoveJob -ErrorAction Continue | Select-Object -Last 1
+                Write-Host ('jupyter probe: ' + $result)
+                if ($result -ne 'OK') { throw ('jupyter probe: ' + $result) }
+            }
+        run: |
+          # 學生的 Git for Windows 預設不開長路徑（core.longpaths）。runner 若開著，頁面少了 git config --global
+          # core.longpaths true 那一行，clone 也會成功，CI 就看不到學生會遇到的失敗；所以明確設成學生預設，再到不屬於任何
+          # repo 的資料夾核對有效值。入口頁的步驟照頁面執行那一行之後，同樣在 repo 外核對。
+          git config --global core.longpaths false
+          if ($LASTEXITCODE -ne 0) { throw 'git config failed' }
+          Push-Location -LiteralPath $env:RUNNER_TEMP
+          try { $longpaths = git config --get core.longpaths } finally { Pop-Location }
+          Write-Host ('core.longpaths outside any repository: ' + $longpaths)
+          if ($longpaths -cne 'false') {
+              throw ('core.longpaths is "{0}" outside any repository; expected false, the Git for Windows default' -f $longpaths)
+          }
+          # 模擬裝好 Git LFS 的學生電腦：clone 時 smudge filter 會下載資料包。filter 不生效的話，
+          # 「跳過下載後仍是指標檔」不論變數有沒有作用都會成立，那項檢查就沒有意義。沒裝 Git LFS 的學生這裡測不到。
+          git lfs install --skip-repo
+          if ($LASTEXITCODE -ne 0) { throw 'git lfs install failed' }
+          if (-not (git config --get filter.lfs.process)) { throw 'the Git LFS filter is not configured' }
+          # 記錄 runner 上可能和學生電腦不同的設定，比對時用：Git 的 system 與 global 設定、長路徑登錄值、執行原則、
+          # 主控台編碼。runner 映像安裝 Git 時開了 symlink（actions/runner-images 的 Install-Git.ps1 帶 EnableSymlinks=Enabled）；
+          # 頁面命令不讀 repo 裡的 symlink，所以不改，頁面命令要讀 symlink 時要重新判斷。
+          git config --list --show-scope --show-origin
+          if ($LASTEXITCODE -ne 0) { throw 'git config --list failed' }
+          # 學生電腦的 LongPathsEnabled 預設是關的；runner 映像把它打開（actions/runner-images 的 Configure-BaseImage.ps1），
+          # 所以 Python 開 260 字元以上的路徑在這裡成功、在學生電腦失敗。clone 資料夾的完整路徑在 100 字元以內時，repo 裡
+          # 完整路徑會到 260 字元的檔都在 docs/natural-assistant/evidence/v4-research/ 與 docs/selftrained/infrastructure/
+          # 底下，頁面命令不讀它們，所以只記錄、不改；頁面命令要讀那些檔時要重新判斷。.venv 裡套件的路徑長度沒有量過；
+          # 學生電腦上的值這裡測不到。
+          $fileSystem = Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem' -ErrorAction SilentlyContinue
+          Write-Host ('LongPathsEnabled on this runner: ' + $(if ($null -ne $fileSystem.LongPathsEnabled) { $fileSystem.LongPathsEnabled } else { 'not set' }))
+          Get-ExecutionPolicy -List | Out-String | Write-Host
+          Write-Host ('[Console]::OutputEncoding {0}, [Console]::InputEncoding {1}, $OutputEncoding {2}' -f [Console]::OutputEncoding.WebName, [Console]::InputEncoding.WebName, $OutputEncoding.WebName)
+          [IO.File]::AppendAllText($env:GITHUB_ENV, "ONEDNN_MAX_CPU_ISA=$env:ONEDNN_MAX_CPU_ISA`n")
+          [IO.File]::WriteAllText((Join-Path $env:RUNNER_TEMP 'page.ps1'), $env:PAGE_HELPERS, (New-Object Text.UTF8Encoding $true))
+
+      - name: 安裝 uv（頁面要讀者先裝好 uv；裝 uv 本身不是要測的命令）
+        # setup-uv 另外設的 UV_* 變數，每個步驟載入 page.ps1 時拿掉，見 PAGE_HELPERS 開頭。
+        uses: astral-sh/setup-uv@v10.2.0
+        with:
+          # 這個 workflow 不先 checkout（取得專案就是受測的學生步驟），沒有 uv.lock 可當快取鍵；
+          # 學生的電腦也是第一次下載，所以不用快取。
+          enable-cache: false
+
+      - name: 入口頁：取得專案並安裝套件
+        env:
+          TESTED_REPOSITORY: ${{ github.server_url }}/${{ github.repository }}.git
+          TESTED_SHA: ${{ github.sha }}
+        run: |
+          . (Join-Path $env:RUNNER_TEMP 'page.ps1')
+          Invoke-Page -Pages course/first-steps.md -Commands 'git --version' | Tee-Object -Variable shown
+          # 頁面說：……在終端機執行 git --version，應顯示版本號。
+          if (('' + $shown) -notmatch '^git version \d') { throw ('unexpected git --version output: ' + $shown) }
+          # 頁面說：設定 core.longpaths 的那一行讓這台電腦上的 Git 都允許長路徑，之後的 clone 與切換版本也適用。
+          # 切換版本只核一部分：後面切到受測 commit 時，Git 只重寫兩個 commit 之間不同的檔，所以只測到預設 branch 與受測
+          # commit 之間有差異的長路徑檔。
+          # 在 windows-latest 上觀察到：clone 帶 -c core.longpaths=true 時，取出檔案仍報 Filename too long；先執行這一行、
+          # clone 不帶 -c，檔案就取得出來。
+          Invoke-Page -Pages README.md,README_en.md,course/first-steps.md -Commands 'git config --global core.longpaths true'
+          # 頁面以外：到不屬於任何 repo 的資料夾核對有效值，確認這一行設的值在 clone 之前就生效。
+          Push-Location -LiteralPath $env:RUNNER_TEMP
+          try { $longpaths = git config --get core.longpaths } finally { Pop-Location }
+          Write-Host ('core.longpaths outside any repository: ' + $longpaths)
+          if ($longpaths -cne 'true') {
+              throw ('core.longpaths is "{0}" outside any repository after the page''s git config --global line; expected true' -f $longpaths)
+          }
+          Invoke-Page -Pages README.md,README_en.md,course/first-steps.md -Commands @'
+          $env:GIT_LFS_SKIP_SMUDGE="1"
+          git clone https://github.com/birdhackor/tiny-perceptron-vlm.git
+          cd tiny-perceptron-vlm
+          '@
+          # 頁面說的指標檔，指的是頁面 clone 取得的預設 branch，所以在切到受測 commit 之前核對。
+          Assert-LfsPointers
+          Assert-CompleteWorktree 'the page clone'
+          Write-PathLengths
+          # 頁面以外：頁面的 git clone 取得預設 branch。這裡要測的是觸發這次執行的 commit（push 的 commit、
+          # pull_request 的合併結果），所以在同一個資料夾取那個 commit 並切過去。GIT_LFS_SKIP_SMUDGE 仍在這個
+          # shell 裡，切換時資料包同樣只留指標檔。長路徑不另外設定，用的是頁面那行 git config --global 設的值；這次切換
+          # 測到哪些長路徑檔，寫在前面引設定 core.longpaths 那句的註解裡。
+          git fetch --no-tags $env:TESTED_REPOSITORY $env:TESTED_SHA
+          Assert-LastExit 'git fetch'
+          git checkout --quiet --detach FETCH_HEAD
+          Assert-LastExit 'git checkout'
+          if ((git rev-parse HEAD) -ne $env:TESTED_SHA) { throw 'HEAD is not the tested commit' }
+          Assert-CompleteWorktree 'switching to the tested commit'
+          Write-PathLengths
+          # 再核對一次指標檔：之後的步驟用的是受測 commit 的工作樹，訓練頁說它的資料包也只是指標檔；受測 commit 新增或
+          # 改過的資料包是切換時才取出的，上面那次核對看不到。
+          Assert-LfsPointers
+          # 學生之後在同一個 PowerShell 視窗繼續操作，這個變數一直都在；之後的步驟也帶著它。
+          [IO.File]::AppendAllText($env:GITHUB_ENV, "GIT_LFS_SKIP_SMUDGE=$env:GIT_LFS_SKIP_SMUDGE`n")
+          # runner 映像預裝了 Python，uv 會直接用它建 .venv（記錄裡 uv 印的 Using CPython ... interpreter at 那一行），
+          # 沒有走「沒裝 Python 的學生電腦上，uv 自己下載 Python」的路；那條路的失敗這裡測不到。要測它得讓 uv 略過預裝的
+          # Python（例如設 UV_PYTHON_PREFERENCE=only-managed），那會改掉學生沒改的 uv 預設，所以沒有做。頁面改成要讀者
+          # 另外安裝 Python，或記錄裡 uv 改用自己下載的 Python 時，要重新判斷這一項。
+          Invoke-Page -Pages README.md,README_en.md,course/first-steps.md -Commands 'uv sync --frozen --extra cpu --group notebook'
+          Assert-Paths .venv\Scripts\python.exe
+          # 頁面以外：記錄 runner 上的 Python 看到的編碼。open() 沒寫 encoding 時用 locale 編碼；UTF-8 mode 要是關的，
+          # 才和學生電腦一樣（見 workflow 開頭的 env）。
+          $encodings = .\.venv\Scripts\python.exe -c "import locale, sys; print(locale.getencoding(), sys.flags.utf8_mode, sys.stdout.encoding)"
+          Assert-LastExit 'python -c'
+          Write-Host ('Python locale encoding, UTF-8 mode, stdout encoding: ' + $encodings)
+          if ((('' + $encodings) -split ' ')[1] -cne '0') { throw ('Python runs in UTF-8 mode here; students do not: ' + $encodings) }
+
+      # 之後的步驟都從專案資料夾開始，跟學生 cd tiny-perceptron-vlm 之後留在原地一樣。每個步驟都是另開的 shell，
+      # PowerShell 變數與啟用狀態不會留到下一步；需要時在步驟裡重新設定，並註明是頁面以外。
+      - name: 入口頁：啟用工具箱，檢查環境、登記 kernel、啟動 JupyterLab
+        working-directory: tiny-perceptron-vlm
+        timeout-minutes: 15
+        run: |
+          . (Join-Path $env:RUNNER_TEMP 'page.ps1')
+          Invoke-Page -Pages README.md,README_en.md,course/first-steps.md -Commands '.venv\Scripts\Activate.ps1'
+          Assert-VenvPython
+          Invoke-Page -Pages README.md,README_en.md,course/first-steps.md -Commands 'python scripts/check_env.py' | Tee-Object -Variable shown
+          Assert-CheckEnv $shown
+          Invoke-Page -Pages README.md,README_en.md,course/first-steps.md -Commands 'python -m ipykernel install --sys-prefix --name tiny-perceptron --display-name "Tiny Perceptron"'
+          Assert-Kernelspec
+          # jupyter lab 會停住等人操作：Start-JupyterProbe 讓同一個命令啟動、核對後自己結束。
+          $probe = Start-JupyterProbe
+          try {
+              Invoke-Page -Pages README.md,README_en.md,course/first-steps.md -Commands 'jupyter lab notebooks'
+          } finally {
+              Complete-JupyterProbe $probe
+          }
+
+      - name: README：最小流程與下載清單
+        working-directory: tiny-perceptron-vlm
+        run: |
+          . (Join-Path $env:RUNNER_TEMP 'page.ps1')
+          # 不跑：安裝表 CPU 那列就是入口頁那一步已執行的同一條命令。
+          Skip-Page -Pages README.md -Reason 'ran earlier in this job as the install step' -Commands 'uv sync --frozen --extra cpu --group notebook'
+          # 不跑：cu130、cu126 兩列。安裝本身不需要 GPU，不跑是因為下載量：torch 2.14.1 的 Windows wheel，CUDA 版約
+          # 1.99 GB（cu130）與 2.60 GB（cu126），CPU 版約 0.12 GB；每次執行兩種 shell 都要各下載一次。runner 沒有 GPU，
+          # 裝了也只能驗證安裝與 CPU 計算。
+          Skip-Page -Pages README.md -Reason 'the CUDA builds of torch are about 2 GB each to download' -Commands @'
+          uv sync --frozen --extra cu130 --group notebook
+          uv sync --frozen --extra cu126 --group notebook
+          '@
+          # 頁面以外：最小流程接在入口頁的啟用之後，學生的視窗仍是啟用狀態。啟用那一行已在上一步照頁面執行並核對。
+          .venv\Scripts\Activate.ps1
+          Invoke-Page -Pages README.md,README_en.md -Commands 'python scripts/prepare_data.py --kind toy-text'
+          Invoke-Page -Pages README.md,README_en.md -Commands 'python scripts/train.py --task text --data data/generated/toy-text/train.jsonl' | Tee-Object -Variable shown
+          # 頁面說：報告的 mode 應為 dry-run-no-weight-update；逐步紀錄 history 第一筆的 loss 是有限數字、grad_norm 也有限且大於 0……
+          Assert-TrainReport $shown -Mode dry-run-no-weight-update -Task text | Out-Null
+          Invoke-Page -Pages README.md,README_en.md -Commands 'python scripts/fetch_training_assets.py --list' | Tee-Object -Variable shown
+          # 頁面說：先用 …--list 查看名稱……再用 …--asset NAME 下載、核對並解包所選包；將 NAME 換成清單中的名稱。
+          # 這裡核對訓練頁換成的 tinystories 在清單裡；下載、核對並解包不在這裡核，由後面照訓練頁執行
+          # --asset tinystories 的那一步核對。
+          if (-not (@($shown | ForEach-Object { ('' + $_ | ConvertFrom-Json).id }) -ccontains 'tinystories')) { throw 'tinystories is not listed' }
+          # 不跑：NAME 要換成清單裡的名稱；換成 tinystories 就是訓練頁的 --asset tinystories，那一條在後面照訓練頁執行。
+          Skip-Page -Pages README.md,README_en.md -Reason 'NAME is a placeholder; the training page step downloads tinystories' -Commands 'python scripts/fetch_training_assets.py --asset NAME'
+          Invoke-Page -Pages README.md,README_en.md -Commands 'python scripts/fetch_course_models.py --list'
+          # 不跑：會從 Hugging Face 匿名下載模型；這個 workflow 不連 Hugging Face。
+          Skip-Page -Pages README.md,README_en.md -Reason 'downloads a model from Hugging Face' -Commands 'python scripts/check_course_models.py --model text_foundation'
+          # 不跑：維護者改教材時的建置與檢查命令，不是讀者的操作步驟。pytest 已由 ci.yml 在 windows-latest 執行，
+          # ruff 也在 ci.yml；其餘會改寫追蹤中的 SVG、章檔與 Notebook，或屬於發布前的審閱檢查。
+          Skip-Page -Pages README.md,README_en.md -Reason 'maintainer commands, not reader steps' -Commands @'
+          python scripts/build_visuals.py
+          python scripts/format_course_code.py course/chapters/01.md
+          python scripts/build_course.py
+          python scripts/build_course.py --check
+          python scripts/check_course_reviews.py
+          python scripts/check_technical_reviews.py
+          python scripts/check_notebooks.py --mode python
+          python scripts/check_notebooks.py --mode kernel --lesson 3.6
+          pytest -ra
+          ruff check .
+          ruff format --check .
+          '@
+
+      - name: 操作與數學暖身：不啟用的寫法
+        working-directory: tiny-perceptron-vlm
+        timeout-minutes: 15
+        run: |
+          . (Join-Path $env:RUNNER_TEMP 'page.ps1')
+          if ($env:VIRTUAL_ENV) { throw 'this step must run without activation' }
+          # 頁面以外：上一步已登記同名 kernel；先移除，才看得出這一步的登記有沒有成功。
+          Remove-Item -Recurse -Force -LiteralPath .venv\share\jupyter\kernels\tiny-perceptron
+          Invoke-Page -Pages course/first-steps.md -Commands '.\.venv\Scripts\python.exe scripts/check_env.py' | Tee-Object -Variable shown
+          Assert-CheckEnv $shown
+          Invoke-Page -Pages course/first-steps.md -Commands '.\.venv\Scripts\python.exe -m ipykernel install --sys-prefix --name tiny-perceptron --display-name "Tiny Perceptron"'
+          Assert-Kernelspec
+          # jupyter lab 會停住等人操作：Start-JupyterProbe 讓同一個命令啟動、核對後自己結束。
+          $probe = Start-JupyterProbe
+          try {
+              Invoke-Page -Pages course/first-steps.md -Commands '.\.venv\Scripts\python.exe -m jupyterlab notebooks'
+          } finally {
+              Complete-JupyterProbe $probe
+          }
+
+      - name: 操作與數學暖身：執行原則不允許腳本時，啟用命令顯示的錯誤
+        working-directory: tiny-perceptron-vlm
+        run: |
+          # 頁面說：Windows PowerShell 啟用時若出現紅色錯誤，說啟用腳本無法載入，並提到 about_Execution_Policies
+          # （Windows PowerShell 5.1 還會列出 PSSecurityException），是系統的執行原則不允許執行 Activate.ps1 這類腳本……
+          # 讀者靠這幾處認出是執行原則擋下腳本。runner 的執行原則允許腳本（準備 runner 那一步印出 Get-ExecutionPolicy -List），
+          # 前面的啟用因此成功；Windows PowerShell 5.1 在 Windows 用戶端電腦的預設是 Restricted（5.1 版的
+          # about_Execution_Policies），學生會看到這個錯誤。這裡用 Restricted 另開一個同版本的 shell 跑同一行，核對顯示的
+          # 錯誤含有頁面說的內容。runner 是英文 Windows，「無法載入」核對的是英文的 cannot be loaded。
+          $ErrorActionPreference = 'Continue'
+          $desktop = $PSVersionTable.PSEdition -eq 'Desktop'
+          $shell = if ($desktop) { 'powershell' } else { 'pwsh' }
+          $shown = & $shell -NoLogo -NoProfile -ExecutionPolicy Restricted -Command 'Get-ExecutionPolicy; .venv\Scripts\Activate.ps1' 2>&1 | Out-String
+          Write-Host $shown
+          $global:LASTEXITCODE = 0
+          # Windows PowerShell 5.1 照主控台寬度把錯誤折成好幾行；比對前把空白與換行壓成一個空格。
+          $flat = $shown -replace '\s+', ' '
+          if ($flat -notmatch 'Activate\.ps1 cannot be loaded') { throw 'the activation error does not say that Activate.ps1 cannot be loaded' }
+          if ($flat -notmatch 'about_Execution_Policies') { throw 'the activation error does not mention about_Execution_Policies' }
+          if ($desktop -and $flat -notmatch 'PSSecurityException') { throw 'Windows PowerShell 5.1 did not list PSSecurityException' }
+
+      - name: 操作與數學暖身：改字練習與暖身程式在 Tiny Perceptron kernel 執行（頁面以外：nbclient 代替瀏覽器）
+        working-directory: tiny-perceptron-vlm
+        timeout-minutes: 15
+        env:
+          # 核對用的 Python 程式。放在環境變數裡傳進來，程式裡的中文不受 Windows PowerShell 5.1 讀檔編碼影響。
+          # tests/test_windows_student_commands.py 也載入這段程式，用其中的函式核對頁面句子與 Notebook 那一行都找得到。
+          PAGE_KERNEL_CHECKS: |
+            """頁面以外：W.1 的改字練習與 W.6 程式的第一行輸出，用登記好的 tiny-perceptron kernel 真的執行一次。
+
+            學生在 JupyterLab 開 notebooks/01/1.1.ipynb、選 Tiny Perceptron，在瀏覽器裡改輸入那行、重啟並全部執行；暖身的
+            短程式則貼進新增的程式格，接在第一個程式格「準備本節的工具」之後執行。這裡用 nbclient 代替瀏覽器：讀入同一份
+            Notebook，只在記憶體裡改那一行，啟動新的 kernel 從頭全部執行；改過的 Notebook 不寫回 clone，也不另存。kernel 的
+            工作目錄是 Notebook 所在的 notebooks/01，和 JupyterLab 替這份 Notebook 開 kernel 的位置相同，準備程式格要從那裡
+            往上找到 pyproject.toml。瀏覽器裡的操作這裡測不到，列在 tests/test_windows_student_commands.py 開頭的〈不涵蓋〉。
+            原句、新句與期望輸出都從頁面讀；W.6 的程式由 workflow 的 Get-PageCode 從頁面取出，放在
+            環境變數 W6_CODE。印進記錄的訊息只用 ASCII，中文的值用 ascii() 印成跳脫碼。
+            """
+
+            import os
+            import re
+            from pathlib import Path
+
+            PAGE = "course/first-steps.md"
+            NOTEBOOK = "notebooks/01/1.1.ipynb"
+            # kernelspec 的名稱（ipykernel install 的 --name），不是顯示名稱 Tiny Perceptron。
+            KERNEL = "tiny-perceptron"
+            # 頁面說：……再把輸入那行 `…` 改成 `…`，重啟並全部執行。
+            # 頁面說：程式最後的文字輸出應為 `…`，而非舊句；這就是要核對的還原結果。
+            EXERCISE = re.compile(r"把輸入那行 ?`([^`\n]+)` ?改成 ?`([^`\n]+)` ?，重啟並全部執行。程式最後的文字輸出應為 ?`([^`\n]+)`")
+            # 頁面說：第一行輸出 `…`，確認代價 4、梯度 -4。
+            W6_FIRST_LINE = re.compile(r"第一行輸出 ?`([^`\n]+)` ?，確認代價")
+
+
+            def one_sentence(pattern, page_text, what):
+                """頁面上那句話剛好出現一次時，回傳它的 inline code；找不到或不只一處就失敗。"""
+                found = pattern.findall(page_text)
+                if len(found) != 1:
+                    raise SystemExit(f"{PAGE}: the sentence for {what} appears {len(found)} times; expected exactly once")
+                return found[0]
+
+
+            def exercise(page_text):
+                """W.1 改字練習的 (原輸入行, 新輸入行, 期望輸出)。"""
+                old, new, expected = one_sentence(EXERCISE, page_text, "the W.1 edit exercise")
+                if old == new:
+                    raise SystemExit(f"{PAGE}: the W.1 exercise replaces an input line with the same line: {ascii(old)}")
+                return old, new, expected
+
+
+            def replace_input_line(notebook, old, new):
+                """程式格裡恰好一行等於 old 時，在記憶體裡把它換成 new；找不到或不只一行就失敗。回傳那個程式格在 cells 裡的索引。"""
+                hits = []
+                for number, cell in enumerate(notebook["cells"]):
+                    if cell["cell_type"] != "code":
+                        continue
+                    source = cell["source"] if isinstance(cell["source"], str) else "".join(cell["source"])
+                    lines = source.split("\n")
+                    hits += [(number, cell, lines, index) for index, line in enumerate(lines) if line == old]
+                if len(hits) != 1:
+                    raise SystemExit(f"{NOTEBOOK}: {len(hits)} code lines equal the page's input line {ascii(old)}; expected exactly one")
+                number, cell, lines, index = hits[0]
+                lines[index] = new
+                cell["source"] = "\n".join(lines)
+                return number
+
+
+            def printed_lines(cell):
+                """程式格寫到 stdout 的文字：各段 stdout 依序接起來再分行。輸出區若還有 stdout 以外的文字（運算式的值、圖、
+                錯誤），「最後的文字輸出」就不只一種讀法，直接失敗。stderr 的警告不算程式印出的文字。"""
+                others = sorted({output["output_type"] for output in cell["outputs"] if output["output_type"] != "stream"})
+                if others:
+                    raise SystemExit(f"the code cell also shows {others} outputs; decide again which output the page means")
+                return "".join(
+                    output["text"] for output in cell["outputs"] if output["output_type"] == "stream" and output["name"] == "stdout"
+                ).splitlines()
+
+
+            def run(notebook, directory):
+                """用登記好的 kernel 從頭執行全部程式格；任何一格出錯就失敗。"""
+                from nbclient import NotebookClient
+
+                client = NotebookClient(
+                    notebook,
+                    timeout=600,
+                    startup_timeout=180,
+                    kernel_name=KERNEL,
+                    resources={"metadata": {"path": str(directory)}},
+                    allow_errors=False,
+                )
+                client.execute()
+
+
+            def main():
+                import nbformat
+                from jupyter_client.kernelspec import KernelSpecManager
+
+                root = Path.cwd()
+                page = (root / PAGE).read_text(encoding="utf-8")
+                path = root / NOTEBOOK
+                spec = KernelSpecManager().get_kernel_spec(KERNEL)
+                print(f"kernel {KERNEL} from {spec.resource_dir}; it starts {spec.argv[0]}")
+
+                # W.1：「程式最後的文字輸出」是最後一個程式格印到 stdout 的最後一行。1.1 的最後一個程式格依序印出字表、編號與
+                # 還原結果三行，還原結果在最後；在它之前的程式格另有準備程式格的運算式值與圖解，不是最後的輸出。
+                old, new, expected = exercise(page)
+                notebook = nbformat.read(path, as_version=4)
+                edited = replace_input_line(notebook, old, new)
+                print(f"W.1 edit exercise: replaced one input line in cells[{edited}] of {NOTEBOOK}, in memory only")
+                run(notebook, path.parent)
+                last = [cell for cell in notebook.cells if cell.cell_type == "code"][-1]
+                lines = printed_lines(last)
+                actual = lines[-1] if lines else None
+                if actual != expected:
+                    raise SystemExit(
+                        f"W.1 edit exercise: after restart and run all, the last line printed by the last code cell is "
+                        f"{ascii(actual)}; the page expects {ascii(expected)}"
+                    )
+                print(f"W.1 edit exercise OK: the last line printed by the last code cell is {ascii(actual)}, as the page expects")
+
+                # W.6：頁面要讀者把暖身程式貼進新的程式格，接在 Notebook 的第一個程式格「準備本節的工具」之後執行。
+                expected = one_sentence(W6_FIRST_LINE, page, "the first W.6 output line")
+                notebook = nbformat.read(path, as_version=4)
+                prepare = [cell for cell in notebook.cells if cell.cell_type == "code"][0]
+                pasted = nbformat.v4.new_code_cell(os.environ["W6_CODE"])
+                notebook.cells = [prepare, pasted]
+                run(notebook, path.parent)
+                lines = printed_lines(pasted)
+                actual = lines[0] if lines else None
+                if actual != expected:
+                    raise SystemExit(f"W.6: the first line printed by the page's code is {ascii(actual)}; the page expects {ascii(expected)}")
+                print(f"W.6 OK: the first line printed by the page's code is {ascii(actual)}, as the page expects")
+
+
+            if __name__ == "__main__":
+                main()
+        run: |
+          . (Join-Path $env:RUNNER_TEMP 'page.ps1')
+          # 頁面以外：頁面要讀者在瀏覽器裡改 1.1 的輸入那行、重啟並全部執行（W.1），也要讀者把暖身程式貼進新的程式格執行
+          # （W.6）。這裡用頁面已裝的 nbclient 與前面登記的 tiny-perceptron kernel 代替瀏覽器，每個 job 跑一次；kernel 從
+          # notebooks/01 啟動，和 JupyterLab 一樣。瀏覽器裡的操作這裡測不到，列在 tests/test_windows_student_commands.py
+          # 開頭的〈不涵蓋〉。比對規則寫在 PAGE_KERNEL_CHECKS。
+          # 頁面說：……想檢查整份能否從零重現時……清空工作桌再由上到下跑……
+          # PAGE_KERNEL_CHECKS 用新的 kernel 由上到下執行全部程式格（改了輸入那行的 1.1），allow_errors=False，任何一格出錯
+          # 就失敗：這就是這句的核對。
+          # 頁面說：……再把輸入那行 `…` 改成 `…`，重啟並全部執行。
+          # 頁面說：程式最後的文字輸出應為 `…`，而非舊句；這就是要核對的還原結果。
+          # 頁面說：第一行輸出 `…`，確認代價 4、梯度 -4。
+          $env:W6_CODE = Get-PageCode -Page course/first-steps.md -After '## W.6'
+          $script = Join-Path $env:RUNNER_TEMP 'page_kernel_checks.py'
+          [IO.File]::WriteAllText($script, $env:PAGE_KERNEL_CHECKS, (New-Object Text.UTF8Encoding $false))
+          .\.venv\Scripts\python.exe $script
+          Assert-LastExit 'the kernel checks'
+
+      - name: 操作與數學暖身：Git LFS
+        working-directory: tiny-perceptron-vlm
+        run: |
+          . (Join-Path $env:RUNNER_TEMP 'page.ps1')
+          Invoke-Page -Pages course/first-steps.md -Commands 'git lfs version' | Tee-Object -Variable shown
+          # 頁面說：在終端機執行 git lfs version，應顯示 git-lfs/ 開頭的版本號……
+          if (('' + $shown) -cnotmatch '^git-lfs/\d') { throw ('git lfs version should start with git-lfs/ and a version number: ' + $shown) }
+          Invoke-Page -Pages course/first-steps.md -Commands 'git lfs install --local'
+
+      - name: 操作與數學暖身：檔案放哪裡（專案根目錄與 notebooks 各跑一次）
+        working-directory: tiny-perceptron-vlm
+        run: |
+          . (Join-Path $env:RUNNER_TEMP 'page.ps1')
+          # 頁面以外：這一節也教「已啟用時只輸入 python」，所以先照入口頁啟用；那一行已在前面照頁面執行。runner 的 PATH 上
+          # 另有預裝的 Python，W.7 的程式在哪個 Python 都印得出同樣三行，所以啟用之後先核對 python 指的是 .venv 裡的那一個。
+          .venv\Scripts\Activate.ps1
+          Assert-VenvPython
+          # 頁面要讀者進 Python 互動模式逐行貼上這段程式，再輸入 exit() 回到終端機。互動模式會停住等人輸入；
+          # 這裡把同一段程式加上 exit()，從管線送進同一個命令，命令讀完就自己結束。頁面說的 >>> 提示這樣看不到。
+          $code = (Get-PageCode -Page course/first-steps.md -After '## W.7') + "exit()`n"
+          $root = (Get-Location).ProviderPath
+          # 頁面說：在專案根目錄執行時，後兩行應都是 True；若都是 False，先看第一行，確認是否站在別的資料夾。
+          Invoke-Page -Pages course/first-steps.md -Stdin $code -Commands '.\.venv\Scripts\python.exe' | Tee-Object -Variable shown
+          Assert-PathCheck $shown -Directory $root -Expected True
+          Invoke-Page -Pages course/first-steps.md -Stdin $code -Commands 'python' | Tee-Object -Variable shown
+          Assert-PathCheck $shown -Directory $root -Expected True
+          # 頁面說：在專案根目錄輸入 cd notebooks，再進互動模式重跑這段……
+          # 頁面說：先預測 pyproject.toml 是否還會被找到……
+          # 這裡重跑這段，是把同一段程式從管線送進命令，不是互動模式。
+          Invoke-Page -Pages course/first-steps.md -Commands 'cd notebooks'
+          Invoke-Page -Pages course/first-steps.md -Stdin $code -Commands '..\.venv\Scripts\python.exe' | Tee-Object -Variable shown
+          Assert-PathCheck $shown -Directory (Join-Path $root 'notebooks') -Expected False
+          Invoke-Page -Pages course/first-steps.md -Stdin $code -Commands 'python' | Tee-Object -Variable shown
+          Assert-PathCheck $shown -Directory (Join-Path $root 'notebooks') -Expected False
+          # 頁面說：核對後用 exit() 退出，再 cd .. 回到上一層專案根目錄。
+          Invoke-Page -Pages course/first-steps.md -Commands 'cd ..'
+          if ((Get-Location).ProviderPath -ne $root) { throw 'cd .. did not return to the project root' }
+          # 不跑：疑難排解提到的路徑寫法，沒有完整命令；同一個寫法上面已執行。
+          Skip-Page -Pages course/first-steps.md -Reason 'same path as the command run above in this step' -Commands '.\.venv\Scripts\python.exe'
+
+      - name: 訓練頁：先決定要拿哪些例子教模型
+        working-directory: tiny-perceptron-vlm
+        run: |
+          . (Join-Path $env:RUNNER_TEMP 'page.ps1')
+          Invoke-Page -Pages course/training.md -Commands '.\.venv\Scripts\python.exe scripts/fetch_training_assets.py --list' | Tee-Object -Variable shown
+          if (-not (@($shown | ForEach-Object { ('' + $_ | ConvertFrom-Json).id }) -ccontains 'tinystories')) { throw 'tinystories is not listed' }
+          # 資料包此時仍是指標檔，下載工具會先執行 git lfs pull；GIT_LFS_SKIP_SMUDGE 還設著，跟學生的視窗一樣。
+          # 工具解包前會核對大小與 SHA-256，所以結束碼是 0 就表示真的下載到資料包。
+          Invoke-Page -Pages course/training.md -Commands '.\.venv\Scripts\python.exe scripts/fetch_training_assets.py --asset tinystories' | Tee-Object -Variable shown
+          if ((Read-JsonLine $shown).asset -cne 'tinystories') { throw 'tinystories was not unpacked' }
+          Invoke-Page -Pages course/training.md -Commands 'git lfs version' | Tee-Object -Variable shown
+          # 頁面說：……並用 git lfs version 確認。
+          if (('' + $shown) -cnotmatch '^git-lfs/\d') { throw ('git lfs version should start with git-lfs/ and a version number: ' + $shown) }
+
+      - name: 訓練頁：先讓一組資料走過模型
+        working-directory: tiny-perceptron-vlm
+        run: |
+          . (Join-Path $env:RUNNER_TEMP 'page.ps1')
+          # 頁面說：mode……應為 dry-run-no-weight-update……task、device……與命令選擇相符……loss……是有限數字，
+          # 沒有 NaN 或無窮大……grad_norm……有限且大於零……effective_tokens……有效目標數，應大於零……
+          Invoke-Page -Pages course/training.md -Commands '.\.venv\Scripts\python.exe scripts/train.py --task text --device cpu' | Tee-Object -Variable shown
+          $report = Assert-TrainReport $shown -Mode dry-run-no-weight-update -Task text
+          $tokens = @($report.history)[0].effective_tokens
+          if ($report.device -cne 'cpu' -or -not ($tokens -gt 0)) { throw ('text: device {0}, effective_tokens {1}' -f $report.device, $tokens) }
+          Invoke-Page -Pages course/training.md -Commands '.\.venv\Scripts\python.exe scripts/train.py --task sft --device cpu' | Tee-Object -Variable shown
+          $report = Assert-TrainReport $shown -Mode dry-run-no-weight-update -Task sft
+          $tokens = @($report.history)[0].effective_tokens
+          if ($report.device -cne 'cpu' -or -not ($tokens -gt 0)) { throw ('sft: device {0}, effective_tokens {1}' -f $report.device, $tokens) }
+          Invoke-Page -Pages course/training.md -Commands '.\.venv\Scripts\python.exe scripts/train.py --task vision --device cpu' | Tee-Object -Variable shown
+          $report = Assert-TrainReport $shown -Mode dry-run-no-weight-update -Task vision
+          # 頁面說：圖片任務的報告不統計這一欄，會寫 null……
+          if (@($report.history)[0].PSObject.Properties.Name -notcontains 'effective_tokens') { throw 'vision: history[0] has no effective_tokens' }
+          $tokens = @($report.history)[0].effective_tokens
+          if ($report.device -cne 'cpu' -or $null -ne $tokens) { throw ('vision: device {0}, effective_tokens {1}' -f $report.device, $tokens) }
+
+      - name: 訓練頁：先訓練接字表，再比較固定視窗
+        working-directory: tiny-perceptron-vlm
+        run: |
+          . (Join-Path $env:RUNNER_TEMP 'page.ps1')
+          Invoke-Page -Pages course/training.md -Commands @'
+          New-Item -ItemType Directory -Force -Path outputs,checkpoints
+          .\.venv\Scripts\python.exe scripts/train_simple.py --model bigram --seed 42 --device cpu > outputs/bigram-before.json
+          .\.venv\Scripts\python.exe scripts/train_simple.py --model mlp --context 3 --width 16 --seed 42 --device cpu > outputs/mlp-before.json
+          .\.venv\Scripts\python.exe scripts/train_simple.py --model bigram --seed 42 --device cpu --train --steps 200 --output checkpoints/bigram.pt > outputs/bigram-after.json
+          .\.venv\Scripts\python.exe scripts/train_simple.py --model mlp --context 3 --width 16 --seed 42 --device cpu --train --steps 200 --output checkpoints/mlp.pt > outputs/mlp-after.json
+          '@
+          Assert-Paths checkpoints/bigram.pt, checkpoints/mlp.pt
+          # 頁面說：這兩次沒有更新。
+          foreach ($name in 'bigram-before', 'mlp-before') {
+              if ((Read-JsonFile "outputs/$name.json").mode -cne 'dry-run-no-weight-update') { throw ($name + ' should be a dry run') }
+          }
+          # 頁面說：--train 開啟更新……
+          foreach ($name in 'bigram-after', 'mlp-after') {
+              if ((Read-JsonFile "outputs/$name.json").mode -cne 'train') { throw ($name + ' should report training') }
+          }
+          Invoke-Page -Pages course/training.md -Commands '.\.venv\Scripts\python.exe scripts/fetch_course_models.py --list'
+          # 不跑：第一行從 Hugging Face 匿名下載模型（這個 workflow 不連 Hugging Face），第二行要用那個模型。
+          Skip-Page -Pages course/training.md -Reason 'downloads a model from Hugging Face; the second line needs it' -Commands @'
+          .\.venv\Scripts\python.exe scripts/fetch_course_models.py --model text_foundation
+          .\.venv\Scripts\python.exe scripts/infer.py checkpoints/course/text_foundation/model.pt --prompt "color=blue;shape=circle;" --tokens 32 --device cpu --json
+          '@
+          Invoke-Page -Pages course/training.md -Commands '.\.venv\Scripts\python.exe -m scripts.course_experiments.run --experiment simple_models --device cpu'
+
+      - name: 訓練頁：把文字訓練和對話練習分開看
+        working-directory: tiny-perceptron-vlm
+        run: |
+          . (Join-Path $env:RUNNER_TEMP 'page.ps1')
+          Invoke-Page -Pages course/training.md -Commands @'
+          .\.venv\Scripts\python.exe scripts/prepare_data.py --kind toy-text --seed 42
+          .\.venv\Scripts\python.exe scripts/prepare_data.py --kind attributes-sft --seed 42
+          '@
+          # 頁面要讀者用純文字編輯器把下一段程式存成 outputs/save_start.py；這裡照頁面內容寫成檔案。
+          Write-PageFile -Path outputs/save_start.py -Text (Get-PageCode -Page course/training.md -After '`outputs/save_start.py`')
+          Invoke-Page -Pages course/training.md -Commands '.\.venv\Scripts\python.exe outputs/save_start.py'
+          Assert-Paths checkpoints/start.pt
+          Invoke-Page -Pages course/training.md -Commands @'
+          .\.venv\Scripts\python.exe scripts/evaluate.py checkpoints/start.pt --data data/generated/toy-text/validation.jsonl --mode text --tokens 32 --device cpu --limit all --output outputs/text-before.json
+          .\.venv\Scripts\python.exe scripts/train.py --task text --data data/generated/toy-text/train.jsonl --checkpoint checkpoints/start.pt --seed 42 --device cpu --train --steps 200 --output checkpoints/text.pt
+          .\.venv\Scripts\python.exe scripts/evaluate.py checkpoints/text.pt --data data/generated/toy-text/validation.jsonl --mode text --tokens 32 --device cpu --limit all --output outputs/text-after.json
+          .\.venv\Scripts\python.exe scripts/evaluate.py checkpoints/start.pt --data data/generated/attributes-sft/validation.jsonl --mode sft --tokens 24 --device cpu --limit all --output outputs/attributes-before.json
+          .\.venv\Scripts\python.exe scripts/train.py --task sft --data data/generated/attributes-sft/train.jsonl --checkpoint checkpoints/start.pt --seed 42 --device cpu --train --steps 500 --output checkpoints/attributes.pt
+          .\.venv\Scripts\python.exe scripts/evaluate.py checkpoints/attributes.pt --data data/generated/attributes-sft/validation.jsonl --mode sft --tokens 24 --device cpu --limit all --output outputs/attributes-after.json
+          .\.venv\Scripts\python.exe scripts/evaluate.py checkpoints/text.pt --data data/generated/attributes-sft/validation.jsonl --mode sft --tokens 24 --device cpu --limit all --output outputs/text-then-sft-before.json
+          .\.venv\Scripts\python.exe scripts/train.py --task sft --data data/generated/attributes-sft/train.jsonl --checkpoint checkpoints/text.pt --seed 42 --device cpu --train --steps 500 --output checkpoints/text-then-sft.pt
+          .\.venv\Scripts\python.exe scripts/evaluate.py checkpoints/text-then-sft.pt --data data/generated/attributes-sft/validation.jsonl --mode sft --tokens 24 --device cpu --limit all --output outputs/text-then-sft-after.json
+          '@
+          Assert-Paths checkpoints/text.pt, checkpoints/attributes.pt, checkpoints/text-then-sft.pt
+          foreach ($name in 'text-before', 'text-after') { Assert-TextEvaluation "outputs/$name.json" }
+          foreach ($name in 'attributes-before', 'attributes-after', 'text-then-sft-before', 'text-then-sft-after') {
+              $null = Read-JsonFile "outputs/$name.json"
+          }
+          # 不跑：固定課程配方。--device cuda 的需要 NVIDIA GPU 與 CUDA 版 PyTorch，windows-latest 沒有 GPU，
+          # 頁面也寫明這些配方用 CUDA。兩條下載資料包的命令，這裡執行的命令沒有一條需要它們下載的資料包；
+          # 其中的 TinyStories 已在前面照訓練頁下載過。
+          Skip-Page -Pages course/training.md -Reason 'fixed recipes use --device cuda; nothing run here needs these downloads' -Commands @'
+          .\.venv\Scripts\python.exe -m scripts.course_experiments.run --experiment text_foundation --device cuda
+          .\.venv\Scripts\python.exe scripts/fetch_training_assets.py --asset tinystories --asset chinese-poetry
+          .\.venv\Scripts\python.exe -m scripts.course_experiments.run --experiment real_text --device cuda
+          .\.venv\Scripts\python.exe -m scripts.course_experiments.run --experiment tokenizer --device cuda
+          .\.venv\Scripts\python.exe scripts/fetch_training_assets.py --asset ultrachat-sft
+          .\.venv\Scripts\python.exe -m scripts.course_experiments.run --experiment sft --device cuda
+          '@
+
+      - name: 訓練頁：把風格、指令遵循與安全拆成不同目標
+        working-directory: tiny-perceptron-vlm
+        run: |
+          . (Join-Path $env:RUNNER_TEMP 'page.ps1')
+          Invoke-Page -Pages course/training.md -Commands @'
+          .\.venv\Scripts\python.exe scripts/prepare_data.py --kind style
+          .\.venv\Scripts\python.exe scripts/prepare_data.py --kind safety
+          .\.venv\Scripts\python.exe scripts/train.py --task sft --data data/generated/style/train.jsonl --train --steps 500 --max-length 256 --output checkpoints/style.pt
+          .\.venv\Scripts\python.exe scripts/evaluate.py checkpoints/style.pt --data data/generated/style/validation.jsonl --mode sft --tokens 128 --limit all --output outputs/style-validation.json
+          .\.venv\Scripts\python.exe scripts/train.py --task sft --data data/generated/safety/train.jsonl --train --steps 500 --max-length 256 --output checkpoints/safety.pt
+          .\.venv\Scripts\python.exe scripts/evaluate.py checkpoints/safety.pt --data data/generated/safety/validation.jsonl --mode sft --tokens 128 --limit all --output outputs/safety-validation.json
+          '@
+          Assert-Paths checkpoints/style.pt, checkpoints/safety.pt
+          foreach ($name in 'style-validation', 'safety-validation') { $null = Read-JsonFile "outputs/$name.json" }
+          Invoke-Page -Pages course/training.md -Commands '.\.venv\Scripts\python.exe scripts/infer.py checkpoints/style.pt --chat --prompt "style=vivid; 2+3=?" --tokens 128'
+          # 不跑：固定風格、安全與 LoRA 配方用 --device cuda（windows-latest 沒有 GPU）。下載 PKU-SafeRLHF 的那一條，
+          # 這裡執行的命令沒有一條需要它下載的資料包。
+          Skip-Page -Pages course/training.md -Reason 'fixed recipes use --device cuda; nothing run here needs this download' -Commands @'
+          .\.venv\Scripts\python.exe -m scripts.course_experiments.run --experiment style --device cuda
+          .\.venv\Scripts\python.exe scripts/fetch_training_assets.py --asset pku-safe-rlhf
+          .\.venv\Scripts\python.exe -m scripts.course_experiments.run --experiment safety --device cuda
+          .\.venv\Scripts\python.exe -m scripts.course_experiments.run --experiment lora --device cuda
+          '@
+
+      - name: 訓練頁：讓圖片與聲音先有可用的基礎特徵
+        working-directory: tiny-perceptron-vlm
+        run: |
+          . (Join-Path $env:RUNNER_TEMP 'page.ps1')
+          Invoke-Page -Pages course/training.md -Commands '.\.venv\Scripts\python.exe scripts/pretrain_encoders.py --modality vision --train --steps 300 --output checkpoints/vision-encoder.pt' | Tee-Object -Variable shown
+          Assert-EncoderReport $shown -Modality vision
+          Invoke-Page -Pages course/training.md -Commands '.\.venv\Scripts\python.exe scripts/pretrain_encoders.py --modality audio --train --steps 300 --output checkpoints/audio-encoder.pt' | Tee-Object -Variable shown
+          Assert-EncoderReport $shown -Modality audio
+          Invoke-Page -Pages course/training.md -Commands @'
+          .\.venv\Scripts\python.exe scripts/train.py --task vision --checkpoint checkpoints/attributes.pt --vision-encoder checkpoints/vision-encoder.pt --freeze projector --train --steps 500 --output checkpoints/vision.pt
+          .\.venv\Scripts\python.exe scripts/train.py --task audio --checkpoint checkpoints/attributes.pt --audio-encoder checkpoints/audio-encoder.pt --freeze projector --train --steps 500 --output checkpoints/audio.pt
+          .\.venv\Scripts\python.exe scripts/train.py --task joint --checkpoint checkpoints/attributes.pt --vision-encoder checkpoints/vision-encoder.pt --audio-encoder checkpoints/audio-encoder.pt --freeze partial --train --steps 500 --output checkpoints/joint.pt
+          '@
+          Assert-Paths checkpoints/vision.pt, checkpoints/audio.pt, checkpoints/joint.pt
+          Invoke-Page -Pages course/training.md -Commands '.\.venv\Scripts\python.exe scripts/infer_modal.py checkpoints/vision.pt --color blue --shape circle --prompt "shape?" --tokens 16' | Tee-Object -Variable shown
+          Assert-ModalAnswer $shown -Color blue -Shape circle
+          Invoke-Page -Pages course/training.md -Commands '.\.venv\Scripts\python.exe scripts/infer_modal.py checkpoints/audio.pt --frequency 880 --prompt "pitch?" --tokens 16' | Tee-Object -Variable shown
+          Assert-ModalAnswer $shown -Frequency 880
+          Invoke-Page -Pages course/training.md -Commands '.\.venv\Scripts\python.exe scripts/infer_modal.py checkpoints/joint.pt --color red --shape square --frequency 220 --prompt "joint?" --tokens 16' | Tee-Object -Variable shown
+          Assert-ModalAnswer $shown -Color red -Shape square -Frequency 220
+          # 不跑：固定的模態實驗要 --device cuda，windows-latest 沒有 GPU。
+          Skip-Page -Pages course/training.md -Reason 'fixed recipes use --device cuda' -Commands @'
+          .\.venv\Scripts\python.exe -m scripts.course_experiments.run --experiment encoders --device cuda
+          .\.venv\Scripts\python.exe -m scripts.course_experiments.run --experiment projector --device cuda
+          .\.venv\Scripts\python.exe -m scripts.course_experiments.run --experiment vqa --device cuda
+          '@
+
+      - name: 訓練頁：先檢查回答能力，再學較偏好的回答
+        working-directory: tiny-perceptron-vlm
+        run: |
+          . (Join-Path $env:RUNNER_TEMP 'page.ps1')
+          Invoke-Page -Pages course/training.md -Commands @'
+          .\.venv\Scripts\python.exe scripts/prepare_data.py --kind preference
+          .\.venv\Scripts\python.exe scripts/train.py --task dpo --checkpoint checkpoints/style.pt --data data/generated/preference/train.jsonl --train --steps 200 --output checkpoints/preferred.pt
+          .\.venv\Scripts\python.exe scripts/infer.py checkpoints/style.pt --chat --prompt "0+5=?" --tokens 32 --temperature 0
+          .\.venv\Scripts\python.exe scripts/infer.py checkpoints/preferred.pt --chat --prompt "0+5=?" --tokens 32 --temperature 0
+          '@
+          Assert-Paths checkpoints/preferred.pt
+          # 不跑：固定 DPO 配方用 --device cuda（windows-latest 沒有 GPU）。下載偏好資料包的那一條，這裡執行的命令
+          # 沒有一條需要它下載的資料包。
+          Skip-Page -Pages course/training.md -Reason 'the fixed recipe uses --device cuda; nothing run here needs this download' -Commands @'
+          .\.venv\Scripts\python.exe scripts/fetch_training_assets.py --asset ultrafeedback-dpo
+          .\.venv\Scripts\python.exe -m scripts.course_experiments.run --experiment dpo --device cuda
+          '@
+          Invoke-Page -Pages course/training.md -Commands '.\.venv\Scripts\python.exe -m scripts.course_experiments.run --experiment posttraining --device cpu'
+
+      - name: 訓練頁：架構比較一次只換一個條件
+        working-directory: tiny-perceptron-vlm
+        run: |
+          . (Join-Path $env:RUNNER_TEMP 'page.ps1')
+          Invoke-Page -Pages course/training.md -Commands @'
+          .\.venv\Scripts\python.exe scripts/prepare_data.py --kind toy-text --seed 42
+          .\.venv\Scripts\python.exe scripts/train.py --task text --data data/generated/toy-text/train.jsonl --train --steps 200 --seed 42 --output checkpoints/baseline.pt
+          .\.venv\Scripts\python.exe scripts/train.py --task text --data data/generated/toy-text/train.jsonl --train --steps 200 --seed 42 --norm rms --output checkpoints/rms.pt
+          .\.venv\Scripts\python.exe scripts/train.py --task text --data data/generated/toy-text/train.jsonl --train --steps 200 --seed 42 --experts 4 --top-k 2 --output checkpoints/moe.pt
+          .\.venv\Scripts\python.exe scripts/evaluate.py checkpoints/baseline.pt --data data/generated/toy-text/validation.jsonl --mode text --tokens 32 --limit all --output outputs/baseline-validation.json
+          .\.venv\Scripts\python.exe scripts/evaluate.py checkpoints/rms.pt --data data/generated/toy-text/validation.jsonl --mode text --tokens 32 --limit all --output outputs/rms-validation.json
+          .\.venv\Scripts\python.exe scripts/evaluate.py checkpoints/moe.pt --data data/generated/toy-text/validation.jsonl --mode text --tokens 32 --limit all --output outputs/moe-validation.json
+          '@
+          Assert-Paths checkpoints/baseline.pt, checkpoints/rms.pt, checkpoints/moe.pt
+          foreach ($name in 'baseline-validation', 'rms-validation', 'moe-validation') { Assert-TextEvaluation "outputs/$name.json" }
+          # 不跑：現代零件與效率的固定配方都用 --device cuda，windows-latest 沒有 GPU。
+          Skip-Page -Pages course/training.md -Reason 'fixed recipes use --device cuda' -Commands @'
+          .\.venv\Scripts\python.exe -m scripts.course_experiments.run --experiment modern --device cuda
+          .\.venv\Scripts\python.exe -m scripts.course_experiments.run --experiment moe --device cuda
+          .\.venv\Scripts\python.exe -m scripts.course_experiments.run --experiment efficiency --device cuda
+          .\.venv\Scripts\python.exe -m scripts.course_experiments.run --experiment precision --device cuda
+          .\.venv\Scripts\python.exe -m scripts.course_experiments.run --experiment flash_probe --device cuda
+          '@
+
+      - name: 訓練頁：真的縮小保存格式，再量品質
+        working-directory: tiny-perceptron-vlm
+        run: |
+          . (Join-Path $env:RUNNER_TEMP 'page.ps1')
+          Invoke-Page -Pages course/training.md -Commands @'
+          .\.venv\Scripts\python.exe scripts/quantize.py checkpoints/attributes.pt --bits 4 --output checkpoints/attributes-int4.pt
+          .\.venv\Scripts\python.exe scripts/quantize.py checkpoints/attributes.pt --bits 8 --output checkpoints/attributes-int8.pt
+          '@
+          Assert-Paths checkpoints/attributes-int4.pt, checkpoints/attributes-int8.pt
+          # 頁面只說「希望」答案是什麼，不保證；這裡只核對輸出是有 answer 欄位的 JSON。
+          Invoke-Page -Pages course/training.md -Commands '.\.venv\Scripts\python.exe scripts/infer.py checkpoints/attributes.pt --chat --prompt "color=blue;shape=circle;pitch=low;color?" --tokens 24 --device cpu --json' | Tee-Object -Variable shown
+          if ((Read-JsonLine $shown).PSObject.Properties.Name -notcontains 'answer') { throw 'fp32 answer' }
+          Invoke-Page -Pages course/training.md -Commands '.\.venv\Scripts\python.exe scripts/infer.py checkpoints/attributes-int4.pt --chat --prompt "color=blue;shape=circle;pitch=low;color?" --tokens 24 --device cpu --json' | Tee-Object -Variable shown
+          if ((Read-JsonLine $shown).PSObject.Properties.Name -notcontains 'answer') { throw 'int4 answer' }
+          # 頁面要讀者用純文字編輯器把下一段程式存成 outputs/size_check.py；這裡照頁面內容寫成檔案。
+          Write-PageFile -Path outputs/size_check.py -Text (Get-PageCode -Page course/training.md -After '`outputs/size_check.py`')
+          Invoke-Page -Pages course/training.md -Commands '.\.venv\Scripts\python.exe outputs/size_check.py' | Tee-Object -Variable shown
+          # 頁面說：應印出三行，每個檔案一行。
+          $names = @($shown | ForEach-Object { (('' + $_) -split ' ')[0] }) -join ','
+          if ($names -cne 'attributes.pt,attributes-int4.pt,attributes-int8.pt') { throw ('size_check.py printed ' + $names) }
+          Invoke-Page -Pages course/training.md -Commands @'
+          .\.venv\Scripts\python.exe scripts/evaluate.py checkpoints/attributes.pt --data data/generated/attributes-sft/validation.jsonl --mode sft --tokens 24 --limit all --device cpu --output outputs/attributes-fp32-validation.json
+          .\.venv\Scripts\python.exe scripts/evaluate.py checkpoints/attributes-int4.pt --data data/generated/attributes-sft/validation.jsonl --mode sft --tokens 24 --limit all --device cpu --output outputs/attributes-int4-validation.json
+          .\.venv\Scripts\python.exe scripts/evaluate.py checkpoints/attributes-int8.pt --data data/generated/attributes-sft/validation.jsonl --mode sft --tokens 24 --limit all --device cpu --output outputs/attributes-int8-validation.json
+          .\.venv\Scripts\python.exe scripts/evaluate.py checkpoints/attributes.pt --data data/generated/attributes-sft/test.jsonl --split-label test --mode sft --tokens 24 --limit all --device cpu --output outputs/attributes-fp32-test.json
+          .\.venv\Scripts\python.exe scripts/evaluate.py checkpoints/attributes-int4.pt --data data/generated/attributes-sft/test.jsonl --split-label test --mode sft --tokens 24 --limit all --device cpu --output outputs/attributes-int4-test.json
+          .\.venv\Scripts\python.exe scripts/evaluate.py checkpoints/attributes-int8.pt --data data/generated/attributes-sft/test.jsonl --split-label test --mode sft --tokens 24 --limit all --device cpu --output outputs/attributes-int8-test.json
+          '@
+          foreach ($bits in 'fp32', 'int4', 'int8') {
+              foreach ($split in 'validation', 'test') { $null = Read-JsonFile "outputs/attributes-$bits-$split.json" }
+          }
+          # 不跑：固定量化配方要先完成固定對話配方 sft，那是 --device cuda 的配方，這裡沒有它的輸出。
+          Skip-Page -Pages course/training.md -Reason 'needs the output of the fixed sft recipe, which uses --device cuda' -Commands '.\.venv\Scripts\python.exe -m scripts.course_experiments.run --experiment quantization --device cpu'
+
+      - name: 訓練頁：用較小學生學教師，再與普通訓練比較（全部不跑）
+        working-directory: tiny-perceptron-vlm
+        run: |
+          . (Join-Path $env:RUNNER_TEMP 'page.ps1')
+          # 不跑：蒸餾要先完成 sft、style、moe 三組 --device cuda 的教師配方（windows-latest 沒有 GPU）；下載 GSM8K 的那一條，
+          # 這裡執行的命令沒有一條需要它下載的資料包；兩條推論要用蒸餾產生的學生；多模態蒸餾也用 --device cuda。
+          Skip-Page -Pages course/training.md -Reason 'needs teachers from fixed recipes that use --device cuda' -Commands @'
+          .\.venv\Scripts\python.exe scripts/fetch_training_assets.py --asset gsm8k
+          .\.venv\Scripts\python.exe -m scripts.course_experiments.run --experiment distillation --device cpu
+          .\.venv\Scripts\python.exe scripts/infer.py outputs/course-experiments/course-v1/distillation/sft-w32-ce.pt --chat --prompt "color=red;shape=square;pitch=high;joint?" --tokens 24 --device cpu --json
+          .\.venv\Scripts\python.exe scripts/infer.py outputs/course-experiments/course-v1/distillation/sft-w32-ce_kl.pt --chat --prompt "color=red;shape=square;pitch=high;joint?" --tokens 24 --device cpu --json
+          .\.venv\Scripts\python.exe -m scripts.course_experiments.run --experiment joint --device cuda
+          .\.venv\Scripts\python.exe -m scripts.course_experiments.run --experiment multimodal_distillation --device cuda
+          '@

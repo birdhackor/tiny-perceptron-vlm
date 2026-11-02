@@ -1,4 +1,4 @@
-# 教材資產存放：Git、LFS與Hugging Face
+# 教材資產存放：Git、LFS與模型封包
 
 一份程式、一批練習題與一個訓練好的模型，是三種不同的東西。程式說明怎麼做；資料提供要學的例子；權重保存學習後的數字。把它們分清楚，才能知道自己現在需要下載什麼，也能把某次實驗完整交給另一位讀者。
 
@@ -11,7 +11,9 @@
 | Python、正文、Notebook來源、設定與檔案清單 | 普通Git | 與專案一起取得，可逐行查看修改。 |
 | 可重建的小世界資料 | Git保存生成器、seed與設定 | 在本機生成，不必下載每一筆合成樣本。 |
 | 固定版本的照片、文字與音訊資料包 | Git LFS | 按實驗下載指定包，再核對內容。 |
-| 已選定的教材推論權重 | Hugging Face模型庫 | 依清單取得需要的模型與配套版本。 |
+| 既有各章與第19章v2的推論權重 | Hugging Face模型庫 | 依既有清單取得需要的模型與配套版本。 |
+| 本輪影音、聲音碼與候選判斷的四個模組 | GitHub Release版本發布頁的固定封包 | 按[新版模型操作](omni-products/README.md)取得選定資產，核對大小與內容指紋。 |
+| 目前裝置決策C-v3的推論配套與驗收 | [固定GitHub Release](decision-product/README.md)的6,168,350-byte ZIP | 下載器核對SHA-256，只安裝四個推論檔；這份ZIP不是完整續訓狀態。 |
 | 自己的下載快取、訓練中間檔與輸出 | 本機忽略目錄 | 保存自己的工作；需要分享時再挑選完整實驗。 |
 
 第20章成品使用指定版本的官方圖文底座與語音辨識器。本專案的公開模型庫提供配對說明與來源記錄，下載程式再取得官方模型；沒有把兩份官方權重另外複製成自製權重。用到LoRA時，修正權重也必須與正確底座配對。
@@ -49,6 +51,8 @@ LFS不會讓檔案本身變小。保存不同內容的版本需要更多儲存�
 
 [公開課程模型庫](https://huggingface.co/birdhackor/tiny-perceptron-course-models)保留[各章歷史推論清單](course-experiments/public-models.json)與[舊合成整合清單](course-experiments/capstone-public.json)。第19章v2另固定於HF revision `979cdfacc588ad0536f1c64fff96f264571cf054` 下的 `selftrained/v2/`：MoE pretrain、MoE SFT、MoE joint、Dense joint四組輸出，共16個檔案，採MIT授權。每組包括 `model.safetensors`、`model-config.json`、`tokenizer.json` 與 `inference-manifest.json`，由本課自訂PyTorch類別和[chat入口](selftrained/v2-public-cpu-commands.md)讀取。
 
+本輪新增的影音、codec、Talker與候選判斷器，另使用[GitHub Release固定公開清單](omni-products/v1/public-release.json)，沒有覆寫上述HF版本。GitHub Release是列出某個版本配套檔案的發布頁；本課清單記錄選定資產的ID、大小與SHA-256，下載時仍逐項核對，不能只靠同名版本或檔名。推論權重與完整續訓檔分開安裝的選項，見[新版模型操作](omni-products/README.md)。
+
 v2公開檔案沒有optimizer、RNG或sampler狀態，目前trainer也不把它們當成新訓練段的起點。自己重做用[本機stage wrapper](selftrained/TRAINING.md)，從隨機初始化開始，後續接自己的 `best.pt`；同段精確續訓則接自己的 `latest.pt`。不需要作者的私人Volume。[5.7](../course/chapters/05.md#5.7)介紹接續小模型，第20章另用自己的[LoRA訓練指引](natural-assistant/v4/TRAINING.md)。
 
 完整訓練備份可以保存到自己的私有模型庫；公開時選定需要的推論里程碑，附上能力與限制。Hugging Face的儲存政策與帳戶方案見[官方說明](https://huggingface.co/docs/hub/storage-limits)，不要把公開模型庫當成無限制的私人備份。
@@ -66,4 +70,4 @@ v2公開檔案沒有optimizer、RNG或sampler狀態，目前trainer也不把它�
 
 下載核對成功只證明取得相同檔案。答案是否正確、資料是否合適、模型是否真的使用圖片或前文，要另做相應的檢查，方法見[教材實作驗證](validation.md)。
 
-想發布自己的資料包時，先保存來源與授權、建立清單，再上傳LFS實體物件和Git中的pointer，最後從新的快取重新下載核對。想發布權重時，固定Hugging Face revision，再把配套清單放回Git。這樣讀者拿到的是可核對的一組材料，後面的[網站發布](publishing.md)就只負責把教材與入口整理出來。
+想發布自己的資料包時，先保存來源與授權、建立清單，再上傳LFS實體物件和Git中的pointer，最後從新的快取重新下載核對。想發布權重時，依平台固定Hugging Face revision，或記錄GitHub Release資產的ID、大小與SHA-256，再把配套清單放回Git。這樣讀者拿到的是可核對的一組材料，後面的[網站發布](publishing.md)就只負責把教材與入口整理出來。
