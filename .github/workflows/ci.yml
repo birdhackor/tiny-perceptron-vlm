@@ -18,6 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.scope.outputs.matrix }}
+      full: ${{ steps.scope.outputs.full }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -51,17 +52,26 @@ jobs:
         run: git config --global core.longpaths true
       - uses: actions/checkout@v7
         with:
-          # tests/test_course_commit_pins.py 核對釘住的 commit 是否為 HEAD 的祖先、tests/test_course_data_pins.py 讀那些版本裡的
-          # 檔案，都要完整歷史；淺 clone 會跳過這些核對，partial clone 也會跳過讀舊版本檔案的核對。
-          fetch-depth: 0
+          # Linux 完整核對祖先與固定資料版本；其他平台只取當前程式。
+          # '0' 必須是字串，避免 GitHub 把數字 0 當成 false 而改用 1。
+          fetch-depth: ${{ runner.os == 'Linux' && '0' || '1' }}
       - uses: astral-sh/setup-uv@v10.2.0
       - run: uv sync ${{ matrix.extra }}
       - run: uv run ${{ matrix.extra }} python scripts/check_env.py
+      - name: Require complete history for the Linux pin checks
+        if: runner.os == 'Linux'
+        run: |
+          uv run --extra cpu python -c "import subprocess; assert subprocess.check_output(['git', 'rev-parse', '--is-shallow-repository']).strip() == b'false'; assert subprocess.run(['git', 'config', '--get-regexp', r'^remote\..*\.promisor$'], capture_output=True).returncode == 1"
       - run: uv run ${{ matrix.extra }} pytest --junitxml=outputs/pytest-results.xml
         env:
           # Some Windows runner CPUs expose inconsistent AMX capabilities
           # (oneDNN #5689, runner-images #14483); keep every dtype/test enabled.
           ONEDNN_MAX_CPU_ISA: ${{ runner.os == 'Windows' && 'AVX2' || '' }}
+      - name: Verify the optional Dataset API once for runtime changes
+        if: runner.os == 'Linux' && needs.scope.outputs.full == 'true'
+        run: |
+          uv sync --frozen --extra cpu --extra data
+          uv run --extra cpu --extra data pytest -q tests/test_env.py::test_datasets_from_dict
       - name: Preserve failing test details in the job summary
         if: failure()
         shell: bash

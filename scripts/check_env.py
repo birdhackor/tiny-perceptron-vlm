@@ -15,7 +15,7 @@ import platform
 import shutil
 import sys
 
-PACKAGES = ["torch", "numpy", "pillow", "soundfile", "tokenizers", "datasets", "huggingface-hub"]
+PACKAGES = ["torch", "numpy", "pillow", "soundfile", "tokenizers", "huggingface-hub"]
 
 
 def show(key, value):

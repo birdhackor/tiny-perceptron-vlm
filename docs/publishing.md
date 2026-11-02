@@ -20,11 +20,11 @@
 先依[W.1](../course/first-steps.md#W.1)取得專案並安裝Git與uv，再到有`pyproject.toml`的專案根目錄安裝工具、啟用環境：
 
 ```bash
-uv sync --frozen --extra cpu --group dev --group notebook --group site
+uv sync --frozen --extra cpu --group dev --group kernel --group site
 source .venv/bin/activate
 ```
 
-Windows PowerShell改用`.venv\Scripts\Activate.ps1`啟用。`notebook`群組提供執行工具，`site`群組提供網站建置，`dev`群組提供檢查與測試；只讀網頁的學生無須安裝它們。
+Windows PowerShell改用`.venv\Scripts\Activate.ps1`啟用。`kernel`群組提供執行工具（`notebook`另含互動用的JupyterLab），`site`群組提供網站建置，`dev`群組提供檢查與測試；只讀網頁的學生無須安裝它們。
 
 核對教材與執行結果：
 

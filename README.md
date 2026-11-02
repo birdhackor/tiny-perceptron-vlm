@@ -32,10 +32,10 @@ Thinking effort（思考投入）、Looped Transformer（循環深度）及Jev�
 
 ## 安裝與開啟 Notebook
 
-先安裝 [uv](https://docs.astral.sh/uv/getting-started/installation/) 與用來取得專案的[Git](https://git-scm.com/downloads)。訓練資料包用 Git LFS（Git 處理大型檔案的擴充工具）保存，下面第一行開頭的 `GIT_LFS_SKIP_SMUDGE=1` 讓 clone 不下載這些資料包；沒有安裝 Git LFS 也可以照打。Windows PowerShell 不寫這段開頭，改成先執行 `git config --global core.longpaths true`，再依序執行 `$env:GIT_LFS_SKIP_SMUDGE="1"` 與 `git clone https://github.com/birdhackor/tiny-perceptron-vlm.git`。專案裡有些檔的路徑很深，Windows 上的 Git 預設建不出超過 260 字元的路徑；設定 `core.longpaths` 的那一行讓這台電腦上的 Git 都允許長路徑，之後的 clone 與切換版本也適用。CPU閱讀與練習按下列順序進行。到了 `check_env.py` 那一行，先確認下方說明的結果，再繼續註冊kernel與啟動Jupyter。這個腳本列出Python與套件版本，選擇可用裝置，並在該裝置做一次小矩陣的前向與反向計算：
+先安裝 [uv](https://docs.astral.sh/uv/getting-started/installation/) 與用來取得專案的[Git](https://git-scm.com/downloads)。訓練資料包用 Git LFS（Git 處理大型檔案的擴充工具）保存，下面第一行開頭的 `GIT_LFS_SKIP_SMUDGE=1` 讓 clone 不下載這些資料包；沒有安裝 Git LFS 也可以照打。Windows PowerShell 不寫這段開頭，改成先執行 `git config --global core.longpaths true`，再依序執行 `$env:GIT_LFS_SKIP_SMUDGE="1"` 與 `git clone --depth 1 --no-tags https://github.com/birdhackor/tiny-perceptron-vlm.git`。專案裡有些檔的路徑很深，Windows 上的 Git 預設建不出超過 260 字元的路徑；設定 `core.longpaths` 的那一行讓這台電腦上的 Git 都允許長路徑，之後的 clone 與切換版本也適用。`--depth 1 --no-tags`只取最新版；需要核對舊提交時見[歷史版本](docs/repository-archives.md)。CPU閱讀與練習按下列順序進行。到了 `check_env.py` 那一行，先確認下方說明的結果，再繼續註冊kernel與啟動Jupyter。這個腳本列出Python與套件版本，選擇可用裝置，並在該裝置做一次小矩陣的前向與反向計算：
 
 ```bash
-GIT_LFS_SKIP_SMUDGE=1 git clone https://github.com/birdhackor/tiny-perceptron-vlm.git
+GIT_LFS_SKIP_SMUDGE=1 git clone --depth 1 --no-tags https://github.com/birdhackor/tiny-perceptron-vlm.git
 cd tiny-perceptron-vlm
 uv sync --frozen --extra cpu --group notebook
 source .venv/bin/activate

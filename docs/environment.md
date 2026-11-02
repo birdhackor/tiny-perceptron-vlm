@@ -82,3 +82,15 @@ uv run --extra cu126 python scripts/check_env.py
 讀課文不需要先下載完整資料。開始一項訓練前，先讀[訓練資料入口](../assets/training/README.md)或[第20章資料說明](natural-assistant/v4/DATA.md)，確認用途、授權與切分。第19章v2按[CPU操作頁](selftrained/v2-public-cpu-commands.md)取得固定權重和示範素材；第20章則取得自己的[公開成品配套](natural-assistant/v4/STUDENT.md#3-讀取公開清單再下載選定配套)。
 
 資料、權重、套件和運算中間結果各自占空間。壓縮包不大，不代表解包後或載入模型後也同樣小；小小的LoRA修正檔也仍需要完整底座參與計算。檔案如何保存與核對，接著讀[教材資產存放](asset-storage.md)。
+
+## 按用途安裝工具
+
+`kernel` 群組提供批次執行 Notebook 的核心與執行工具；`notebook` 另含 JupyterLab，供讀者互動編輯。網站部署只安裝 `kernel` 與 `site`，不需要啟動互動編輯器。
+
+Hugging Face 的 Dataset API 改為選用的 `data` extra；固定資料包下載器及教材短程式不依賴它。真的要使用該 API 時，可在原本的安裝選項上加 `--extra data`，例如：
+
+```bash
+uv sync --frozen --extra cpu --extra data
+```
+
+同時使用其他 extra 或 Notebook 工具時也保留那些選項。來源標註與重建配方的按需準備方式，見[固定研究輸入](../assets/research/README.md)。

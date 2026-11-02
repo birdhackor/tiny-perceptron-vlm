@@ -141,21 +141,21 @@ POWERSHELL_ONLY = re.compile(r"\\|\$|\.(?:exe|ps1)\b")
 REPLACEMENTS = {
     "README.md": [
         (
-            "GIT_LFS_SKIP_SMUDGE=1 git clone https://github.com/birdhackor/tiny-perceptron-vlm.git",
+            "GIT_LFS_SKIP_SMUDGE=1 git clone --depth 1 --no-tags https://github.com/birdhackor/tiny-perceptron-vlm.git",
             "Windows PowerShell 不寫這段開頭，改成先執行",
         ),
         ("source .venv/bin/activate", "Windows PowerShell 啟用指令是"),
     ],
     "README_en.md": [
         (
-            "GIT_LFS_SKIP_SMUDGE=1 git clone https://github.com/birdhackor/tiny-perceptron-vlm.git",
+            "GIT_LFS_SKIP_SMUDGE=1 git clone --depth 1 --no-tags https://github.com/birdhackor/tiny-perceptron-vlm.git",
             "In Windows PowerShell, leave that prefix out: run",
         ),
         ("source .venv/bin/activate", "On Windows PowerShell, activate with"),
     ],
     "course/first-steps.md": [
         (
-            "GIT_LFS_SKIP_SMUDGE=1 git clone https://github.com/birdhackor/tiny-perceptron-vlm.git",
+            "GIT_LFS_SKIP_SMUDGE=1 git clone --depth 1 --no-tags https://github.com/birdhackor/tiny-perceptron-vlm.git",
             "Windows PowerShell 不寫這段開頭，改成先執行",
         ),
     ],
@@ -665,7 +665,7 @@ def test_windows_clone_comes_after_global_long_paths():
             "```text\nRemove-Item -Recurse -Force .venv\n```\n", "x.md:2：標成「text」", id="text 區塊裡的 cmdlet"
         ),
         pytest.param(
-            "```output\ngit clone https://github.com/birdhackor/tiny-perceptron-vlm.git\n```\n",
+            "```output\ngit clone --depth 1 --no-tags https://github.com/birdhackor/tiny-perceptron-vlm.git\n```\n",
             "x.md:2：標成「output」",
             id="output 區塊裡的 git",
         ),

@@ -156,4 +156,6 @@ def test_missing_diff_base_conservatively_runs_all_platforms(tmp_path, monkeypat
 
     monkeypatch.setattr(ci_scope.subprocess, "check_output", unavailable)
     ci_scope.main()
-    assert len(json.loads(output.read_text().removeprefix("matrix="))) == 3
+    values = dict(line.split("=", 1) for line in output.read_text().splitlines())
+    assert len(json.loads(values["matrix"])) == 3
+    assert values["full"] == "true"
