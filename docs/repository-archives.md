@@ -1,10 +1,26 @@
 # 開發分支與歷史版本
 
-目前開發與新安裝統一使用 `main`：
+新安裝使用 `main`；只學習或執行最新版教材時，可省略完整歷史及可選資料包：
 
 ```bash
-GIT_LFS_SKIP_SMUDGE=1 git clone --branch main https://github.com/birdhackor/tiny-perceptron-vlm.git
+GIT_LFS_SKIP_SMUDGE=1 git clone --depth 1 --branch main https://github.com/birdhackor/tiny-perceptron-vlm.git
 ```
+
+需要資料包時按 [資料下載指引](../assets/training/README.md)取得指定包。若要核對教材釘住的歷史版本，另執行 `git fetch --unshallow`；一般完整 clone 仍會下載舊歷史。
+
+## 2026-11-02 精簡工作樹與發布流程
+
+教材、Notebook、圖解、實作、重現設定、來源、授權和重要實驗結果保留在 `main`。歷史審閱快照、重複 manifest、讀者 session 與截圖不再放在目前工作樹；發布也不再執行舊審閱引擎。
+
+移出的檔案可在[精簡前的完整公開版本](https://github.com/birdhackor/tiny-perceptron-vlm/tree/83630ea1cea23d47c4b77162a31cbb7566686d11)查閱。這個提交仍是 `main` 的祖先，本輪沒有改寫 Git 歷史或刪除舊提交。教材對移出資料的連結改指固定版本；留在目前工作樹的科學結果與來源內容不變。
+
+日後詳細審閱過程使用短期 artifact，PR 留易讀性、正確性、連貫性的簡短結論。長期支持實驗主張的資料另按重現需要保存；權重與完整訓練輸出使用 Release 或模型儲存庫。見 [發布流程](publishing.md)與[編輯準則](editorial-guide.md)。
+
+這次減少的是最新版工作樹與淺層下載量。完整 clone 仍包含舊證據的歷史；若未來需要縮小它，要另行規劃備份與固定版本連結，不能直接 force push。
+
+## 較早的封存紀錄
+
+以下保留先前的整理紀錄；其中「生效中的審閱輪次必須留在 main」等舊發布規則已由上述流程取代。
 
 ## 封存的工作分支
 
@@ -40,13 +56,3 @@ GIT_LFS_SKIP_SMUDGE=1 git clone --branch main https://github.com/birdhackor/tiny
 2026-10-19 這一輪（`docs/course-review-20261019/`）在 `eaee5ed4` 生效、推到 `main` 後發布檢查通過，於是從 `main` 移除上一輪 `docs/course-repair-20261017/` 的 681 個檔（10.5 MiB）。留在原路徑的 43 個檔，是下列來源以路徑引用的：課文 19.6 與它的 Notebook（`artifacts/primary-audio-head-values-01.json`）、生效輪次的紀錄與技術審閱 artifact（上一輪的部分技術報告與凍結快照、`manifest-final-01.json`、`all-gate-final-01.json`、`active-pointer-before-repair-01.json` 等）、`docs/course-revision-20261016/reader-sessions/` 裡上一輪的讀者 session（它們指向的閱讀計畫與凍結檔；`docs/course-revision-20261016/` 因為三道檢查的重放要整棵留著）、交接文件與一個測試。
 
 移除的檔仍在 Git 歷史裡，完整的目錄最後出現在 `eac81bbc`，例如 `git show eac81bbc:docs/course-repair-20261017/REPAIR-NOTE.md`；這個目錄裡其他紀錄引用的路徑，現在只在那個提交以前有效。移除前後，三道發布審閱檢查的輸出逐位元組相同，全套測試的結果也相同。留下的檔內容不變。
-
-## 審閱輪次的保存規則
-
-`docs/course-reviews-active.json` 指向生效中的審閱輪次。發布流程每次 push 到 `main` 都核對這一輪，下一輪沿用舊審閱的頁面也從這裡取得證據，所以生效中的輪次必須留在 `main`。
-
-新一輪生效且發布檢查通過後，封存上一輪：
-
-1. 從 `main` 移除上一輪的目錄；課文、notebook、README、CI、審閱準則或生效輪次仍引用的檔案留在原路徑。移除的內容仍保留在 Git 歷史裡。
-2. 重跑發布前的審閱檢查與全套測試，通過後再提交。
-3. 只有移除的內容在歷史裡占用太多空間時，才依 [AGENTS.md](../AGENTS.md#改寫-git-歷史) 的步驟重寫歷史。推到封存 repo 時使用新的 ref 名稱，不要覆寫封存 repo 已有的 ref。

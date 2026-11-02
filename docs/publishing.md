@@ -30,35 +30,33 @@ Windows PowerShell改用`.venv\Scripts\Activate.ps1`啟用。`notebook`群組提
 
 ```bash
 python scripts/build_course.py --check
-python scripts/check_course_reviews.py
-python scripts/check_technical_reviews.py
-python docs/review-tools/check_review_round.py
 python -m ipykernel install --sys-prefix --name tiny-perceptron --display-name "Tiny Perceptron"
-python scripts/check_notebooks.py --mode kernel --workers 1
-python scripts/reading_time.py validate --executed
+python scripts/course_execution.py ensure --revision "$(git rev-parse HEAD)"
 ```
 
-這些檢查要求目錄、正文、圖解、審閱資料、Notebook與閱讀時間對上目前來源。若修改正文，先重審、重估受影響的頁面，不能用舊結果替新內容背書。檢查的支持範圍見[實作驗證](validation.md)。
+這些檢查要求目錄、正文、圖解與 Notebook 同步。審閱按改動範圍在 PR 記錄，不作建置輸入。執行工具以完整有序程式格、共用程式、資料、圖與環境識別整套 CPU 結果；完全相同就重用，缺少、過期或檢查失敗則逐一重新執行全部 Notebook。正文文字與閱讀時間不會要求重啟所有 kernel；已改動的程式不能沿用舊輸出。檢查的支持範圍見[實作驗證](validation.md)。
 
 全部通過後，先把這次要發布的教材與核對資料commit，再以目前Git commit作為網站版本。`--revision`是網站入口的版本標記，不會替你保存尚未commit的修改；下面的匯出使用剛保存的提交：
 
 ```bash
-python scripts/export_course.py --executed outputs/notebooks --require-reading-times --revision "$(git rev-parse HEAD)"
+python scripts/export_course.py --executed outputs/notebooks --publish --revision "$(git rev-parse HEAD)"
 python scripts/check_site.py
 python -m http.server 8000 --directory outputs/site
 ```
 
-`--executed`核對每個程式格與輸出，`--require-reading-times`要求每頁估時仍符合來源；網站檢查再核對內部連結、圖檔、Notebook下載與Colab入口。
+`--executed`核對每個程式格與輸出，`--publish`要求可查的固定版本 Notebook；來源已改的舊估時會省略，不阻擋發布；網站檢查再核對內部連結、圖檔、Notebook下載與Colab入口。
 
 開啟`http://127.0.0.1:8000/`查看產物。用HTTP伺服器測試，才能讓搜尋正常使用瀏覽器的網頁機制；直接雙擊HTML檔案會受到不同限制。網址中的`127.0.0.1`指向執行伺服器的那臺電腦。
 
 ## 3. 發布到GitHub Pages
 
-專案的Settings → Pages → Build and deployment → Source選擇GitHub Actions。`.github/workflows/pages.yml`在`main`更新或手動觸發時，取得必要資料、核對審閱、逐份啟動獨立CPU kernel、嚴格建置網站並檢查連結，再由Pages部署工作發布。
+專案的Settings → Pages → Build and deployment → Source選擇GitHub Actions。`.github/workflows/pages.yml`在`main`更新或手動觸發時，核對教材同步、重用或重新執行 CPU 結果、嚴格建置網站並檢查連結，再由Pages部署工作發布。
 
-Notebook數量由當前小節目錄決定，新增小節時也要同步來源、索引與導覽。網站產物與已執行Notebook放在被Git忽略的`outputs/`，透過Pages artifact傳送；正文與核對證據留在Git中。
+快取只有一套整包，不使用逐節依賴圖；執行輸入任何一項不明就重跑，成功才保存。需要強制重跑時移除 `outputs/notebooks/` 的快取後再執行。Notebook數量由當前小節目錄決定，新增小節時也要同步來源、索引與導覽。網站產物與已執行Notebook放在被Git忽略的`outputs/`，透過Pages artifact傳送；正文、程式與必要實驗結果留在 Git；完整審閱過程不再提交。
 
 發布後查看`build-info.json`，核對實際commit、頁面與小節數、CPU輸出狀態及Zensical版本，再實際點開新增頁面與下載入口。工作顯示成功和讀者拿到正確版本都需要確認。資料包、模型配套與網站是三條不同的發布路線，前兩者的規則見[教材資產存放](asset-storage.md)。
+
+閱讀時間仍可用 `python scripts/reading_time.py validate --executed` 單獨嚴格核對；它是編輯工具，缺漏或過期不阻擋正常發布。
 
 ## 4. 第19章v2的公開材料
 

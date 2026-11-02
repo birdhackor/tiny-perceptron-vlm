@@ -99,19 +99,21 @@ def output_html(outputs):
 
 def checked_notebook(original, executed_path):
     executed = json.loads(executed_path.read_text(encoding="utf-8"))
-    if len(original["cells"]) != len(executed["cells"]):
-        raise ValueError(f"執行副本的 cell 數量不同：{executed_path}")
     checked = copy.deepcopy(original)
-    for source, result, target in zip(original["cells"], executed["cells"], checked["cells"], strict=True):
-        if source["cell_type"] != result["cell_type"] or joined(source["source"]) != joined(result["source"]):
+    originals = [cell for cell in original["cells"] if cell["cell_type"] == "code"]
+    results = [cell for cell in executed["cells"] if cell["cell_type"] == "code"]
+    targets = [cell for cell in checked["cells"] if cell["cell_type"] == "code"]
+    if len(originals) != len(results):
+        raise ValueError(f"執行副本的程式格數量不同：{executed_path}")
+    for source, result, target in zip(originals, results, targets, strict=True):
+        if joined(source["source"]) != joined(result["source"]):
             raise ValueError(f"執行結果不是目前的教材：{executed_path}")
-        if result["cell_type"] == "code":
-            if result.get("execution_count") is None:
-                raise ValueError(f"程式尚未執行：{executed_path}")
-            if any(output["output_type"] == "error" for output in result.get("outputs", [])):
-                raise ValueError(f"程式執行失敗：{executed_path}")
-            target["execution_count"] = result["execution_count"]
-            target["outputs"] = copy.deepcopy(result.get("outputs", []))
+        if result.get("execution_count") is None:
+            raise ValueError(f"程式尚未執行：{executed_path}")
+        if any(output["output_type"] == "error" for output in result.get("outputs", [])):
+            raise ValueError(f"程式執行失敗：{executed_path}")
+        target["execution_count"] = result["execution_count"]
+        target["outputs"] = copy.deepcopy(result.get("outputs", []))
     # course_setup/course_figure等呈現規則仍取自已審Notebook；執行副本只提供結果。
     return checked
 
@@ -326,7 +328,18 @@ def build(
     reading_times=METADATA,
     reading_routes=ROUTES,
     require_reading_times=False,
+    publish=False,
 ):
+    publication = publish or require_reading_times
+    if publish and not executed_root:
+        raise ValueError("正式發布必須提供已成功執行的 Notebook")
+    execution = {}
+    if publish:
+        if __package__:
+            from .course_execution import execution_key, validate_bundle
+        else:
+            from course_execution import execution_key, validate_bundle
+        execution = validate_bundle(ROOT, executed_root, execution_key(ROOT))
     configuration = (ROOT / "zensical.toml").read_text(encoding="utf-8")
     settings = tomllib.loads(configuration)["project"]
     docs = ROOT / settings["docs_dir"]
@@ -342,7 +355,7 @@ def build(
     inventory = build_inventory(ROOT, index, DOCUMENTS, home_source)
     estimates = load_estimates(reading_times, inventory, require_complete=require_reading_times)
     routes = load_routes(reading_routes, inventory)
-    if require_reading_times:
+    if publication:
         verify_colab_notebooks(index, revision)
     targets = {(ROOT / path).resolve(): name + ".md" for name, path in DOCUMENTS.items()}
     targets[(ROOT / "course/lessons.md").resolve()] = "index.md"
@@ -399,9 +412,7 @@ def build(
             elif not cell.get("metadata", {}).get("course_setup"):
                 content.append(code_markdown(source))
                 content.append(output_html(cell.get("outputs", [])))
-        content.append(
-            section_footer(item, notebook, revision, bool(executed_root), direct_colab=require_reading_times)
-        )
+        content.append(section_footer(item, notebook, revision, bool(executed_root), direct_colab=publication))
         (docs / f"{item['id']}.md").write_text("\n\n".join(content) + "\n", encoding="utf-8")
     for name, relative in DOCUMENTS.items():
         path = ROOT / relative
@@ -476,9 +487,12 @@ def build(
                 "builder_version": version("zensical"),
                 "reading_time_pages": len(estimates),
                 "reading_time_complete": len(estimates) == len(inventory["pages"]),
-                "colab_mode": "github" if require_reading_times else "upload",
-                "publication_ready": require_reading_times,
-                "colab_git_objects_verified": require_reading_times,
+                "colab_mode": "github" if publication else "upload",
+                "publication_ready": publication,
+                "colab_git_objects_verified": publication,
+                "execution_key": execution.get("key"),
+                "execution_revision": execution.get("executed_revision"),
+                "execution_date": execution.get("executed_at"),
             },
             indent=2,
         )
@@ -493,6 +507,7 @@ if __name__ == "__main__":
     p.add_argument("--output", type=Path, default=ROOT / "outputs/site")
     p.add_argument("--executed", type=Path, help="獨立 kernel 執行副本；提供時嚴格核對每份教材與執行結果")
     p.add_argument("--revision", default="main", help="網站原始碼與 Colab 連結的 Git ref")
+    p.add_argument("--publish", action="store_true", help="正式發布：核對 CPU 輸出與固定版本 Notebook，估時可缺省")
     p.add_argument(
         "--reading-times", type=Path, default=METADATA, help="外部 AI 估時 JSON；已提供資料會嚴格核對來源 SHA"
     )
@@ -508,4 +523,5 @@ if __name__ == "__main__":
         args.reading_times,
         args.reading_routes,
         args.require_reading_times,
+        args.publish,
     )

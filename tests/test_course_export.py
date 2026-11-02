@@ -13,7 +13,7 @@ from scripts.build_course import notebook_reading_links
 from scripts.export_course import COURSE_URL, checked_notebook, output_html, reading_markdown, section_footer
 
 
-@pytest.mark.parametrize("problem", ["markdown", "code", "missing_cell", "not_executed", "error"])
+@pytest.mark.parametrize("problem", ["code", "missing_cell", "not_executed", "error"])
 def test_rejects_unverified_execution(tmp_path, problem):
     original = {
         "cells": [
@@ -23,9 +23,7 @@ def test_rejects_unverified_execution(tmp_path, problem):
     }
     executed = copy.deepcopy(original)
     executed["cells"][1].update(execution_count=1, outputs=[{"output_type": "stream", "text": "1\n"}])
-    if problem == "markdown":
-        executed["cells"][0]["source"] = ["舊的說明"]
-    elif problem == "code":
+    if problem == "code":
         executed["cells"][1]["source"] = ["print(2)"]
     elif problem == "missing_cell":
         executed["cells"].pop()

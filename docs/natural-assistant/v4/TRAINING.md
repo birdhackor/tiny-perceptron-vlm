@@ -30,7 +30,7 @@
 
 最後一列只計PyTorch已分配的GPU記憶體，不含CUDA執行環境、配置器保留空間或重設前的載入峰值。因此它不是整張顯示卡的總占用，更不是最低硬體需求。這次雲端工作請求4個CPU與32 GiB主記憶體；那是配置值，未量得CPU記憶體峰值。
 
-完整[訓練核對摘要](../evidence/v4-runtime/train-37217452291/training-audit-summary.json)保留量測範圍與完成檢查。換電腦、照片預算或對話長度，時間與占用都可能不同；推論另有自己的量測，不能直接拿訓練數字替代。
+完整[訓練核對摘要](https://github.com/birdhackor/tiny-perceptron-vlm/blob/83630ea1cea23d47c4b77162a31cbb7566686d11/docs/natural-assistant/evidence/v4-runtime/train-37217452291/training-audit-summary.json)保留量測範圍與完成檢查。換電腦、照片預算或對話長度，時間與占用都可能不同；推論另有自己的量測，不能直接拿訓練數字替代。
 
 ## 2. 取得固定資料，確認真正的資料目錄
 

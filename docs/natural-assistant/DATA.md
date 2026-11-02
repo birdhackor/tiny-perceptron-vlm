@@ -50,7 +50,7 @@
 
 因此，我們另外固定了 [10 個 CC-OCR 外部觀察案例](external-ocr.json)：6 張街道、商店或工廠照片，以及 4 張含實物照片的商品或分享頁面。它們主要使用簡體中文，不能代表完整的繁體中文 OCR 測試。這 10 張全部只用於額外檢查，不進入訓練、驗證或版本選擇。
 
-這組案例也提醒我們：參考答案不一定完美。有一張藥局照片的原始答案只列出大招牌「万民药」，沒有列完下方海報的小字；另一張商品頁最後的字，圖片可讀為「刺绣」，原始答案卻寫成「刺袖」。我們保留原始答案，另行註記問題，避免看到模型輸出後改答案來提高分數。字元錯誤率（CER）會比較模型輸出和參考答案之間需要改動多少字。逐字評分時，正確讀到額外小字或讀出「刺绣」也可能被扣分，因此要一起查看圖片與原始輸出。[兩個案例的獨立查看紀錄](evidence/data/ocr/independent-annotation-spot-check.json)保存了來源圖片的雜湊與觀察範圍。
+這組案例也提醒我們：參考答案不一定完美。有一張藥局照片的原始答案只列出大招牌「万民药」，沒有列完下方海報的小字；另一張商品頁最後的字，圖片可讀為「刺绣」，原始答案卻寫成「刺袖」。我們保留原始答案，另行註記問題，避免看到模型輸出後改答案來提高分數。字元錯誤率（CER）會比較模型輸出和參考答案之間需要改動多少字。逐字評分時，正確讀到額外小字或讀出「刺绣」也可能被扣分，因此要一起查看圖片與原始輸出。[兩個案例的獨立查看紀錄](https://github.com/birdhackor/tiny-perceptron-vlm/blob/83630ea1cea23d47c4b77162a31cbb7566686d11/docs/natural-assistant/evidence/data/ocr/independent-annotation-spot-check.json)保存了來源圖片的雜湊與觀察範圍。
 
 CC-OCR 的資料卡雖然標示 MIT，正文的授權敘述明確說的是**原始碼**，不足以證明所有混合來源圖片都可用 MIT 再發布。因此，本 repo 只保存固定版本的來源、下載位置、原始答案與檢查資料；這 10 張原圖不放進 Git 或 Git LFS。需要重現檢查時才由程式向原來源取得。
 
@@ -72,10 +72,10 @@ DOCCI 的官方網站明確寫明，Google LLC 以 **CC BY 4.0** 授權圖片與
 
 | 來源 | 本包固定的版本或資料定位 | 授權與證據 |
 | --- | --- | --- |
-| DOCCI | HF 資料卡與 loader：`a0a43eaf34676ffd008fb6565dd8c2ba00d09100`；網站：`c190366529943195d90c141899abb2ec68dc345d` | [官方資料卡](evidence/data/vision/README-docci.md)、[網站原文](evidence/data/vision/docci-website.html)、[授權與署名](evidence/data/vision/ATTRIBUTION.json) |
-| Noto CJK | `f8d157532fbfaeda587e826d4cd5b21a49186f7c` | [Sans OFL](evidence/data/ocr/Noto-sans-OFL.txt)、[Serif OFL](evidence/data/ocr/Noto-serif-OFL.txt)、[自製資料 MIT](evidence/data/ocr/course-MIT.txt) |
-| FLEURS | `d7c758a6dceecd54a98cac43404d3d576e721f07` | [官方資料卡](evidence/data/speech/FLEURS_DATASET_CARD.md)、[授權來源](evidence/data/speech/LICENSE-FLEURS.txt) |
-| CC-OCR 外部檢查 | `c64517e92179991d509776064174776700cdd5a2` | [資料卡正文](evidence/data/ocr/CC-OCR-README.md)、[原始碼授權](evidence/data/ocr/CC-OCR-CODE-LICENSE.txt)；不宣稱原圖可用 MIT 再發布 |
+| DOCCI | HF 資料卡與 loader：`a0a43eaf34676ffd008fb6565dd8c2ba00d09100`；網站：`c190366529943195d90c141899abb2ec68dc345d` | [官方資料卡](https://github.com/birdhackor/tiny-perceptron-vlm/blob/83630ea1cea23d47c4b77162a31cbb7566686d11/docs/natural-assistant/evidence/data/vision/README-docci.md)、[網站原文](https://github.com/birdhackor/tiny-perceptron-vlm/blob/83630ea1cea23d47c4b77162a31cbb7566686d11/docs/natural-assistant/evidence/data/vision/docci-website.html)、[授權與署名](https://github.com/birdhackor/tiny-perceptron-vlm/blob/83630ea1cea23d47c4b77162a31cbb7566686d11/docs/natural-assistant/evidence/data/vision/ATTRIBUTION.json) |
+| Noto CJK | `f8d157532fbfaeda587e826d4cd5b21a49186f7c` | [Sans OFL](https://github.com/birdhackor/tiny-perceptron-vlm/blob/83630ea1cea23d47c4b77162a31cbb7566686d11/docs/natural-assistant/evidence/data/ocr/Noto-sans-OFL.txt)、[Serif OFL](https://github.com/birdhackor/tiny-perceptron-vlm/blob/83630ea1cea23d47c4b77162a31cbb7566686d11/docs/natural-assistant/evidence/data/ocr/Noto-serif-OFL.txt)、[自製資料 MIT](https://github.com/birdhackor/tiny-perceptron-vlm/blob/83630ea1cea23d47c4b77162a31cbb7566686d11/docs/natural-assistant/evidence/data/ocr/course-MIT.txt) |
+| FLEURS | `d7c758a6dceecd54a98cac43404d3d576e721f07` | [官方資料卡](https://github.com/birdhackor/tiny-perceptron-vlm/blob/83630ea1cea23d47c4b77162a31cbb7566686d11/docs/natural-assistant/evidence/data/speech/FLEURS_DATASET_CARD.md)、[授權來源](https://github.com/birdhackor/tiny-perceptron-vlm/blob/83630ea1cea23d47c4b77162a31cbb7566686d11/docs/natural-assistant/evidence/data/speech/LICENSE-FLEURS.txt) |
+| CC-OCR 外部檢查 | `c64517e92179991d509776064174776700cdd5a2` | [資料卡正文](https://github.com/birdhackor/tiny-perceptron-vlm/blob/83630ea1cea23d47c4b77162a31cbb7566686d11/docs/natural-assistant/evidence/data/ocr/CC-OCR-README.md)、[原始碼授權](https://github.com/birdhackor/tiny-perceptron-vlm/blob/83630ea1cea23d47c4b77162a31cbb7566686d11/docs/natural-assistant/evidence/data/ocr/CC-OCR-CODE-LICENSE.txt)；不宣稱原圖可用 MIT 再發布 |
 
 版本名稱像書籍的版次，SHA-256 雜湊則像檔案的封條：下載後再計算一次，能檢查拿到的位元組是否與公開清單相同。固定 DOCCI 的 Hugging Face loader，並不會自動固定它去其他網站下載的圖片；因此，我們還保存 Google Cloud Storage 的物件 `generation` 與每個檔案的 SHA-256。完整原始描述的 generation 為 `1714384012999810`，所選圖片各自也有固定 generation，記錄在照片包的清單中。
 
@@ -101,10 +101,10 @@ python scripts/fetch_natural_data.py
 python scripts/fetch_natural_data.py --verify
 ```
 
-程式使用 `scripts/fetch_natural_data.py` 的 `DEFAULT_REVISION` 指定的公開 Git 版本，先核對遠端清單，再核對三個壓縮包和全部解包檔案，最後放到 `data/natural`。第一次下載約70.65 MB；已有完全相同資料會跳過，遇到不同內容則保留原資料並停止。[學生下載入口的實際匿名測試](evidence/data/student-fetch/run.json)記錄了這三包與345個檔案的核對。
+程式使用 `scripts/fetch_natural_data.py` 的 `DEFAULT_REVISION` 指定的公開 Git 版本，先核對遠端清單，再核對三個壓縮包和全部解包檔案，最後放到 `data/natural`。第一次下載約70.65 MB；已有完全相同資料會跳過，遇到不同內容則保留原資料並停止。[學生下載入口的實際匿名測試](https://github.com/birdhackor/tiny-perceptron-vlm/blob/83630ea1cea23d47c4b77162a31cbb7566686d11/docs/natural-assistant/evidence/data/student-fetch/run.json)記錄了這三包與345個檔案的核對。
 
-這次核對以整合清單 SHA `7604526c67da31a41940f16f9c87027c73cf2782c63522dbde8c7efbf015db91` 為準，實際讀取解開後的全部 **345 個檔案**，並另外讀取三個壓縮包的全部一般檔案成員：照片包 154 個、中文圖片包 143 個、語音包 48 個。大小與 SHA 全部相符，也檢查了路徑與跨切分來源組別。[完整核對結果](evidence/data/merged-assets-and-archive-audit.json)與[本次使用的核對程式](evidence/data/verify_snapshot.py.txt)公開保存；這證明取得的是指定檔案，並不證明每個標註都無誤。
+這次核對以整合清單 SHA `7604526c67da31a41940f16f9c87027c73cf2782c63522dbde8c7efbf015db91` 為準，實際讀取解開後的全部 **345 個檔案**，並另外讀取三個壓縮包的全部一般檔案成員：照片包 154 個、中文圖片包 143 個、語音包 48 個。大小與 SHA 全部相符，也檢查了路徑與跨切分來源組別。[完整核對結果](https://github.com/birdhackor/tiny-perceptron-vlm/blob/83630ea1cea23d47c4b77162a31cbb7566686d11/docs/natural-assistant/evidence/data/merged-assets-and-archive-audit.json)與[本次使用的核對程式](https://github.com/birdhackor/tiny-perceptron-vlm/blob/83630ea1cea23d47c4b77162a31cbb7566686d11/docs/natural-assistant/evidence/data/verify_snapshot.py.txt)公開保存；這證明取得的是指定檔案，並不證明每個標註都無誤。
 
-另外保留了原先實際執行的[照片獨立重建紀錄](evidence/data/vision/original-reconstruction-proof.json)、[中文圖片重建紀錄](evidence/data/ocr/original-generator-verification.json)、[語音獨立重建紀錄](evidence/data/speech/original-reproducibility-check.json)，以及[外部 OCR 下載核對紀錄](evidence/data/ocr/original-external-preparation-verification.json)。[證據複製索引](evidence/data/copy-index.json)列出這些小型公開證據的原路徑與 SHA；檔案是原樣複製，沒有把舊紀錄改寫成一次新的執行。
+另外保留了原先實際執行的[照片獨立重建紀錄](https://github.com/birdhackor/tiny-perceptron-vlm/blob/83630ea1cea23d47c4b77162a31cbb7566686d11/docs/natural-assistant/evidence/data/vision/original-reconstruction-proof.json)、[中文圖片重建紀錄](https://github.com/birdhackor/tiny-perceptron-vlm/blob/83630ea1cea23d47c4b77162a31cbb7566686d11/docs/natural-assistant/evidence/data/ocr/original-generator-verification.json)、[語音獨立重建紀錄](https://github.com/birdhackor/tiny-perceptron-vlm/blob/83630ea1cea23d47c4b77162a31cbb7566686d11/docs/natural-assistant/evidence/data/speech/original-reproducibility-check.json)，以及[外部 OCR 下載核對紀錄](https://github.com/birdhackor/tiny-perceptron-vlm/blob/83630ea1cea23d47c4b77162a31cbb7566686d11/docs/natural-assistant/evidence/data/ocr/original-external-preparation-verification.json)。[證據複製索引](https://github.com/birdhackor/tiny-perceptron-vlm/blob/83630ea1cea23d47c4b77162a31cbb7566686d11/docs/natural-assistant/evidence/data/copy-index.json)列出這些小型公開證據的原路徑與 SHA；檔案是原樣複製，沒有把舊紀錄改寫成一次新的執行。
 
 證據目錄不另外塞入原始照片、WAV、字型二進位檔，或大型完整 TSV。可再發布的教學資料在上述小包裡；外部圖片的權利與資料範圍限制則如實保留。

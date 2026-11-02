@@ -12,7 +12,7 @@
 
 ## 工作階段與成品分工
 
-完整改版沿用[六階段原規約](../../../../docs/course-revision-20261005/README.md)的先後關係：大綱、新增教材、既有教材改寫、三輪審閱、必要的成品工程與訓練、事實回填及發布。同一階段可分工；本輪的實際階段與範圍依使用者指示及對應工作計畫，不把較早批次當成新任務自動重做。保留的 [MTP／蒸餾批次計畫](../../../../docs/course-revision-20261007-phase7/PLAN.md)屬其指定修訂範圍。
+完整改版沿用[六階段原規約](https://github.com/birdhackor/tiny-perceptron-vlm/blob/83630ea1cea23d47c4b77162a31cbb7566686d11/docs/course-revision-20261005/README.md)的先後關係：大綱、新增教材、既有教材改寫、三輪審閱、必要的成品工程與訓練、事實回填及發布。同一階段可分工；本輪的實際階段與範圍依使用者指示及對應工作計畫，不把較早批次當成新任務自動重做。保留的 [MTP／蒸餾批次計畫](https://github.com/birdhackor/tiny-perceptron-vlm/blob/83630ea1cea23d47c4b77162a31cbb7566686d11/docs/course-revision-20261007-phase7/PLAN.md)屬其指定修訂範圍。
 
 只分析、審閱、改 skill、修文句或局部維護時，完成已授權範圍及相應核對，不因此啟動全書改寫或成品訓練。只審凍結稿可依通用流程保存三類證據；完整改版已指定的三輪先後及修正門檻仍依本輪約定。
 
@@ -23,11 +23,7 @@
 ## 來源、審閱與發布
 
 - 依 [CLAUDE.md](../../../../CLAUDE.md)、[編輯說明](../../../../docs/editorial-guide.md)及[正確性審閱](../../../../docs/technical-review-guide.md)維護。正文以 `course/chapters/` 與對應入口／參考頁為來源，SVG 在 `course/figures/`，Notebook 由來源產生；保留小節編號與既有連結，不另抄一份教材。
-- 首讀紀錄在 `docs/reader-reviews/`，技術在 `docs/technical-reviews/`，銜接在 `docs/continuity-reviews/`；凍結與分組證據依[目前 active 批次](../../../../docs/course-reviews-active.json)及其引用的 manifest。歷史問題由協調者在獨立初判與交叉覆核後比對，不提前放入閱讀包。
-- 更新 skill／protocol 不改寫舊審閱紀錄、凍結判準、判定或指紋。[批次檢查器](../../../../docs/review-tools/phase7_review.py)會拒絕判準已變的舊批次；下一輪另凍結新判準並完成實際審閱，不能只改 manifest 的 hash。
-- 修改教材時按範圍重建 Notebook、核對正文與圖的版本，完成受影響的讀者、技術、銜接、程式與閱讀時間檢查；操作依[發布說明](../../../../docs/publishing.md)。只改本 skill 時查文件、來源與連結，不宣稱既有教材已依新標準通過。
-- 本地網站也是 Zensical，但沿用本 repo 的建置與檢查命令。桌面、手機、必要圖文位置與實際閱讀路徑另做視覺檢查；建置成功不代替頁面證據。
-- 網站、資料包與權重是不同發布材料。發布後按本課規約核對公開 commit、下載入口與配套版本；固定 HF revision、資料 manifest 及歷史結果不隨文字改版覆寫。存放與授權依[資產管理](../../../../docs/asset-storage.md)。
+- 易讀性、正確性與連貫性按本次實質改動獨立審閱，PR 留結論、範圍及未驗證項；逐段暫存紀錄無須進 main。歷史審閱從固定封存版本查詢，不重寫舊結論，也不作部署前提。
 
 ## 技術與證據核對的位置
 
