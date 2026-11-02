@@ -27,7 +27,7 @@ FSDD另保留各20段validation／test，原錄音是8 kHz，使用16 kHz入口�
 GIT_LFS_SKIP_SMUDGE=1 git clone https://github.com/birdhackor/tiny-perceptron-vlm.git
 ```
 
-Windows PowerShell先設定 `$env:GIT_LFS_SKIP_SMUDGE="1"` 再clone。需安裝 [Git LFS](https://git-lfs.com/)，clone後在repo根目錄執行 `git lfs install --local`，並依主README安裝Python環境。啟用`.venv`後：
+Windows PowerShell先執行 `git config --global core.longpaths true`，讓Git能建立本專案較深的檔案路徑；再設定 `$env:GIT_LFS_SKIP_SMUDGE="1"` 並clone。需安裝 [Git LFS](https://git-lfs.com/)，clone後在repo根目錄執行 `git lfs install --local`，並依主README安裝Python環境。啟用`.venv`後：
 
 ```bash
 python scripts/fetch_training_assets.py --list

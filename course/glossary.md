@@ -210,6 +210,7 @@ token 不一定是一個中文字。逐 byte 切詞時，一個常見中文字�
 | --- | --- | --- |
 | MoE助理、Looped解題器、機率判斷器 | 第19章已發布的三個自家從隨機起點訓練的基線：A處理有限文字、圖、字卡與錄音；B解固定語法的狀態／加法題；C依狀態、問題與候選回傳機率。歷史成績各屬原版本 | [19.13](chapters/19.md#19.13)、[19.20](chapters/19.md#19.20) |
 | A影音擴充、有限音調模組、C-v2 | 本輪新版設計：保留A基線另接影音模組，將真預測接有限音調生成；C-v2共享材料並重新訓練候選決策。正式能力依各自驗收，不能由CPU機制例推得 | [19.21–19.24](chapters/19.md#19.21) |
+| C-v3裝置判斷器 | 目前建議的裝置決策成品，讀取3–6個裝置的明確欄位資料，回答動作、資訊是否齊全及固定規準評分；與舊文字C、C-v2研究版本分開驗收 | [19.25](chapters/19.md#19.25) |
 | 助手（assistant）、助理 | 對話資料替每段話記一個角色（role），寫明這段話是誰說的；模型那一方的角色叫助手，角色欄位寫 assistant。第 19 章的 MoE 助理與第 20 章的助理，指的是整個成品 | [6.6](chapters/06.md#6.6)、[7.1](chapters/07.md#7.1)、[19.13](chapters/19.md#19.13)、[20.1](chapters/20.md#20.1) |
 | 字卡 | 讀字用的中文字圖片，由作者製作；和第 13 章、B 單元的回答卡不同 | [11.18](chapters/11.md#11.18)、[19.13](chapters/19.md#19.13) |
 | 跨切分重複的輸入句 | 同一段輸入（連同問題與候選）出現在不同資料份的列裡；家族沒有跨份，不等於模型從未看過這段文字 | [19.14](chapters/19.md#19.14) |
@@ -226,7 +227,7 @@ token 不一定是一個中文字。逐 byte 切詞時，一個常見中文字�
 
 **B**　[backpropagation](chapters/01.md#1.10)（反向傳播） · [baseline](chapters/13.md#13.11)（基準值） · [base model](chapters/07.md#7.11)（底座） · [batch](chapters/05.md#5.2) · [bias](chapters/02.md#2.3)（偏移） · [bigram 表](chapters/01.md#1.5)（接字表） · [bit](chapters/05.md#5.9)（位元） · [BOS](chapters/06.md#6.5)（開始標記） · [byte](chapters/05.md#5.9)（位元組）
 
-**C**　[calibration](chapters/09.md#9.9)（校準） · [calibration split](chapters/09.md#9.10)（校準資料） · [causal mask](chapters/03.md#3.6)（因果遮罩） · [CE](chapters/09.md#9.14)（交叉熵） · [checkpoint](chapters/05.md#5.7)（檢查點） · [Choice](chapters/09.md#9.11) · [classification head](chapters/10.md#10.5)（分類頭） · [Code2Wav](chapters/20.md#20.15) · [codebook](chapters/12.md#12.18)（碼本） · [codec](chapters/12.md#12.18)（聲音編解碼） · [code point](chapters/06.md#6.1)（碼點） · [commitment loss](chapters/17.md#17.16) · [concentration](chapters/09.md#9.15)（集中度） · [confidence](chapters/09.md#9.9)（信心） · [context](chapters/02.md#2.5)（上下文） · [context window](chapters/02.md#2.5)（上下文視窗） · [control](chapters/12.md#12.4)（對照） · [coverage](chapters/09.md#9.18)（覆蓋率） · [critic](chapters/13.md#13.14)（價值模型） · [cross entropy](chapters/01.md#1.8)（交叉熵） · [CUDA](chapters/16.md#16.8)
+**C**　[calibration](chapters/09.md#9.9)（校準） · [calibration split](chapters/09.md#9.10)（校準資料） · [causal mask](chapters/03.md#3.6)（因果遮罩） · [CE](chapters/09.md#9.14)（交叉熵） · [checkpoint](chapters/05.md#5.7)（檢查點） · [Choice](chapters/09.md#9.11) · [classification head](chapters/10.md#10.5)（分類頭） · [Code2Wav](chapters/20.md#20.15) · [codebook](chapters/12.md#12.18)（碼本） · [codec](chapters/12.md#12.18)（聲音編解碼） · [code point](chapters/06.md#6.1)（碼點） · [commitment loss](chapters/17.md#17.16) · [concentration](chapters/09.md#9.15)（集中度） · [confidence](chapters/09.md#9.9)（信心） · [context](chapters/02.md#2.5)（上下文） · [context window](chapters/02.md#2.5)（上下文視窗） · [control](chapters/12.md#12.4)（對照） · [coverage](chapters/09.md#9.18)（覆蓋率） · [critic](chapters/13.md#13.14)（價值模型） · [cross entropy](chapters/01.md#1.8)（交叉熵） · [CUDA](chapters/16.md#16.8) · [C-v3](chapters/19.md#19.25)（裝置判斷器）
 
 **D**　decode（[解碼](chapters/01.md#1.1)、[逐步生成階段](chapters/16.md#16.2)） · [deep supervision](chapters/14.md#14.14)（逐輪監督） · [Dense](chapters/04.md#4.4) · [derivative](chapters/01.md#1.9)（導數） · [distillation](chapters/18.md#18.1)（蒸餾） · [DPO](chapters/07.md#7.18)（直接偏好最佳化）
 
