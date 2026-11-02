@@ -118,6 +118,8 @@ The terminal's last line includes the following fields; the omitted `evidence` p
 
 Edit `course/chapters/`, format that file’s Python examples, then regenerate notebooks. Each changed section receives three independent stages in order: readability and understanding, correctness and evidence, then continuity with the surrounding lessons. See the [editorial protocol](docs/editorial-guide.md) and [technical review protocol](docs/technical-review-guide.md). Each PR records concise conclusions for the affected material; deployment does not load historical review records. Components live in `tiny_perceptron/`; SVGs live in `course/figures/`, with generated examples in `scripts/build_visuals.py`.
 
+The research-input step below prepares about 4 MiB of sources and annotations for the full data tests. Ordinary reading and all 332 CPU lesson notebooks can omit that download; see [research inputs](assets/research/README.md).
+
 ```bash
 python scripts/build_visuals.py
 python scripts/format_course_code.py course/chapters/01.md

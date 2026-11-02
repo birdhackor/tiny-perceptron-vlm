@@ -135,6 +135,8 @@ tests/              離線契約測試
 docs/               大綱、研究、環境與驗證紀錄
 ```
 
+以下維護步驟中的研究輸入只供完整資料測試使用，會按需取得約4 MiB的來源與標註；普通閱讀與332節CPU Notebook可略過該下載。詳見[研究輸入](assets/research/README.md)。
+
 ```bash
 python scripts/build_visuals.py
 python scripts/format_course_code.py course/chapters/01.md

@@ -1195,9 +1195,16 @@ def committed_text(relative, revision, prefix):
         ["git", "show", f"{revision}:{path.as_posix()}"], cwd=ROOT, check=False, capture_output=True
     )
     if result.returncode and path.as_posix() == "docs/natural-assistant/v4/manifest.json":
-        from scripts.research_assets import frozen_input
+        listing = subprocess.run(
+            ["git", "ls-tree", "--name-only", revision, "--", path.as_posix()],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+        )
+        if not listing.stdout.strip():
+            from scripts.research_assets import frozen_input
 
-        return frozen_input(ROOT, path.as_posix(), revision).decode("utf-8")
+            return frozen_input(ROOT, path.as_posix(), revision).decode("utf-8")
     result.check_returncode()
     content = result.stdout
     if (ROOT / path).read_bytes() != content:

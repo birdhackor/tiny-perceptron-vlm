@@ -2,10 +2,13 @@
 
 import importlib.util
 import json
+import re
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "scripts/selftrained/publish_data.py"
@@ -46,6 +49,53 @@ def recipe():
             "unpacked_bytes": 20,
         },
     }
+
+
+def test_workflow_dependency_setup_reads_external_recipe_without_weakening_control(repository, monkeypatch):
+    from scripts import research_assets
+
+    name = "docs/selftrained/package-recipe.json"
+    value = recipe()
+    raw = (json.dumps(value) + "\n").encode()
+    catalog = {
+        "schema_version": 1,
+        "repository": research_assets.REPOSITORY,
+        "source_revision": research_assets.SOURCE_REVISION,
+        "release_tag": research_assets.RELEASE_TAG,
+        "groups": {
+            "natural-v4": {"name": "natural.zip", "files": {}},
+            "selftrained-sources": {
+                "name": "sources.zip",
+                "files": {name: {"bytes": len(raw), "sha256": research_assets.sha(raw)}},
+            },
+        },
+    }
+    revision = commit(repository, research_assets.CATALOG, catalog)
+    path = repository / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(raw)
+    workflow = yaml.load((ROOT / ".github/workflows/selftrained-data.yml").read_text(), Loader=yaml.BaseLoader)
+    step = next(
+        step
+        for step in workflow["jobs"]["publish"]["steps"]
+        if step.get("name") == "Install exact reconstruction dependencies from frozen recipe"
+    )
+    code = re.search(r"python - <<'PY'\n(.*?)\nPY", step["run"], re.S).group(1)
+    monkeypatch.chdir(repository)
+    monkeypatch.setenv("SELFTRAINED_DATA_RECIPE", name)
+    monkeypatch.setenv("GITHUB_SHA", revision)
+    actual_run = subprocess.run
+    installed = []
+
+    def no_pip_network(command, **kwargs):
+        if command[:4] == [sys.executable, "-m", "pip", "install"]:
+            installed.append(command[4:])
+            return subprocess.CompletedProcess(command, 0)
+        return actual_run(command, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", no_pip_network)
+    exec(compile(code, "workflow-dependency-preflight-fixture", "exec"), {})
+    assert installed == [["numpy==2.5.3"]]
 
 
 def commit(root, path, value, message="fixture"):

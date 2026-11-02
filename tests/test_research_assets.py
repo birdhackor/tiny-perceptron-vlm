@@ -167,6 +167,8 @@ def test_external_recipe_uses_committed_catalog_and_control_still_requires_git(b
 
 
 def test_v4_manifest_uses_catalog_but_selection_cannot_fall_back_to_local_file(bundle):
+    from scripts import score_natural_v4_test as scoring
+
     root, catalog, _, _ = bundle
     name = "docs/natural-assistant/v4/manifest.json"
     raw = b'{"schema_version":1,"rows":[]}'
@@ -191,10 +193,16 @@ def test_v4_manifest_uses_catalog_but_selection_cannot_fall_back_to_local_file(b
     namespace = {"Path": Path, "ROOT": root, "subprocess": subprocess}
     exec(compile(ast.Module(body=nodes, type_ignores=[]), "manifest-reader-fixture", "exec"), namespace)
     assert namespace["committed_text"](name, revision, ("docs", "natural-assistant")) == raw.decode()
+    binding = scoring.committed_bytes(root / name, revision, root)
+    assert binding["sha256"] == assets.sha(raw)
+    assert binding["binding"] == "committed_catalog"
+    assert binding["data_source_revision"] == assets.SOURCE_REVISION
     selection = "docs/natural-assistant/v4/selection.json"
     write(root, selection, b'{"selected":"anything"}')
     with pytest.raises(subprocess.CalledProcessError):
         namespace["committed_text"](selection, revision, ("docs", "natural-assistant"))
+    with pytest.raises(ValueError, match="absent from execution Git commit"):
+        scoring.committed_bytes(root / selection, revision, root)
 
 
 def test_catalog_cannot_reclassify_a_control_file_as_research(bundle):
