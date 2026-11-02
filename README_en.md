@@ -122,6 +122,7 @@ Edit `course/chapters/`, format that file’s Python examples, then regenerate n
 python scripts/build_visuals.py
 python scripts/format_course_code.py course/chapters/01.md
 python scripts/build_course.py
+python scripts/research_assets.py fetch --group all
 python scripts/build_course.py --check
 python scripts/check_notebooks.py --mode python
 python scripts/check_notebooks.py --mode kernel --lesson 3.6

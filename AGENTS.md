@@ -14,7 +14,8 @@
 uv sync                                  # 安裝（PyPI 預設版 torch）
 uv sync --extra cpu                      # 或 cu126 / cu130，見 pyproject.toml
 uv run python scripts/check_env.py       # 環境檢查
-uv run pytest                            # 測試（全部離線；完整資料測試另先準備研究輸入）
+python scripts/research_assets.py fetch --group all  # 一次準備固定研究明細
+uv run pytest                            # 測試本身全部離線
 uv run ruff check . && uv run ruff format .
 ```
 
@@ -45,7 +46,7 @@ uv run ruff check . && uv run ruff format .
 ## Repo 存放與封存
 
 - 普通 Git 保存教材、圖、Notebook、實作、測試，以及教學和實驗重現所需的小型設定、生成器、資料來源、授權和重要結果。
-- 權重、完整資料、訓練原始輸出、截圖與完整審閱過程放 Release、模型／資料儲存庫或暫存 artifact，按需下載；不要複製進新的審閱目錄。
+- 權重、完整資料、訓練原始輸出、截圖與完整審閱過程放 Release、模型／資料儲存庫或暫存 artifact，按需下載；不要複製進新的審閱目錄。固定研究明細由 `assets/research/catalog.json` 指向保留原 bytes 的公開包，顯式 fetch 後落在被忽略的原路徑；pytest 與教材 kernel 不隱性下載。
 - 封存輪次的完整公開來源固定在提交 `83630ea1cea23d47c4b77162a31cbb7566686d11`，見 [歷史版本](docs/repository-archives.md)。它仍是 main 的祖先，不改寫舊紀錄。
 - 搬移前辨認真正的教材程式輸入與來源／授權資料，不因路徑有 evidence 或 review 就整棵刪除，也不因舊審閱文字引用就整棵保留。
 - 既有來源與結果的事實引用保持可查。移出的說明／證據連結指向固定舊提交，不能留失效的 blob/main 連結。

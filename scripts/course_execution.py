@@ -41,11 +41,27 @@ def execution_key(root=ROOT):
     paths = {root / "pyproject.toml", root / "uv.lock"}
     for directory in ("tiny_perceptron", "scripts"):
         paths.update((root / directory).rglob("*.py"))
+    # 可選的原始研究明細不供教材短程式使用；是否下載不能改變 CPU 執行鍵。
+    catalog_path = root / "assets/research/catalog.json"
+    research_inputs = set()
+    if catalog_path.is_file():
+        catalog = json.loads(catalog_path.read_bytes())
+        research_inputs = {name for spec in catalog["groups"].values() for name in spec["files"]}
+        for spec in catalog["groups"].values():
+            for name, item in spec["files"].items():
+                path = root / name
+                if path.is_file():
+                    raw = path.read_bytes()
+                    if len(raw) != item["bytes"] or hashlib.sha256(raw).hexdigest() != item["sha256"]:
+                        raise ValueError(f"已下載的固定研究輸入已變動：{name}")
     for directory in ("docs", "assets", "course/figures", "checkpoints"):
         paths.update(
             path
             for path in (root / directory).rglob("*")
-            if path.is_file() and path.suffix not in {".md", ".pyc"} and "__pycache__" not in path.parts
+            if path.is_file()
+            and path.suffix not in {".md", ".pyc"}
+            and "__pycache__" not in path.parts
+            and path.relative_to(root).as_posix() not in research_inputs
         )
     for path in sorted(paths):
         if path.is_file():

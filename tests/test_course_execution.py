@@ -1,6 +1,7 @@
 """文字更新重用成功輸出；程式、資料與環境變動必須重跑。"""
 
 import copy
+import hashlib
 import json
 import subprocess
 
@@ -159,3 +160,21 @@ def test_missing_diff_base_conservatively_runs_all_platforms(tmp_path, monkeypat
     values = dict(line.split("=", 1) for line in output.read_text().splitlines())
     assert len(json.loads(values["matrix"])) == 3
     assert values["full"] == "true"
+
+
+def test_optional_research_download_does_not_change_lesson_execution_key(course):
+    root, _, _, _ = course
+    name = "docs/natural-assistant/v4/data/fixture.json"
+    raw = b'{"research":"fixed"}'
+    write_json(
+        root / "assets/research/catalog.json",
+        {"groups": {"natural-v4": {"files": {name: {"bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}}}}},
+    )
+    before = course_execution.execution_key(root)
+    target = root / name
+    target.parent.mkdir(parents=True)
+    target.write_bytes(raw)
+    assert course_execution.execution_key(root) == before
+    target.write_bytes(b"modified research input")
+    with pytest.raises(ValueError, match="固定研究輸入已變動"):
+        course_execution.execution_key(root)

@@ -88,6 +88,7 @@ v2以28,876題訓練，2,435題validation選定候選與生成設定，再凍結
 先按[W.1](../course/first-steps.md#W.1)準備專案與Notebook環境，啟用`.venv`後，在專案根目錄執行：
 
 ```bash
+python scripts/research_assets.py fetch --group all
 python scripts/build_course.py --check
 python -m ipykernel install --sys-prefix --name tiny-perceptron --display-name "Tiny Perceptron"
 python scripts/check_notebooks.py --mode kernel --workers 1

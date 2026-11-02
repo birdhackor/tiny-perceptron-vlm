@@ -12,9 +12,12 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 CONTROL = "docs/selftrained/data-publish.json"
 
 
@@ -50,6 +53,28 @@ def committed_json(root, path, revision):
     ).stdout
     if (Path(root) / path).read_bytes() != raw:
         raise ValueError("File differs from selected committed Git revision")
+    return json.loads(raw), hashlib.sha256(raw).hexdigest()
+
+
+def committed_recipe(root, path, revision):
+    """配方可來自固定研究包；控制與授權 JSON 仍須位於當次提交。"""
+    name = relative(path).as_posix()
+    if name not in {"docs/selftrained/package-recipe.json", "docs/selftrained/v2-package-recipe.json"}:
+        return committed_json(root, path, revision)
+    if not re.fullmatch(r"[a-f0-9]{40}", revision):
+        raise ValueError("Need actual full dispatch Git SHA")
+    listing = subprocess.run(
+        ["git", "ls-tree", "--name-only", revision, "--", name],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    if listing:
+        return committed_json(root, path, revision)
+    from scripts.research_assets import frozen_input
+
+    raw = frozen_input(Path(root), name, revision)
     return json.loads(raw), hashlib.sha256(raw).hexdigest()
 
 
@@ -116,7 +141,7 @@ def select_operation(root, event, inputs, revision):
         "publication_started": False,
     }
     if operation == "publish":
-        recipe, recipe_sha = committed_json(root, recipe_path, revision)
+        recipe, recipe_sha = committed_recipe(root, recipe_path, revision)
         validate_recipe(recipe)
         if expected_sha and expected_sha != recipe_sha:
             raise ValueError("Publish descriptor differs from exact committed recipe bytes")
@@ -155,7 +180,7 @@ def verify_archive(root, recipe, revision, output_dir):
 
 
 def publish(root, recipe_path, revision, output_dir):
-    recipe, recipe_sha = committed_json(root, recipe_path, revision)
+    recipe, recipe_sha = committed_recipe(root, recipe_path, revision)
     actual, path, expected, pointer_present = verify_archive(root, recipe, revision, output_dir)
     subprocess.run(["git", "lfs", "install", "--local"], cwd=root, check=True)
     target = Path(root) / path
@@ -211,7 +236,7 @@ def main():
                 stream.write(f"{field}={selection.get(field, '')}\n")
         print(json.dumps(selection))
     elif args.operation == "verify":
-        recipe, recipe_sha = committed_json(ROOT, args.recipe, args.revision)
+        recipe, recipe_sha = committed_recipe(ROOT, args.recipe, args.revision)
         _, _, _, pointer_present = verify_archive(ROOT, recipe, args.revision, output)
         write_json(
             output / "verified.json",

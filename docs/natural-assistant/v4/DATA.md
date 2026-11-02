@@ -1,5 +1,7 @@
 # 照片、中文讀字與語音：資料怎麼教到用途？
 
+使用目前 `main` 重建資料或訓練前，先在專案根目錄執行 `python scripts/research_assets.py fetch --group natural-v4`，取得原始來源明細與配方。下載會核對固定內容，之後可離線使用。依舊版提交重現時，保留該版原有資料與環境；這個準備步驟不會啟動模型訓練。詳見[研究輸入](../../../assets/research/README.md)。
+
 模型要學會「桌上有幾隻貓」，需要圖片、這個問題與合適答案。要學抄寫招牌，則需要看得見的字與原樣轉寫；只告訴它「這是商店」，沒有教到每個字。準備資料的第一件事，是讓每道練習對上用途，接著才談題目夠不夠多。
 
 第20章接手已有圖文能力的Qwen3-VL，再用照片問答、中文讀字和聊天示範建立LoRA候選。LoRA是加在底座旁的少量可更新修正參數，使用時仍需要完整底座；候選要與原底座一起驗證。本版依[驗證結果](../../../course/chapters/20.md#20.8)保留原底座，資料對上用途並不保證微調更好。聲音由現成ASR（語音辨識器）先轉成文字，真人錄音用於驗收兩站流程，不拿來更新這次圖文LoRA或重新訓練Whisper。各項資料只是有限的教學樣本，模型原本的能力仍來自上游訓練。
@@ -16,7 +18,7 @@
 
 已用來選過版本的題目，之後仍可檢查舊能力是否保留，但不能重新稱為未見過的最後測試。公開底座的上游訓練資料也可能與公共素材重疊；這份切分保證的是本課資料的隔離，不保證上游從沒見過任何相似內容。
 
-執行程式讀取[整合清單](manifest.json)。其中 `rows` 收錄聊天與圖片問答，`audio_rows` 另列錄音及逐字稿；後者不等於帶有助手訓練答案。數素材時看檔案與來源，數練習時看題目，兩個數字應各自保留。
+執行程式讀取[整合清單](https://github.com/birdhackor/tiny-perceptron-vlm/blob/92b8763ca24511f0da1c259429851a314accea19/docs/natural-assistant/v4/manifest.json)。其中 `rows` 收錄聊天與圖片問答，`audio_rows` 另列錄音及逐字稿；後者不等於帶有助手訓練答案。數素材時看檔案與來源，數練習時看題目，兩個數字應各自保留。
 
 下表數的是「題目」，不是獨立照片數。照片描述與可見事實常共用照片；有字／無字題也可能共用其他列的圖片。
 
@@ -53,17 +55,17 @@ OpenAssistant的訓練／驗證／測試題來自40／8／12個家族（依對�
 
 使用的圖片是發布者提供的固定縮圖，並非下載整個高解析度原圖庫。大場景可以直接觀察，小筆畫或遠處物件則可能不足以看清。照片裁切或放大只能重新分配可見資訊，不能找回來源圖片原本沒有的細節。完整答案的判尺見[20.9](../../../course/chapters/20.md#20.9)。
 
-來源與配對資料見[照片來源清單](data/vision-sources.json)，活動補充各有[訓練來源](data/vision-activity-sources.json)和[留出來源](data/vision-activity-heldout-sources.json)。照片與原描述由 Google LLC 以 CC BY 4.0 提供，照片署名 Jason Baldridge and family；本課保留署名、來源連結與繁中改寫說明。
+來源與配對資料見[照片來源清單](https://github.com/birdhackor/tiny-perceptron-vlm/blob/92b8763ca24511f0da1c259429851a314accea19/docs/natural-assistant/v4/data/vision-sources.json)，活動補充各有[訓練來源](https://github.com/birdhackor/tiny-perceptron-vlm/blob/92b8763ca24511f0da1c259429851a314accea19/docs/natural-assistant/v4/data/vision-activity-sources.json)和[留出來源](https://github.com/birdhackor/tiny-perceptron-vlm/blob/92b8763ca24511f0da1c259429851a314accea19/docs/natural-assistant/v4/data/vision-activity-heldout-sources.json)。照片與原描述由 Google LLC 以 CC BY 4.0 提供，照片署名 Jason Baldridge and family；本課保留署名、來源連結與繁中改寫說明。
 
 ## 3. 中文讀字：合成文件與真實招牌各練一件事
 
-合成文件來自 [NVIDIA OCR-Synthetic-Multilingual-v1](https://huggingface.co/datasets/nvidia/OCR-Synthetic-Multilingual-v1) 的繁體中文部分。它們是合成文件，不是自然街拍。這份教學包取出有來源轉寫的文字區域，保留單行與多行兩種題型，讓模型練習原樣抄寫。「繁體中文部分」是上游的分桶名稱（`zh_hant`），桶裡也有簡體字或簡繁混排的文字；本包照原樣保留，不轉換字形，見[OCR 來源清單](data/ocr-sources.json)的 `limits`。
+合成文件來自 [NVIDIA OCR-Synthetic-Multilingual-v1](https://huggingface.co/datasets/nvidia/OCR-Synthetic-Multilingual-v1) 的繁體中文部分。它們是合成文件，不是自然街拍。這份教學包取出有來源轉寫的文字區域，保留單行與多行兩種題型，讓模型練習原樣抄寫。「繁體中文部分」是上游的分桶名稱（`zh_hant`），桶裡也有簡體字或簡繁混排的文字；本包照原樣保留，不轉換字形，見[OCR 來源清單](https://github.com/birdhackor/tiny-perceptron-vlm/blob/92b8763ca24511f0da1c259429851a314accea19/docs/natural-assistant/v4/data/ocr-sources.json)的 `limits`。
 
 裁切要同時看文字和範圍。如果只指定抄寫一行，裁切裡卻留了隔壁行的一角，讀者和模型都可能不知道該不該抄它。本包記錄原頁、裁切位置、目標文字與範圍判準；同原頁的全部裁切留在同一個家族。多行題另外指定閱讀順序，不能只因字都出現便算完成。
 
 真實文字照片另取自 [Wikimedia Commons](https://commons.wikimedia.org/) 個別署名與授權的作品，提供招牌、路牌或背景中的中文字。訓練可以用清楚區域，留出題則按題目指定整圖或目標區域，保留文字與周圍情境。斜拍、反光、背景和字距，都可能與合成文件不同，結果要分開看。
 
-Commons 的中文轉寫同樣由 AI 助理（不是第 20 章交付的助理）實際查看圖像後編寫，並非上游另附的人工中文標準答案。轉寫照圖中原本的字形，不換成繁體：Commons 抄寫題的 `language` 欄只有一題測試題是 `zh_hans`（招牌上是簡體字），其餘都是 `zh_hant`。逐張來源、作者、授權與修改記錄在[OCR 來源清單](data/ocr-sources.json)，題目及原樣文字在[OCR 標註](data/ocr-labels.jsonl)，但「保留多行內容與順序」的 3 道驗證題和 3 道最後測試題另記在[多行順序標註](data/ocr-order-labels.jsonl)。NVIDIA 資料採 CC BY 4.0；Commons 每張按自己的 CC BY 4.0、CC BY 3.0 或 CC0 條件處理，不把全部照片統一視為 MIT。
+Commons 的中文轉寫同樣由 AI 助理（不是第 20 章交付的助理）實際查看圖像後編寫，並非上游另附的人工中文標準答案。轉寫照圖中原本的字形，不換成繁體：Commons 抄寫題的 `language` 欄只有一題測試題是 `zh_hans`（招牌上是簡體字），其餘都是 `zh_hant`。逐張來源、作者、授權與修改記錄在[OCR 來源清單](https://github.com/birdhackor/tiny-perceptron-vlm/blob/92b8763ca24511f0da1c259429851a314accea19/docs/natural-assistant/v4/data/ocr-sources.json)，題目及原樣文字在[OCR 標註](https://github.com/birdhackor/tiny-perceptron-vlm/blob/92b8763ca24511f0da1c259429851a314accea19/docs/natural-assistant/v4/data/ocr-labels.jsonl)，但「保留多行內容與順序」的 3 道驗證題和 3 道最後測試題另記在[多行順序標註](https://github.com/birdhackor/tiny-perceptron-vlm/blob/92b8763ca24511f0da1c259429851a314accea19/docs/natural-assistant/v4/data/ocr-order-labels.jsonl)。NVIDIA 資料採 CC BY 4.0；Commons 每張按自己的 CC BY 4.0、CC BY 3.0 或 CC0 條件處理，不把全部照片統一視為 MIT。
 
 是否有中文字另有題型。看見字但讀不清，和完全沒有中文字，是不同情況；英文圖也不能自動被當成中文字圖。CER 是字元錯誤率，把插入、刪除和替換的字數加總，再除以參考文字的字數。參考文字為空時，沒有可除的字數，因此有字／無字另列判準。逐字、正規化與行序的差別見[20.10](../../../course/chapters/20.md#20.10)和[20.11](../../../course/chapters/20.md#20.11)。
 
@@ -71,11 +73,11 @@ Commons 的中文轉寫同樣由 AI 助理（不是第 20 章交付的助理）�
 
 聊天示範包含 [OpenAssistant/oasst2](https://huggingface.co/datasets/OpenAssistant/oasst2) 的中文對話，以及本課另寫的短對話。資料樹上的每個助手回合可以形成一筆練習，前面的回合則成為歷史。即使同一棵樹產生多筆題目，仍一起分到同一側，不能用另一個分支偷看測試的前文。
 
-選用的路線保留完整請求和可用回答，再由 AI 助理（不是第 20 章交付的助理）按繁中需求改寫；原始文字另外保存，[更動紀錄](data/chat-curation-ledger.jsonl)的每項更動都記下類別與前後文字，部分附理由。社群回答的來源排名不保證事實正確，簡繁轉換也不能代替語義閱讀。要求「兩句」時應真的給兩句，要求記住飲食條件時應使用那段歷史，不靠資料夾名稱教出指令遵循。
+選用的路線保留完整請求和可用回答，再由 AI 助理（不是第 20 章交付的助理）按繁中需求改寫；原始文字另外保存，[更動紀錄](https://github.com/birdhackor/tiny-perceptron-vlm/blob/92b8763ca24511f0da1c259429851a314accea19/docs/natural-assistant/v4/data/chat-curation-ledger.jsonl)的每項更動都記下類別與前後文字，部分附理由。社群回答的來源排名不保證事實正確，簡繁轉換也不能代替語義閱讀。要求「兩句」時應真的給兩句，要求記住飲食條件時應使用那段歷史，不靠資料夾名稱教出指令遵循。
 
 本課另外編寫的條件對話只用於訓練。這些是 AI 助理（不是第 20 章交付的助理）寫的文字，不是新增真人對話錄音。後續抽到同一題多次，也只增加練習比重，沒有創造更多獨立情境。
 
-來源與題目清單見[聊天來源](data/chat-sources.json)與[聊天標註](data/chat-labels.jsonl)。原始對話另外存放：OpenAssistant 改寫前的原文在[原文快照](../evidence/v4-research/chat-speech/oasst2-selected-original-messages.jsonl)，本課另寫的整段對話在[另寫對話](data/chat-original-conversations.json)。上游資料採 Apache-2.0，保留原來源及 NOTICE；本課另寫的 80 題在聊天標註裡逐筆記下來源類別（`source` 欄）與 MIT 授權，並標成合成資料（`synthetic` 欄為 `true`）。這份小包適合教資料整理與對話微調，完整中文聊天能力仍需更廣的任務、情境和評估。
+來源與題目清單見[聊天來源](https://github.com/birdhackor/tiny-perceptron-vlm/blob/92b8763ca24511f0da1c259429851a314accea19/docs/natural-assistant/v4/data/chat-sources.json)與[聊天標註](https://github.com/birdhackor/tiny-perceptron-vlm/blob/92b8763ca24511f0da1c259429851a314accea19/docs/natural-assistant/v4/data/chat-labels.jsonl)。原始對話另外存放：OpenAssistant 改寫前的原文在[原文快照](../evidence/v4-research/chat-speech/oasst2-selected-original-messages.jsonl)，本課另寫的整段對話在[另寫對話](https://github.com/birdhackor/tiny-perceptron-vlm/blob/92b8763ca24511f0da1c259429851a314accea19/docs/natural-assistant/v4/data/chat-original-conversations.json)。上游資料採 Apache-2.0，保留原來源及 NOTICE；本課另寫的 80 題在聊天標註裡逐筆記下來源類別（`source` 欄）與 MIT 授權，並標成合成資料（`synthetic` 欄為 `true`）。這份小包適合教資料整理與對話微調，完整中文聊天能力仍需更廣的任務、情境和評估。
 
 ## 5. 真人錄音：分開檢查聽寫與聊天
 
@@ -87,7 +89,7 @@ FLEURS 一句旅遊敘述，可以有正確逐字稿，卻沒有「助手接下�
 
 來源簡體字形與原始錄音位元組保留；AISHELL 輸入文字移除來源分詞空格，這種整理明寫在記錄中，不更正成模型可能輸出的字。評估保存原樣及指定正規化後的 CER，聊天則另讀完整回答。使用者在介面更正逐字稿是人工操作，自動測試不能暗中換入來源真值，差別見[20.12](../../../course/chapters/20.md#20.12)。
 
-逐檔資訊見[FLEURS 來源](data/voice-sources.json)及[AISHELL 問句來源](data/voice-question-sources.json)。FLEURS 採 CC BY 4.0；AISHELL-1 語料採 Apache-2.0。快照核對的是所選錄音，來源大型壓縮包的完整指紋則另標明取得範圍，不能把只讀到的部分串流稱為親自驗過整包。
+逐檔資訊見[FLEURS 來源](https://github.com/birdhackor/tiny-perceptron-vlm/blob/92b8763ca24511f0da1c259429851a314accea19/docs/natural-assistant/v4/data/voice-sources.json)及[AISHELL 問句來源](https://github.com/birdhackor/tiny-perceptron-vlm/blob/92b8763ca24511f0da1c259429851a314accea19/docs/natural-assistant/v4/data/voice-question-sources.json)。FLEURS 採 CC BY 4.0；AISHELL-1 語料採 Apache-2.0。快照核對的是所選錄音，來源大型壓縮包的完整指紋則另標明取得範圍，不能把只讀到的部分串流稱為親自驗過整包。
 
 ## 6. 取得固定快照，核對後再使用
 
