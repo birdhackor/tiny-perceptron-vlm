@@ -425,7 +425,7 @@ def main():
     parser.add_argument("--model", action="append", help="只檢查指定實驗；可重複指定")
     parser.add_argument("--all", action="store_true", help="明確選取此公開清單中的全部模型")
     parser.add_argument("--output", type=Path, default=ROOT / "checkpoints/course")
-    parser.add_argument("--evidence", type=Path, default=ROOT / "docs/course-experiments/student-checks")
+    parser.add_argument("--evidence", type=Path, default=ROOT / "outputs/course-model-checks")
     parser.add_argument("--probe", type=Path, help="內部 CPU 子命令：對單一 checkpoint 實際 forward")
     parser.add_argument("--model-dir", type=Path, help="probe 配對 tokenizer 的公開模型資料夾")
     args = parser.parse_args()

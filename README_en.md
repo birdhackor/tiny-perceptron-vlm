@@ -28,10 +28,12 @@ Thinking effort, Looped Transformers, and Jev-style typed probabilistic judgment
 
 ## Setup
 
-Install [uv](https://docs.astral.sh/uv/getting-started/installation/) and [Git](https://git-scm.com/downloads) to obtain the project. The training data archives are stored with Git LFS (a tool for storing large files with Git), and the `GIT_LFS_SKIP_SMUDGE=1` at the start of the first line below keeps the clone from downloading them. You can type it even without Git LFS installed. In Windows PowerShell, leave that prefix out: run `git config --global core.longpaths true` first, then `$env:GIT_LFS_SKIP_SMUDGE="1"` and `git clone https://github.com/birdhackor/tiny-perceptron-vlm.git`. Some files in the project have deep paths, and Git for Windows cannot create paths longer than 260 characters by default; the line that sets `core.longpaths` lets Git on this computer use long paths, including in later clones and when switching versions. For CPU exercises, run these in order. Pause at `check_env.py` to inspect the result described below before registering the kernel and starting Jupyter. This script lists Python and package versions, selects an available device, and performs one small matrix forward/backward calculation on it:
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/) and [Git](https://git-scm.com/downloads) to obtain the project. The training data archives are stored with Git LFS (a tool for storing large files with Git), and the `GIT_LFS_SKIP_SMUDGE=1` at the start of the first line below keeps the clone from downloading them. You can type it even without Git LFS installed. In Windows PowerShell, leave that prefix out: run `git config --global core.longpaths true` first, then `$env:GIT_LFS_SKIP_SMUDGE="1"` and `git clone --depth 1 --no-tags https://github.com/birdhackor/tiny-perceptron-vlm.git`. Some files in the project have deep paths, and Git for Windows cannot create paths longer than 260 characters by default; the line that sets `core.longpaths` lets Git on this computer use long paths, including in later clones and when switching versions. For CPU exercises, run these in order. Pause at `check_env.py` to inspect the result described below before registering the kernel and starting Jupyter. This script lists Python and package versions, selects an available device, and performs one small matrix forward/backward calculation on it:
+
+`--depth 1 --no-tags` downloads the current version only. See [historical versions](docs/repository-archives.md) when older history is needed.
 
 ```bash
-GIT_LFS_SKIP_SMUDGE=1 git clone https://github.com/birdhackor/tiny-perceptron-vlm.git
+GIT_LFS_SKIP_SMUDGE=1 git clone --depth 1 --no-tags https://github.com/birdhackor/tiny-perceptron-vlm.git
 cd tiny-perceptron-vlm
 uv sync --frozen --extra cpu --group notebook
 source .venv/bin/activate

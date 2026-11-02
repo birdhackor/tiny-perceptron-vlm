@@ -49,6 +49,7 @@ def main():
     print(json.dumps(matrix))
     with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as stream:
         stream.write("matrix=" + json.dumps(matrix) + "\n")
+        stream.write("full=" + str(full).lower() + "\n")
 
 
 if __name__ == "__main__":

@@ -25,7 +25,7 @@
 本專案以`/assets/training/*.tar.gz`追蹤固定資料包；`data/`仍是本機解包與快取位置。可先跳過資料下載，取得程式：
 
 ```bash
-GIT_LFS_SKIP_SMUDGE=1 git clone https://github.com/birdhackor/tiny-perceptron-vlm.git
+GIT_LFS_SKIP_SMUDGE=1 git clone --depth 1 --no-tags https://github.com/birdhackor/tiny-perceptron-vlm.git
 cd tiny-perceptron-vlm
 ```
 

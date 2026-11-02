@@ -14,7 +14,7 @@
 uv sync                                  # 安裝（PyPI 預設版 torch）
 uv sync --extra cpu                      # 或 cu126 / cu130，見 pyproject.toml
 uv run python scripts/check_env.py       # 環境檢查
-uv run pytest                            # 測試（全部離線）
+uv run pytest                            # 測試（全部離線；完整資料測試另先準備研究輸入）
 uv run ruff check . && uv run ruff format .
 ```
 
@@ -56,7 +56,7 @@ uv run ruff check . && uv run ruff format .
 - 修改前後核對 `python scripts/build_course.py --check`；程式、資料、共享執行輸入或依賴變更時跑相關測試及全套 CPU Notebook。純文字變更可重用相同執行輸入的成功結果。
 - `scripts/course_execution.py` 使用一個粗粒度鍵管理整套 CPU 結果；鍵不同、缺檔或驗證失敗就重新執行全部。不得把失敗輸出或不同程式的輸出當成快取命中。
 - 網站正式發布使用 `export_course.py --publish`：核對執行結果、固定 Notebook 版本、嚴格建站與連結／下載。不得為了快取而略過錯誤、猜結果或標示未執行的新程式已成功。
-- 日常 CI 在 PR 和 main 執行；文字修改跑 Linux 檢查，實作／安裝／依賴變更另跑 Windows、macOS。Windows 學生指令按入口及共用程式的改動觸發。
+- 日常 CI 在 PR 和 main 執行；文字修改跑 Linux 檢查，實作／安裝／依賴變更另跑 Windows、macOS。Linux 完整核對歷史與固定資料版本；其他平台及學生預設安裝只取最新版，後續 fetch 也限制深度。Windows 學生指令按入口及共用程式的改動觸發。
 - 模型訓練、Modal 計費運算與 Hugging Face 發布維持手動，沒有作者授權不觸發。網站發布不下載純為歷史審閱使用的資料包。
 - 發布後核對 workflow 與線上 build-info.json 的 revision；合併成功不能代替確認網站上線。
 

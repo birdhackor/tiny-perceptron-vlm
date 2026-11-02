@@ -3,10 +3,10 @@
 新安裝使用 `main`；只學習或執行最新版教材時，可省略完整歷史及可選資料包：
 
 ```bash
-GIT_LFS_SKIP_SMUDGE=1 git clone --depth 1 --branch main https://github.com/birdhackor/tiny-perceptron-vlm.git
+GIT_LFS_SKIP_SMUDGE=1 git clone --depth 1 --no-tags --branch main https://github.com/birdhackor/tiny-perceptron-vlm.git
 ```
 
-需要資料包時按 [資料下載指引](../assets/training/README.md)取得指定包。若要核對教材釘住的歷史版本，另執行 `git fetch --unshallow`；一般完整 clone 仍會下載舊歷史。
+需要資料包時按 [資料下載指引](../assets/training/README.md)取得指定包。若要核對教材釘住的歷史版本，另執行 `git fetch --unshallow --tags`；一般完整 clone 仍會下載舊歷史。
 
 ## 2026-11-02 精簡工作樹與發布流程
 

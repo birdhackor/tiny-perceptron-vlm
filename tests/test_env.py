@@ -4,6 +4,8 @@
     uv run pytest
 """
 
+from importlib.util import find_spec
+
 import numpy as np
 import pytest
 import soundfile as sf
@@ -68,6 +70,7 @@ def test_bpe_tokenizer_roundtrip():
     assert tok.decode(tok.encode(text).ids) == text
 
 
+@pytest.mark.skipif(find_spec("datasets") is None, reason="選用的 data extra 未安裝")
 def test_datasets_from_dict():
     from datasets import Dataset
 
