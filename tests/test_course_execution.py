@@ -16,7 +16,9 @@ def write_json(path, payload):
 
 
 @pytest.fixture
-def course(tmp_path):
+def course(tmp_path, monkeypatch):
+    # 一般 CPU 單元測試不安裝可選的 Notebook 群組；這裡只測版本如何參與快取鍵。
+    monkeypatch.setattr(course_execution, "version", lambda _: "test-1.0")
     notebook = {
         "metadata": {"kernelspec": {"name": "tiny-perceptron"}},
         "cells": [
@@ -50,7 +52,7 @@ def test_text_and_markdown_cell_reordering_reuse_outputs_with_current_text(cours
     assert checked["cells"][0]["outputs"][0]["text"] == "1\n"
 
 
-@pytest.mark.parametrize("change", ["code", "kernel", "script", "data", "dependency", "threads"])
+@pytest.mark.parametrize("change", ["code", "kernel", "script", "data", "dependency", "threads", "runtime-package"])
 def test_execution_inputs_invalidate_cache(course, monkeypatch, change):
     root, source, notebook, output = course
     before = course_execution.execution_key(root)
@@ -62,6 +64,8 @@ def test_execution_inputs_invalidate_cache(course, monkeypatch, change):
         write_json(source, notebook)
     elif change == "threads":
         monkeypatch.setenv("OMP_NUM_THREADS", "999")
+    elif change == "runtime-package":
+        monkeypatch.setattr(course_execution, "version", lambda _: "test-2.0")
     else:
         path = (
             root / {"script": "scripts/helper.py", "data": "docs/experiment/data.json", "dependency": "uv.lock"}[change]
