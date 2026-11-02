@@ -178,6 +178,8 @@ def frozen_input(root, relative, revision):
     付費授權、控制設定及其他 JSON 仍使用原本的當次提交核對。
     本函式不下載，不把缺少 committed JSON 當成可以相信任意本機檔案。
     """
+    if not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{40}", revision):
+        raise ValueError("研究輸入必須綁定完整的程式提交 SHA")
     raw_catalog = subprocess.check_output(["git", "show", f"{revision}:{CATALOG}"], cwd=root)
     catalog = parse_catalog(raw_catalog)
     for spec in catalog["groups"].values():
@@ -215,6 +217,23 @@ def gh(*args):
     return result.stdout
 
 
+def release_by_tag(tag):
+    result = subprocess.run(
+        ["gh", "api", "--include", f"repos/{REPOSITORY}/releases/tags/{tag}"], capture_output=True, check=False
+    )
+    header, separator, body = result.stdout.partition(b"\r\n\r\n")
+    if not separator:
+        header, separator, body = result.stdout.partition(b"\n\n")
+    status = re.match(rb"HTTP/\S+ (\d{3})", header)
+    if not separator or status is None:
+        raise RuntimeError("Release 查詢沒有可核對的 HTTP 狀態")
+    if status[1] == b"404":
+        return None
+    if status[1] != b"200" or result.returncode:
+        raise RuntimeError("Release 查詢失敗，不將權限或服務錯誤當成不存在")
+    return json.loads(body)
+
+
 def publish(root=ROOT):
     if (
         os.environ.get("GITHUB_ACTIONS") != "true"
@@ -228,8 +247,7 @@ def publish(root=ROOT):
         raise ValueError("發布來源不是固定的原始 Git 版本")
     catalog = build(root, source_root)
     tag = catalog["release_tag"]
-    releases = json.loads(gh("api", f"repos/{REPOSITORY}/releases?per_page=100"))
-    release = next((value for value in releases if value["tag_name"] == tag), None)
+    release = release_by_tag(tag)
     if release is None:
         gh(
             "release",

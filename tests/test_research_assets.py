@@ -6,6 +6,7 @@ import json
 import subprocess
 import zipfile
 from contextlib import nullcontext
+from types import SimpleNamespace
 
 import pytest
 
@@ -157,3 +158,25 @@ def test_local_process_cannot_publish(monkeypatch):
     monkeypatch.setattr(assets, "gh", lambda *a: pytest.fail("本機不得呼叫發布 API"))
     with pytest.raises(ValueError, match="GitHub Actions"):
         assets.publish()
+
+
+@pytest.mark.parametrize("revision", [":0", "HEAD", "a" * 39, "a" * 41])
+def test_frozen_input_rejects_non_commit_references(tmp_path, monkeypatch, revision):
+    monkeypatch.setattr(assets.subprocess, "check_output", lambda *a, **k: pytest.fail("不應讀取暫存區或分支"))
+    with pytest.raises(ValueError, match="完整"):
+        assets.frozen_input(tmp_path, RECIPE, revision)
+
+
+@pytest.mark.parametrize("status", [200, 404, 403, 503])
+def test_release_lookup_only_treats_actual_404_as_absent(monkeypatch, status):
+    raw = f'HTTP/2.0 {status} response\r\nContent-Type: application/json\r\n\r\n{{"id":123}}'.encode()
+    monkeypatch.setattr(
+        assets.subprocess, "run", lambda *a, **k: SimpleNamespace(stdout=raw, returncode=0 if status == 200 else 1)
+    )
+    if status == 200:
+        assert assets.release_by_tag(assets.RELEASE_TAG) == {"id": 123}
+    elif status == 404:
+        assert assets.release_by_tag(assets.RELEASE_TAG) is None
+    else:
+        with pytest.raises(RuntimeError):
+            assets.release_by_tag(assets.RELEASE_TAG)
