@@ -65,7 +65,7 @@ def require_scoring_sources(artifacts):
 
 
 def committed_bytes(path, revision, repo_root=ROOT):
-    """Compare exact local bytes to the actual execution commit, including LF."""
+    """核對執行版本中的原始檔，或其 catalog 固定的 v4 研究 manifest。"""
     root, path = Path(repo_root).resolve(), Path(path).resolve()
     require(path.is_relative_to(root), "Frozen input must be inside its Git repository")
     require(re.fullmatch(r"[a-f0-9]{40}|[a-f0-9]{64}", str(revision)) is not None, "Missing execution Git commit")
@@ -73,6 +73,23 @@ def committed_bytes(path, revision, repo_root=ROOT):
     result = subprocess.run(
         ["git", "-C", str(root), "show", f"{revision}:{relative}"], capture_output=True, check=False
     )
+    if result.returncode and relative == "docs/natural-assistant/v4/manifest.json":
+        listing = subprocess.run(
+            ["git", "-C", str(root), "ls-tree", "--name-only", revision, "--", relative],
+            capture_output=True,
+            check=True,
+        )
+        if not listing.stdout.strip():
+            from scripts.research_assets import CATALOG, SOURCE_REVISION, frozen_input
+
+            raw = frozen_input(root, relative, revision)
+            return {
+                "path": relative,
+                "sha256": digest(raw),
+                "binding": "committed_catalog",
+                "catalog_path": CATALOG,
+                "data_source_revision": SOURCE_REVISION,
+            }
     require(result.returncode == 0, f"Frozen input is absent from execution Git commit: {relative}")
     require(result.stdout == path.read_bytes(), f"Frozen input differs from execution Git commit: {relative}")
     return {"path": relative, "sha256": digest(result.stdout)}
@@ -426,7 +443,7 @@ def load_artifacts(manifest_path, protocol_path, test_dir, data_root, selection_
         "runtime_sources": source_bindings,
         "scoring_sources": scoring_sources(),
         "runtime_options_sha256": execution["runtime_options_sha256"],
-        "prompt_evidence_scope": "Raw records verify current user, reference, family and source image. System/history are reconstructed from committed manifest and bound runtime sources; raw records do not independently log rendered chat-template tokens.",
+        "prompt_evidence_scope": "Raw records verify current user, reference, family and source image. System/history are reconstructed from the frozen manifest (Git or catalog-bound) and bound runtime sources; raw records do not independently log rendered chat-template tokens.",
     }
     require(
         all(isinstance(binding[field], str) and binding[field].strip() for field in ("test_run_id", "batch_id")),

@@ -88,13 +88,14 @@ v2以28,876題訓練，2,435題validation選定候選與生成設定，再凍結
 先按[W.1](../course/first-steps.md#W.1)準備專案與Notebook環境，啟用`.venv`後，在專案根目錄執行：
 
 ```bash
+python scripts/research_assets.py fetch --group all
 python scripts/build_course.py --check
 python -m ipykernel install --sys-prefix --name tiny-perceptron --display-name "Tiny Perceptron"
 python scripts/check_notebooks.py --mode kernel --workers 1
 pytest -ra
 ```
 
-第一行核對教材來源與 Notebook 同步；接著註冊kernel，讓每份Notebook由獨立執行環境開始；最後的單元測試檢查程式機制。Notebook執行副本與當次核對寫入`outputs/notebooks/`，它們是工作產物，不是模型能力分數。
+第一行先準備完整研究資料測試需要的固定明細；若只執行CPU Notebook，可略過這行。第二行核對教材來源與 Notebook 同步；接著註冊kernel，讓每份Notebook由獨立執行環境開始；最後的單元測試檢查程式機制。Notebook執行副本與當次核對寫入`outputs/notebooks/`，它們是工作產物，不是模型能力分數。
 
 每一行結束時的exit code都是0才算通過。exit code（結束碼）是每條命令結束時交回終端機的數字：0表示成功，不是0就是沒有通過。要看剛結束那一條的值，在輸入下一條命令之前執行：macOS或Linux用`echo $?`，Windows PowerShell用`$LASTEXITCODE`。`check_notebooks.py`最後印出一段JSON：`failed`是0表示每份Notebook都從頭跑完；有失敗時`failures`列出哪一份、錯在哪裡，同一份結果也寫進`outputs/notebooks/validation-kernel.json`。`pytest -ra`的最後一行列出通過、失敗與跳過的數目，`-ra`會把失敗與跳過的原因列在摘要裡。
 

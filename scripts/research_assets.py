@@ -184,7 +184,12 @@ def frozen_input(root, relative, revision):
     catalog = parse_catalog(raw_catalog)
     for spec in catalog["groups"].values():
         if relative in spec["files"]:
-            raw = safe_path(root, relative).read_bytes()
+            path = safe_path(root, relative)
+            if not path.is_file():
+                raise ValueError(
+                    f"缺少固定研究輸入；先執行 python scripts/research_assets.py fetch --group all：{relative}"
+                )
+            raw = path.read_bytes()
             return checked(raw, spec["files"][relative], relative)
     raise ValueError(f"不是已列名的固定研究輸入：{relative}")
 

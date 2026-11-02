@@ -85,7 +85,7 @@ uv run --extra cu126 python scripts/check_env.py
 
 ## 按用途安裝工具
 
-`kernel` 群組提供批次執行 Notebook 的核心與執行工具；`notebook` 另含 JupyterLab，供讀者互動編輯。網站部署只安裝 `kernel` 與 `site`，不需要啟動互動編輯器。
+`kernel` 群組提供批次執行 Notebook 的核心與執行工具；`notebook` 另含 JupyterLab，供讀者互動編輯。網站部署只安裝 `kernel` 與 `site`，略過預設開發群組，不需要互動編輯器、pytest 或 Ruff。
 
 Hugging Face 的 Dataset API 改為選用的 `data` extra；固定資料包下載器及教材短程式不依賴它。真的要使用該 API 時，可在原本的安裝選項上加 `--extra data`，例如：
 

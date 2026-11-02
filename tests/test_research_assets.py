@@ -1,11 +1,13 @@
 """固定研究輸入按需取得；不把網路下載藏在離線測試內。"""
 
+import ast
 import copy
 import io
 import json
 import subprocess
 import zipfile
 from contextlib import nullcontext
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -142,6 +144,65 @@ def test_source_catalog_is_read_from_the_program_commit_not_local_edits(bundle):
         assets.frozen_input(root, RECIPE, revision)
     with pytest.raises(ValueError, match="不是已列名"):
         assets.frozen_input(root, "docs/course-revision-20261029-omni/finance-policy.json", revision)
+
+
+def test_external_recipe_uses_committed_catalog_and_control_still_requires_git(bundle):
+    from scripts.selftrained import publish_data
+
+    root, _, files, _ = bundle
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    subprocess.run(["git", "add", assets.CATALOG], cwd=root, check=True)
+    subprocess.run(
+        ["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "Catalog"],
+        cwd=root,
+        check=True,
+    )
+    revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+    write(root, RECIPE, files[RECIPE])
+    data, digest = publish_data.committed_recipe(root, RECIPE, revision)
+    assert data == json.loads(files[RECIPE]) and digest == assets.sha(files[RECIPE])
+    write(root, publish_data.CONTROL, b'{"operation":"publish"}')
+    with pytest.raises(subprocess.CalledProcessError):
+        publish_data.committed_json(root, publish_data.CONTROL, revision)
+
+
+def test_v4_manifest_uses_catalog_but_selection_cannot_fall_back_to_local_file(bundle):
+    from scripts import score_natural_v4_test as scoring
+
+    root, catalog, _, _ = bundle
+    name = "docs/natural-assistant/v4/manifest.json"
+    raw = b'{"schema_version":1,"rows":[]}'
+    catalog["groups"]["natural-v4"]["files"] = {name: {"bytes": len(raw), "sha256": assets.sha(raw)}}
+    write(root, assets.CATALOG, json.dumps(catalog).encode())
+    write(root, name, raw)
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    subprocess.run(["git", "add", assets.CATALOG], cwd=root, check=True)
+    subprocess.run(
+        ["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "Catalog"],
+        cwd=root,
+        check=True,
+    )
+    revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+    source = ast.parse((assets.ROOT / "scripts/modal_natural.py").read_text())
+    nodes = [
+        node
+        for node in source.body
+        if isinstance(node, ast.FunctionDef) and node.name in {"safe_relative", "committed_text"}
+    ]
+    assert len(nodes) == 2
+    namespace = {"Path": Path, "ROOT": root, "subprocess": subprocess}
+    exec(compile(ast.Module(body=nodes, type_ignores=[]), "manifest-reader-fixture", "exec"), namespace)
+    assert namespace["committed_text"](name, revision, ("docs", "natural-assistant")) == raw.decode()
+    binding = scoring.committed_bytes(root / name, revision, root)
+    assert binding["sha256"] == assets.sha(raw)
+    assert binding["binding"] == "committed_catalog"
+    assert binding["data_source_revision"] == assets.SOURCE_REVISION
+    selection = "docs/natural-assistant/v4/selection.json"
+    write(root, selection, b'{"selected":"anything"}')
+    with pytest.raises(subprocess.CalledProcessError):
+        namespace["committed_text"](selection, revision, ("docs", "natural-assistant"))
+    with pytest.raises(ValueError, match="absent from execution Git commit"):
+        scoring.committed_bytes(root / selection, revision, root)
 
 
 def test_catalog_cannot_reclassify_a_control_file_as_research(bundle):
